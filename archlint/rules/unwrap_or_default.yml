@@ -1,0 +1,13 @@
+id: unwrap_or_default
+language: rust
+severity: error
+message: |
+  serde_json deserialization with `.unwrap_or_default()` silently turns corrupt
+  or unexpected data into empty defaults — a fail-loud violation.
+  Use `.expect(...)` or `?` instead.
+  To suppress: `// ALLOW(unwrap_or_default): <reason>`
+rule:
+  any:
+    - pattern: serde_json::from_str($X).unwrap_or_default()
+    - pattern: serde_json::from_str($X).ok().unwrap_or_default()
+    - pattern: serde_json::from_value($X).unwrap_or_default()

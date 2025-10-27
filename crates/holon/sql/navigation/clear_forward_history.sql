@@ -1,0 +1,1 @@
+DELETE FROM navigation_history WHERE region = $region AND id > $current_id

@@ -1,0 +1,35 @@
+[package]
+name = "holon-app"
+version = "0.1.0"
+edition = "2021"
+
+# The wiring crate (storage de-leak Stage 6, ADR plan quirky-dazzling-map):
+# owns all DI assembly that names concrete backends (BackendEngine, Loro/OrgMode
+# modules, TursoBlockQuerySource, LoroUiWatcher) so that holon-frontend and
+# holon-orgmode stay storage-agnostic. Only frontends that assemble backends
+# depend on this crate — never the storage-agnostic layers.
+
+[dependencies]
+holon.workspace = true
+holon-api.workspace = true
+holon-core.workspace = true
+holon-profiles.workspace = true
+holon-frontend.workspace = true
+holon-orgmode.workspace = true
+holon-filesystem.workspace = true
+holon-loro.workspace = true
+holon-turso.workspace = true
+holon-mcp-client.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+fluxdi.workspace = true
+futures-signals.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+holon-block-roundtrip-testing.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+uuid.workspace = true

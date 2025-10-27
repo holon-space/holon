@@ -1,0 +1,44 @@
+[package]
+name = "holon-turso"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "holon_turso"
+path = "src/lib.rs"
+
+[dependencies]
+holon-api.workspace = true
+holon-core.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+similar.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+turso.workspace = true
+turso_core.workspace = true
+turso_sdk_kit.workspace = true
+sqlparser.workspace = true
+gql-transform.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+tokio = { workspace = true, default-features = false, features = ["sync", "macros", "rt", "time"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+tokio = { workspace = true, default-features = false, features = ["sync", "macros", "rt", "time"] }
+wasm-bindgen-futures = "0.4"
+web-time = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile.workspace = true

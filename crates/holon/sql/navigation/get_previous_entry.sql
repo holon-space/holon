@@ -1,0 +1,1 @@
+SELECT id FROM navigation_history WHERE region = $region AND id < $current_id ORDER BY id DESC LIMIT 1

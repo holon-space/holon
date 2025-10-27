@@ -1,0 +1,9 @@
+[package]
+name = "holon-architecture-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# archlint (Python + ast-grep + ripgrep at repo-root archlint/) supplies all
+# the rule logic; this crate only shells out to it. No Rust deps needed.
+

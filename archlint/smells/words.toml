@@ -1,0 +1,140 @@
+# archlint word/regex smells. Run via ripgrep on the changed file.
+#
+# Each smell:
+#   id           — short tag for the diagnostic + ALLOW(id) suppression
+#   pattern      — ripgrep regex (PCRE2-compatible, case-insensitive by default)
+#   files        — glob (ripgrep --glob); default "**/*.rs"
+#   message      — what the agent should do
+#   case_sensitive (optional, default false)
+
+[[smell]]
+id = "fallback"
+pattern = '\bfallback\b'
+files = "**/*.rs"
+message = """
+The word "fallback" is almost always a smell. Fallbacks hide failure modes — \
+fail loudly instead, or disclose the fallback to the user. See CLAUDE.md → \
+Error Handling Philosophy. To suppress: // ALLOW(fallback): <reason>
+"""
+
+[[smell]]
+id = "compatibility"
+pattern = '\bcompatibilit(y|ies)\b'
+files = "**/*.rs"
+message = """
+"Compatibility" usually means a backwards-compat shim that should just be \
+deleted. We have version control. To suppress: // ALLOW(compatibility): <reason>
+"""
+
+[[smell]]
+id = "global_registry"
+pattern = 'Arc<(std::sync::)?RwLock<HashMap<String,\s*Entity<'
+case_sensitive = true
+files = "**/*.rs"
+message = """
+Found global Arc<RwLock<HashMap<String, Entity<...>>>> registry — exactly the \
+FocusRegistry pattern that was removed. Decentralize via per-row reactive \
+primitives. To suppress: // ALLOW(global_registry): <reason>
+"""
+
+[[smell]]
+id = "deleted_cell_symbol"
+# Symbols deleted by the Phase 1+2 cells / authority-flip rollout. If any of
+# these reappear it's a regression: BlockContentResolver / live_content /
+# set_live_content / EditableTextProvider were superseded by Cell<T> +
+# BlockCellRegistry; with_content_resolver was the SqlBlockOperations builder
+# that the registry replaced. The watermark fields (`_expected_content`,
+# `_expected_parent_id`, `_expected_marks`) are dead post-authority-flip —
+# Loro is single-writer for SQL block columns. Comments and docstrings are
+# allowed to *describe* the historical names; the rule fires on identifier
+# usage. To suppress: // ALLOW(deleted_cell_symbol): <reason>
+pattern = '\b(BlockContentResolver|LoroEditableTextProvider|EditableTextProvider|with_content_resolver)\b|\bfn\s+(live_content|set_live_content)\b|"_expected_content"|"_expected_parent_id"|"_expected_marks"'
+files = "**/*.rs"
+exclude = [
+  "crates/holon/src/sync/loro_sync_controller.rs",
+  "crates/holon/src/core/sql_operation_provider_outbound_parent_test.rs",
+]
+case_sensitive = true
+message = """
+A symbol from the pre-Phase-2 cells / watermark design has reappeared. \
+BlockContentResolver / live_content / set_live_content / EditableTextProvider \
+/ with_content_resolver were replaced by Cell<T> + BlockCellRegistry. \
+_expected_content / _expected_parent_id / _expected_marks were watermark gates \
+removed when Loro became the sole writer for block SQL columns. \
+To suppress: // ALLOW(deleted_cell_symbol): <reason>
+"""
+
+[[smell]]
+id = "routing_payload_key"
+# Phase 3.7 + follow-up retired the `_routing_*` HashMap-smuggling
+# convention from the event bus. The two routing hints that used to
+# travel as underscore-prefixed payload keys —
+# `_routing_after_block_id` and `_routing_doc_uri` — are now typed
+# fields on `Event` (`position_after_block_id`, `routing_doc_uri`).
+#
+# The rule fires on any new literal `"_routing_<name>"` string anywhere
+# except the canonical const definition in `event_bus.rs`. The two
+# remaining prefix-filter sites in `SqlOperationProvider` use the bare
+# prefix `"_routing_"` and so don't match this full-key regex.
+#
+# If you need a new routing hint:
+#   1. Add a typed `Option<…>` field on `Event` + builder.
+#   2. Round-trip via a transport key in `TursoEventBus`.
+#   3. Lift at the operation boundary in `SqlOperationProvider`.
+# See `devlog/2026-05-11-typed-routing-doc-uri.md` for the template.
+#
+# To suppress: // ALLOW(routing_payload_key): <reason>
+pattern = '"_routing_[a-z][a-z_0-9]*"'
+files = "**/*.rs"
+exclude = "crates/holon/src/sync/event_bus.rs"
+case_sensitive = true
+message = """
+Found a string literal `"_routing_*"`. The underscore-prefixed routing-\
+key convention has been retired in favour of typed `Event` fields. \
+Add a typed `Option<…>` field on `Event` (see Phase 3.7 + follow-up \
+devlogs) instead of smuggling state through `payload`. To suppress: \
+// ALLOW(routing_payload_key): <reason>
+"""
+
+[[smell]]
+id = "sort_key_writer"
+# `block.sort_key` has exactly two authoritative writers:
+#   - `LoroSyncController::on_loro_changed` (Loro tree.fractional_index → SQL),
+#   - the `SqlBlockOrdering` impl (`crates/holon/src/core/sql_block_operations.rs`).
+# Producers — notably the org-sync path — must emit only positional
+# intent (`after_block_id`, lifted to `Event::position_after_block_id`)
+# and let the projector compute the resulting fi.
+#
+# When the org parser used to also write `sort_key` directly to SQL via
+# `params.insert("sort_key".to_string(), Value::String(...))`, its
+# `gen_n_keys` strings competed with Loro's auto-assigned fis — two
+# generators in disjoint string spaces, producing the seed=42
+# SplitBlock ordering panic (devlog 2026-05-14 SplitBlock handoff).
+#
+# This rule fires on the producer-side write shape inside the org-sync
+# crate. Loro/SQL projector + SqlBlockOrdering impl live in `holon`
+# proper and are not matched. To suppress: // ALLOW(sort_key_writer): <reason>
+pattern = '"sort_key"\.to_string\(\)\s*,\s*Value::'
+files = "crates/holon-orgmode/**/*.rs"
+case_sensitive = true
+message = """
+Producer-side `sort_key` write detected. The org parser path may not
+write `block.sort_key` directly — emit `after_block_id` instead and let
+`LoroSyncController::on_loro_changed` project Loro's fractional index
+back to SQL. See devlog 2026-05-14 (SplitBlock handoff). To suppress:
+// ALLOW(sort_key_writer): <reason>
+"""
+
+[[smell]]
+id = "raw_sql_in_frontend"
+# Mirror the cargo arch-test (no_raw_sql_in_frontends): catches schema-changing
+# and read-leaking SQL but deliberately omits UPDATE/DELETE — frontend-side
+# mutations are accepted in narrow seeding paths (e.g. holon-worker/src/seed.rs).
+pattern = '"(SELECT|INSERT|CREATE TABLE|DROP|ALTER) '
+files = "frontends/**/*.rs"
+exclude = "frontends/mcp/**"
+message = """
+Raw SQL in a frontend. Frontends are pure render engines — move SQL to the \
+backend (holon crate) and expose via BackendEngine methods. To suppress: \
+// ALLOW(sql): <reason>
+"""

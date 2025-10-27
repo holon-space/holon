@@ -1,0 +1,447 @@
+use std::collections::HashMap;
+
+use holon_api::QueryLanguage;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde::Serialize;
+
+/// Wrapper for TypeDefinition JSON — the tool description explains the shape.
+/// We use serde_json::Value because TypeDefinition doesn't derive JsonSchema.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CreateEntityTypeParams {
+    /// TypeDefinition as JSON object. Shape: {name, fields: [{name, sql_type,
+    /// ...}], primary_key?, graph_label?, id_references?}
+    pub type_definition: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CreateTableParams {
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ColumnDef {
+    pub name: String,
+    pub sql_type: String, // TEXT, INTEGER, BOOLEAN, etc.
+    #[serde(default)]
+    pub primary_key: bool,
+    pub default: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct InsertDataParams {
+    pub table_name: String,
+    pub rows: Vec<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExecuteQueryParams {
+    /// The query string to execute
+    pub query: String,
+    /// Query language: "holon_prql", "holon_gql", or "holon_sql"
+    pub language: String,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+    /// Block ID for `from children` context resolution. When set, `from
+    /// children` returns children of this block. Without this, `from
+    /// children` returns empty results.
+    pub context_id: Option<String>,
+    /// Parent block ID for `from siblings` context resolution.
+    pub context_parent_id: Option<String>,
+    /// Render spec for GQL/SQL queries. Parsed as PRQL render expression.
+    /// Example: "list item_template:(row (text this.name))"
+    pub render: Option<String>,
+    /// When true, each row gets a `_profile` key with resolved entity profile
+    /// info (profile name, render expression, available operations).
+    #[serde(default)]
+    pub include_profile: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExecuteSourceBlockParams {
+    /// Block ID of a source block whose `content` is the query and whose
+    /// `source_language` is one of `holon_prql` / `holon_gql` / `holon_sql`.
+    /// Bare slugs are accepted (auto-prefixed to `block:`).
+    pub block_id: String,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+    /// Override `source_language`. When omitted, the block's stored
+    /// `source_language` is used.
+    pub language: Option<String>,
+    /// Block ID for `from children` context resolution.
+    pub context_id: Option<String>,
+    /// Parent block ID for `from siblings` context resolution.
+    pub context_parent_id: Option<String>,
+    /// Render spec override (mirrors `execute_query`).
+    pub render: Option<String>,
+    /// When true, each row gets a `_profile` key with resolved entity profile
+    /// info.
+    #[serde(default)]
+    pub include_profile: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExecuteOperationParams {
+    pub entity_name: String,
+    pub operation: String,
+    pub params: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct WatchQueryParams {
+    /// The query string to watch
+    pub query: String,
+    /// Query language: "holon_prql", "holon_gql", or "holon_sql". Defaults to
+    /// "holon_prql".
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+    /// Render spec for GQL/SQL queries
+    pub render: Option<String>,
+}
+
+fn default_language() -> String {
+    QueryLanguage::HolonPrql.to_string()
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct WatchHandle {
+    pub watch_id: String,
+    pub initial_data: Vec<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct QueryResult {
+    pub rows: Vec<HashMap<String, serde_json::Value>>,
+    pub row_count: usize,
+    /// Query execution time in milliseconds (wall clock, excluding
+    /// serialization).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RowChangeJson {
+    pub change_type: String, // "Created", "Updated", "Deleted"
+    pub entity_id: Option<String>,
+    pub data: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DropTableParams {
+    pub table_name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListOperationsParams {
+    pub entity_name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct StopWatchParams {
+    pub watch_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PollChangesParams {
+    pub watch_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RankTasksResult {
+    pub tasks: Vec<RankedTaskJson>,
+    pub mental_slots: MentalSlotsJson,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RankedTaskJson {
+    pub rank: usize,
+    pub block_id: String,
+    pub label: String,
+    pub delta_obj: f64,
+    pub delta_per_minute: f64,
+    pub duration_minutes: f64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct MentalSlotsJson {
+    pub occupied: usize,
+    pub capacity: usize,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UndoRedoResult {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CanUndoRedoResult {
+    pub available: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExecuteRawSqlParams {
+    /// Raw SQL to send directly to Turso. No PRQL/GQL compilation, no SQL
+    /// transforms.
+    pub sql: String,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+}
+
+// --- Debug tool types ---
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CompileQueryParams {
+    /// The query string to compile
+    pub query: String,
+    /// Query language: "holon_prql", "holon_gql", or "holon_sql"
+    pub language: String,
+    /// Optional render spec (for GQL/SQL queries)
+    pub render: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CompileQueryResult {
+    pub compiled_sql: String,
+    pub render_spec: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct InspectLoroBlocksParams {
+    /// Document ID — can be a UUID or a file path
+    pub doc_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DiffLoroSqlParams {
+    /// Document ID — can be a UUID or a file path
+    pub doc_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ReadOrgFileParams {
+    /// Document ID — can be a UUID or a file path. Resolved to file path via
+    /// aliases.
+    pub doc_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RenderOrgParams {
+    /// Document ID — can be a UUID or a file path
+    pub doc_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DescribeUiParams {
+    /// Block ID to render and describe
+    pub block_id: String,
+    /// Output format: "text" for pretty-printed tree, "json" for structured
+    /// JSON
+    #[serde(default = "default_text_format")]
+    pub format: String,
+}
+
+fn default_text_format() -> String {
+    "text".to_string()
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotParams {
+    /// Window title or app name substring to match (e.g. "Holon" for GPUI,
+    /// "Blinc"). If omitted, tries known frontend names in order: "Holon",
+    /// "Blinc".
+    pub window_title: Option<String>,
+}
+
+// --- UI interaction tool types ---
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SendNavigationParams {
+    /// Entity ID of the element to navigate from (e.g. a block's row_id).
+    pub from_entity_id: String,
+    /// Navigation direction: "up" or "down".
+    pub direction: String,
+    /// Optional cursor column hint for placement in the target block.
+    #[serde(default)]
+    pub cursor_column: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SendKeyChordParams {
+    /// Entity ID of the element to target (key chord bubbles up from here).
+    pub entity_id: String,
+    /// Keys in the chord, e.g. ["cmd", "enter"] or ["shift", "tab"].
+    pub keys: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListCommandsParams {
+    /// Block ID to list available commands for.
+    pub block_id: String,
+    /// Optional filter string to narrow commands.
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExecuteCommandParams {
+    /// Block ID to execute the command on.
+    pub block_id: String,
+    /// Command name (operation name from list_commands).
+    pub command_name: String,
+    /// Entity name for the operation (e.g. "blocks").
+    pub entity_name: String,
+    /// Additional parameters for the command.
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ClickParams {
+    /// Optional entity id (block id). When set, the click is dispatched at
+    /// the center of the rendered element via the same entity-addressed
+    /// `UserDriver::click_entity` path the PBT/E2E tests use — it resolves
+    /// the element bounds, hit-tests the point, and warns if a different
+    /// element is on top. `x`/`y`/`button`/`modifiers` are ignored (the
+    /// driver synthesizes a plain left click). Prefer this over raw
+    /// coordinates: it survives relayout/scroll and self-verifies the hit.
+    #[serde(default)]
+    pub entity_id: Option<String>,
+    /// Panel region for the entity click, e.g. "main", "left_sidebar".
+    /// Only used with `entity_id`. Defaults to "main".
+    #[serde(default = "default_main")]
+    pub region: String,
+    /// X coordinate in logical pixels. Ignored if `entity_id` is set.
+    #[serde(default)]
+    pub x: f32,
+    /// Y coordinate in logical pixels. Ignored if `entity_id` is set.
+    #[serde(default)]
+    pub y: f32,
+    /// Mouse button: "left" (default), "right", "middle". Ignored if
+    /// `entity_id` is set.
+    #[serde(default = "default_left")]
+    pub button: String,
+    /// Modifier keys held during click, e.g. ["cmd", "shift"]. Ignored if
+    /// `entity_id` is set.
+    #[serde(default)]
+    pub modifiers: Vec<String>,
+}
+
+fn default_left() -> String {
+    "left".to_string()
+}
+
+fn default_main() -> String {
+    "main".to_string()
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ScrollParams {
+    /// Optional entity id (block id). When set, the scroll event is
+    /// dispatched at the center of the rendered element; `x`/`y` are
+    /// ignored. When omitted, `x`/`y` are required.
+    #[serde(default)]
+    pub entity_id: Option<String>,
+    /// X coordinate in logical pixels. Ignored if `entity_id` is set.
+    #[serde(default)]
+    pub x: f32,
+    /// Y coordinate in logical pixels. Ignored if `entity_id` is set.
+    #[serde(default)]
+    pub y: f32,
+    /// Horizontal scroll delta in lines. Positive = scroll right.
+    #[serde(default)]
+    pub dx: f32,
+    /// Vertical scroll delta in lines. Positive = scroll down.
+    #[serde(default)]
+    pub dy: f32,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TypeTextParams {
+    /// Text to type, or a special key name (e.g. "enter", "tab", "escape").
+    pub text: String,
+    /// Modifier keys held during typing, e.g. ["cmd", "shift"].
+    #[serde(default)]
+    pub modifiers: Vec<String>,
+}
+
+/// Parameters for the `now_for_agent` agent-coordination tool.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct NowForAgentParams {
+    /// Agent identifier (e.g. "claude-feature-x"). Falls back to env
+    /// `HOLON_AGENT_ID` when omitted. Used to filter the now-query so
+    /// the agent sees only unclaimed tasks plus tasks already assigned
+    /// to itself.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Maximum number of tasks to return (default 10, max 100).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Parameters for `claim_task` — atomic best-effort task assignment.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ClaimTaskParams {
+    /// Block id of the task to claim. Bare slugs are accepted
+    /// (auto-prefixed to `block:`).
+    pub task_id: String,
+    /// Agent identifier; falls back to env `HOLON_AGENT_ID`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// Parameters for `add_subtask` — append a new TODO block under an existing
+/// one.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AddSubtaskParams {
+    /// Parent block id (bare slug or `block:` prefixed).
+    pub parent_id: String,
+    /// First line of the new block's content (used as the headline).
+    pub title: String,
+    /// Optional body — appended to title with a newline. Use this for the
+    /// task description, runbook notes, etc.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Initial task_state. Defaults to `"TODO"`. Pass `"DOING"` to claim
+    /// in the same call (you'll usually call `claim_task` separately so
+    /// the worktree/agent metadata is set).
+    #[serde(default)]
+    pub task_state: Option<String>,
+    /// Gate for now-query visibility. Defaults to the parent's gate; if
+    /// the parent has none, falls back to `"G1"`.
+    #[serde(default)]
+    pub gate: Option<String>,
+    /// Tags to attach (e.g. `["agent"]` so the new task surfaces in
+    /// `now_for_agent` immediately). NOT yet wired — currently ignored
+    /// because `block.create` partitioning needs additional plumbing
+    /// for edge fields. Track in a follow-up.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Initial blocker list (`requires` edge field). Same caveat as `tags`.
+    #[serde(default)]
+    pub requires: Option<Vec<String>>,
+    /// Additional `properties` key/values merged in (priority, effort, etc.).
+    #[serde(default)]
+    pub properties: HashMap<String, serde_json::Value>,
+    /// Explicit id for the new block. When omitted, a UUID is minted.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Parameters for `complete_task` — marks DONE + writes a devlog file.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CompleteTaskParams {
+    /// Block id of the task to mark complete. Bare slugs accepted.
+    pub task_id: String,
+    /// One- to three-paragraph summary of what shipped, written to the devlog.
+    pub summary: String,
+    /// Agent identifier; falls back to env `HOLON_AGENT_ID`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Optional commit SHA to record in the devlog header.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+}
