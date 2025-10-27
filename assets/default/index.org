@@ -1,0 +1,72 @@
+* Holon Layout
+:PROPERTIES:
+:ID: default-layout-root
+:END:
+#+BEGIN_SRC render :id default-layout-root::render::0
+columns(#{gap: 4, item_template: block_ref()})
+#+END_SRC
+#+BEGIN_SRC holon_prql :id default-layout-root::src::0
+from children
+filter content_type != "source"
+derive {
+  seq = s"json_extract(properties, '$.\"column-order\"')" ?? 999999,
+  collapse_to = s"json_extract(properties, '$.\"collapse-to\"')",
+  ideal_width = s"json_extract(properties, '$.\"ideal-width\"')",
+  priority = s"json_extract(properties, '$.\"column-priority\"')"
+}
+sort seq
+#+END_SRC
+** Left Sidebar
+:PROPERTIES:
+:ID: default-left-sidebar
+:END:
+#+BEGIN_SRC render :id default-left-sidebar::render::0
+list(#{sortkey: "name", item_template: selectable(row(icon("folder"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
+#+END_SRC
+#+BEGIN_SRC holon_prql :id default-left-sidebar::src::0
+from document
+filter name != ""
+#+END_SRC
+** Main Panel
+:PROPERTIES:
+:ID: default-main-panel
+:END:
+#+BEGIN_SRC holon_gql :id default-main-panel::src::0
+MATCH (fr:FocusRoot), (root:Block)<-[:CHILD_OF*0..20]-(d:Block) WHERE fr.region = 'main' AND root.id = fr.root_id RETURN d
+#+END_SRC
+#+BEGIN_SRC render :id default-main-panel::render::0
+tree(#{parent_id: col("parent_id"), sortkey: col("sequence"), item_template: render_block()})
+#+END_SRC
+** Right Sidebar
+:PROPERTIES:
+:ID: default-right-sidebar
+:END:
+#+BEGIN_SRC render :id default-right-sidebar::render::0
+list(#{item_template: render_block()})
+#+END_SRC
+#+BEGIN_SRC holon_prql :id default-right-sidebar::src::0
+from children
+#+END_SRC
+* Block Profiles
+:PROPERTIES:
+:ID: default-block-profiles
+:END:
+#+BEGIN_SRC holon_entity_profile_yaml :id default-block-profiles::src::0
+entity_name: block
+
+computed:
+  is_task: '= task_state != ()'
+  is_source: '= content_type == "source"'
+  todo_states: '= if document_id != () { let d = document(document_id); if d != () { d.todo_keywords } else { () } } else { () }'
+
+default:
+  render: 'row(icon("orgmode"), spacer(8), editable_text(col("content")))'
+
+variants:
+  - name: task
+    condition: '= is_task'
+    render: 'row(state_toggle(col("task_state"), states: col("todo_states")), spacer(8), editable_text(col("content")))'
+  - name: source
+    condition: '= is_source'
+    render: 'source_editor(#{language: col("source_language"), content: col("content")})'
+#+END_SRC
