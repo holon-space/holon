@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c805fd377bbd3078030a1709e200a3d98a5e0273cdfa44d42809d0e201deb5cd # shrinks to (initial_state, transitions, seen_counter) = (ReferenceState { blocks: {"block-3": RefBlock { id: "block-3", parent_id: "block-2", content: "dF34an3XbsBL47K   n g9 KgVPR", properties: {} }, "block-4": RefBlock { id: "block-4", parent_id: "block-1", content: "C8P6O4 Dm", properties: {} }, "block-5": RefBlock { id: "block-5", parent_id: "block-4", content: "o  5gD9", properties: {} }, "block-1": RefBlock { id: "block-1", parent_id: "block-0", content: "au  Z O2ICD 1OH0rtkia6 ", properties: {} }, "block-0": RefBlock { id: "block-0", parent_id: "root", content: "A", properties: {} }, "block-2": RefBlock { id: "block-2", parent_id: "block-1", content: "UTo9l30ta44n8GKcpXkuk8J9W", properties: {} }}, root_document_id: "root", pending_cdc_events: [], active_watches: {}, next_id: 0, runtime: Runtime { scheduler: MultiThread(MultiThread), handle: Handle { inner: MultiThread(multi_thread::Handle { ... }) }, blocking_pool: BlockingPool } }, [], None)

@@ -1,0 +1,30 @@
+clock: "2025-03-01T08:00:00Z"
+
+tokens:
+  self:
+    token_type: person
+    energy: 0.8
+    health: 0.85
+    status: active
+
+  income_statement:
+    token_type: document
+    kind: income_statement
+    status: missing
+
+  tax_refund:
+    token_type: monetary
+    kind: tax_refund
+    value: 2000.0
+    status: not_realized
+
+  car:
+    token_type: asset
+    kind: car
+    status: wanted
+
+  budget:
+    token_type: monetary
+    kind: budget
+    value: 35000.0
+    status: available

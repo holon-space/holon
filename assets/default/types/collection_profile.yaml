@@ -1,0 +1,16 @@
+# Collection profile: entity-agnostic view modes for rendering collections.
+# Any entity with the required columns can use these (e.g. tree needs parent_id).
+# Uses the same format as entity profiles.
+
+entity_name: collection
+
+computed: {}
+
+variants:
+  - name: table_view
+    priority: 1
+    condition: 'view_mode == "table"'
+    render: 'table(#{sortkey: col("sequence"), item_template: render_entity()})'
+  - name: tree_view
+    priority: 0
+    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sequence"), item_template: render_entity()})'

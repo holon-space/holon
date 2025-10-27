@@ -1,0 +1,74 @@
+# Block entity profile: computed fields + render variants.
+# Loaded by TypeRegistry to augment the macro-generated Block TypeDefinition.
+# Uses the same format as org-embedded entity profiles (RawEntityProfile).
+#
+# This is the canonical per-block render path: every block goes through
+# `live_block` → `render_entity` → TypeRegistry → block_profile (here).
+# The `editing`/`default` variants wrap each block in
+# `column(row(draggable(...), ...), drop_zone())` so users can drag the
+# block by its bullet and drop another block onto its drop zone.
+#
+# (The `crates/holon-{orgmode,todoist}/queries/*_hierarchy.prql` files
+# are not loaded at runtime; they are test-only fixtures.)
+
+entity_name: block
+
+computed:
+  is_task: 'task_state != ()'
+  is_source: 'content_type == "source"'
+  is_image: 'content_type == "image"'
+  is_holon_source: 'is_source && (source_language.starts_with("holon_") || source_language == "render")'
+  has_query_source: 'query_source(id) != ()'
+  todo_states: 'if is_def_var("document_id") && document_id != () { let d = document(document_id); if d != () { d.todo_keywords } else { () } } else { () }'
+
+variants:
+  - name: root_layout
+    priority: 1
+    condition: 'id == "block:root-layout"'
+    # Narrow-viewport branch (≤600 px) stacks the phone three-panel
+    # columns above a bottom-docked action bar composed from primitives —
+    # no specialized widget. `bottom_dock` pins the bar to the bottom
+    # inset; `chain_ops(0)` emits one row per operation registered on the
+    # focused block's URI scheme; each row renders as a tappable
+    # `op_button`. Wider branches keep the existing 3-column layout (no
+    # bar — there's plenty of room for inline operation menus).
+    render: >-
+      if_space(600,
+        bottom_dock(
+          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "overlay"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
+          columns(#{gap: 8, collection: chain_ops(0), item_template: op_button(col("name"))})),
+        if_space(1000,
+          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
+          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "shrink"}))))
+  - name: source_editing
+    priority: -1
+    condition: 'is_source && is_focused'
+    render: 'source_editor(#{language: col("source_language"), content: col("content")})'
+  - name: holon_source
+    priority: -1
+    condition: 'is_holon_source'
+    render: 'spacer(0)'
+  - name: query_block
+    priority: -1
+    condition: 'has_query_source'
+    render: 'live_block()'
+  - name: image_block
+    priority: -1
+    condition: 'is_image'
+    render: 'image(col("content"))'
+  - name: editing
+    priority: -1
+    condition: 'is_focused'
+    render: 'column(row(draggable(icon("orgmode")), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), editable_text(col("content"))), drop_zone())'
+  - name: source
+    priority: -1
+    condition: 'is_source'
+    render: 'query_result(#{language: col("source_language")})'
+  - name: default
+    priority: -1
+    render: 'column(row(draggable(icon("orgmode")), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), editable_text(col("content"))), drop_zone())'
+
+virtual_child:
+  defaults:
+    content: ""
+    content_type: "text"

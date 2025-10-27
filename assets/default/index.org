@@ -1,0 +1,32 @@
+* Holon Layout
+:PROPERTIES:
+:ID: root-layout
+:END:
+** Left Sidebar
+:PROPERTIES:
+:ID: default-left-sidebar
+:collapse_to: drawer
+:END:
+#+BEGIN_SRC render :id block:left_sidebar::render::0
+list(#{sortkey: "name", item_template: selectable(row(icon("notebook"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
+#+END_SRC
+#+BEGIN_SRC holon_prql :id block:left_sidebar::src::0
+from block
+filter name != null
+filter name != "" && name != "index" && name != "__default__"
+#+END_SRC
+** Main Panel
+:PROPERTIES:
+:ID: default-main-panel
+:END:
+#+BEGIN_SRC holon_gql :id default-main-panel::src::0
+MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'main' AND root.id = fr.root_id RETURN d
+#+END_SRC
+** Right Sidebar
+:PROPERTIES:
+:ID: default-right-sidebar
+:collapse_to: drawer
+:END:
+#+BEGIN_SRC holon_prql :id default-right-sidebar::src::0
+from children
+#+END_SRC

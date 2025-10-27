@@ -1,0 +1,20 @@
+[package]
+name = "holon-layout-testing"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "holon_layout_testing"
+path = "src/lib.rs"
+
+[dependencies]
+holon-api = { workspace = true }
+holon-frontend = { workspace = true }
+tokio = { workspace = true }
+proptest = { workspace = true }
+futures = { workspace = true }
+futures-signals = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

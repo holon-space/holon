@@ -1,0 +1,10 @@
+[package]
+name = "holon-architecture-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+ast-grep-core = "0.42"
+ast-grep-language = "0.42"
+glob = "0.3"

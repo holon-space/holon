@@ -1,0 +1,17 @@
+[package]
+name = "holon-macros-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "holon_macros_test"
+path = "src/lib.rs"
+
+[dependencies]
+holon-macros.workspace = true
+holon.workspace = true
+holon-api.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "test-util"] }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

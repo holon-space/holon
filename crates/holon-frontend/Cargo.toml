@@ -1,0 +1,71 @@
+[package]
+name = "holon-frontend"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+heap-profile = ["dep:dhat", "dep:ctrlc", "dep:libc"]
+chrome-trace = ["dep:tracing-chrome", "dep:chrono"]
+otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-stdout"]
+blinc = ["dep:blinc_core", "dep:blinc_theme"]
+
+[dependencies]
+anyhow.workspace = true
+premortem.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["time"] }
+toml.workspace = true
+tracing.workspace = true
+
+# default-features = false disables iroh-sync (QUIC P2P transport) which
+# has no wasm32 port. Frontends that need iroh-sync add it via their own
+# direct `holon = { path = "../holon", features = ["iroh-sync"] }` dep.
+# NOTE: path dep (not workspace) so `default-features = false` is honored
+# even when building from holon-worker's out-of-workspace context.
+holon = { path = "../holon", default-features = false }
+holon-core.workspace = true
+holon-macros.workspace = true
+holon-api.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+futures-signals.workspace = true
+fluxdi.workspace = true
+dhat = { workspace = true, optional = true }
+libc = { version = "0.2", optional = true }
+ctrlc = { workspace = true, optional = true }
+tracing-chrome = { workspace = true, optional = true }
+tracing-appender.workspace = true
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry-stdout = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+blinc_core = { git = "https://github.com/project-blinc/Blinc", package = "blinc_core", optional = true }
+blinc_theme = { git = "https://github.com/project-blinc/Blinc", package = "blinc_theme", optional = true }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+# Native-only deps: not available on wasm32 (includes both wasm32-unknown-unknown
+# and wasm32-wasip1-threads). Source sites guarded with #[cfg(not(target_arch = "wasm32"))].
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uuid.workspace = true
+clap.workspace = true
+holon-filesystem = { path = "../holon-filesystem" }
+holon-mcp-client.workspace = true
+holon-todoist.workspace = true
+memory-stats.workspace = true
+# holon-orgmode uses tokio::fs + tokio::process which are unavailable on wasm32
+holon-orgmode.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# clap: the derive feature works on wasi (env-var reading via WASI environ_get).
+# Do NOT add `env` feature here to avoid pulling os-env detection code.
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true
