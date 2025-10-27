@@ -1,0 +1,25 @@
+warning: manual `Result` -> `Option` conversion silently discards the error
+  --> $DIR/main.rs:12:5
+   |
+LL | /     match parse_int(s) {
+LL | |         Ok(n) => Some(n),
+LL | |         Err(_) => None,
+LL | |     }
+   | |_____^
+   |
+   = help: either change the return type to `Result<_, _>` and propagate the error, or wrap it in a richer enum variant. CLAUDE.md: "DO NOT return null or None in case of an error".
+   = note: `#[warn(result_to_none)]` on by default
+
+warning: manual `Result` -> `Option` conversion silently discards the error
+  --> $DIR/main.rs:20:5
+   |
+LL | /     match parse_int(s) {
+LL | |         Err(_) => None,
+LL | |         Ok(n) => Some(n),
+LL | |     }
+   | |_____^
+   |
+   = help: either change the return type to `Result<_, _>` and propagate the error, or wrap it in a richer enum variant. CLAUDE.md: "DO NOT return null or None in case of an error".
+
+warning: 2 warnings emitted
+

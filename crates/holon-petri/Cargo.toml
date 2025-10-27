@@ -1,0 +1,12 @@
+[package]
+name = "holon-petri"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chrono.workspace = true
+holon-api.workspace = true
+holon-core.workspace = true
+holon-engine.workspace = true
+rhai.workspace = true

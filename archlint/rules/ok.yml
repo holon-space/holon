@@ -1,0 +1,11 @@
+id: ok
+language: rust
+severity: error
+message: |
+  `.ok()` on a Result silently discards the error. Use `?`, `.context(...)`, or
+  `.expect(...)` instead. Universally accepted (no ALLOW needed): writeln!() /
+  write!() on String, OnceLock::set(), tx.send(), env::var, try_resolve, and
+  files under build.rs / holon-macros/ / theme.rs.
+  To suppress: `// ALLOW(ok): <reason>`
+rule:
+  pattern: $EXPR.ok()

@@ -1,0 +1,174 @@
+# Import / dependency boundary smells.
+# Run via ripgrep on changed files.
+
+# orgmode_no_direct_loro_or_turso_imports — split into two so the suppress tags
+# (loro / turso) match the original architecture_rules.rs convention.
+
+[[smell]]
+id = "loro"
+pattern = '(use\s+loro|loro::|loro_backend::|\bLoroBackend\b)'
+files = "crates/holon-orgmode/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-orgmode must not import Loro directly — neither the raw crate nor \
+holon-mediated paths like holon::api::loro_backend::LoroBackend \
+(Architecture.md §Crate Responsibilities; spec 0007 Phase 2.5 C1/C2: the \
+Loro-typed adapters live in holon-app). Use traits from traits.rs; wire \
+implementations in holon-app. To suppress: // ALLOW(loro): <reason>
+"""
+
+[[smell]]
+id = "turso"
+pattern = '(use\s+turso|turso::|\bTursoBackend|\bSchemaModule\b|\bBlockSchemaModule\b|BLOCK_(READ|WRITE)_TABLE|\bMatviewManager\b|\bDbHandle\b)'
+files = "crates/holon-orgmode/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-orgmode must not import Turso directly — neither the raw crate, nor \
+holon-mediated paths like holon::storage::turso::TursoBackend, nor the \
+Turso-side symbols (SchemaModule / BlockSchemaModule / BLOCK_*_TABLE / \
+MatviewManager / DbHandle) (Architecture.md §Crate Responsibilities; \
+spec 0007 Phase 2.5 C3). Use the BlockReader / DocumentManager / \
+BlockOrdering traits; the Turso seam impls and schema wiring live in \
+holon-app::turso_seams. To suppress: // ALLOW(turso): <reason>
+"""
+
+# orgmode is holon-free since crate-decoupling Rev 3.5a: LiveData / BlockFeed /
+# ROUTING_DOC_URI_KEY live in holon-api; the Turso seam impls + OrgModeModule
+# live in holon-app::turso_seams. Lock the whole `holon::` namespace out.
+
+[[smell]]
+id = "orgmode-holon-dep"
+pattern = '\bholon::'
+files = "crates/holon-orgmode/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-orgmode no longer depends on the `holon` engine crate (crate-decoupling \
+Rev 3.5a). Generic types live in holon-api / holon-core; Turso-backed seam \
+impls and wiring live in holon-app::turso_seams. \
+To suppress: // ALLOW(orgmode-holon-dep): <reason>
+"""
+
+[[smell]]
+id = "orgmode-holon-dep-manifest"
+pattern = '^holon(\.workspace| *=)'
+files = "crates/holon-orgmode/Cargo.toml"
+case_sensitive = true
+message = """
+holon-orgmode's Cargo.toml must not declare a dependency on the `holon` \
+engine crate (crate-decoupling Rev 3.5a). \
+To suppress: # ALLOW(orgmode-holon-dep-manifest): <reason>
+"""
+
+# mcp-client left the fat-holon critical path in crate-decoupling Rev 3.5b:
+# it consumes holon-core seams (EntityCache/CacheFactory/MatviewHook) and,
+# being a Turso FDW bridge BY DESIGN (implements turso_core::ForeignDataWrapper),
+# names holon-turso explicitly. Only the `holon` engine crate is banned.
+
+[[smell]]
+id = "mcp-client-holon-dep"
+pattern = '\bholon::'
+files = "crates/holon-mcp-client/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-mcp-client must not import the `holon` engine crate (crate-decoupling \
+Rev 3.5b). Use holon-core seams (EntityCache / CacheFactory / MatviewHook); \
+Turso-vtable specifics (DbHandle, register_foreign_table) come from \
+holon-turso, the disclosed backend coupling of this FDW bridge. \
+To suppress: // ALLOW(mcp-client-holon-dep): <reason>
+"""
+
+[[smell]]
+id = "mcp-client-holon-dep-manifest"
+pattern = '^holon(\.workspace| *=)'
+files = "crates/holon-mcp-client/Cargo.toml"
+case_sensitive = true
+message = """
+holon-mcp-client's Cargo.toml must not declare a dependency on the `holon` \
+engine crate (crate-decoupling Rev 3.5b); holon-core / holon-api / \
+holon-turso are the sanctioned deps. \
+To suppress: # ALLOW(mcp-client-holon-dep-manifest): <reason>
+"""
+
+# frontend_crate_no_platform_imports — only crates/holon-frontend/src.
+
+[[smell]]
+id = "platform"
+pattern = '\b(gpui|flutter_rust_bridge|dioxus|ratatui|crossterm|winit)::'
+files = "crates/holon-frontend/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-frontend must be platform-agnostic (Architecture.md §MVVM Pattern). \
+Platform-specific code belongs in frontends/*, not in the shared ViewModel layer. \
+To suppress: // ALLOW(platform): <reason>
+"""
+
+# frontend_cargo_no_provider_deps — frontends Cargo.toml shouldn't pull in provider crates.
+# MCP and flutter are exempt (legacy/inline DI).
+
+[[smell]]
+id = "frontend-provider-dep"
+pattern = '\b(holon-orgmode|holon-todoist)\b'
+files = "frontends/*/Cargo.toml"
+exclude = ["frontends/mcp/**", "frontends/flutter/**"]
+case_sensitive = true
+message = """
+Frontends should depend on holon-api + holon-frontend, not provider crates. \
+Provider crates (holon-orgmode, holon-todoist) should be wired via DI, not imported directly. \
+To suppress: # ALLOW(frontend-provider-dep): <reason>
+"""
+
+# storage de-leak regression gates (plan quirky-dazzling-map, Stage 9).
+
+[[smell]]
+id = "frontend-storage-backend"
+pattern = '(use\s+loro|loro::|use\s+turso|turso::|holon::storage|RowChangeStream)'
+files = "crates/holon-frontend/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-frontend is storage-agnostic: no Loro/Turso imports, no holon::storage \
+paths, no RowChangeStream. Route reads/writes through the capability traits \
+(QueryEngine::watch_query, BlockQuerySource, OperationEngine); concrete \
+assembly lives in holon-app. NOTE: a regex can't see RowChangeStream values \
+held by type inference — keep the capability surfaces (BuilderServices, \
+FrontendSession) free of raw SQL/stream types, the gate is necessary not \
+sufficient. To suppress: // ALLOW(frontend-storage-backend): <reason>
+"""
+
+[[smell]]
+id = "frontend-raw-sql"
+pattern = '"(SELECT|INSERT|UPDATE|DELETE|CREATE) '
+files = "crates/holon-frontend/src/**/*.rs"
+case_sensitive = true
+message = """
+No raw SQL strings in the storage-agnostic ViewModel layer. Put the SQL \
+behind the query capability (QueryEngine / BlockQuerySource impls in holon / \
+holon-app). Known limits: lowercase SQL and format!-assembled fragments \
+evade this regex — don't get creative. \
+To suppress: // ALLOW(frontend-raw-sql): <reason>
+"""
+
+[[smell]]
+id = "orgmode-raw-sql"
+pattern = '"(SELECT|INSERT|UPDATE|DELETE|CREATE) '
+files = "crates/holon-orgmode/src/**/*.rs"
+case_sensitive = true
+message = """
+No raw SQL strings in holon-orgmode. Use the BlockReader / DocumentManager / \
+BlockOrdering traits; the SQL-backed impls live in holon-app::turso_seams. \
+To suppress: # ALLOW(orgmode-raw-sql): <reason>
+"""
+
+[[smell]]
+id = "focus-no-from-raw"
+pattern = 'EntityUri::from_raw'
+files = "crates/holon-frontend/src/{focus_path,navigation,input,user_driver}.rs"
+case_sensitive = true
+message = """
+The focus/navigation routing layer is typed end-to-end (#7): `from_raw` \
+GUESSES the scheme for bare strings (bare → `block:`), which silently \
+mistypes doc ids — the exact bug class this layer's EntityUri typing \
+eliminates. Parse at the boundary with `EntityUri::parse` (fail loud) or \
+take an `&EntityUri` parameter; the only sanctioned bare-string entries are \
+`entity_uri_from_id_str` (row-id columns) and the org parser. \
+To suppress: // ALLOW(focus-no-from-raw): <reason>
+"""

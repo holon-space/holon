@@ -1,0 +1,32 @@
+# Focus / navigation discipline smells.
+# Mirror no_direct_focus_mutation and no_navigation_execute_op_in_tests
+# from the original architecture_rules.rs cargo arch-tests.
+
+[[smell]]
+id = "direct_focus_mutation"
+pattern = '\bui_state(\(\))?\.set_focus\('
+files = "**/*.rs"
+exclude = ["crates/holon-frontend/src/reactive.rs"]
+case_sensitive = true
+message = """
+Direct focus mutation found — must dispatch `navigation.focus` / \
+`navigation.editor_focus` / `navigation.go_home` through the engine instead. \
+The legitimate setter lives in `crates/holon-frontend/src/reactive.rs`; \
+`services.set_focus(...)` from BuilderServices is also fine. \
+To suppress: // ALLOW(direct_focus_mutation): <reason>
+"""
+
+[[smell]]
+id = "navigation_execute_op"
+pattern = 'execute_op\("navigation"'
+files = "**/*.rs"
+exclude = ["crates/holon/src/navigation/**"]
+case_sensitive = true
+message = """
+`execute_op("navigation", ...)` was the API shortcut removed in TUI cleanup A2–A4. \
+Drive navigation through the keyboard pipeline instead \
+(`driver.click_entity(doc, "left_sidebar")` for sidebar focus, leader chord for \
+go_home / go_back / go_forward). The provider source under \
+`crates/holon/src/navigation/` legitimately receives the dispatched intent and is exempt. \
+To suppress: // ALLOW(navigation_execute_op): <reason>
+"""

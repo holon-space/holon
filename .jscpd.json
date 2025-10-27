@@ -1,0 +1,18 @@
+{
+  "threshold": 10,
+  "reporters": ["console"],
+  "ignore": [
+    "vendor/**",
+    "target/**",
+    "frontends/flutter/**",
+    "frontends/waterui/**",
+    ".claude/worktrees/**",
+    "**/*.generated.*",
+    "workspace-hack/**",
+    "examples/**"
+  ],
+  "format": ["rust"],
+  "minLines": 20,
+  "minTokens": 100,
+  "absolute": true
+}

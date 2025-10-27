@@ -1,0 +1,1 @@
+INSERT OR REPLACE INTO navigation_cursor (region, history_id) VALUES ($region, $new_id)
