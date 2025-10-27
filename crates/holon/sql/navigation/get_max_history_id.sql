@@ -1,0 +1,1 @@
+SELECT MAX(id) as max_id FROM navigation_history WHERE region = $region

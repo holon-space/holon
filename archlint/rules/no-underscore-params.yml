@@ -1,0 +1,13 @@
+id: no-underscore-params
+language: rust
+severity: error
+message: |
+  Underscore-prefixed function parameters silently suppress unused-variable warnings.
+  Either use the parameter or remove it. If required by a trait signature, use bare `_`.
+  To suppress: `// ALLOW(unused_param): <reason>`
+rule:
+  kind: parameter
+  has:
+    field: pattern
+    kind: identifier
+    regex: '^_[A-Za-z]'

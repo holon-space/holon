@@ -1,0 +1,286 @@
+//! DI providers for database schema initialization.
+//!
+//! Each core schema group is represented as a phantom-typed `DbReady<R>` marker
+//! registered as an async DI provider. Dependencies between schemas (e.g.,
+//! `block_with_path` depends on `block`) are expressed via `with_dependency`
+//! hints, letting FluxDI's `resolve_all_eager()` determine the correct
+//! topological order and maximize parallelism.
+//!
+//! ## Compile-time vs runtime schemas
+//!
+//! Core schemas known at compile time use typed markers (`DbReady<CoreTables>`).
+//! User-defined schemas from YAML/MCP use FluxDI dynamic providers with string
+//! keys and `depends_on_static::<DbReady<CoreTables>>()`.
+
+use std::marker::PhantomData;
+
+use fluxdi::{Injector, Provider, Shared};
+
+use crate::storage::turso::DbHandle;
+use holon_turso::schema_modules::{
+    BlockHierarchySchemaModule, BlockMatviewSchemaModule, BlockRequirementEdgesSchemaModule,
+    BlockSchemaModule, CoreSchemaModule, IdentitySchemaModule, LinkSchemaModule,
+    NavigationSchemaModule, OperationsSchemaModule, SyncStateSchemaModule,
+};
+
+use super::DbHandleProvider;
+
+// ---------------------------------------------------------------------------
+// Phantom type infrastructure
+// ---------------------------------------------------------------------------
+
+/// Marker proving that a database resource group has been initialized.
+///
+/// `R` is a zero-sized type identifying which schema group is ready.
+/// Services that need a particular table resolve `DbReady<R>` in their
+/// DI factory, making the dependency compiler-checked and visible in
+/// FluxDI's dependency graph.
+pub struct DbReady<R: DbResource>(PhantomData<R>);
+
+impl<R: DbResource> DbReady<R> {
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+/// Marker trait for database resource groups.
+pub trait DbResource: Send + Sync + 'static {}
+
+// ---------------------------------------------------------------------------
+// Marker types — one per schema group
+// ---------------------------------------------------------------------------
+
+/// `block_raw`, `directory`, `file` tables.
+pub struct CoreTables;
+impl DbResource for CoreTables {}
+
+/// The `block` matview hydrating `tags` / `requires` from junction tables
+/// (depends on `block_raw` + `block_tags` + `block_requires`).
+pub struct BlockMatviewView;
+impl DbResource for BlockMatviewView {}
+
+/// `block_with_path` materialized view (depends on the `block` matview).
+pub struct BlockHierarchyView;
+impl DbResource for BlockHierarchyView {}
+
+/// `block_requirement_edges` matview (chained on `block` matview).
+pub struct BlockRequirementEdgesView;
+impl DbResource for BlockRequirementEdgesView {}
+
+/// `navigation_history`, `navigation_cursor`, `current_focus`, etc.
+pub struct NavigationTables;
+impl DbResource for NavigationTables {}
+
+/// `sync_states` table.
+pub struct SyncStateTables;
+impl DbResource for SyncStateTables {}
+
+/// `operation` table for undo/redo.
+pub struct OperationTables;
+impl DbResource for OperationTables {}
+
+/// `block_requires`, `block_tags` junction tables (FK to `block_raw`).
+pub struct BlockTables;
+impl DbResource for BlockTables {}
+
+/// `block_link` table (depends on `block`).
+pub struct LinkTables;
+impl DbResource for LinkTables {}
+
+/// `canonical_entity`, `entity_alias`, `proposal_queue` tables for cross-system identity.
+pub struct IdentityTables;
+impl DbResource for IdentityTables {}
+
+/// `graph_eav` schema.
+pub struct GraphEavSchema;
+impl DbResource for GraphEavSchema {}
+
+// ---------------------------------------------------------------------------
+// Helper: run a SchemaModule's DDL via DbHandle
+// ---------------------------------------------------------------------------
+
+use crate::storage::schema_module::SchemaModule;
+
+#[tracing::instrument(skip(module, db_handle), name = "di.schema_module", fields(name = module.name()))]
+async fn run_schema_module(module: &dyn SchemaModule, db_handle: &DbHandle) -> anyhow::Result<()> {
+    module
+        .ensure_schema(db_handle)
+        .await
+        .map_err(|e| anyhow::anyhow!("[{}] ensure_schema failed: {e}", module.name()))?;
+    module
+        .initialize_data(db_handle)
+        .await
+        .map_err(|e| anyhow::anyhow!("[{}] initialize_data failed: {e}", module.name()))?;
+
+    // Mark resources available in DbHandle for downstream DDL-dependency checks
+    let provides = module.provides();
+    if !provides.is_empty() {
+        db_handle
+            .mark_available(provides)
+            .await
+            .map_err(|e| anyhow::anyhow!("[{}] mark_available failed: {e}", module.name()))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Provider registration
+// ---------------------------------------------------------------------------
+
+/// Register all core schema providers on the injector.
+///
+/// After calling this, `injector.resolve_all_eager().await` will create all
+/// tables/views in the correct order with maximum parallelism.
+pub fn register_schema_providers(injector: &Injector) {
+    // -- CoreTables (no deps) --
+    injector.provide::<DbReady<CoreTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&CoreSchemaModule, &db.handle())
+            .await
+            .expect("CoreTables schema init failed");
+        Shared::new(DbReady::<CoreTables>::new())
+    }));
+
+    // -- BlockMatviewView (depends on CoreTables + BlockTables: matview JOINs block_raw + junctions) --
+    injector.provide::<DbReady<BlockMatviewView>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&BlockMatviewSchemaModule, &db.handle())
+                .await
+                .expect("BlockMatviewView schema init failed");
+            Shared::new(DbReady::<BlockMatviewView>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>()
+        .with_dependency::<DbReady<BlockTables>>(),
+    );
+
+    // -- BlockHierarchyView (block_with_path: FROM block — chained on the matview) --
+    injector.provide::<DbReady<BlockHierarchyView>>(
+        Provider::root_async(|inj| async move {
+            let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&BlockHierarchySchemaModule, &db.handle())
+                .await
+                .expect("BlockHierarchyView schema init failed");
+            Shared::new(DbReady::<BlockHierarchyView>::new())
+        })
+        .with_dependency::<DbReady<BlockMatviewView>>(),
+    );
+
+    // -- BlockRequirementEdgesView (chained on block matview + junctions) --
+    injector.provide::<DbReady<BlockRequirementEdgesView>>(
+        Provider::root_async(|inj| async move {
+            let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
+            let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&BlockRequirementEdgesSchemaModule, &db.handle())
+                .await
+                .expect("BlockRequirementEdgesView schema init failed");
+            Shared::new(DbReady::<BlockRequirementEdgesView>::new())
+        })
+        .with_dependency::<DbReady<BlockMatviewView>>()
+        .with_dependency::<DbReady<BlockTables>>(),
+    );
+
+    // -- NavigationTables (focus_roots matview JOINs block — chained on the matview) --
+    injector.provide::<DbReady<NavigationTables>>(
+        Provider::root_async(|inj| async move {
+            let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&NavigationSchemaModule, &db.handle())
+                .await
+                .expect("NavigationTables schema init failed");
+            Shared::new(DbReady::<NavigationTables>::new())
+        })
+        .with_dependency::<DbReady<BlockMatviewView>>(),
+    );
+
+    // -- SyncStateTables (no deps) --
+    injector.provide::<DbReady<SyncStateTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&SyncStateSchemaModule, &db.handle())
+            .await
+            .expect("SyncStateTables schema init failed");
+        Shared::new(DbReady::<SyncStateTables>::new())
+    }));
+
+    // -- OperationTables (no deps) --
+    injector.provide::<DbReady<OperationTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&OperationsSchemaModule, &db.handle())
+            .await
+            .expect("OperationTables schema init failed");
+        Shared::new(DbReady::<OperationTables>::new())
+    }));
+
+    // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id) --
+    injector.provide::<DbReady<BlockTables>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&BlockSchemaModule, &db.handle())
+                .await
+                .expect("BlockTables schema init failed");
+            Shared::new(DbReady::<BlockTables>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>(),
+    );
+
+    // -- LinkTables (depends on CoreTables) --
+    injector.provide::<DbReady<LinkTables>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&LinkSchemaModule, &db.handle())
+                .await
+                .expect("LinkTables schema init failed");
+            Shared::new(DbReady::<LinkTables>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>(),
+    );
+
+    // -- IdentityTables (no deps; tables are independent of block) --
+    injector.provide::<DbReady<IdentityTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&IdentitySchemaModule, &db.handle())
+            .await
+            .expect("IdentityTables schema init failed");
+        Shared::new(DbReady::<IdentityTables>::new())
+    }));
+
+    // -- GraphEavSchema (depends on CoreTables) --
+    injector.provide::<DbReady<GraphEavSchema>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(
+                &holon_turso::schema_modules::GraphEavSchemaModule,
+                &db.handle(),
+            )
+            .await
+            .expect("GraphEavSchema init failed");
+            Shared::new(DbReady::<GraphEavSchema>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>(),
+    );
+}
+
+/// All core schema TypeIds. Single source of truth for `resolve_eager_roots`
+/// and `with_dependency` declarations.
+pub fn all_schema_roots() -> Vec<std::any::TypeId> {
+    use std::any::TypeId;
+    vec![
+        TypeId::of::<DbReady<CoreTables>>(),
+        TypeId::of::<DbReady<BlockTables>>(),
+        TypeId::of::<DbReady<BlockMatviewView>>(),
+        TypeId::of::<DbReady<BlockHierarchyView>>(),
+        TypeId::of::<DbReady<BlockRequirementEdgesView>>(),
+        TypeId::of::<DbReady<NavigationTables>>(),
+        TypeId::of::<DbReady<SyncStateTables>>(),
+        TypeId::of::<DbReady<OperationTables>>(),
+        TypeId::of::<DbReady<LinkTables>>(),
+        TypeId::of::<DbReady<GraphEavSchema>>(),
+    ]
+}

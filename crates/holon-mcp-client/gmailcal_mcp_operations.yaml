@@ -1,0 +1,73 @@
+entities:
+  gmail_emails:
+    short_name: email
+    id_column: id
+    schema:
+      - { name: id, sql_type: TEXT, primary_key: true }
+      - { name: threadId, sql_type: TEXT, indexed: true }
+      - { name: subject, sql_type: TEXT }
+      - { name: from, sql_type: TEXT }
+      - { name: to, sql_type: TEXT }
+      - { name: date, sql_type: TEXT }
+      - { name: snippet, sql_type: TEXT }
+      - { name: labelIds, sql_type: TEXT, jsonb: true }
+      - { name: headers, sql_type: TEXT, jsonb: true }
+    sync:
+      list_tool: list_emails
+      extract_path: emails
+      list_params: { maxResults: 50 }
+
+  gcal_events:
+    short_name: event
+    id_column: id
+    schema:
+      - { name: id, sql_type: TEXT, primary_key: true }
+      - { name: calendarId, sql_type: TEXT, indexed: true }
+      - { name: summary, sql_type: TEXT }
+      - { name: description, sql_type: TEXT }
+      - { name: location, sql_type: TEXT }
+      - { name: start, sql_type: TEXT }
+      - { name: end, sql_type: TEXT }
+      - { name: status, sql_type: TEXT }
+      - { name: attendees, sql_type: TEXT, jsonb: true }
+      - { name: organizer, sql_type: TEXT, jsonb: true }
+    sync:
+      list_tool: list_events
+      extract_path: events
+      list_params: { maxResults: 100 }
+
+tools:
+  list_emails:
+    entity: gmail_emails
+  get_email:
+    entity: gmail_emails
+  search_emails:
+    entity: gmail_emails
+  send_email:
+    entity: gmail_emails
+    display_name: Send Email
+    undo:
+      reversible: false
+  modify_email:
+    entity: gmail_emails
+    affected_fields: [labelIds]
+  list_events:
+    entity: gcal_events
+  get_event:
+    entity: gcal_events
+  create_event:
+    entity: gcal_events
+    display_name: Create Event
+    undo:
+      reversible: false
+  update_event:
+    entity: gcal_events
+    affected_fields: [summary, description, location, start, end]
+    undo:
+      tool: update_event
+      capture: [summary, description, location, start, end]
+  delete_event:
+    entity: gcal_events
+    display_name: Delete Event
+    undo:
+      reversible: false

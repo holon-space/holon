@@ -1,0 +1,10 @@
+mod cdc_base_vs_matview_repro;
+mod turso_ivm_cdc_zero_changes_repro;
+mod turso_ivm_join_test;
+mod turso_ivm_navigation_cursor_repro;
+mod turso_ivm_split_block_cdc_drop_repro;
+mod turso_ivm_union_all_insert_repro;
+mod turso_matview_first_open_test;
+mod turso_matview_test;
+mod turso_repro_test;
+mod turso_tests;

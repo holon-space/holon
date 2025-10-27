@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e2ee8f94aa299cfc281f6f9d7aca3a4aac0bcb1ba2ec5cc6edeec3ddb75a0ddc # shrinks to headlines = [HeadlineSpec { block_id: EntityUri("block:0aaaa0aa-aa0a-a0a0-aaa0-aa0aaa00aa19"), properties_drawer: PropertiesDrawer { explicit_id: Some("0aaaa0aa-aa0a-a0a0-aaa0-aa0aaa00aa19"), other_props: {"column-order": "sQ6-vBJzS0j-ws-ec-lDt-d-_K-y3X", "column-priority": "qD-68-_W_---PWu--r_"} }, level: 1, task_state: None, priority: Some(Low), title: "s L2L 4e 9", tags: Some(["M___", "e-_1O_-_AOXG8yT", "s__D"]), body: None, scheduled: Some("<2024-12-31 Tue 09:30>"), deadline: Some("<2024-12-31 Tue 09:30>"), source_blocks: [SourceBlockSpec { id: EntityUri("block:7283ce44-7dd6-4037-a82c-69716638a90f"), language: "holon_sql", source: "_;[6=g).\n.\n}F=_f]", name: None, header_args: {}, custom_properties: {"collapse-to": "KE1_-4m_D_-7XH-", "column-priority": "ZF--F"} }, SourceBlockSpec { id: EntityUri("block:70fdd9b0-94dd-47e3-929d-580b7ff8e79f"), language: "holon_prql", source: "m]vm,=56GN_\n,Jo= k =]iC\n,G;d vL_.8(\nd(p_\n04.32W_\nP()hu;_{].l", name: None, header_args: {"session": "G4h_d9PR_U_s", "results": "rGy5_Z_f8Q99c"}, custom_properties: {} }], child_headlines: [] }]

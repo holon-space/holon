@@ -1,0 +1,104 @@
+{
+  "name": "extended_gen_pbt_sql_only_captured",
+  "description": "Auto-captured from a panicking proptest case. Rename + move into the slice's fixtures_dir to lock it.",
+  "environment": {
+    "wiring": {
+      "storage_adapters": [
+        "Org",
+        "Turso"
+      ],
+      "sync_adapters": [],
+      "actors": [
+        "UI"
+      ]
+    },
+    "env_flags": {
+      "PBT_ATOMIC_EDITOR": "1"
+    }
+  },
+  "initial_state": null,
+  "transitions": [
+    {
+      "WriteOrgFile": {
+        "filename": "a_0.org",
+        "blocks": [
+          {
+            "id": "block:4ar2ch--y0",
+            "parent_id": "block:gen-placeholder",
+            "content": ":PROPERTIES: 25xyvg S",
+            "content_type": "text",
+            "source_language": null,
+            "source_name": null,
+            "properties": {
+              "ID": "4ar2ch--y0"
+            },
+            "marks": null,
+            "created_at": 1781101573052,
+            "updated_at": 1781101573052
+          },
+          {
+            "id": "block:m85m9-nyu-n-0z-8-jo16",
+            "parent_id": "block:gen-placeholder",
+            "content": "B4 o",
+            "content_type": "text",
+            "source_language": null,
+            "source_name": null,
+            "properties": {
+              "ID": "m85m9-nyu-n-0z-8-jo16"
+            },
+            "marks": null,
+            "created_at": 1781101573052,
+            "updated_at": 1781101573052
+          },
+          {
+            "id": "block:-n--ka-86",
+            "parent_id": "block:gen-placeholder",
+            "content": "Lyf8o3 z5",
+            "content_type": "text",
+            "source_language": null,
+            "source_name": null,
+            "properties": {
+              "ID": "-n--ka-86"
+            },
+            "marks": null,
+            "created_at": 1781101573052,
+            "updated_at": 1781101573052
+          },
+          {
+            "id": "block:8u-p8x-4607--c",
+            "parent_id": "block:gen-placeholder",
+            "content": ":PROPERTIES: A2 ",
+            "content_type": "text",
+            "source_language": null,
+            "source_name": null,
+            "properties": {
+              "ID": "8u-p8x-4607--c"
+            },
+            "marks": null,
+            "created_at": 1781101573052,
+            "updated_at": 1781101573052
+          }
+        ]
+      }
+    },
+    {
+      "StartApp": {
+        "wait_for_ready": true,
+        "enable_fake_mcp": true,
+        "enable_loro": false
+      }
+    },
+    {
+      "NavigateFocus": {
+        "region": "main",
+        "block_id": "block:ref-doc-0"
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block:4ar2ch--y0",
+        "position": 12
+      }
+    }
+  ]
+}

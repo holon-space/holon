@@ -1,0 +1,79 @@
+{
+  "name": "loro-content-drop-set-field",
+  "description": "Loro content-drop repro: ApplyMutation set_field content A->AK lands in Turso (block_raw+matview) but not Loro. Surfaced by full sweep 2026-06-08.",
+  "initial_state": null,
+  "transitions": [
+    {
+      "WriteOrgFile": {
+        "filename": "index.org",
+        "blocks": [
+          {
+            "id": "block:--",
+            "parent_id": "block:gen-placeholder",
+            "content": "A",
+            "content_type": "text",
+            "source_language": null,
+            "source_name": null,
+            "properties": {
+              "ID": "--"
+            },
+            "marks": null,
+            "created_at": 1780954147980,
+            "updated_at": 1780954147980
+          },
+          {
+            "id": "block:--::src::0",
+            "parent_id": "block:--",
+            "content": "from children\n",
+            "content_type": "source",
+            "source_language": "holon_prql",
+            "source_name": null,
+            "properties": {
+              "sequence": 1
+            },
+            "marks": null,
+            "created_at": 1780954147980,
+            "updated_at": 1780954147980
+          },
+          {
+            "id": "block:--::render::0",
+            "parent_id": "block:--",
+            "content": "tree(#{parent_id: col(\"parent_id\"), sortkey: col(\"sequence\"), item_template: render_entity(), creation_slot: true})",
+            "content_type": "source",
+            "source_language": "render",
+            "source_name": null,
+            "properties": {
+              "sequence": 2
+            },
+            "marks": null,
+            "created_at": 1780954147980,
+            "updated_at": 1780954147980
+          }
+        ]
+      }
+    },
+    {
+      "StartApp": {
+        "wait_for_ready": true,
+        "enable_fake_mcp": true,
+        "enable_loro": true
+      }
+    },
+    {
+      "ApplyMutation": {
+        "event": {
+          "source": "UI",
+          "mutation": {
+            "Update": {
+              "entity": "block",
+              "id": "block:--",
+              "fields": {
+                "content": "AK"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

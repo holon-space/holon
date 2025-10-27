@@ -1,0 +1,1 @@
+from block | filter content_type == "text" | select {id, content}

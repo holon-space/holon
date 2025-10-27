@@ -1,0 +1,1 @@
+from block | select {id, parent_id, content, content_type, source_language}

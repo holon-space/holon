@@ -1,0 +1,11 @@
+warning: `Result::ok()?` silently drops the error and propagates `None`
+  --> $DIR/main.rs:4:13
+   |
+LL |     let n = s.parse::<i32>().ok()?;
+   |             ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: change the enclosing fn's return type to `Result<_, _>` and propagate the error with `?`, or wrap the error in a richer enum that this fn's caller can disting$DIRsh from a real `None`. CLAUDE.md: "DO NOT return null or None in case of an error".
+   = note: `#[warn(error_to_option_via_ok_question)]` on by default
+
+warning: 1 warning emitted
+

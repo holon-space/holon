@@ -1,0 +1,60 @@
+# Fluent Emoji Icon Manifest
+#
+# Maps local filename → emoji name in microsoft/fluentui-emoji repo.
+# Style: "Flat" (clean multi-color SVGs, ~1-4 KB each).
+#
+# Browse available icons at: https://fluentemoji.com/
+# Repo structure: assets/{Emoji Name}/Flat/{emoji_name}_flat.svg
+#
+# Run `./assets/icons/download.sh` to fetch all listed icons.
+# Run `./assets/icons/download.sh sync` to also remove icons not in manifest.
+
+[icons]
+# Documents & Content
+notebook = "Notebook"
+bookmark = "Bookmark"
+page-facing-up = "Page facing up"
+memo = "Memo"
+scroll = "Scroll"
+clipboard = "Clipboard"
+
+# Tasks & Status
+check-mark = "Check mark button"
+cross-mark = "Cross mark"
+hourglass = "Hourglass not done"
+warning = "Warning"
+bell = "Bell"
+pushpin = "Pushpin"
+
+# Navigation & Actions
+magnifying-glass = "Magnifying glass tilted left"
+gear = "Gear"
+link = "Link"
+inbox = "Inbox tray"
+outbox = "Outbox tray"
+folder-open = "Open file folder"
+folder = "File folder"
+
+# Organization
+label = "Label"
+calendar = "Calendar"
+bar-chart = "Bar chart"
+light-bulb = "Light bulb"
+star = "Star"
+fire = "Fire"
+
+# Communication & People
+speech-bubble = "Speech balloon"
+thought-bubble = "Thought balloon"
+robot = "Robot"
+eye = "Eye"
+
+# View Modes
+deciduous-tree = "Deciduous tree"
+abacus = "Abacus"
+books = "Books"
+
+# Arrows & Symbols
+right-arrow = "Right arrow"
+cycle = "Counterclockwise arrows button"
+sparkles = "Sparkles"

@@ -1,0 +1,212 @@
+//! File watcher for Org files
+//!
+//! Bridges the injected [`FileChangeSource`] port (ADR 0011) to the org sync
+//! loop: subscribes to raw file-change events, filters to `.org` files that
+//! are not gitignored (including always skipping `.git/` and `.jj/`), and
+//! forwards the paths on an unbounded mpsc channel.
+//!
+//! Echo suppression lives in `FileSyncController::last_projection`, not here.
+
+use holon_core::CanonicalPath;
+use holon_filesystem::FileChangeSource;
+use ignore::gitignore::Gitignore;
+use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
+
+use holon_filesystem::FileSystem;
+pub use holon_filesystem::ScannedEntries;
+
+/// Scan a directory for `.org` files through the `FileSystem` port (ADR 0011).
+///
+/// The gitignore-aware recursive walk lives in the port
+/// (`holon_filesystem::fs_port::walk_directory` for the real adapter); this
+/// wrapper applies the org-format extension filter.
+pub async fn scan_directory(fs: &dyn FileSystem, root: &Path) -> std::io::Result<ScannedEntries> {
+    let mut scanned = fs.scan_directory(root).await?;
+    scanned
+        .files
+        .retain(|p| p.extension().is_some_and(|e| e == "org"));
+    Ok(scanned)
+}
+
+#[tracing::instrument(name = "build_gitignore", fields(root = %root.display()))]
+fn build_gitignore(root: &Path) -> Gitignore {
+    let (gitignore, errors) = Gitignore::new(root.join(".gitignore"));
+    if let Some(err) = errors {
+        warn!("Error parsing .gitignore: {}", err);
+    }
+    gitignore
+}
+
+fn is_ignored(path: &Path, gitignore: &Gitignore) -> bool {
+    // Always skip VCS internals
+    for component in path.components() {
+        let s = component.as_os_str().to_str().unwrap_or("");
+        if s == ".git" || s == ".jj" {
+            return true;
+        }
+    }
+    let is_dir = path.is_dir();
+    // `matched` alone never consults parent dirs, so a `vendor/` pattern
+    // would not ignore `vendor/dep.org`.
+    gitignore
+        .matched_path_or_any_parents(path, is_dir)
+        .is_ignore()
+}
+
+/// File watcher for Org files: the org-side consumer of a [`FileChangeSource`].
+///
+/// The channel carries `(Option<PathBuf>, seq)`: `Some(path)` for org-relevant
+/// changes the sync loop must ingest, `None` for filtered ones (non-`.org`,
+/// gitignored). Filtered events still flow through the SAME channel so the
+/// consumer can advance its processed-seq watermark strictly in delivery
+/// order — advancing for a filtered event from the bridge directly could
+/// overtake an unprocessed earlier forwarded event.
+pub struct OrgFileWatcher {
+    change_rx: mpsc::UnboundedReceiver<(Option<PathBuf>, u64)>,
+}
+
+impl OrgFileWatcher {
+    /// Subscribe to `source` and spawn the filter bridge. Subscribing happens
+    /// here — before the caller arms the source — so no event is missed.
+    ///
+    /// The gitignore root is canonicalized so it matches the canonical paths
+    /// fs event backends report (macOS: `/var` → `/private/var`).
+    pub fn new(source: &dyn FileChangeSource, watch_dir: &Path) -> Self {
+        let gitignore = tracing::info_span!("OrgFileWatcher.build_gitignore")
+            .in_scope(|| build_gitignore(&CanonicalPath::new(watch_dir).into_path_buf()));
+        let (change_tx, change_rx) = mpsc::unbounded_channel();
+        let mut source_rx = source.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                match source_rx.recv().await {
+                    Ok(change) => {
+                        let path = change.path;
+                        let relevant = path.extension().map(|e| e == "org").unwrap_or(false)
+                            && !is_ignored(&path, &gitignore);
+                        if relevant {
+                            debug!("File change detected: {}", path.display());
+                        }
+                        let msg = if relevant { Some(path) } else { None };
+                        if change_tx.send((msg, change.seq)).is_err() {
+                            // Receiver dropped — sync loop is gone.
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Dropped raw events are repaired by the controller's
+                        // poll backstops (poll_tracked_files / poll_new_files).
+                        warn!("[OrgFileWatcher] lagged behind change source by {n} events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+
+        Self { change_rx }
+    }
+
+    /// Get a receiver for file change events
+    pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<(Option<PathBuf>, u64)> {
+        &mut self.change_rx
+    }
+
+    /// Consume the watcher and return the filtered-path receiver.
+    pub fn into_receiver(self) -> mpsc::UnboundedReceiver<(Option<PathBuf>, u64)> {
+        self.change_rx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use holon_filesystem::NotifyWatcher;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::time::{sleep, Duration};
+
+    /// These tests drive the REAL `NotifyWatcher` (fsevents on macOS) end to
+    /// end through the org filter bridge — the dedicated real-watcher coverage
+    /// ADR 0011 requires once the PBT harness runs on the in-memory adapter.
+    fn armed_watcher(dir: &Path) -> OrgFileWatcher {
+        let source = Arc::new(NotifyWatcher::new_unarmed().unwrap());
+        let watcher = OrgFileWatcher::new(source.as_ref(), dir);
+        source.arm(dir).unwrap();
+        // Leak the source so the notify watcher outlives this helper —
+        // dropping it stops event delivery. Test-scoped only.
+        std::mem::forget(source);
+        watcher
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_detects_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.org");
+
+        let watcher = armed_watcher(temp_dir.path());
+
+        sleep(Duration::from_millis(100)).await;
+
+        tokio::fs::write(&test_file, "* Test").await.unwrap();
+        sleep(Duration::from_millis(500)).await;
+
+        let mut receiver = watcher.into_receiver();
+        let mut saw_org_change = false;
+        while let Ok((msg, _seq)) = receiver.try_recv() {
+            saw_org_change |= msg.is_some();
+        }
+        assert!(saw_org_change, "Should receive file change event");
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_ignores_git_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let git_dir = temp_dir.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let git_file = git_dir.join("test.org");
+
+        let mut watcher = armed_watcher(temp_dir.path());
+        sleep(Duration::from_millis(100)).await;
+
+        tokio::fs::write(&git_file, "* Hidden").await.unwrap();
+        sleep(Duration::from_millis(500)).await;
+
+        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
+            assert!(
+                msg.is_none(),
+                "Should NOT receive events from .git/: {msg:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_respects_gitignore() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create .gitignore that ignores "vendor/" directory
+        tokio::fs::write(temp_dir.path().join(".gitignore"), "vendor/\n")
+            .await
+            .unwrap();
+
+        let vendor_dir = temp_dir.path().join("vendor");
+        std::fs::create_dir_all(&vendor_dir).unwrap();
+
+        let mut watcher = armed_watcher(temp_dir.path());
+        sleep(Duration::from_millis(100)).await;
+
+        // Write to ignored path
+        tokio::fs::write(vendor_dir.join("dep.org"), "* Vendor dep")
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(500)).await;
+
+        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
+            assert!(
+                msg.is_none(),
+                "Should NOT receive events from gitignored paths: {msg:?}"
+            );
+        }
+    }
+}

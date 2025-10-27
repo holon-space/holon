@@ -1,0 +1,179 @@
+//! OperationWrapper - Decorator for automatic change propagation after operations
+//!
+//! This module provides a wrapper around OperationProvider that handles:
+//! - Sync to external systems via SyncableProvider after operation execution
+//! - Future: Cache updates via FieldDelta propagation
+
+use async_trait::async_trait;
+use std::sync::Arc;
+
+use crate::storage::types::StorageEntity;
+use crate::traits::{
+    generate_sync_operation, OperationProvider, OperationResult, Result, SyncableProvider,
+};
+use holon_api::{EntityName, OperationDescriptor, StreamPosition};
+
+/// Wrapper that adds automatic sync after operation execution.
+///
+/// This decorator wraps an OperationProvider and automatically calls
+/// sync_changes() on the SyncableProvider after each operation completes.
+pub struct OperationWrapper<S> {
+    inner: Arc<dyn OperationProvider>,
+    sync_provider: Option<Arc<S>>,
+}
+
+impl<S> OperationWrapper<S> {
+    /// Create a new OperationWrapper with an inner provider and optional sync provider.
+    ///
+    /// `inner` is a `dyn OperationProvider` so the wrapper is agnostic to which
+    /// backend owns the wrapped CRUD authority (Loro, SQL, …) — the caller picks
+    /// the authority and erases its concrete type at the boundary.
+    pub fn new(inner: Arc<dyn OperationProvider>, sync_provider: Option<Arc<S>>) -> Self {
+        Self {
+            inner,
+            sync_provider,
+        }
+    }
+
+    /// Create a wrapper without sync (passthrough mode)
+    pub fn without_sync(inner: Arc<dyn OperationProvider>) -> Self {
+        Self {
+            inner,
+            sync_provider: None,
+        }
+    }
+}
+
+#[async_trait]
+impl<S> OperationProvider for OperationWrapper<S>
+where
+    S: SyncableProvider + Send + Sync,
+{
+    fn operations(&self) -> Vec<OperationDescriptor> {
+        let mut ops = self.inner.operations();
+
+        // Add sync operation if sync_provider is present
+        if let Some(ref sync_provider) = self.sync_provider {
+            ops.push(generate_sync_operation(sync_provider.provider_name()));
+        }
+
+        ops
+    }
+
+    fn find_operations(
+        &self,
+        entity_name: &EntityName,
+        available_args: &[String],
+    ) -> Vec<OperationDescriptor> {
+        self.inner.find_operations(entity_name, available_args)
+    }
+
+    async fn execute_operation(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+    ) -> Result<OperationResult> {
+        // Handle sync operation specially - delegates to sync_provider
+        if op_name == "sync" {
+            if let Some(ref sync_provider) = self.sync_provider {
+                tracing::info!(
+                    "[OperationWrapper] Executing sync operation for provider '{}'",
+                    sync_provider.provider_name()
+                );
+                sync_provider.sync(StreamPosition::Beginning).await?;
+                return Ok(OperationResult::irreversible(Vec::new()));
+            } else {
+                return Err("No sync provider configured".into());
+            }
+        }
+
+        // 1. Execute operation on inner provider
+        let result = self
+            .inner
+            .execute_operation(entity_name, op_name, params)
+            .await?;
+
+        // 2. Sync to external systems (if sync provider is available)
+        // Extract FieldDeltas from the operation result and pass to sync_changes
+        if let Some(ref sync_provider) = self.sync_provider {
+            if let Err(e) = sync_provider.sync_changes(&result.changes).await {
+                tracing::warn!(
+                    "[OperationWrapper] Post-operation sync failed for {}.{}: {}",
+                    entity_name,
+                    op_name,
+                    e
+                );
+            }
+        }
+
+        // 3. Return operation result (contains both changes and undo action)
+        Ok(result)
+    }
+
+    fn get_last_created_id(&self) -> Option<String> {
+        self.inner.get_last_created_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::{FieldDelta, SyncableProvider};
+    use std::collections::HashMap;
+
+    // Mock OperationProvider for testing
+    struct MockProvider;
+
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    impl OperationProvider for MockProvider {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            vec![]
+        }
+
+        fn find_operations(&self, _: &EntityName, _: &[String]) -> Vec<OperationDescriptor> {
+            vec![]
+        }
+
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            _: &str,
+            _: StorageEntity,
+        ) -> Result<OperationResult> {
+            Ok(OperationResult::irreversible(Vec::new()))
+        }
+    }
+
+    // Mock SyncableProvider for testing
+    struct MockSyncProvider;
+
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    impl SyncableProvider for MockSyncProvider {
+        fn provider_name(&self) -> &str {
+            "mock"
+        }
+
+        async fn sync(&self, _: StreamPosition) -> Result<StreamPosition> {
+            Ok(StreamPosition::Beginning)
+        }
+
+        async fn sync_changes(&self, _: &[FieldDelta]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wrapper_passthrough() {
+        let provider: Arc<dyn OperationProvider> = Arc::new(MockProvider);
+        let wrapper: OperationWrapper<MockSyncProvider> = OperationWrapper::without_sync(provider);
+
+        let result = wrapper
+            .execute_operation(&EntityName::from("test"), "test_op", HashMap::new())
+            .await;
+
+        assert!(result.is_ok());
+    }
+}

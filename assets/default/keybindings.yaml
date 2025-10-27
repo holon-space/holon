@@ -1,0 +1,58 @@
+# Only leader chords (Space + key, navigation mode) are configurable
+# here. Direct keys (Up/Down focus walk, Tab region switch, Enter edit)
+# and all editing-mode keys (Esc/Enter exit, Ctrl+x split, Backspace-at-0
+# join) are hardcoded in frontends/tui/src/app_main.rs and are NOT
+# consulted from this table.
+bindings:
+  # ── Navigation mode ──────────────────────────────────────────────
+  #
+  # Space acts as a leader key — press Space, then the second key.
+  # The status bar shows available sub-commands while leader is active.
+
+  # Leader chords (Space + key)
+  - key: "Up"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "move_up"
+
+  - key: "Down"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "move_down"
+
+  - key: "Right"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "indent"
+
+  - key: "Left"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "outdent"
+
+  - key: "Enter"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "start_editing"
+
+  - key: "x"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "cycle_task_state"
+
+  # Navigation history (browser-like back/forward, plus home).
+  # Mnemonic: leader + h = home, b = back, f = forward.
+  - key: "h"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "go_home"
+
+  - key: "b"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "go_back"
+
+  - key: "f"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "go_forward"
