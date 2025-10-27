@@ -1,0 +1,17 @@
+* Journals
+#+BEGIN_SRC holon_prql :id block:journals::src::0
+from block
+filter parent_id == 'block:journals'
+filter name != null
+sort {-name}
+#+END_SRC
+#+BEGIN_SRC render :id block:journals::render::0
+list(#{sortkey: "-name", item_template: selectable(row(icon("calendar"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
+#+END_SRC
+** Journal Auto-Create
+#+BEGIN_SRC holon_sql :id block:journals::trigger::0
+SELECT date('now', 'localtime') as name
+#+END_SRC
+#+BEGIN_SRC action :id block:journals::action::0
+block.create(#{parent_id: "block:journals", name: col("name")})
+#+END_SRC

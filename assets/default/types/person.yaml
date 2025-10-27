@@ -1,0 +1,24 @@
+name: person
+default_lifetime: persistent
+primary_key: id
+id_references: block
+graph_label: Person
+source: pre_configured
+fields:
+  - name: id
+    sql_type: TEXT
+    primary_key: true
+    indexed: true
+  - name: email
+    sql_type: TEXT
+    indexed: true
+    nullable: true
+  - name: role
+    sql_type: TEXT
+    nullable: true
+  - name: organization
+    sql_type: TEXT
+    nullable: true
+  - name: phone
+    sql_type: TEXT
+    nullable: true

@@ -1,0 +1,62 @@
+entities:
+  todoist_tasks:
+    short_name: task
+    id_column: id
+  todoist_projects:
+    short_name: project
+    id_column: id
+
+tools:
+  complete-tasks:
+    entity: todoist_tasks
+    affected_fields: [completed]
+    triggered_by:
+      - from: completed
+        provides: [ids]
+    precondition: "completed == false"
+    undo:
+      reversible: false
+  update-tasks:
+    entity: todoist_tasks
+    affected_fields: [content, description, priority, dueString, labels]
+    undo:
+      tool: update-tasks
+      capture: [content, description, priority, dueString, labels]
+  add-tasks:
+    entity: todoist_tasks
+    display_name: Create Task
+    undo:
+      reversible: false
+  delete-object:
+    entity: todoist_tasks
+    display_name: Delete
+    undo:
+      reversible: false
+  add-projects:
+    entity: todoist_projects
+    display_name: Create Project
+    undo:
+      reversible: false
+  update-projects:
+    entity: todoist_projects
+    affected_fields: [name, color, isFavorite, viewStyle]
+    undo:
+      tool: update-projects
+      capture: [name, color, isFavorite, viewStyle]
+  find-tasks:
+    entity: todoist_tasks
+  find-tasks-by-date:
+    entity: todoist_tasks
+  find-completed-tasks:
+    entity: todoist_tasks
+  find-projects:
+    entity: todoist_projects
+  add-sections:
+    entity: todoist_projects
+    display_name: Create Section
+  add-comments:
+    entity: todoist_tasks
+    display_name: Add Comment
+  manage-assignments:
+    entity: todoist_tasks
+    affected_fields: [responsibleUid]

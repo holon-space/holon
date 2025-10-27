@@ -1,0 +1,1035 @@
+//! Stateful property-based tests comparing two DocumentRepository implementations
+//!
+//! This module tests LoroBackend against MemoryBackend by running identical
+//! operations on both and comparing their results structurally.
+
+#[cfg(test)]
+mod stateful_tests {
+    use super::super::loro_backend::LoroBackend;
+    use super::super::memory_backend::MemoryBackend;
+    use super::super::pbt_infrastructure::{
+        BlockTransition, apply_transition, check_transition_preconditions,
+        generate_crud_transitions, populate_initial_id_map, translate_transition,
+        update_id_map_after_create, verify_backends_match,
+    };
+    use super::super::repository::{CoreOperations, Lifecycle};
+    use super::super::types::Traversal;
+    use holon_api::streaming::ChangeNotifications;
+    use holon_api::{ApiError, Block, Change, StreamPosition};
+    use proptest::prelude::*;
+    use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use tokio_stream::StreamExt;
+
+    type WatcherId = usize;
+
+    /// Stream wrapper for a watcher subscription
+    struct WatcherStream {
+        stream: Pin<Box<dyn futures::Stream<Item = Result<Vec<Change<Block>>, ApiError>> + Send>>,
+    }
+
+    impl std::fmt::Debug for WatcherStream {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("WatcherStream").finish()
+        }
+    }
+
+    /// Pure metadata for a watcher (cloneable)
+    #[derive(Debug, Clone)]
+    struct WatcherDescriptor {
+        watcher_id: WatcherId,
+        base_version_idx: usize,
+        last_consumed_idx: usize,
+        pending_events: Vec<Change<Block>>,
+    }
+
+    /// Reference state wraps MemoryBackend (our reference implementation)
+    #[derive(Debug)]
+    struct ReferenceState {
+        backend: MemoryBackend,
+        /// Snapshot versions after each command
+        versions: Vec<Vec<u8>>,
+        /// Watcher metadata (cloneable data only)
+        watchers: HashMap<WatcherId, WatcherDescriptor>,
+        /// Live watcher streams (not cloned directly, rebuilt on clone)
+        live_streams: HashMap<WatcherId, WatcherStream>,
+        /// Runtime for async operations (wrapped in Arc to keep it alive)
+        _runtime: Arc<tokio::runtime::Runtime>,
+    }
+
+    impl Default for ReferenceState {
+        fn default() -> Self {
+            let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+
+            let backend = runtime
+                .block_on(MemoryBackend::create_new("reference".to_string()))
+                .unwrap();
+
+            let initial_version = runtime.block_on(backend.get_current_version()).unwrap();
+
+            Self {
+                backend,
+                versions: vec![initial_version],
+                watchers: HashMap::new(),
+                live_streams: HashMap::new(),
+                _runtime: runtime,
+            }
+        }
+    }
+
+    impl Clone for ReferenceState {
+        fn clone(&self) -> Self {
+            let backend_clone = self.backend.clone();
+            let versions_clone = self.versions.clone();
+            let watchers_clone = self.watchers.clone();
+
+            // Don't rebuild streams in Clone - do it lazily in apply() instead
+            // This keeps Clone cheap and avoids async work during cloning
+            let live_streams_clone = HashMap::new();
+
+            Self {
+                backend: backend_clone,
+                versions: versions_clone,
+                watchers: watchers_clone,
+                live_streams: live_streams_clone,
+                _runtime: self._runtime.clone(),
+            }
+        }
+    }
+
+    impl ReferenceStateMachine for ReferenceState {
+        type State = Self;
+        type Transition = BlockTransition;
+
+        fn init_state() -> BoxedStrategy<Self::State> {
+            Just(ReferenceState::default()).boxed()
+        }
+
+        fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+            // Get all blocks including root (root will be parent for top-level user blocks)
+            let all_blocks = state
+                ._runtime
+                .block_on(state.backend.get_all_blocks(Traversal::ALL))
+                .expect("Failed to get all blocks in transitions()");
+            let all_ids: Vec<String> = all_blocks.iter().map(|b| b.id.to_string()).collect();
+            let non_root_ids: Vec<String> = all_blocks
+                .iter()
+                .filter(|b| !b.parent_id.is_no_parent() && !b.parent_id.is_sentinel())
+                .map(|b| b.id.to_string())
+                .collect();
+
+            // Generate CRUD transitions using shared logic
+            let crud_transitions = generate_crud_transitions(all_ids, non_root_ids);
+
+            // Generate next available watcher ID
+            let next_watcher_id = state.watchers.keys().max().map(|id| id + 1).unwrap_or(0);
+            let watch_changes = Just(BlockTransition::WatchChanges {
+                watcher_id: next_watcher_id,
+            })
+            .boxed();
+
+            let active_watcher_ids: Vec<WatcherId> = state.watchers.keys().copied().collect();
+
+            if active_watcher_ids.is_empty() {
+                prop::strategy::Union::new(vec![crud_transitions, watch_changes]).boxed()
+            } else {
+                let unwatch = prop::sample::select(active_watcher_ids)
+                    .prop_map(|id| BlockTransition::UnwatchChanges { watcher_id: id })
+                    .boxed();
+
+                prop::strategy::Union::new_weighted(vec![
+                    (10, crud_transitions),
+                    (5, watch_changes),
+                    (3, unwatch),
+                ])
+                .boxed()
+            }
+        }
+
+        fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+            // Handle watcher-specific preconditions first
+            match transition {
+                BlockTransition::WatchChanges { watcher_id } => {
+                    !state.watchers.contains_key(watcher_id)
+                }
+                BlockTransition::UnwatchChanges { watcher_id } => {
+                    state.watchers.contains_key(watcher_id)
+                }
+                _ => {
+                    // Use shared async precondition checker for CRUD operations
+                    state
+                        ._runtime
+                        .block_on(check_transition_preconditions(transition, &state.backend))
+                }
+            }
+        }
+
+        fn apply(state: Self::State, transition: &Self::Transition) -> Self::State {
+            let mut state = state;
+
+            match transition {
+                BlockTransition::WatchChanges { watcher_id } => {
+                    let initial_version = state.versions[0].clone();
+
+                    // DON'T clone backend - watchers must observe the same backend instance
+                    let stream = match state._runtime.block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(1),
+                            state
+                                .backend
+                                .watch_changes_since(StreamPosition::Version(initial_version)),
+                        )
+                        .await
+                    }) {
+                        Ok(s) => s,
+                        Err(_) => panic!(
+                            "Timed out creating watcher stream. Likely synchronous replay prefill into a bounded channel in MemoryBackend::watch_changes_since."
+                        ),
+                    };
+
+                    let mut watcher_stream = WatcherStream {
+                        stream: Box::pin(stream),
+                    };
+
+                    // Drain initial replay events (limit to 1000 to prevent infinite loops)
+                    let mut pending_events = Vec::new();
+                    let mut drain_count = 0;
+                    const MAX_DRAIN_EVENTS: usize = 1000;
+
+                    loop {
+                        if drain_count >= MAX_DRAIN_EVENTS {
+                            panic!(
+                                "Watcher replay exceeded {} events - possible infinite loop",
+                                MAX_DRAIN_EVENTS
+                            );
+                        }
+
+                        match state._runtime.block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_millis(10),
+                                watcher_stream.stream.next(),
+                            )
+                            .await
+                        }) {
+                            Ok(Some(Ok(batch))) => {
+                                // Stream returns batches, so we need to flatten them
+                                for event in batch {
+                                    pending_events.push(event);
+                                }
+                                drain_count += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    let descriptor = WatcherDescriptor {
+                        watcher_id: *watcher_id,
+                        base_version_idx: 0,
+                        last_consumed_idx: state.versions.len() - 1,
+                        pending_events,
+                    };
+
+                    state.watchers.insert(*watcher_id, descriptor);
+                    state.live_streams.insert(*watcher_id, watcher_stream);
+                }
+                BlockTransition::UnwatchChanges { watcher_id } => {
+                    state.watchers.remove(watcher_id);
+                    state.live_streams.remove(watcher_id);
+                }
+                _ => {
+                    state._runtime
+                        .block_on(apply_transition(&state.backend, transition))
+                        .expect("Reference backend transition should succeed (preconditions validated it)");
+
+                    let new_version = state
+                        ._runtime
+                        .block_on(state.backend.get_current_version())
+                        .expect("Failed to get current version");
+                    state.versions.push(new_version);
+
+                    // Drain pending events from all active watchers (with safety limit)
+                    const MAX_EVENTS_PER_WATCHER: usize = 1000;
+                    let watcher_ids: Vec<WatcherId> = state.watchers.keys().copied().collect();
+
+                    for watcher_id in watcher_ids {
+                        // Lazy rehydration: rebuild stream if missing (e.g., after Clone)
+                        if !state.live_streams.contains_key(&watcher_id)
+                            && let Some(descriptor) = state.watchers.get(&watcher_id)
+                        {
+                            let version = state.versions[descriptor.last_consumed_idx].clone();
+
+                            let stream = match state._runtime.block_on(async {
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(2),
+                                    state
+                                        .backend
+                                        .watch_changes_since(StreamPosition::Version(version)),
+                                )
+                                .await
+                            }) {
+                                Ok(s) => s,
+                                Err(_) => panic!(
+                                    "Timed out rehydrating watcher {}. Likely bounded replay prefill deadlock.",
+                                    watcher_id
+                                ),
+                            };
+
+                            state.live_streams.insert(
+                                watcher_id,
+                                WatcherStream {
+                                    stream: Box::pin(stream),
+                                },
+                            );
+                        }
+
+                        if let Some(stream) = state.live_streams.get_mut(&watcher_id) {
+                            let mut event_count = 0;
+
+                            loop {
+                                if event_count >= MAX_EVENTS_PER_WATCHER {
+                                    panic!(
+                                        "Watcher {} received {} events without timeout - possible infinite loop",
+                                        watcher_id, MAX_EVENTS_PER_WATCHER
+                                    );
+                                }
+
+                                match state._runtime.block_on(async {
+                                    tokio::time::timeout(
+                                        std::time::Duration::from_millis(10),
+                                        stream.stream.next(),
+                                    )
+                                    .await
+                                }) {
+                                    Ok(Some(Ok(batch))) => {
+                                        // Stream returns batches, so we need to flatten them
+                                        for event in batch {
+                                            if let Some(descriptor) =
+                                                state.watchers.get_mut(&watcher_id)
+                                            {
+                                                descriptor.pending_events.push(event);
+                                                descriptor.last_consumed_idx =
+                                                    state.versions.len() - 1;
+                                            }
+                                            event_count += 1;
+                                        }
+                                    }
+                                    _ => break,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            state
+        }
+    }
+
+    /// System under test - generic over any backend implementing CoreOperations + Lifecycle
+    struct BlockTreeTest<R: CoreOperations + Lifecycle> {
+        backend: R,
+        /// Initial version for watcher replay
+        initial_version: Vec<u8>,
+        /// ID mapping: MemoryBackend ID → LoroBackend ID
+        id_map: std::collections::HashMap<String, String>,
+        /// Watcher notifications: WatcherId → Arc<Mutex<Vec<Change<Block>>>>
+        watcher_notifications: HashMap<WatcherId, Arc<Mutex<Vec<Change<Block>>>>>,
+        /// Active watcher stream handles
+        watcher_handles: HashMap<WatcherId, tokio::task::JoinHandle<()>>,
+        /// Persistent runtime to keep spawned tasks alive
+        runtime: Arc<tokio::runtime::Runtime>,
+    }
+
+    impl StateMachineTest for BlockTreeTest<LoroBackend> {
+        type SystemUnderTest = Self;
+        type Reference = ReferenceState;
+
+        fn init_test(
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+            let backend = runtime
+                .block_on(LoroBackend::create_new("test-pbt".to_string()))
+                .unwrap();
+
+            let initial_version = runtime.block_on(backend.get_current_version()).unwrap();
+
+            // Populate id_map with initial blocks (root + first child)
+            let mut id_map = HashMap::new();
+            runtime
+                .block_on(populate_initial_id_map(
+                    &mut id_map,
+                    &ref_state.backend,
+                    &backend,
+                ))
+                .expect("Failed to populate initial ID map");
+
+            BlockTreeTest {
+                backend,
+                initial_version,
+                id_map,
+                watcher_notifications: HashMap::new(),
+                watcher_handles: HashMap::new(),
+                runtime,
+            }
+        }
+
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            transition: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            let runtime = state.runtime.clone();
+
+            let sut_transition = translate_transition(&transition, &state.id_map);
+
+            // Handle watcher commands specially
+            match &sut_transition {
+                BlockTransition::WatchChanges { watcher_id } => {
+                    let notifications = Arc::new(Mutex::new(Vec::new()));
+                    let backend_clone = state.backend.clone();
+                    let initial_version = state.initial_version.clone();
+
+                    // Create stream and drain initial replay events synchronously,
+                    // matching the reference implementation's behavior
+                    // Add timeout to prevent deadlock from synchronous replay into bounded channel
+                    let mut stream = runtime.block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            backend_clone.watch_changes_since(StreamPosition::Version(initial_version))
+                        )
+                        .await
+                        .expect("Timed out creating SUT watcher stream. Likely bounded channel replay deadlock - watch_changes_since should spawn a task for replay instead of sending synchronously.")
+                    });
+
+                    // Drain replay events with timeout (mimics reference implementation)
+                    const MAX_DRAIN_EVENTS: usize = 1000;
+                    let mut drain_count = 0;
+                    loop {
+                        if drain_count >= MAX_DRAIN_EVENTS {
+                            panic!("Watcher replay exceeded {} events", MAX_DRAIN_EVENTS);
+                        }
+
+                        match runtime.block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_millis(10),
+                                stream.next(),
+                            )
+                            .await
+                        }) {
+                            Ok(Some(Ok(batch))) => {
+                                // Stream returns batches, so we need to flatten them
+                                for event in batch {
+                                    notifications.lock().unwrap().push(event);
+                                }
+                                drain_count += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    // Spawn task to continue listening for future events
+                    let notifications_clone = notifications.clone();
+                    let handle = runtime.spawn(async move {
+                        while let Some(batch_result) = stream.next().await {
+                            if let Ok(batch) = batch_result {
+                                // Stream returns batches, so we need to flatten them
+                                for change in batch {
+                                    notifications_clone.lock().unwrap().push(change);
+                                }
+                            }
+                        }
+                    });
+
+                    state
+                        .watcher_notifications
+                        .insert(*watcher_id, notifications);
+                    state.watcher_handles.insert(*watcher_id, handle);
+                    return state;
+                }
+                BlockTransition::UnwatchChanges { watcher_id } => {
+                    if let Some(handle) = state.watcher_handles.remove(watcher_id) {
+                        handle.abort();
+                    }
+                    state.watcher_notifications.remove(watcher_id);
+                    return state;
+                }
+                _ => {}
+            }
+
+            // Apply the translated transition to the SUT
+            let created_blocks = runtime
+                .block_on(apply_transition(&state.backend, &sut_transition))
+                .expect("Transition should succeed on SUT");
+
+            // Update the ID map immediately after create operations
+            if !created_blocks.is_empty() {
+                let ref_blocks = runtime
+                    .block_on(ref_state.backend.get_all_blocks(Traversal::ALL_BUT_ROOT))
+                    .unwrap();
+                update_id_map_after_create(
+                    &mut state.id_map,
+                    &transition,
+                    &ref_blocks,
+                    &created_blocks,
+                );
+            }
+
+            state
+        }
+
+        fn check_invariants(
+            state: &Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+
+            // Compare reference backend (MemoryBackend) with system under test (LoroBackend)
+            verify_backends_match(&ref_state.backend, &state.backend, runtime.handle());
+
+            // Give notifications time to propagate (async processing)
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            // Compare change notification sequences for each watcher
+            for (watcher_id, ref_descriptor) in &ref_state.watchers {
+                let ref_changes = &ref_descriptor.pending_events;
+                let sut_notifications = state
+                    .watcher_notifications
+                    .get(watcher_id)
+                    .unwrap_or_else(|| panic!("Watcher {} should exist in SUT", watcher_id));
+                let sut_changes = sut_notifications.lock().unwrap();
+
+                // Both should have received the same number of changes
+                assert_eq!(
+                    ref_changes.len(),
+                    sut_changes.len(),
+                    "Reference and SUT should receive same number of change notifications.\nReference: {} changes\nSUT: {} changes",
+                    ref_changes.len(),
+                    sut_changes.len()
+                );
+
+                // Compare each change (accounting for ID mapping)
+                // Match changes by content and parent_id instead of position,
+                // since notifications might arrive in different orders
+                let sut_changes_len = sut_changes.len();
+                let mut matched_sut_indices = std::collections::HashSet::new();
+
+                for ref_change in ref_changes.iter() {
+                    let matched = match ref_change {
+                        Change::Created {
+                            data: ref_block,
+                            origin: ref_origin,
+                        } => {
+                            // Find matching SUT change by content and parent_id (after ID translation)
+                            let ref_parent_str = ref_block.parent_id.to_string();
+                            let translated_parent_id = state
+                                .id_map
+                                .get(&ref_parent_str)
+                                .cloned()
+                                .unwrap_or(ref_parent_str);
+
+                            let sut_match =
+                                sut_changes.iter().enumerate().find(|(idx, sut_change)| {
+                                    !matched_sut_indices.contains(idx)
+                                        && match sut_change {
+                                            Change::Created {
+                                                data: sut_block,
+                                                origin: sut_origin,
+                                            } => {
+                                                sut_block.content == ref_block.content
+                                                    && sut_block.parent_id.as_raw_str()
+                                                        == translated_parent_id
+                                                    && sut_origin == ref_origin
+                                            }
+                                            _ => false,
+                                        }
+                                });
+
+                            if let Some((
+                                sut_idx,
+                                Change::Created {
+                                    data: sut_block,
+                                    origin: sut_origin,
+                                },
+                            )) = sut_match
+                            {
+                                matched_sut_indices.insert(sut_idx);
+                                assert_eq!(ref_origin, sut_origin, "Change origins should match");
+                                assert_eq!(
+                                    ref_block.content, sut_block.content,
+                                    "Block content should match"
+                                );
+                                // IDs will differ, but should be mapped
+                                if let Some(expected_sut_id) =
+                                    state.id_map.get(ref_block.id.as_str())
+                                {
+                                    assert_eq!(
+                                        expected_sut_id,
+                                        sut_block.id.as_str(),
+                                        "Block ID mapping should be consistent"
+                                    );
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Change::Updated {
+                            id: ref_id,
+                            data: ref_block,
+                            origin: ref_origin,
+                        } => {
+                            // Find matching SUT change by ID (after translation) and content
+                            let translated_ref_id = state
+                                .id_map
+                                .get(ref_id)
+                                .cloned()
+                                .unwrap_or_else(|| ref_id.clone());
+
+                            let sut_match =
+                                sut_changes.iter().enumerate().find(|(idx, sut_change)| {
+                                    !matched_sut_indices.contains(idx)
+                                        && match sut_change {
+                                            Change::Updated {
+                                                id: sut_id,
+                                                data: sut_block,
+                                                origin: sut_origin,
+                                            } => {
+                                                sut_id == &translated_ref_id
+                                                    && sut_block.content == ref_block.content
+                                                    && sut_origin == ref_origin
+                                            }
+                                            _ => false,
+                                        }
+                                });
+
+                            if let Some((
+                                sut_idx,
+                                Change::Updated {
+                                    id: sut_id,
+                                    data: sut_block,
+                                    origin: sut_origin,
+                                },
+                            )) = sut_match
+                            {
+                                matched_sut_indices.insert(sut_idx);
+                                assert_eq!(ref_origin, sut_origin, "Change origins should match");
+                                assert_eq!(
+                                    ref_block.content, sut_block.content,
+                                    "Updated content should match"
+                                );
+                                if let Some(expected_sut_id) = state.id_map.get(ref_id) {
+                                    assert_eq!(
+                                        expected_sut_id, sut_id,
+                                        "Updated block ID mapping should be consistent"
+                                    );
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Change::Deleted {
+                            id: ref_id,
+                            origin: ref_origin,
+                        } => {
+                            // Find matching SUT change by ID (after translation)
+                            let translated_ref_id = state
+                                .id_map
+                                .get(ref_id)
+                                .cloned()
+                                .unwrap_or_else(|| ref_id.clone());
+
+                            let sut_match =
+                                sut_changes.iter().enumerate().find(|(idx, sut_change)| {
+                                    !matched_sut_indices.contains(idx)
+                                        && match sut_change {
+                                            Change::Deleted {
+                                                id: sut_id,
+                                                origin: sut_origin,
+                                            } => {
+                                                sut_id == &translated_ref_id
+                                                    && sut_origin == ref_origin
+                                            }
+                                            _ => false,
+                                        }
+                                });
+
+                            if let Some((
+                                sut_idx,
+                                Change::Deleted {
+                                    id: sut_id,
+                                    origin: sut_origin,
+                                },
+                            )) = sut_match
+                            {
+                                matched_sut_indices.insert(sut_idx);
+                                assert_eq!(ref_origin, sut_origin, "Change origins should match");
+                                if let Some(expected_sut_id) = state.id_map.get(ref_id) {
+                                    assert_eq!(
+                                        expected_sut_id, sut_id,
+                                        "Deleted block ID mapping should be consistent"
+                                    );
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Change::FieldsChanged {
+                            entity_id,
+                            fields: ref_fields,
+                            origin,
+                        } => {
+                            // Find matching SUT change by ID (after translation)
+                            let translated_ref_id = state
+                                .id_map
+                                .get(entity_id)
+                                .cloned()
+                                .unwrap_or_else(|| entity_id.clone());
+
+                            let sut_match =
+                                sut_changes.iter().enumerate().find(|(idx, sut_change)| {
+                                    !matched_sut_indices.contains(idx)
+                                        && match sut_change {
+                                            Change::FieldsChanged {
+                                                entity_id: sut_id,
+                                                origin: sut_origin,
+                                                ..
+                                            } => {
+                                                sut_id == &translated_ref_id && sut_origin == origin
+                                            }
+                                            _ => false,
+                                        }
+                                });
+
+                            if let Some((sut_idx, sut_change)) = sut_match {
+                                matched_sut_indices.insert(sut_idx);
+                                if let Change::FieldsChanged {
+                                    fields: sut_fields, ..
+                                } = sut_change
+                                {
+                                    assert_eq!(
+                                        ref_fields, sut_fields,
+                                        "FieldsChanged payload mismatch for entity {}",
+                                        entity_id
+                                    );
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    };
+
+                    assert!(
+                        matched,
+                        "Could not find matching SUT change for reference change: {:?}",
+                        ref_change
+                    );
+                }
+
+                // Ensure all SUT changes were matched
+                assert_eq!(
+                    matched_sut_indices.len(),
+                    sut_changes_len,
+                    "All SUT changes should be matched"
+                );
+            }
+        }
+    }
+
+    proptest_state_machine::prop_state_machine! {
+        #![proptest_config(ProptestConfig {
+            cases: 20,
+            failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions"))),
+            timeout: 10000,
+            verbose: 2,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn test_loro_backend_state_machine(sequential 1..40 => BlockTreeTest<LoroBackend>);
+    }
+}
+
+/// Round-trip tests for custom block properties through LoroBackend.
+///
+/// Investigates the failure described in
+/// `docs/HANDOFF_PBT_REMAINING_FLAKINESS.md`: after an external property
+/// UPDATE, the Full-variant PBT finds `effort` missing from `properties`
+/// on the way back from SQL.
+///
+/// Hypothesis H3 in that handoff says "the Loro inbound path deserializes
+/// the block without the custom property (since Loro's block schema may
+/// not carry arbitrary `properties` map fields)". These tests exercise
+/// the same code paths LoroSyncController relies on — especially the
+/// `fork_at(watermark) → snapshot_blocks_from_doc → diff` pipeline —
+/// to prove or disprove that hypothesis at the LoroBackend layer.
+#[cfg(test)]
+mod custom_properties_round_trip {
+    use super::super::loro_backend::{LoroBackend, snapshot_blocks_from_doc};
+    use super::super::repository::{CoreOperations, Lifecycle};
+    use holon_api::{BlockContent, EntityUri, Value};
+    use std::collections::HashMap;
+
+    async fn backend() -> LoroBackend {
+        LoroBackend::create_new("test-properties-roundtrip".to_string())
+            .await
+            .unwrap()
+    }
+
+    fn props(pairs: &[(&str, &str)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect()
+    }
+
+    /// CRUD sanity: `update_block_properties` then `get_block` returns
+    /// the custom keys verbatim. The same `effort`/`story_points`/
+    /// `column-order` keys that appear in the PBT's fixed custom-prop
+    /// list are used here.
+    #[tokio::test]
+    async fn get_block_returns_custom_properties_after_update() {
+        let backend = backend().await;
+        let block = backend
+            .create_block(EntityUri::no_parent(), BlockContent::text("hello"), None)
+            .await
+            .unwrap();
+
+        let updates = props(&[
+            ("effort", "7yzXz"),
+            ("story_points", "3"),
+            ("column-order", "priority,effort,owner"),
+        ]);
+        backend
+            .update_block_properties(block.id.as_str(), &updates)
+            .await
+            .unwrap();
+
+        let fetched = backend.get_block(block.id.as_str()).await.unwrap();
+        let p = fetched.properties_map();
+
+        assert_eq!(
+            p.get("effort"),
+            Some(&Value::String("7yzXz".into())),
+            "effort custom property lost on get_block. Full props: {p:?}"
+        );
+        assert_eq!(
+            p.get("story_points"),
+            Some(&Value::String("3".into())),
+            "story_points lost on get_block. Full props: {p:?}"
+        );
+        assert_eq!(
+            p.get("column-order"),
+            Some(&Value::String("priority,effort,owner".into())),
+            "hyphenated key column-order lost on get_block. Full props: {p:?}"
+        );
+    }
+
+    /// Successive property updates must merge, not replace. Mirrors the
+    /// actual failure pattern: a block first gets `task_state: WAITING`
+    /// (from a local update), then later gets `effort: 7yzXz` (from an
+    /// external write). Both must survive.
+    #[tokio::test]
+    async fn later_property_update_merges_with_earlier() {
+        let backend = backend().await;
+        let block = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::text("task title"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        backend
+            .update_block_properties(block.id.as_str(), &props(&[("task_state", "WAITING")]))
+            .await
+            .unwrap();
+
+        backend
+            .update_block_properties(block.id.as_str(), &props(&[("effort", "7yzXz")]))
+            .await
+            .unwrap();
+
+        let fetched = backend.get_block(block.id.as_str()).await.unwrap();
+        let p = fetched.properties_map();
+
+        assert_eq!(p.get("task_state"), Some(&Value::String("WAITING".into())));
+        assert_eq!(
+            p.get("effort"),
+            Some(&Value::String("7yzXz".into())),
+            "effort lost after a later update_block_properties call that did not mention effort. Full props: {p:?}"
+        );
+    }
+
+    /// `snapshot_blocks_from_doc` is the exact helper
+    /// `LoroSyncController::on_loro_changed` uses to build both the
+    /// "before" (via `fork_at(watermark)`) and "after" block maps for
+    /// diffing. Any property it drops is a property that would show up
+    /// as a "diff" even when unchanged — or, worse, disappear silently
+    /// if both snapshots agree on an incorrect empty map.
+    #[tokio::test]
+    async fn snapshot_blocks_from_doc_preserves_custom_properties() {
+        let backend = backend().await;
+        let block = backend
+            .create_block(EntityUri::no_parent(), BlockContent::text("content"), None)
+            .await
+            .unwrap();
+        backend
+            .update_block_properties(
+                block.id.as_str(),
+                &props(&[("effort", "7yzXz"), ("task_state", "WAITING")]),
+            )
+            .await
+            .unwrap();
+
+        let collab = backend.collab_for_test();
+        let doc_arc = collab.doc();
+        let doc = doc_arc.read().await;
+        let snapshot = snapshot_blocks_from_doc(&doc);
+
+        let snap_block = snapshot
+            .get(block.id.as_str())
+            .expect("block missing from snapshot_blocks_from_doc");
+        let p = snap_block.properties_map();
+        assert_eq!(
+            p.get("effort"),
+            Some(&Value::String("7yzXz".into())),
+            "effort missing from snapshot_blocks_from_doc output — LoroSyncController outbound diff would emit an UPDATE with stripped properties. Full props: {p:?}"
+        );
+        assert_eq!(p.get("task_state"), Some(&Value::String("WAITING".into())));
+    }
+
+    /// Full LoroSyncController outbound-diff simulation: capture a
+    /// watermark, mutate properties, then `fork_at(watermark)` and
+    /// compare snapshots. The diff must show `effort` as added.
+    ///
+    /// If this regression fires, the outbound reconcile would either
+    /// miss the addition (bad — SQL never learns) or emit a UPDATE
+    /// without the full merged properties (bad — SQL `prepare_update`
+    /// only merges what's in `extra_props`, so missing keys survive).
+    #[tokio::test]
+    async fn fork_at_watermark_shows_property_diff() {
+        let backend = backend().await;
+        let block = backend
+            .create_block(EntityUri::no_parent(), BlockContent::text("content"), None)
+            .await
+            .unwrap();
+        // Seed an existing property BEFORE the watermark.
+        backend
+            .update_block_properties(block.id.as_str(), &props(&[("task_state", "WAITING")]))
+            .await
+            .unwrap();
+
+        let collab = backend.collab_for_test();
+        let doc_arc = collab.doc();
+
+        // Capture the watermark — this is what `LoroSyncController`
+        // persists to its sidecar as `last_synced`.
+        let watermark = {
+            let doc = doc_arc.read().await;
+            doc.oplog_frontiers()
+        };
+
+        // Now the "external" write: a second property update with effort.
+        backend
+            .update_block_properties(block.id.as_str(), &props(&[("effort", "7yzXz")]))
+            .await
+            .unwrap();
+
+        let (before, after) = {
+            let doc = doc_arc.read().await;
+            let fork = doc.fork_at(&watermark).expect("fork_at must succeed");
+            (
+                snapshot_blocks_from_doc(&fork),
+                snapshot_blocks_from_doc(&doc),
+            )
+        };
+
+        let before_block = before
+            .get(block.id.as_str())
+            .expect("block missing from before-snapshot");
+        let after_block = after
+            .get(block.id.as_str())
+            .expect("block missing from after-snapshot");
+
+        // Sanity: `task_state` is in both (pre-existed).
+        assert_eq!(
+            before_block.properties_map().get("task_state"),
+            Some(&Value::String("WAITING".into()))
+        );
+        assert_eq!(
+            after_block.properties_map().get("task_state"),
+            Some(&Value::String("WAITING".into()))
+        );
+
+        // Before should NOT have effort — watermark was taken first.
+        assert!(
+            before_block.properties_map().get("effort").is_none(),
+            "before-snapshot unexpectedly has effort — fork_at didn't rewind. Before props: {:?}",
+            before_block.properties_map()
+        );
+
+        // After MUST have effort. If it doesn't, the outbound
+        // reconcile diff would find no change and emit no UPDATE —
+        // or emit an UPDATE without effort, wiping SQL.
+        assert_eq!(
+            after_block.properties_map().get("effort"),
+            Some(&Value::String("7yzXz".into())),
+            "after-snapshot missing effort after update_block_properties. Full props: {:?}",
+            after_block.properties_map()
+        );
+    }
+
+    /// CRDT sync round-trip: export a doc with properties, import into
+    /// a fresh LoroBackend, and verify properties survive. This is what
+    /// happens during peer sync and during `LoroDocument::load_from_file`.
+    #[tokio::test]
+    async fn properties_survive_export_import_cycle() {
+        let a = backend().await;
+        let block = a
+            .create_block(EntityUri::no_parent(), BlockContent::text("content"), None)
+            .await
+            .unwrap();
+        a.update_block_properties(
+            block.id.as_str(),
+            &props(&[("effort", "7yzXz"), ("column-order", "priority,effort")]),
+        )
+        .await
+        .unwrap();
+
+        let bytes = {
+            let collab = a.collab_for_test();
+            let doc_arc = collab.doc();
+            let doc = doc_arc.read().await;
+            doc.export(loro::ExportMode::Snapshot).unwrap()
+        };
+
+        // Fresh backend that imports the snapshot.
+        let b = LoroBackend::create_new("peer-b".to_string()).await.unwrap();
+        {
+            let collab = b.collab_for_test();
+            let doc_arc = collab.doc();
+            let doc = doc_arc.write().await;
+            doc.import(&bytes).unwrap();
+        }
+
+        let fetched = b.get_block(block.id.as_str()).await.unwrap();
+        let p = fetched.properties_map();
+        assert_eq!(
+            p.get("effort"),
+            Some(&Value::String("7yzXz".into())),
+            "effort lost after export/import. Full props: {p:?}"
+        );
+        assert_eq!(
+            p.get("column-order"),
+            Some(&Value::String("priority,effort".into())),
+            "column-order lost after export/import. Full props: {p:?}"
+        );
+    }
+}

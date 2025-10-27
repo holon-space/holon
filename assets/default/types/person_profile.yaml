@@ -1,0 +1,8 @@
+entity_name: person
+
+computed:
+  display_name: 'if is_def_var("role") && role != () { role + " — " + email } else { email }'
+
+variants:
+  - name: default
+    render: 'row(col("display_name"), col("email"))'
