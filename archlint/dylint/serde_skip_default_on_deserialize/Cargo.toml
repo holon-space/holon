@@ -1,0 +1,22 @@
+[package]
+name = "serde_skip_default_on_deserialize"
+version = "0.1.0"
+authors = ["holon"]
+description = "Flags `#[serde(skip, default)]` on a struct field whose containing type derives Deserialize — that field is silently filled with Default::default() at deserialize time. Hits the May 2026 Block-tags-dropped regression."
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "20ce69b9a63bcd2756cd906fe0964d1e901e042a" }
+dylint_linting = "5.0.0"
+
+[dev-dependencies]
+dylint_testing = "5.0.0"
+
+[workspace]
+
+[package.metadata.rust-analyzer]
+rustc_private = true

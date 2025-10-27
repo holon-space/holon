@@ -1,0 +1,22 @@
+[package]
+name = "error_to_option_via_ok_question"
+version = "0.1.0"
+authors = ["holon"]
+description = "Flags `expr.ok()?` where expr is `Result<_, _>` and the enclosing fn returns `Option<_>` — the error is silently dropped to None, violating CLAUDE.md 'DO NOT return None on error'."
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "20ce69b9a63bcd2756cd906fe0964d1e901e042a" }
+dylint_linting = "5.0.0"
+
+[dev-dependencies]
+dylint_testing = "5.0.0"
+
+[workspace]
+
+[package.metadata.rust-analyzer]
+rustc_private = true

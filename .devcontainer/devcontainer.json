@@ -1,0 +1,46 @@
+{
+  "name": "holon (headless rust)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind,consistency=cached",
+  "mounts": [
+    // Cargo download caches are safe to share across worktrees — content-addressed.
+    "source=holon-cargo-registry,target=/home/vscode/.cargo/registry,type=volume",
+    "source=holon-cargo-git,target=/home/vscode/.cargo/git,type=volume",
+    // target/ is per-worktree: separate containers must not fight over the same build dir.
+    "source=holon-target-${localWorkspaceFolderBasename},target=/workspaces/${localWorkspaceFolderBasename}/target,type=volume",
+    // Claude Code config is shared across worktrees so you auth once.
+    "source=holon-claude-config,target=/home/vscode/.claude,type=volume",
+    // VCS isolation: mask .jj and .git with empty tmpfs so nothing inside the container
+    // can read or mutate the real repo state on the host. All jj/git operations happen
+    // on the host. Builds work because the host files are still bind-mounted underneath.
+    "type=tmpfs,target=/workspaces/${localWorkspaceFolderBasename}/.jj",
+    "type=tmpfs,target=/workspaces/${localWorkspaceFolderBasename}/.git"
+  ],
+  "containerEnv": {
+    "CARGO_TERM_COLOR": "always",
+    "RUST_BACKTRACE": "1"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.targetDir": true
+      }
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh"
+}

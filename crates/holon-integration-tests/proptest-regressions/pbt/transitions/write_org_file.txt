@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b722c78d69a4315147b0692294b9510c8b52cba5f2aca4873271d8aec44ed9c2 # shrinks to (ks, (filename, blocks)) = (TodoKeywordSet([TaskState { keyword: "NEXT", category: Active }, TaskState { keyword: "DONE", category: Done }]), ("__0.org", [Block { id: EntityUri("block:-"), parent_id: EntityUri("block:gen-placeholder"), tags: Tags({}), requires: [], content: "A", content_type: Text, source_language: None, source_name: None, properties: {"task_state": String("NEXT"), "ID": String("-")}, marks: None, created_at: 1781864932445, updated_at: 1781864932445 }, Block { id: EntityUri("block:-"), parent_id: EntityUri("block:gen-placeholder"), tags: Tags({}), requires: [], content: "A", content_type: Text, source_language: None, source_name: None, properties: {"ID": String("-")}, marks: None, created_at: 1781864932445, updated_at: 1781864932445 }]))

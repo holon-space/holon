@@ -1,0 +1,19 @@
+warning: `Result<_, ()>` discards all error information
+  --> $DIR/main.rs:2:28
+   |
+LL | fn returns_unit_error() -> Result<i32, ()> {
+   |                            ^^^^^^^^^^^^^^^
+   |
+   = help: use a real error type — a domain enum, `anyhow::Error`, or `Box<dyn std::error::Error>` — so failure modes are diagnosable.
+   = note: `#[warn(unit_error_type)]` on by default
+
+warning: `Result<_, ()>` discards all error information
+  --> $DIR/main.rs:8:12
+   |
+LL |     let r: Result<i32, ()> = Ok(0);
+   |            ^^^^^^^^^^^^^^^
+   |
+   = help: use a real error type — a domain enum, `anyhow::Error`, or `Box<dyn std::error::Error>` — so failure modes are diagnosable.
+
+warning: 2 warnings emitted
+

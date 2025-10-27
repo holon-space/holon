@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# archlint — picks a Python >= 3.11 (needed for tomllib) and runs archlint.py.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$DIR/archlint.py"
+
+for cand in python3.14 python3.13 python3.12 python3.11 python3; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    ver=$("$cand" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    major=${ver%.*}
+    minor=${ver#*.}
+    if [[ "$major" -gt 3 || ( "$major" -eq 3 && "$minor" -ge 11 ) ]]; then
+      exec "$cand" "$SCRIPT" "$@"
+    fi
+  fi
+done
+
+echo "archlint: needs Python >= 3.11 on PATH. Install with: brew install python@3.13" >&2
+exit 127

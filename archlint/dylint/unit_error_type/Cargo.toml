@@ -1,0 +1,22 @@
+[package]
+name = "unit_error_type"
+version = "0.1.0"
+authors = ["holon"]
+description = "Flags `Result<T, ()>` — a unit error type carries no diagnostic info, violating CLAUDE.md 'enrich the error message with information'."
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "20ce69b9a63bcd2756cd906fe0964d1e901e042a" }
+dylint_linting = "5.0.0"
+
+[dev-dependencies]
+dylint_testing = "5.0.0"
+
+[workspace]
+
+[package.metadata.rust-analyzer]
+rustc_private = true

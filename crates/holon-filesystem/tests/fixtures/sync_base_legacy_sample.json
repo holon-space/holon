@@ -1,0 +1,27 @@
+{
+  "global\u0000*": {
+    "block:a": {
+      "block": {
+        "id": "block:a",
+        "parent_id": "sentinel:no_parent",
+        "content": "a",
+        "content_type": "text",
+        "source_language": null,
+        "source_name": null,
+        "properties": {},
+        "marks": null,
+        "created_at": 1782948473846,
+        "updated_at": 1782948473846
+      },
+      "tags": [
+        "Page",
+        "Inbox"
+      ],
+      "requires": [
+        "block:dep1",
+        "block:dep2"
+      ],
+      "sort_key": "A0"
+    }
+  }
+}

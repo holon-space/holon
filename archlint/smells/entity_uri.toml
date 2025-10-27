@@ -1,0 +1,54 @@
+# EntityUri typing-boundary smell (parse, don't validate).
+#
+# `EntityUri::from_raw` turns an untyped string into a domain URI, papering
+# over scheme ambiguity (bare `x` vs `block:x`). It is correct ONLY at a true
+# boundary — where a string first enters the system from something we don't
+# control: the org parser, a SQL/matview row, a Loro field, an MCP/FFI param,
+# a render-spec/DSL value, a test fixture literal. Past that point the URI must
+# flow as an `EntityUri`; re-parsing internal data deeper in the stack is the
+# smell (it let bare-vs-schemed focus ids diverge between the matview, the
+# bridge, and the editor cursor subscription — see docs/Architecture).
+#
+# Every occurrence must be justified individually with a SPECIFIC reason
+# naming the external source, not a blanket pardon. When the scheme is known
+# statically, prefer `EntityUri::block(..)` / `EntityUri::doc(..)` /
+# `EntityUri::parse(..)` instead.
+
+[[smell]]
+id = "entity_uri_parse_default"
+# A hand-rolled `from_raw` that evades `entity_uri_from_raw`: parse the string,
+# and on failure silently substitute a re-schemed default (`EntityUri::block(..)`
+# / `EntityUri::new(..)` / a sentinel). This is exactly the bare-vs-schemed
+# divergence the typed URI exists to prevent — it papers over an invalid id at a
+# point that is NOT a boundary (see the props["block_id"] consumers, all of which
+# now `.expect`). If the value really is untrusted boundary input, parse it once
+# at the boundary; everywhere downstream `.expect(..)` (a malformed internal URI
+# is a bug, fail loud) or propagate the `Result`.
+pattern = 'EntityUri::parse(_owned)?\([^;]*\)\s*\.unwrap_or(_else)?\('
+files = "**/*.rs"
+exclude = ["**/target/**"]
+case_sensitive = true
+message = """
+`EntityUri::parse(..).unwrap_or[_else](..)` silently substitutes a default URI \
+when parsing fails — a hand-rolled `from_raw` that dodges the entity_uri_from_raw \
+rule and re-introduces bare-vs-schemed id drift. Internal data: `.expect(..)` \
+(a malformed URI is a bug — fail loud) or propagate the `Result`. True boundary \
+input: parse once at the boundary. \
+To suppress: // ALLOW(entity_uri_parse_default): <names the external source>
+"""
+
+[[smell]]
+id = "entity_uri_from_raw"
+pattern = 'EntityUri::from_raw\('
+files = "**/*.rs"
+exclude = ["**/target/**"]
+case_sensitive = true
+message = """
+`EntityUri::from_raw` re-parses a string into a domain URI — allowed only at a \
+true boundary where the string arrives from outside our control (org parser, \
+SQL/matview row, Loro field, MCP/FFI param, render-spec value, test literal). \
+If the value is already an `EntityUri` upstream, thread it through instead of \
+stringifying + re-parsing; if the scheme is known statically use \
+`EntityUri::block(..)` / `EntityUri::doc(..)` / `EntityUri::parse(..)`. \
+To suppress at a genuine boundary: // ALLOW(entity_uri_from_raw): <names the external source>
+"""

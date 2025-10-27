@@ -1,0 +1,44 @@
+# Order-ownership invariant for fractional indices (Model.md invariants 2/10,
+# Replication.md §5). Exactly ONE consolidator per sibling-set owns order and
+# is the monopolist that mints every fractional index. Minting a fi anywhere
+# else (a frontend, an ad-hoc SQL path) reintroduces the keyspace-mixing bug
+# class invariant 10 warns about: `gen_key_between` values and Loro-fi values
+# coexisting in one `sort_key` column, plus order oscillation between writers.
+# Route positional intent through BlockOrdering (the order owner) instead.
+#
+# The negative-lookahead `(?!\.\.\.)` skips doc-comment references that spell
+# the legacy call shape literally as `gen_key_between(...)`.
+
+[[smell]]
+id = "order_minting"
+pattern = '\b(gen_key_between|new_child_anchor)\s*\((?!\.\.\.)'
+case_sensitive = true
+files = "**/*.rs"
+exclude = [
+    # Defining modules (the mint primitive + the ordering / key-minting traits):
+    "crates/holon-core/src/fractional_index.rs",
+    "crates/holon-core/src/block_ordering.rs",
+    # Sanctioned order-owner impl / call sites (per Replication.md §5): the
+    # SqlOnly `Store` order owner mints via `OrderKeyMinting`; `split_block`'s
+    # SqlOnly branch is its sole chord-op caller. The Loro seam
+    # (`loro_seams.rs`) no longer appears here — the type-level split removed
+    # its `new_child_anchor` entirely, so it can no longer mint by construction.
+    "crates/holon/src/core/sql_block_operations.rs",
+    "crates/holon-core/src/traits.rs",
+    # Tests / examples / integration-tests exercise the mint primitive directly:
+    "**/tests/**",
+    "**/*_test.rs",
+    "**/*_tests.rs",
+    "crates/holon/examples/**",
+    "crates/holon-integration-tests/**",
+    "tools/**",
+]
+message = """
+Fractional-index minting (`gen_key_between` / `new_child_anchor`) outside the \
+sibling-set's order owner. Only the consolidator that owns a sibling-set may \
+mint its fractional indices (Model.md invariants 2/10, Replication.md §5). \
+Minting a `sort_key` elsewhere mixes fi keyspaces (`gen_key_between` values vs \
+Loro-fi in one column) and causes order oscillation between writers. Route the \
+positional intent through BlockOrdering / the cell registry's positioned move. \
+To suppress: // ALLOW(order_minting): <reason>
+"""
