@@ -1,0 +1,6 @@
+framework module rust_lib_holon {
+  umbrella header "rust_lib_holon-umbrella.h"
+
+  export *
+  module * { export * }
+}

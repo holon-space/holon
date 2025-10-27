@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 47e9e39be693a407b992ebdf107e2c7692864e124a92141a744c904bb75f9583 # shrinks to variant = 1, mutation = RemoveTodoKeyword { headline_idx: 1 }

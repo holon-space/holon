@@ -1,0 +1,1 @@
+INSERT INTO navigation_history (region, block_id) VALUES ($region, $block_id)

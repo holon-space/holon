@@ -1,0 +1,1 @@
+INSERT OR IGNORE INTO navigation_cursor (region, history_id) VALUES ($region, NULL)

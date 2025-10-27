@@ -1,0 +1,1 @@
+SELECT * FROM document WHERE parent_id = $parent_id AND name = $name

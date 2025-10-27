@@ -1,0 +1,6 @@
+framework module macos_secure_bookmarks {
+  umbrella header "macos_secure_bookmarks-umbrella.h"
+
+  export *
+  module * { export * }
+}

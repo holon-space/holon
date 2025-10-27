@@ -1,0 +1,21 @@
+[package]
+name = "holon-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+holon-macros.workspace = true
+opentelemetry.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-stream.workspace = true
+uuid.workspace = true
+fluent-uri.workspace = true
+async-trait.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
