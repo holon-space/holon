@@ -1,0 +1,22 @@
+[package]
+name = "hardcoded_table_name"
+version = "0.1.0"
+authors = ["holon"]
+description = "Flags string literals matching known matview/table names — must be referenced via the BLOCK_WRITE_TABLE / BLOCK_READ_TABLE constants. Direct hit on the May 2026 LoroSyncController matview-write regression."
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "20ce69b9a63bcd2756cd906fe0964d1e901e042a" }
+dylint_linting = "5.0.0"
+
+[dev-dependencies]
+dylint_testing = "5.0.0"
+
+[workspace]
+
+[package.metadata.rust-analyzer]
+rustc_private = true

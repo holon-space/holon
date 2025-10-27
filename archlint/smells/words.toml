@@ -1,0 +1,52 @@
+# archlint word/regex smells. Run via ripgrep on the changed file.
+#
+# Each smell:
+#   id           — short tag for the diagnostic + ALLOW(id) suppression
+#   pattern      — ripgrep regex (PCRE2-compatible, case-insensitive by default)
+#   files        — glob (ripgrep --glob); default "**/*.rs"
+#   message      — what the agent should do
+#   case_sensitive (optional, default false)
+
+[[smell]]
+id = "fallback"
+pattern = '\bfallback\b'
+files = "**/*.rs"
+message = """
+The word "fallback" is almost always a smell. Fallbacks hide failure modes — \
+fail loudly instead, or disclose the fallback to the user. See CLAUDE.md → \
+Error Handling Philosophy. To suppress: // ALLOW(fallback): <reason>
+"""
+
+[[smell]]
+id = "compatibility"
+pattern = '\bcompatibilit(y|ies)\b'
+files = "**/*.rs"
+message = """
+"Compatibility" usually means a backwards-compat shim that should just be \
+deleted. We have version control. To suppress: // ALLOW(compatibility): <reason>
+"""
+
+[[smell]]
+id = "global_registry"
+pattern = 'Arc<(std::sync::)?RwLock<HashMap<String,\s*Entity<'
+case_sensitive = true
+files = "**/*.rs"
+message = """
+Found global Arc<RwLock<HashMap<String, Entity<...>>>> registry — exactly the \
+FocusRegistry pattern that was removed. Decentralize via per-row reactive \
+primitives. To suppress: // ALLOW(global_registry): <reason>
+"""
+
+[[smell]]
+id = "raw_sql_in_frontend"
+# Mirror the cargo arch-test (no_raw_sql_in_frontends): catches schema-changing
+# and read-leaking SQL but deliberately omits UPDATE/DELETE — frontend-side
+# mutations are accepted in narrow seeding paths (e.g. holon-worker/src/seed.rs).
+pattern = '"(SELECT|INSERT|CREATE TABLE|DROP|ALTER) '
+files = "frontends/**/*.rs"
+exclude = "frontends/mcp/**"
+message = """
+Raw SQL in a frontend. Frontends are pure render engines — move SQL to the \
+backend (holon crate) and expose via BackendEngine methods. To suppress: \
+// ALLOW(sql): <reason>
+"""

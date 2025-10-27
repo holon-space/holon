@@ -1,0 +1,21 @@
+[package]
+name = "holon-block-roundtrip-testing"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "holon_block_roundtrip_testing"
+path = "src/lib.rs"
+
+[dependencies]
+holon-api = { workspace = true }
+# Used internally for OrgBlockExt — the canonical block-field accessors today
+# (level/tags/priority/task_state/scheduled/deadline/sequence/drawer_properties).
+# These are domain-level concepts even though the trait lives in the org crate;
+# moving them to holon-api is a separate refactor.
+holon-org-format = { workspace = true }
+proptest = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

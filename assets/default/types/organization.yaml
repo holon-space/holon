@@ -1,0 +1,17 @@
+name: organization
+default_lifetime: persistent
+primary_key: id
+id_references: block
+graph_label: Organization
+source: pre_configured
+fields:
+  - name: id
+    sql_type: TEXT
+    primary_key: true
+    indexed: true
+  - name: domain
+    sql_type: TEXT
+    nullable: true
+  - name: industry
+    sql_type: TEXT
+    nullable: true

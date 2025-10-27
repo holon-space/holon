@@ -1,0 +1,20 @@
+id: no-block-on-in-async
+language: rust
+severity: error
+message: |
+  block_on() inside an async context deadlocks. Use `.await` instead, or restructure
+  to avoid the sync/async bridge.
+  To suppress: `// ALLOW(block_on): <reason>`
+rule:
+  pattern: $RT.block_on($F)
+  inside:
+    any:
+      - kind: function_item
+        has:
+          kind: function_modifiers
+          regex: 'async'
+          stopBy: end
+      - pattern: async move { $$$ }
+      - pattern: async { $$$ }
+      - pattern: tokio::spawn($$$)
+    stopBy: end

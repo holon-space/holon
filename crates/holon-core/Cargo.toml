@@ -1,0 +1,20 @@
+[package]
+name = "holon-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+holon-api.workspace = true
+holon-macros.workspace = true
+anyhow.workspace = true
+loro_fractional_index.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

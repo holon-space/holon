@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 13ea659cb50745853b9ba32f2eea3f9701f322ab0e20e20708aa958f0fa0e586 # shrinks to variant = 0, mutation = ReplaceTitle { headline_idx: 0, new_title: "aa" }
+cc 373b5b31082483e6e926c2d202bf518321b64b675dfa86416e6583ebc9e575b2 # shrinks to variant = 0, mutation = SetTitle("AA"), target_idx = Index(0)

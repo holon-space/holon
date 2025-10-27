@@ -1,0 +1,32 @@
+[package]
+name = "holon-api"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+holon-engine = { path = "../holon-engine" }
+holon-macros.workspace = true
+rhai = { version = "1", features = ["sync"] }
+opentelemetry.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-stream.workspace = true
+futures.workspace = true
+futures-signals.workspace = true
+uuid.workspace = true
+fluent-uri.workspace = true
+async-trait.workspace = true
+once_cell.workspace = true
+regex.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = "0.4"

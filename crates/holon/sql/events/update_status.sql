@@ -1,0 +1,1 @@
+UPDATE events SET status = ?, rejection_reason = ? WHERE id = ?

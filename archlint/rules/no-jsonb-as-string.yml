@@ -1,0 +1,15 @@
+id: jsonb-as-string
+language: rust
+severity: error
+message: |
+  `as_string()` / `as_string_owned()` on a `#[jsonb]` column always returns None.
+  CDC delivers jsonb values as Value::Array / Value::Json / Value::Null —
+  never Value::String — so the call silently misclassifies rows.
+  Parse the JSON shape explicitly instead.
+  To suppress: `// ALLOW(jsonb_as_string): <reason>`
+rule:
+  any:
+    - pattern: $ROW.get($KEY).and_then(|$V| $V.as_string())
+    - pattern: $ROW.get($KEY).and_then(|$V| $V.as_string_owned())
+    - pattern: $ROW.get($KEY).map(|$V| $V.as_string())
+    - pattern: $ROW.get($KEY).map_or($DEFAULT, |$V| $V.as_string())

@@ -1,0 +1,57 @@
+# Import / dependency boundary smells.
+# Run via ripgrep on changed files.
+
+# orgmode_no_direct_loro_or_turso_imports — split into two so the suppress tags
+# (loro / turso) match the original architecture_rules.rs convention.
+
+[[smell]]
+id = "loro"
+pattern = '(use\s+loro|loro::)'
+files = "crates/holon-orgmode/src/**/*.rs"
+exclude = ["**/di.rs"]
+case_sensitive = true
+message = """
+holon-orgmode must not import Loro directly (Architecture.md §Crate Responsibilities). \
+Use traits from traits.rs; wire implementations in di.rs. \
+To suppress: // ALLOW(loro): <reason>
+"""
+
+[[smell]]
+id = "turso"
+pattern = '(use\s+turso|turso::)'
+files = "crates/holon-orgmode/src/**/*.rs"
+exclude = ["**/di.rs"]
+case_sensitive = true
+message = """
+holon-orgmode must not import Turso directly (Architecture.md §Crate Responsibilities). \
+Use traits from traits.rs; wire implementations in di.rs. \
+To suppress: // ALLOW(turso): <reason>
+"""
+
+# frontend_crate_no_platform_imports — only crates/holon-frontend/src.
+
+[[smell]]
+id = "platform"
+pattern = '\b(gpui|flutter_rust_bridge|dioxus|ratatui|crossterm|winit)::'
+files = "crates/holon-frontend/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-frontend must be platform-agnostic (Architecture.md §MVVM Pattern). \
+Platform-specific code belongs in frontends/*, not in the shared ViewModel layer. \
+To suppress: // ALLOW(platform): <reason>
+"""
+
+# frontend_cargo_no_provider_deps — frontends Cargo.toml shouldn't pull in provider crates.
+# MCP and flutter are exempt (legacy/inline DI).
+
+[[smell]]
+id = "frontend-provider-dep"
+pattern = '\b(holon-orgmode|holon-todoist)\b'
+files = "frontends/*/Cargo.toml"
+exclude = ["frontends/mcp/**", "frontends/flutter/**"]
+case_sensitive = true
+message = """
+Frontends should depend on holon-api + holon-frontend, not provider crates. \
+Provider crates (holon-orgmode, holon-todoist) should be wired via DI, not imported directly. \
+To suppress: # ALLOW(frontend-provider-dep): <reason>
+"""

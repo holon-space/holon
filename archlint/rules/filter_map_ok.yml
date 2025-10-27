@@ -1,0 +1,9 @@
+id: filter_map_ok
+language: rust
+severity: error
+message: |
+  `filter_map(|x| ... .ok())` silently drops errors from iterators.
+  Use `.map(...).collect::<Result<Vec<_>, _>>()?` and propagate the first error.
+  To suppress: `// ALLOW(filter_map_ok): <reason>`
+rule:
+  pattern: $ITER.filter_map($CLOSURE)

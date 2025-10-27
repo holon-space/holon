@@ -1,0 +1,197 @@
+transitions:
+  collect_income_statement:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          energy: ">= 0.2"
+          status: "active"
+      - bind: doc
+        token_type: document
+        precond:
+          kind: "income_statement"
+          status: "missing"
+    outputs:
+      - from: person
+        postcond:
+          energy: "person.energy - 0.02"
+      - from: doc
+        postcond:
+          status: '"found"'
+    duration: 15
+
+  fill_tax_form:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          energy: ">= 0.3"
+          status: "active"
+      - bind: doc
+        token_type: document
+        precond:
+          kind: "income_statement"
+          status: "found"
+      - bind: refund
+        token_type: monetary
+        precond:
+          kind: "tax_refund"
+          status: "not_realized"
+    outputs:
+      - from: person
+        postcond:
+          energy: "person.energy - 0.1"
+      - from: doc
+        postcond:
+          status: '"filed"'
+      - from: refund
+        postcond:
+          status: '"filed"'
+    duration: 60
+
+  receive_tax_refund:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          status: "active"
+      - bind: refund
+        token_type: monetary
+        precond:
+          kind: "tax_refund"
+          status: "filed"
+    outputs:
+      - from: person
+      - from: refund
+        postcond:
+          status: '"realized"'
+    duration: 5
+
+  research_cars:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          energy: ">= 0.2"
+          status: "active"
+      - bind: car
+        token_type: asset
+        precond:
+          kind: "car"
+          status: "wanted"
+    outputs:
+      - from: person
+        postcond:
+          energy: "person.energy - 0.05"
+      - from: car
+        postcond:
+          status: '"researched"'
+    duration: 30
+
+  buy_car:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          energy: ">= 0.3"
+          status: "active"
+      - bind: car
+        token_type: asset
+        precond:
+          kind: "car"
+          status: "researched"
+      - bind: budget
+        token_type: monetary
+        precond:
+          kind: "budget"
+          status: "available"
+    outputs:
+      - from: person
+        postcond:
+          energy: "person.energy - 0.1"
+      - from: car
+        postcond:
+          status: '"purchased"'
+      - from: budget
+        postcond:
+          status: '"spent"'
+    duration: 120
+
+  register_car:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          energy: ">= 0.2"
+          status: "active"
+      - bind: car
+        token_type: asset
+        precond:
+          kind: "car"
+          status: "purchased"
+    outputs:
+      - from: person
+        postcond:
+          energy: "person.energy - 0.03"
+      - from: car
+        postcond:
+          status: '"registered"'
+    duration: 30
+
+  create_expense_report:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          energy: ">= 0.2"
+          status: "active"
+      - bind: doc
+        token_type: document
+        precond:
+          kind: "income_statement"
+          status: "found"
+    outputs:
+      - from: person
+        postcond:
+          energy: "person.energy - 0.05"
+      - from: doc
+    creates:
+      - id_expr: '"expense_report"'
+        token_type: document
+        attrs:
+          kind: '"expense_report"'
+          status: '"draft"'
+          source: '"income_statement"'
+    duration: 20
+
+  sleep:
+    inputs:
+      - bind: person
+        token_type: person
+        precond:
+          energy: "<= 0.3"
+          status: "active"
+    outputs:
+      - from: person
+        postcond:
+          energy: "if person.energy + 0.7 > 1.0 { 1.0 } else { person.energy + 0.7 }"
+    duration: 480
+
+objective:
+  expr: |
+    let tax_progress = if tax_refund.status == "realized" { 2000.0 }
+      else if tax_refund.status == "filed" { 1500.0 }
+      else if income_statement.status == "found" { 200.0 }
+      else { 0.0 };
+    let car_progress = if car.status == "registered" { 1000.0 }
+      else if car.status == "purchased" { 600.0 }
+      else if car.status == "researched" { 200.0 }
+      else { 0.0 };
+    let car_cost = if budget.status == "spent" { -500.0 } else { 0.0 };
+    (tax_progress + car_progress + car_cost) * discount
+    + self.energy * 10.0
+    + self.health * 50.0
+  constraints:
+    - "self.energy > 0.05"
+    - "self.health > 0.3"
+  discount_rate: 0.05

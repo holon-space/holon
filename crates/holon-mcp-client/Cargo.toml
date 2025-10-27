@@ -1,0 +1,32 @@
+[package]
+name = "holon-mcp-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+rhai.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+tracing.workspace = true
+
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process", "auth"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+chrono.workspace = true
+holon-api.workspace = true
+holon-core.workspace = true
+holon-macros.workspace = true
+holon.workspace = true
+turso.workspace = true
+turso_core.workspace = true
+turso_ext.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile.workspace = true

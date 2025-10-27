@@ -1,0 +1,22 @@
+let children = (from block | filter parent_id == $context_id | filter content_type != 'source')
+let roots = (from block | filter (parent_id | text.starts_with "doc:") | filter content_type != 'source')
+let siblings = (from block | filter parent_id == $context_parent_id | filter content_type != 'source')
+let descendants = (
+  from block_with_path
+  filter (path | text.starts_with $context_path_prefix)
+  filter content_type != 'source'
+  select {id, parent_id, content, content_type, source_language, source_name, properties, created_at, updated_at, path}
+)
+let block_children = (
+  from b = block
+  filter b.parent_id == $context_parent_id
+  filter b.content_type != 'source'
+)
+let focused_children = (
+  from b = block
+  join side:inner nh = navigation_history (b.parent_id == nh.block_id)
+  join side:inner nc = navigation_cursor (nh.id == nc.history_id)
+  filter nc.region == "main"
+  filter b.content_type != 'source'
+  select {b.id, b.parent_id, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.created_at, b.updated_at}
+)

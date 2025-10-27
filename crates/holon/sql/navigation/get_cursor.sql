@@ -1,0 +1,1 @@
+SELECT history_id FROM navigation_cursor WHERE region = $region
