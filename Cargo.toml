@@ -105,6 +105,9 @@ portable-pty = "0.8"
 is_ci = "1.2"
 strip-ansi-escapes = "0.2"
 
+# === Flutter ===
+flutter_rust_bridge = "2"
+
 # === Memory profiling ===
 memory-stats = "1"
 dhat = "0.3"
@@ -163,6 +166,7 @@ lto = "thin"
 
 # Debugger profile: full debug info for variable inspection in LLDB/DAP
 # Usage: cargo build --profile debugger
+
 [profile.debugger]
 inherits = "dev"
 debug = 2
@@ -170,11 +174,13 @@ debug = 2
 # Coverage profile for runtime code coverage collection
 # This profile enables LLVM source-based coverage instrumentation
 # Usage: cargo build --profile coverage
+
 [profile.coverage]
 inherits = "dev"
 debug = true
 # Enable LLVM source-based code coverage instrumentation
 # This adds -Cinstrument-coverage flag automatically
+
 [profile.coverage.package."*"]
 # Coverage instrumentation is enabled via RUSTFLAGS environment variable
 # See scripts/run-with-coverage.sh for usage
@@ -183,3 +189,8 @@ debug = true
 #sqlparser = { version = "0.33", default-features = false, features = [] }
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
 pathfinder_simd = { git = "https://github.com/pbdeuchler/pathfinder.git", branch = "pbd/fix_simd_renames", package = "pathfinder_simd" }
+
+[patch.crates-io]
+#sqlparser = { version = "0.33", default-features = false, features = [] }
+flutter_rust_bridge = { git = "https://github.com/nightscape/flutter_rust_bridge.git", branch = "generic-enums-with-concrete-type-aliases" }
+flutter_rust_bridge_macros = { git = "https://github.com/nightscape/flutter_rust_bridge.git", branch = "generic-enums-with-concrete-type-aliases" }
