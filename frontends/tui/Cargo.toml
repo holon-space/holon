@@ -1,0 +1,41 @@
+[package]
+name = "holon-tui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "holon_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "holon-tui"
+path = "src/main.rs"
+
+[dependencies]
+# R3BL TUI Framework
+r3bl_tui.workspace = true
+
+# Holon workspace crates
+holon-frontend.workspace = true
+holon-api.workspace = true
+holon-macros.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# Error handling
+anyhow.workspace = true
+miette.workspace = true
+
+# Data handling
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+unicode-segmentation.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-core.workspace = true
+tracing-subscriber.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
