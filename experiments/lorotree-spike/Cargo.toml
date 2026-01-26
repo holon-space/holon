@@ -1,0 +1,12 @@
+[package]
+name = "lorotree-spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+loro = "1.0"
+loro_fractional_index = "1.0"
+serde_json = "1"
+
+[dev-dependencies]
+# Tests are the main deliverable

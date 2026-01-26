@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "updated": "2026-04-22T23:52:30Z",
+  "directories": [
+    {
+      "path": "./specs",
+      "specsCount": 1,
+      "isDefault": true
+    }
+  ],
+  "specs": [
+    {
+      "name": "reactive-vm-refactor",
+      "path": "./specs/reactive-vm-refactor",
+      "phase": "execution",
+      "taskIndex": 0,
+      "totalTasks": 43
+    }
+  ]
+}
