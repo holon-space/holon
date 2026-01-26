@@ -1,0 +1,1655 @@
+{
+  "version": "2.0",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/frontends",
+  "root": {
+    "name": ".",
+    "path": ".",
+    "dirs": [
+      {
+        "name": "dioxus",
+        "path": "dioxus",
+        "dirs": [
+          {
+            "name": "assets",
+            "path": "dioxus/assets"
+          },
+          {
+            "name": "src",
+            "path": "dioxus/src",
+            "dirs": [
+              {
+                "name": "render",
+                "path": "dioxus/src/render",
+                "c4_level": "unknown",
+                "description": "Dioxus renderer for `holon_frontend::view_model::ViewModel`.",
+                "pattern_status": "planned",
+                "content": "Dioxus renderer for `holon_frontend::view_model::ViewModel`.\n\nMirrors `frontends/gpui/src/render/` in structure: one file per widget under\n[`builders`], dispatched by the shared `holon_macros::builder_registry!`\nmacro. Unlike GPUI, which renders from the live `ReactiveViewModel` tree,\ndioxus-web receives a serialized `ViewModel` snapshot from the worker over\npostMessage and dispatches on the static `ViewKind`.\n\nThe dioxus-only plumbing (worker bridge, contenteditable cell,\nper-`LiveBlock` subscription) stays in `crate::{bridge, editor}`. Everything\nhere is pure `ViewModel → Element`.",
+                "source_file": "dioxus/src/render/mod.rs",
+                "dirs": [
+                  {
+                    "name": "builders",
+                    "path": "dioxus/src/render/builders",
+                    "c4_level": "unknown",
+                    "description": "Widget builder registry for the dioxus desktop snapshot renderer.",
+                    "pattern_status": "planned",
+                    "content": "Widget builder registry for the dioxus desktop snapshot renderer.\n\nUses `holon_macros::builder_registry!` in `node_dispatch` mode, pointing\nat the static `view_model::ViewKind` enum (not the live\n`reactive_view_model::ReactiveViewModel` that GPUI uses — see the\n`node_type` arg below).\n\nEach file in this directory exports `pub fn render(node, ctx) -> Element`\nand matches its own `ViewKind` variant. The macro generates a `render_node`\nthat dispatches on `node.widget_name()` to the matching builder.",
+                    "source_file": "dioxus/src/render/builders/mod.rs",
+                    "parent": "dioxus/src/render",
+                    "files": [
+                      {
+                        "name": "badge.rs"
+                      },
+                      {
+                        "name": "block_operations.rs"
+                      },
+                      {
+                        "name": "card.rs"
+                      },
+                      {
+                        "name": "chat_bubble.rs"
+                      },
+                      {
+                        "name": "checkbox.rs"
+                      },
+                      {
+                        "name": "collapsible.rs"
+                      },
+                      {
+                        "name": "column.rs"
+                      },
+                      {
+                        "name": "columns.rs"
+                      },
+                      {
+                        "name": "dispatch.rs"
+                      },
+                      {
+                        "name": "draggable.rs"
+                      },
+                      {
+                        "name": "drawer.rs"
+                      },
+                      {
+                        "name": "editable_text.rs"
+                      },
+                      {
+                        "name": "error.rs"
+                      },
+                      {
+                        "name": "focusable.rs"
+                      },
+                      {
+                        "name": "icon.rs"
+                      },
+                      {
+                        "name": "list.rs"
+                      },
+                      {
+                        "name": "live_block.rs"
+                      },
+                      {
+                        "name": "live_query.rs"
+                      },
+                      {
+                        "name": "mod.rs"
+                      },
+                      {
+                        "name": "outline.rs"
+                      },
+                      {
+                        "name": "pie_menu.rs"
+                      },
+                      {
+                        "name": "pref_field.rs"
+                      },
+                      {
+                        "name": "prelude.rs"
+                      },
+                      {
+                        "name": "query_result.rs"
+                      },
+                      {
+                        "name": "render_block.rs"
+                      },
+                      {
+                        "name": "row.rs"
+                      },
+                      {
+                        "name": "section.rs"
+                      },
+                      {
+                        "name": "selectable.rs"
+                      },
+                      {
+                        "name": "source_block.rs"
+                      },
+                      {
+                        "name": "source_editor.rs"
+                      },
+                      {
+                        "name": "spacer.rs"
+                      },
+                      {
+                        "name": "state_toggle.rs"
+                      },
+                      {
+                        "name": "table.rs"
+                      },
+                      {
+                        "name": "table_row.rs"
+                      },
+                      {
+                        "name": "text.rs"
+                      },
+                      {
+                        "name": "tree.rs"
+                      },
+                      {
+                        "name": "tree_item.rs"
+                      },
+                      {
+                        "name": "util.rs"
+                      },
+                      {
+                        "name": "view_mode_switcher.rs"
+                      }
+                    ]
+                  }
+                ],
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "editor.rs"
+              },
+              {
+                "name": "main.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "Dioxus.toml"
+          },
+          {
+            "name": "HANDOFF.md"
+          }
+        ]
+      },
+      {
+        "name": "dioxus-web",
+        "path": "dioxus-web",
+        "dirs": [
+          {
+            "name": "assets",
+            "path": "dioxus-web/assets"
+          },
+          {
+            "name": "src",
+            "path": "dioxus-web/src",
+            "dirs": [
+              {
+                "name": "render",
+                "path": "dioxus-web/src/render",
+                "c4_level": "unknown",
+                "description": "Dioxus renderer for `holon_frontend::view_model::ViewModel`.",
+                "pattern_status": "planned",
+                "content": "Dioxus renderer for `holon_frontend::view_model::ViewModel`.\n\nMirrors `frontends/gpui/src/render/` in structure: one file per widget under\n[`builders`], dispatched by the shared `holon_macros::builder_registry!`\nmacro. Unlike GPUI, which renders from the live `ReactiveViewModel` tree,\ndioxus-web receives a serialized `ViewModel` snapshot from the worker over\npostMessage and dispatches on the static `ViewKind`.\n\nThe dioxus-only plumbing (worker bridge, contenteditable cell,\nper-`LiveBlock` subscription) stays in `crate::{bridge, editor}`. Everything\nhere is pure `ViewModel → Element`.",
+                "source_file": "dioxus-web/src/render/mod.rs",
+                "dirs": [
+                  {
+                    "name": "builders",
+                    "path": "dioxus-web/src/render/builders",
+                    "c4_level": "unknown",
+                    "description": "Widget builder registry for the dioxus-web snapshot renderer.",
+                    "pattern_status": "planned",
+                    "content": "Widget builder registry for the dioxus-web snapshot renderer.\n\nUses `holon_macros::builder_registry!` in `node_dispatch` mode, pointing\nat the static `view_model::ViewKind` enum (not the live\n`reactive_view_model::ReactiveViewKind` that GPUI uses — see the\n`node_type` / `kind_type` args below).\n\nEach file in this directory exports `pub fn render(...) -> Element`.\nThe macro parses that signature and generates a `render_node` function\nthat destructures each `ViewKind` variant into its fields and calls the\nmatching builder.",
+                    "source_file": "dioxus-web/src/render/builders/mod.rs",
+                    "parent": "dioxus-web/src/render",
+                    "files": [
+                      {
+                        "name": "badge.rs"
+                      },
+                      {
+                        "name": "block_operations.rs"
+                      },
+                      {
+                        "name": "card.rs"
+                      },
+                      {
+                        "name": "chat_bubble.rs"
+                      },
+                      {
+                        "name": "checkbox.rs"
+                      },
+                      {
+                        "name": "collapsible.rs"
+                      },
+                      {
+                        "name": "column.rs"
+                      },
+                      {
+                        "name": "columns.rs"
+                      },
+                      {
+                        "name": "draggable.rs"
+                      },
+                      {
+                        "name": "drawer.rs"
+                      },
+                      {
+                        "name": "drop_zone.rs"
+                      },
+                      {
+                        "name": "editable_text.rs"
+                      },
+                      {
+                        "name": "error.rs"
+                      },
+                      {
+                        "name": "expand_toggle.rs"
+                      },
+                      {
+                        "name": "focusable.rs"
+                      },
+                      {
+                        "name": "icon.rs"
+                      },
+                      {
+                        "name": "list.rs"
+                      },
+                      {
+                        "name": "live_block.rs"
+                      },
+                      {
+                        "name": "live_query.rs"
+                      },
+                      {
+                        "name": "mod.rs"
+                      },
+                      {
+                        "name": "on_hover.rs"
+                      },
+                      {
+                        "name": "outline.rs"
+                      },
+                      {
+                        "name": "pie_menu.rs"
+                      },
+                      {
+                        "name": "pref_field.rs"
+                      },
+                      {
+                        "name": "prelude.rs"
+                      },
+                      {
+                        "name": "query_result.rs"
+                      },
+                      {
+                        "name": "render_block.rs"
+                      },
+                      {
+                        "name": "rendered_text.rs"
+                      },
+                      {
+                        "name": "row.rs"
+                      },
+                      {
+                        "name": "section.rs"
+                      },
+                      {
+                        "name": "selectable.rs"
+                      },
+                      {
+                        "name": "source_block.rs"
+                      },
+                      {
+                        "name": "source_editor.rs"
+                      },
+                      {
+                        "name": "spacer.rs"
+                      },
+                      {
+                        "name": "state_toggle.rs"
+                      },
+                      {
+                        "name": "table.rs"
+                      },
+                      {
+                        "name": "table_row.rs"
+                      },
+                      {
+                        "name": "text.rs"
+                      },
+                      {
+                        "name": "tree.rs"
+                      },
+                      {
+                        "name": "tree_item.rs"
+                      },
+                      {
+                        "name": "util.rs"
+                      },
+                      {
+                        "name": "view_mode_switcher.rs"
+                      }
+                    ]
+                  }
+                ],
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "bridge.rs"
+              },
+              {
+                "name": "dnd.rs"
+              },
+              {
+                "name": "editor.rs"
+              },
+              {
+                "name": "main.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "dioxus-web/tests"
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "HANDOFF.md"
+          },
+          {
+            "name": "README.md"
+          },
+          {
+            "name": "Trunk.toml"
+          },
+          {
+            "name": "package.json"
+          }
+        ]
+      },
+      {
+        "name": "flutter",
+        "path": "flutter",
+        "dirs": [
+          {
+            "name": "rust_builder",
+            "path": "flutter/rust_builder",
+            "dirs": [
+              {
+                "name": "cargokit",
+                "path": "flutter/rust_builder/cargokit",
+                "dirs": [
+                  {
+                    "name": "build_tool",
+                    "path": "flutter/rust_builder/cargokit/build_tool"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "gpui",
+        "path": "gpui",
+        "c4_level": "container",
+        "description": "GPUI desktop frontend (primary; mobile via gpui-mobile feature) — the MVVM **View** layer; its render functions build native GPUI widgets from holon-frontend's `ReactiveViewModel`.",
+        "pattern": "MVVM View",
+        "pattern_status": "planned",
+        "content": "@c4 container\n@c4 layer UI\nPattern: MVVM View\n\nGPUI desktop frontend (primary; mobile via gpui-mobile feature) — the MVVM\n**View** layer; its render functions build native GPUI widgets from\nholon-frontend's `ReactiveViewModel`.",
+        "source_file": "gpui/src/lib.rs",
+        "layer": "UI",
+        "dirs": [
+          {
+            "name": "android",
+            "path": "gpui/android",
+            "dirs": [
+              {
+                "name": "fastlane",
+                "path": "gpui/android/fastlane",
+                "dirs": [
+                  {
+                    "name": "metadata",
+                    "path": "gpui/android/fastlane/metadata",
+                    "dirs": [
+                      {
+                        "name": "android",
+                        "path": "gpui/android/fastlane/metadata/android",
+                        "dirs": [
+                          {
+                            "name": "en-US",
+                            "path": "gpui/android/fastlane/metadata/android/en-US",
+                            "dirs": [
+                              {
+                                "name": "images",
+                                "path": "gpui/android/fastlane/metadata/android/en-US/images"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "java",
+                "path": "gpui/android/java",
+                "dirs": [
+                  {
+                    "name": "dev",
+                    "path": "gpui/android/java/dev",
+                    "dirs": [
+                      {
+                        "name": "gpui",
+                        "path": "gpui/android/java/dev/gpui",
+                        "dirs": [
+                          {
+                            "name": "mobile",
+                            "path": "gpui/android/java/dev/gpui/mobile"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "res",
+                "path": "gpui/android/res",
+                "dirs": [
+                  {
+                    "name": "values",
+                    "path": "gpui/android/res/values"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "build-apk.sh"
+              },
+              {
+                "name": "build-release-aab.sh"
+              },
+              {
+                "name": "build-release-apk.sh"
+              }
+            ]
+          },
+          {
+            "name": "examples",
+            "path": "gpui/examples",
+            "files": [
+              {
+                "name": "design_gallery.rs"
+              },
+              {
+                "name": "reactive_vm_demo.rs"
+              },
+              {
+                "name": "refresh_cascade.rs"
+              },
+              {
+                "name": "rich_input_spike.rs"
+              }
+            ]
+          },
+          {
+            "name": "ios",
+            "path": "gpui/ios",
+            "dirs": [
+              {
+                "name": "Assets.xcassets",
+                "path": "gpui/ios/Assets.xcassets",
+                "dirs": [
+                  {
+                    "name": "AppIcon.appiconset",
+                    "path": "gpui/ios/Assets.xcassets/AppIcon.appiconset",
+                    "files": [
+                      {
+                        "name": "Contents.json"
+                      }
+                    ]
+                  }
+                ],
+                "files": [
+                  {
+                    "name": "Contents.json"
+                  }
+                ]
+              },
+              {
+                "name": "fastlane",
+                "path": "gpui/ios/fastlane"
+              }
+            ],
+            "files": [
+              {
+                "name": "project.yml"
+              }
+            ]
+          },
+          {
+            "name": "macos",
+            "path": "gpui/macos"
+          },
+          {
+            "name": "src",
+            "path": "gpui/src",
+            "dirs": [
+              {
+                "name": "render",
+                "path": "gpui/src/render",
+                "dirs": [
+                  {
+                    "name": "builders",
+                    "path": "gpui/src/render/builders",
+                    "files": [
+                      {
+                        "name": "accordion.rs"
+                      },
+                      {
+                        "name": "badge.rs"
+                      },
+                      {
+                        "name": "block_operations.rs"
+                      },
+                      {
+                        "name": "board.rs"
+                      },
+                      {
+                        "name": "bottom_dock.rs"
+                      },
+                      {
+                        "name": "card.rs"
+                      },
+                      {
+                        "name": "chat_bubble.rs"
+                      },
+                      {
+                        "name": "checkbox.rs"
+                      },
+                      {
+                        "name": "collapsible.rs"
+                      },
+                      {
+                        "name": "column.rs"
+                      },
+                      {
+                        "name": "columns.rs"
+                      },
+                      {
+                        "name": "divider.rs"
+                      },
+                      {
+                        "name": "draggable.rs"
+                      },
+                      {
+                        "name": "drawer.rs"
+                      },
+                      {
+                        "name": "drop_zone.rs"
+                      },
+                      {
+                        "name": "editable_text.rs"
+                      },
+                      {
+                        "name": "error.rs"
+                      },
+                      {
+                        "name": "expand_toggle.rs"
+                      },
+                      {
+                        "name": "focusable.rs"
+                      },
+                      {
+                        "name": "icon.rs"
+                      },
+                      {
+                        "name": "image.rs"
+                      },
+                      {
+                        "name": "input_box.rs"
+                      },
+                      {
+                        "name": "live_block.rs"
+                      },
+                      {
+                        "name": "live_query.rs"
+                      },
+                      {
+                        "name": "loading.rs"
+                      },
+                      {
+                        "name": "mod.rs"
+                      },
+                      {
+                        "name": "on_hover.rs"
+                      },
+                      {
+                        "name": "op_button.rs"
+                      },
+                      {
+                        "name": "pie_menu.rs"
+                      },
+                      {
+                        "name": "pref_field.rs"
+                      },
+                      {
+                        "name": "prelude.rs"
+                      },
+                      {
+                        "name": "query_result.rs"
+                      },
+                      {
+                        "name": "render_entity.rs"
+                      },
+                      {
+                        "name": "rendered_text.rs"
+                      },
+                      {
+                        "name": "row.rs"
+                      },
+                      {
+                        "name": "section.rs"
+                      },
+                      {
+                        "name": "section_stack.rs"
+                      },
+                      {
+                        "name": "selectable.rs"
+                      },
+                      {
+                        "name": "source_block.rs"
+                      },
+                      {
+                        "name": "source_editor.rs"
+                      },
+                      {
+                        "name": "spacer.rs"
+                      },
+                      {
+                        "name": "state_toggle.rs"
+                      },
+                      {
+                        "name": "style.rs"
+                      },
+                      {
+                        "name": "table_row.rs"
+                      },
+                      {
+                        "name": "text.rs"
+                      },
+                      {
+                        "name": "tree_item.rs"
+                      },
+                      {
+                        "name": "view_mode_switcher.rs"
+                      }
+                    ]
+                  }
+                ],
+                "files": [
+                  {
+                    "name": "drag.rs"
+                  },
+                  {
+                    "name": "layout_renderer.rs"
+                  },
+                  {
+                    "name": "mod.rs"
+                  },
+                  {
+                    "name": "rich_text_runs.rs"
+                  },
+                  {
+                    "name": "warn_throttle.rs"
+                  }
+                ]
+              },
+              {
+                "name": "views",
+                "path": "gpui/src/views",
+                "files": [
+                  {
+                    "name": "editor_view.rs"
+                  },
+                  {
+                    "name": "mod.rs"
+                  },
+                  {
+                    "name": "reactive_shell.rs"
+                  },
+                  {
+                    "name": "render_entity_view.rs"
+                  },
+                  {
+                    "name": "rich_text_editor.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "breadcrumb.rs"
+              },
+              {
+                "name": "di.rs"
+              },
+              {
+                "name": "entity_view_registry.rs"
+              },
+              {
+                "name": "geometry.rs"
+              },
+              {
+                "name": "inspector.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "main.rs"
+              },
+              {
+                "name": "mobile.rs"
+              },
+              {
+                "name": "navigation_state.rs"
+              },
+              {
+                "name": "oracles_ui.rs"
+              },
+              {
+                "name": "reactive_vm_poc.rs"
+              },
+              {
+                "name": "reset.rs"
+              },
+              {
+                "name": "search_ui.rs"
+              },
+              {
+                "name": "share_ui.rs"
+              },
+              {
+                "name": "state.rs"
+              },
+              {
+                "name": "tab_strip.rs"
+              },
+              {
+                "name": "user_driver.rs"
+              },
+              {
+                "name": "window_state.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "gpui/tests",
+            "dirs": [
+              {
+                "name": "features",
+                "path": "gpui/tests/features"
+              },
+              {
+                "name": "fixtures",
+                "path": "gpui/tests/fixtures",
+                "files": [
+                  {
+                    "name": "presskey_loro_split_backspace.json"
+                  }
+                ]
+              },
+              {
+                "name": "pbt_harness",
+                "path": "gpui/tests/pbt_harness",
+                "c4_level": "unknown",
+                "description": "Shared gpui PBT harness modules for the composed windowed path.",
+                "pattern_status": "planned",
+                "content": "Shared gpui PBT harness modules for the composed windowed path.\n\nIncrement 4c: the phased real-NSWindow shell (`run_in_gpui_window` +\n`OnReady`/`GpuiLaunchContext`, the phased ready-protocol) and the\nphased harnesses (`random_pbt`, `random_pbt_sim`, `windowed_replay`) were\nDELETED. The survivors are the composed windowed boot/replay helper\n(`windowed_wide`) and the TestPlatform `SimUserDriver`\n(`sim_windowed_replay`); the windowed random runner is the 4b loop in\n`gpui_composed_windowed_loop.rs`.\n\nIncluded via `#[path = \"pbt_harness/mod.rs\"] mod pbt_harness;` from each\ntest binary (subdir modules aren't auto-discovered as tests).",
+                "source_file": "gpui/tests/pbt_harness/mod.rs",
+                "parent": "gpui",
+                "files": [
+                  {
+                    "name": "capture.rs"
+                  },
+                  {
+                    "name": "mod.rs"
+                  },
+                  {
+                    "name": "sim_windowed_replay.rs"
+                  },
+                  {
+                    "name": "windowed_wide.rs"
+                  }
+                ]
+              },
+              {
+                "name": "snapshots",
+                "path": "gpui/tests/snapshots"
+              },
+              {
+                "name": "support",
+                "path": "gpui/tests/support",
+                "c4_level": "unknown",
+                "description": "Fast-UI test support — render a `ReactiveViewModel` in `TestAppContext` without any backend, then query `BoundsRegistry` for layout assertions.",
+                "pattern_status": "planned",
+                "content": "Fast-UI test support — render a `ReactiveViewModel` in `TestAppContext`\nwithout any backend, then query `BoundsRegistry` for layout assertions.\n\nThis is the L2 primitive from the fast UI test plan (see\n`frontends/gpui/ZED_UI_PATTERNS.md §14`). Production-only concerns\n(reactive engine, DI, tokio runtime, real session) are replaced with a\npanicking stub; fixtures that pull on any of those will fail loudly,\nsignalling that the fixture is outside the pure-layout subset.",
+                "source_file": "gpui/tests/support/mod.rs",
+                "parent": "gpui",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              },
+              {
+                "name": "test_init",
+                "path": "gpui/tests/test_init",
+                "c4_level": "unknown",
+                "description": "Observability init for every windowed (`frontends/gpui/tests/*`) test binary.",
+                "pattern_status": "planned",
+                "content": "Observability init for every windowed (`frontends/gpui/tests/*`) test\nbinary.\n\nWindowed targets used to install NO tracing subscriber at all, so every\n`warn!`/`error!` a widget, driver or background worker emitted during a test\nwas discarded by `tracing`'s no-op global dispatcher before anything could\nread it. That made the \"falls back VISIBLY\" tier of the error philosophy\nunenforceable here: a degradation could announce itself perfectly and the\nwindowed suite would still be green and silent (a silent-empty context-path\nresolution once survived six rounds of #27 this way).\n\nDeclaring `mod test_init;` in a test file is the whole wiring — the\nconstructor below runs before `main`/the libtest harness, so the subscriber\nis up before any SUT code can emit. `windowed_log_capture.rs` fails the\nsuite if a target forgets the declaration.",
+                "source_file": "gpui/tests/test_init/mod.rs",
+                "parent": "gpui",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "accordion_bounded_pbt.rs"
+              },
+              {
+                "name": "accordion_layout_spike.rs"
+              },
+              {
+                "name": "cmd_enter_chord_dispatch.rs"
+              },
+              {
+                "name": "degraded_bus_bridge_windowed.rs"
+              },
+              {
+                "name": "degraded_signal_bus_container.rs"
+              },
+              {
+                "name": "editor_ime_deferred_replay.rs"
+              },
+              {
+                "name": "editor_task_keyword_promotion.rs"
+              },
+              {
+                "name": "editor_trailing_space_echo.rs"
+              },
+              {
+                "name": "executor_bridge_test.rs"
+              },
+              {
+                "name": "gpui_capture_replay.rs"
+              },
+              {
+                "name": "gpui_compose_sut_windowed.rs"
+              },
+              {
+                "name": "gpui_composed_windowed_loop.rs"
+              },
+              {
+                "name": "gpui_gherkin_replay.rs"
+              },
+              {
+                "name": "gpui_rebind_reset_smoke.rs"
+              },
+              {
+                "name": "gpui_sim_replay_capture.rs"
+              },
+              {
+                "name": "gpui_window_slice.rs"
+              },
+              {
+                "name": "gpui_windowed_minimize.rs"
+              },
+              {
+                "name": "input_box_windowed.rs"
+              },
+              {
+                "name": "layout_editor.rs"
+              },
+              {
+                "name": "layout_insta.rs"
+              },
+              {
+                "name": "layout_matrix.rs"
+              },
+              {
+                "name": "layout_scroll.rs"
+              },
+              {
+                "name": "layout_smoke.rs"
+              },
+              {
+                "name": "left_sidebar_scroll.rs"
+              },
+              {
+                "name": "list_scroll_spike.rs"
+              },
+              {
+                "name": "live_promotion_windowed.rs"
+              },
+              {
+                "name": "main_outline_virtualized_pbt.rs"
+              },
+              {
+                "name": "main_panel_scroll.rs"
+              },
+              {
+                "name": "mcp_scroll_fail_loud.rs"
+              },
+              {
+                "name": "mcp_scroll_wheel_accordion.rs"
+              },
+              {
+                "name": "mcp_scroll_wheel_eager_panel.rs"
+              },
+              {
+                "name": "nested_band_height_spike.rs"
+              },
+              {
+                "name": "nested_page_chevron_gate.rs"
+              },
+              {
+                "name": "nested_page_real_engine.rs"
+              },
+              {
+                "name": "panel_scroll_spike.rs"
+              },
+              {
+                "name": "plain_path_scroll.rs"
+              },
+              {
+                "name": "reactive_vm_realwindow_test.rs"
+              },
+              {
+                "name": "reactive_vm_test.rs"
+              },
+              {
+                "name": "seeded_accordion_panel_smoke.rs"
+              },
+              {
+                "name": "seeded_sidebar_live_query_height.rs"
+              },
+              {
+                "name": "sidebar_disclosure_affordance.rs"
+              },
+              {
+                "name": "sticky_accordion_pbt.rs"
+              },
+              {
+                "name": "sticky_footer_spike.rs"
+              },
+              {
+                "name": "structural_chord_stale_flush_windowed.rs"
+              },
+              {
+                "name": "task_keyword_blur_windowed.rs"
+              },
+              {
+                "name": "test_platform_blur.rs"
+              },
+              {
+                "name": "test_platform_geometry_determinism.rs"
+              },
+              {
+                "name": "test_platform_smoke.rs"
+              },
+              {
+                "name": "tracked_layout_neutrality.rs"
+              },
+              {
+                "name": "tree_row_first_line_alignment.rs"
+              },
+              {
+                "name": "undo_redo_keybinding.rs"
+              },
+              {
+                "name": "undo_survives_blur_windowed.rs"
+              },
+              {
+                "name": "window_chord_reentrant_dispatch.rs"
+              },
+              {
+                "name": "window_key_bindings.rs"
+              },
+              {
+                "name": "windowed_log_capture.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "Dioxus.toml"
+          },
+          {
+            "name": "MEMORY_ANALYSIS.md"
+          },
+          {
+            "name": "TESTING.md"
+          },
+          {
+            "name": "ZED_UI_PATTERNS.md"
+          },
+          {
+            "name": "build.rs"
+          }
+        ]
+      },
+      {
+        "name": "holon-worker",
+        "path": "holon-worker",
+        "c4_level": "container",
+        "description": "Holon worker — Phase 1 spike.",
+        "pattern": "Worker",
+        "pattern_status": "planned",
+        "content": "@c4 container\n@c4 layer Services\nPattern: Worker\n\nHolon worker — Phase 1 spike.\n\nGoal: falsify or validate H2 (napi build from holon's repo) and H4 (tokio\non wasm32-wasip1-threads) before touching any holon code. This crate only\nexposes two entry points: [`ping`] and [`spawn_check`].\n\nSee ~/.claude/plans/nifty-bouncing-ladybug.md Phase 1 for the rationale.",
+        "source_file": "holon-worker/src/lib.rs",
+        "layer": "Services",
+        "dirs": [
+          {
+            "name": "patches",
+            "path": "holon-worker/patches",
+            "dirs": [
+              {
+                "name": "symlink",
+                "path": "holon-worker/patches/symlink",
+                "c4_level": "unknown",
+                "description": "wasi-compatible drop-in for the `symlink` crate. Mirrors the public API of `symlink` 0.1.0 but defines the functions on every target. On unix/windows it delegates to `std`; on targets without symlink support (wasm32-wasip1) it returns an `Unsupported` error so dependents compile and fail loudly at runtime rather than at compile time.",
+                "pattern_status": "planned",
+                "content": "wasi-compatible drop-in for the `symlink` crate. Mirrors the public API of\n`symlink` 0.1.0 but defines the functions on every target. On unix/windows\nit delegates to `std`; on targets without symlink support (wasm32-wasip1)\nit returns an `Unsupported` error so dependents compile and fail loudly at\nruntime rather than at compile time.",
+                "source_file": "holon-worker/patches/symlink/src/lib.rs",
+                "parent": "holon-worker",
+                "dirs": [
+                  {
+                    "name": "src",
+                    "path": "holon-worker/patches/symlink/src",
+                    "files": [
+                      {
+                        "name": "lib.rs"
+                      }
+                    ]
+                  }
+                ],
+                "files": [
+                  {
+                    "name": "Cargo.toml"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "scripts",
+            "path": "holon-worker/scripts",
+            "files": [
+              {
+                "name": "build.sh"
+              }
+            ]
+          },
+          {
+            "name": "src",
+            "path": "holon-worker/src",
+            "files": [
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "seed.rs"
+              },
+              {
+                "name": "subscriptions.rs"
+              },
+              {
+                "name": "turso_browser_shim.rs"
+              }
+            ]
+          },
+          {
+            "name": "web",
+            "path": "holon-worker/web"
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "README.md"
+          },
+          {
+            "name": "browser.js"
+          },
+          {
+            "name": "build.rs"
+          },
+          {
+            "name": "holon_worker.wasi-browser.js"
+          },
+          {
+            "name": "index.d.ts"
+          },
+          {
+            "name": "package.json"
+          }
+        ]
+      },
+      {
+        "name": "mcp",
+        "path": "mcp",
+        "c4_level": "container",
+        "description": "MCP server frontend (stdio + HTTP).",
+        "pattern": "MCP Server",
+        "pattern_status": "planned",
+        "content": "@c4 container\n@c4 layer Services\nPattern: MCP Server\n\nMCP server frontend (stdio + HTTP).",
+        "source_file": "mcp/src/lib.rs",
+        "layer": "Services",
+        "dirs": [
+          {
+            "name": "examples",
+            "path": "mcp/examples"
+          },
+          {
+            "name": "src",
+            "path": "mcp/src",
+            "files": [
+              {
+                "name": "browser_relay.rs"
+              },
+              {
+                "name": "dense_patch.rs"
+              },
+              {
+                "name": "dense_projection.rs"
+              },
+              {
+                "name": "describe_ui_expand.rs"
+              },
+              {
+                "name": "describe_ui_geometry.rs"
+              },
+              {
+                "name": "di.rs"
+              },
+              {
+                "name": "key_chord_report.rs"
+              },
+              {
+                "name": "keybindings.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "main.rs"
+              },
+              {
+                "name": "resources.rs"
+              },
+              {
+                "name": "self_check.rs"
+              },
+              {
+                "name": "server.rs"
+              },
+              {
+                "name": "telemetry.rs"
+              },
+              {
+                "name": "tools.rs"
+              },
+              {
+                "name": "types.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "mcp/tests",
+            "files": [
+              {
+                "name": "dense_patch_entity_links.rs"
+              },
+              {
+                "name": "dense_patch_pbt.rs"
+              },
+              {
+                "name": "describe_ui_deferred.rs"
+              },
+              {
+                "name": "describe_ui_geometry.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "README.md"
+          }
+        ]
+      },
+      {
+        "name": "ply",
+        "path": "ply",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "ply/src",
+            "dirs": [
+              {
+                "name": "render",
+                "path": "ply/src/render",
+                "dirs": [
+                  {
+                    "name": "builders",
+                    "path": "ply/src/render/builders",
+                    "files": [
+                      {
+                        "name": "badge.rs"
+                      },
+                      {
+                        "name": "block.rs"
+                      },
+                      {
+                        "name": "block_operations.rs"
+                      },
+                      {
+                        "name": "checkbox.rs"
+                      },
+                      {
+                        "name": "col.rs"
+                      },
+                      {
+                        "name": "columns.rs"
+                      },
+                      {
+                        "name": "draggable.rs"
+                      },
+                      {
+                        "name": "drop_zone.rs"
+                      },
+                      {
+                        "name": "editable_text.rs"
+                      },
+                      {
+                        "name": "error.rs"
+                      },
+                      {
+                        "name": "focusable.rs"
+                      },
+                      {
+                        "name": "icon.rs"
+                      },
+                      {
+                        "name": "list.rs"
+                      },
+                      {
+                        "name": "live_block.rs"
+                      },
+                      {
+                        "name": "live_query.rs"
+                      },
+                      {
+                        "name": "mod.rs"
+                      },
+                      {
+                        "name": "operation_helpers.rs"
+                      },
+                      {
+                        "name": "outline.rs"
+                      },
+                      {
+                        "name": "pie_menu.rs"
+                      },
+                      {
+                        "name": "prelude.rs"
+                      },
+                      {
+                        "name": "query_result.rs"
+                      },
+                      {
+                        "name": "render_block.rs"
+                      },
+                      {
+                        "name": "row.rs"
+                      },
+                      {
+                        "name": "section.rs"
+                      },
+                      {
+                        "name": "selectable.rs"
+                      },
+                      {
+                        "name": "source_block.rs"
+                      },
+                      {
+                        "name": "source_editor.rs"
+                      },
+                      {
+                        "name": "spacer.rs"
+                      },
+                      {
+                        "name": "state_toggle.rs"
+                      },
+                      {
+                        "name": "table.rs"
+                      },
+                      {
+                        "name": "text.rs"
+                      },
+                      {
+                        "name": "tree.rs"
+                      }
+                    ]
+                  }
+                ],
+                "files": [
+                  {
+                    "name": "context.rs"
+                  },
+                  {
+                    "name": "interpreter.rs"
+                  },
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "cdc.rs"
+              },
+              {
+                "name": "main.rs"
+              },
+              {
+                "name": "state.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "HANDOFF.md"
+          }
+        ]
+      },
+      {
+        "name": "tui",
+        "path": "tui",
+        "c4_level": "container",
+        "description": "Terminal UI frontend — the MVVM **View** layer; its render functions build ratatui widgets from holon-frontend's `ReactiveViewModel`.",
+        "pattern": "MVVM View",
+        "pattern_status": "planned",
+        "content": "@c4 container\n@c4 layer UI\nPattern: MVVM View\n\nTerminal UI frontend — the MVVM **View** layer; its render functions build\nratatui widgets from holon-frontend's `ReactiveViewModel`.",
+        "source_file": "tui/src/lib.rs",
+        "layer": "UI",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "tui/src",
+            "dirs": [
+              {
+                "name": "render",
+                "path": "tui/src/render",
+                "c4_level": "unknown",
+                "description": "Renders a `ReactiveViewModel` tree into r3bl render ops.",
+                "pattern_status": "planned",
+                "content": "Renders a `ReactiveViewModel` tree into r3bl render ops.\n\nCounterpart of `frontends/gpui/src/render/builders/mod.rs`. The shadow\ninterpreter (in `holon-frontend`) has already turned the `RenderExpr` into\na `ReactiveViewModel`; this module walks that tree, reading the reactive\n`expr`, `props`, `data` mutables and the `collection` `MutableVec` snapshot,\nand emits r3bl `RenderOpIRVec` operations.",
+                "source_file": "tui/src/render/mod.rs",
+                "parent": "tui",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "TESTING.md"
+              },
+              {
+                "name": "TESTING_PAGEOBJECT.md"
+              },
+              {
+                "name": "app_main.rs"
+              },
+              {
+                "name": "di.rs"
+              },
+              {
+                "name": "geometry.rs"
+              },
+              {
+                "name": "input_pump.rs"
+              },
+              {
+                "name": "keybindings.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "main.rs"
+              },
+              {
+                "name": "stylesheet.rs"
+              },
+              {
+                "name": "user_driver.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "tui/tests",
+            "dirs": [
+              {
+                "name": "common",
+                "path": "tui/tests/common",
+                "c4_level": "unknown",
+                "description": "Shared scaffolding for the TUI integration tests.",
+                "pattern_status": "planned",
+                "content": "Shared scaffolding for the TUI integration tests.\n\nBoth `tui_ui_pbt` and `screenshot_painter` include this module via\n`mod common`, so cargo compiles it once per test target and warns\nabout items only used by the *other* target. `allow(dead_code)`\ncovers that — the items aren't actually unused in aggregate.",
+                "source_file": "tui/tests/common/mod.rs",
+                "parent": "tui",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  },
+                  {
+                    "name": "pbt_main.rs"
+                  },
+                  {
+                    "name": "screenshot.rs"
+                  },
+                  {
+                    "name": "test_harness.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "screenshot_painter.rs"
+              },
+              {
+                "name": "tui_ui_pbt.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "README.md"
+          },
+          {
+            "name": "TODO.md"
+          }
+        ]
+      },
+      {
+        "name": "waterui",
+        "path": "waterui",
+        "c4_level": "unknown",
+        "description": "WaterUI frontend — PARKED / bit-rotted experimental spike.",
+        "pattern": "Builder",
+        "pattern_status": "planned",
+        "content": "WaterUI frontend — PARKED / bit-rotted experimental spike.\n\nRECOMMENDED FOR DELETION (crate + its root-`Cargo.toml` `exclude` entry).\nSingle commit (2026-01-26); `HANDOFF.md` calls it a \"Parked experimental\nfrontend\". Because the crate is workspace-excluded (for an unrelated\nwgpu/naga/codespan build error), CI never compiled it, so its wiring rotted\nsilently against symbols deleted by later refactors:\n\n  * `holon_frontend::cdc::spawn_ui_listener` + `AppState`  → deleted in the\n    ReactiveEngine rewrite. Replacement: `ReactiveEngine::ensure_watching`\n    (spawns the `watch_ui` CDC pump internally) + `ReactiveRenderedRows`.\n  * `RenderContext::new(session, rt)`                      → deleted;\n    `RenderContext` no longer holds a session/runtime. Use\n    `RenderContext::default().with_data_rows(..)`.\n  * `FrontendSession::watch_ui(id, None, true)`            → signature is\n    now `watch_ui(&EntityUri) -> WatchHandle`.\n  * `holon_frontend::frontend_module::FrontendInjectorExt` / `add_frontend`\n    → the module was deleted; frontend DI wiring moved to the `holon-app`\n    crate (`holon_app::FrontendInjectorExt::add_frontend`).\n  * `RenderInterpreter::interpret(expr, ctx)`              → now takes a\n    third `services: &dyn BuilderServices` argument.\n\nRestoring a live frontend is a real migration, not a symbol swap, and needs\ndeps this excluded crate does not carry (a `holon-app` path-dep for\n`add_frontend`, and a `futures_signals` reactive bridge to push\n`ReactiveRenderedRows` snapshots into a waterui `Binding`). The template to\ncopy is `frontends/tui/src/di.rs` (DI module) + `ReactiveEngine::\nensure_watching` / `snapshot()` in `crates/holon-frontend/src/reactive.rs`.\n\nUntil that decision is made, this module is reduced to a compile-clean shell\nthat references ONLY live symbols and renders a static placeholder view. It\ndoes NOT boot the holon backend. `mod render` (the builder registry) is kept\non disk pending the delete-vs-revive decision but is currently unused.",
+        "source_file": "waterui/src/lib.rs",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "waterui/src",
+            "dirs": [
+              {
+                "name": "render",
+                "path": "waterui/src/render",
+                "dirs": [
+                  {
+                    "name": "builders",
+                    "path": "waterui/src/render/builders",
+                    "files": [
+                      {
+                        "name": "block.rs"
+                      },
+                      {
+                        "name": "checkbox.rs"
+                      },
+                      {
+                        "name": "columns.rs"
+                      },
+                      {
+                        "name": "editable_text.rs"
+                      },
+                      {
+                        "name": "icon.rs"
+                      },
+                      {
+                        "name": "list.rs"
+                      },
+                      {
+                        "name": "mod.rs"
+                      },
+                      {
+                        "name": "outline.rs"
+                      },
+                      {
+                        "name": "prelude.rs"
+                      },
+                      {
+                        "name": "row.rs"
+                      },
+                      {
+                        "name": "section.rs"
+                      },
+                      {
+                        "name": "selectable.rs"
+                      },
+                      {
+                        "name": "source_block.rs"
+                      },
+                      {
+                        "name": "spacer.rs"
+                      },
+                      {
+                        "name": "table.rs"
+                      },
+                      {
+                        "name": "text.rs"
+                      },
+                      {
+                        "name": "tree.rs"
+                      }
+                    ]
+                  }
+                ],
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "lib.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "HANDOFF.md"
+          },
+          {
+            "name": "HANDOFF_PROMPT.md"
+          },
+          {
+            "name": "Water.toml"
+          }
+        ]
+      }
+    ],
+    "files": [
+      {
+        "name": "SPECS.md"
+      }
+    ]
+  }
+}

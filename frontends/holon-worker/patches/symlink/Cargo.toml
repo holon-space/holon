@@ -1,0 +1,14 @@
+# Drop-in replacement for the unmaintained `symlink` crate (0.1.0), patched
+# into the holon-worker workspace ONLY (see ../../Cargo.toml [patch.crates-io]).
+#
+# Upstream `symlink` gates every function to `cfg(any(redox, unix, windows))`,
+# so on wasm32-wasip1-threads the functions don't exist and `tracing-appender`
+# (pulled non-optionally by turso_sdk_kit) fails to compile. This reimplementation
+# keeps identical behavior on unix/windows (delegates to std) and returns an
+# "unsupported" io::Error on wasm/other targets so the crate compiles everywhere.
+[package]
+name = "symlink"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "wasi-compatible drop-in for the symlink crate (holon-worker patch)"
