@@ -1,0 +1,48 @@
+# Out-of-workspace crate: excluded from the holon root workspace because
+# naga 27 (via wgpu) + codespan-reporting 0.12 breaks feature unification
+# (https://github.com/gfx-rs/wgpu/issues/7915, backport pending in
+# https://github.com/gfx-rs/wgpu/issues/8366). Like frontends/holon-worker,
+# it declares its own [workspace] so the manifest is buildable standalone;
+# workspace-inherited deps are replaced with path/pinned equivalents.
+[workspace]
+resolver = "2"
+
+[package]
+name = "holon-waterui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+# WaterUI framework. Pinned to a rev instead of `branch = "dev"`: dev HEAD
+# (93c8e96, 2026-07-02) points its backends/android submodule at a commit
+# that was force-pushed away upstream, so cargo cannot fetch it. 3baf8b39 is
+# the newest dev rev whose submodule pointers all still exist upstream.
+waterui = { git = "https://github.com/water-rs/waterui.git", rev = "3baf8b397a39b86e72a973abb4504b4c5f7efaa8" }
+waterui-ffi = { git = "https://github.com/water-rs/waterui.git", rev = "3baf8b397a39b86e72a973abb4504b4c5f7efaa8" }
+
+# Holon crates, path-deps relative to this manifest (mirroring the root
+# workspace's [workspace.dependencies])
+holon = { path = "../../crates/holon" }
+holon-frontend = { path = "../../crates/holon-frontend" }
+holon-api = { path = "../../crates/holon-api" }
+holon-macros = { path = "../../crates/holon-macros" }
+
+# DI — same fork/branch as the root workspace
+fluxdi = { git = "https://github.com/holon-space/fluxdi", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
+
+# Serialization
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }

@@ -1,0 +1,6 @@
+[package]
+type = "playground"
+name = "holon-waterui"
+bundle_identifier = "com.holon.waterui"
+
+waterui_path = "/Users/martin/.cargo/git/checkouts/waterui-2308096a1ebd3ee0/e28ab14"
