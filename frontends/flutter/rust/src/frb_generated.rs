@@ -48,7 +48,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -979222750;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1870492831;
 
 // Section: executor
 
@@ -1941,6 +1941,81 @@ fn wire__holon_api__types__entity_name_as_str_impl(
         },
     )
 }
+fn wire__crate__api__ffi_bridge__eval_binary_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "eval_binary",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_op = <holon_api::render_types::BinaryOperator>::sse_decode(&mut deserializer);
+            let api_left = <holon_api::Value>::sse_decode(&mut deserializer);
+            let api_right = <holon_api::Value>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(crate::api::ffi_bridge::eval_binary(
+                        api_op, api_left, api_right,
+                    ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__ffi_bridge__eval_render_expr_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "eval_render_expr",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_expr = <holon_api::render_types::RenderExpr>::sse_decode(&mut deserializer);
+            let api_row = <std::collections::HashMap<String, holon_api::Value>>::sse_decode(
+                &mut deserializer,
+            );
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(crate::api::ffi_bridge::eval_render_expr(
+                        api_expr, api_row,
+                    ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__ffi_bridge__execute_operation_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2087,6 +2162,75 @@ fn wire__holon_api__entity__field_type_to_sqlite_type_impl(
                     })?;
                     Ok(output_ok)
                 })())
+            }
+        },
+    )
+}
+fn wire__crate__api__ffi_bridge__get_preference_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_preference",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_key = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::ffi_bridge::get_preference(api_key)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__ffi_bridge__get_preferences_render_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_preferences_render",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::ffi_bridge::get_preferences_render()?;
+                        Ok(output_ok)
+                    })(),
+                )
             }
         },
     )
@@ -2274,6 +2418,41 @@ fn wire__holon_api__document__is_document_uri_impl(
         },
     )
 }
+fn wire__crate__api__ffi_bridge__is_widget_open_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "is_widget_open",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_block_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::ffi_bridge::is_widget_open(api_block_id)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__ffi_bridge__lookup_render_sibling_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2417,76 +2596,6 @@ fn wire__crate__api__shared_pbt__pbt_setup_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
                         let output_ok = crate::api::shared_pbt::pbt_setup(api_num_steps).await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__shared_pbt__pbt_step_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "pbt_step",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || async move {
-                        let output_ok = crate::api::shared_pbt::pbt_step().await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__shared_pbt__pbt_step_confirm_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "pbt_step_confirm",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || async move {
-                        let output_ok = crate::api::shared_pbt::pbt_step_confirm().await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -3085,6 +3194,79 @@ fn wire__holon_api__entity__schema_to_index_sql_impl(
         },
     )
 }
+fn wire__crate__api__ffi_bridge__set_preference_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_preference",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_key = <String>::sse_decode(&mut deserializer);
+            let api_value = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::ffi_bridge::set_preference(api_key, api_value)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__ffi_bridge__set_preference_bool_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_preference_bool",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_key = <String>::sse_decode(&mut deserializer);
+            let api_value = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok =
+                            crate::api::ffi_bridge::set_preference_bool(api_key, api_value)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__ffi_bridge__set_variant_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3108,7 +3290,7 @@ fn wire__crate__api__ffi_bridge__set_variant_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_handle = <RustOpaqueMoi<
-                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>,
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>,
             >>::sse_decode(&mut deserializer);
             let api_variant = <String>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -3140,6 +3322,43 @@ fn wire__crate__api__ffi_bridge__set_variant_impl(
                         Ok(output_ok)
                     })()
                     .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__ffi_bridge__set_widget_open_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_widget_open",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_block_id = <String>::sse_decode(&mut deserializer);
+            let api_open = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok =
+                            crate::api::ffi_bridge::set_widget_open(api_block_id, api_open)?;
+                        Ok(output_ok)
+                    })(),
                 )
             }
         },
@@ -3951,6 +4170,41 @@ fn wire__holon_api__value_default_object_impl(
         },
     )
 }
+fn wire__crate__api__ffi_bridge__value_display_string_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "value_display_string",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_value = <holon_api::Value>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(
+                        crate::api::ffi_bridge::value_display_string(api_value),
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__holon_api__value_from_datetime_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -4046,6 +4300,40 @@ fn wire__holon_api__value_is_null_impl(
             move |context| {
                 transform_result_sse::<_, ()>((move || {
                     let output_ok = Result::<_, ()>::Ok(holon_api::Value::is_null(&api_that))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__holon_api__value_to_display_string_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "value_to_display_string",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <holon_api::Value>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(holon_api::Value::to_display_string(&api_that))?;
                     Ok(output_ok)
                 })())
             }
@@ -4490,6 +4778,8 @@ const _: fn() = || {
         holon_api::render_types::TypeHint::Object { fields } => {
             let _: Vec<holon_api::render_types::OperationParam> = fields;
         }
+        holon_api::render_types::TypeHint::Expr => {}
+        holon_api::render_types::TypeHint::Collection => {}
     }
     match None::<holon_api::streaming::UiEvent>.unwrap() {
         holon_api::streaming::UiEvent::Structure {
@@ -4502,6 +4792,15 @@ const _: fn() = || {
         holon_api::streaming::UiEvent::Data { batch, generation } => {
             let _: holon_api::streaming::BatchMapChangeWithMetadata = batch;
             let _: u64 = generation;
+        }
+        holon_api::streaming::UiEvent::CollectionUpdate {
+            collection_id,
+            offset,
+            items_json,
+        } => {
+            let _: holon_api::streaming::CollectionId = collection_id;
+            let _: usize = offset;
+            let _: String = items_json;
         }
     }
     {
@@ -4604,13 +4903,13 @@ flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<EntityUri>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
+    flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>
+);
+flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterMutationDriver>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SpanContext>
-);
-flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
-    flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>
 );
 
 // Section: dart2rust
@@ -4665,6 +4964,16 @@ impl SseDecode for EntityUri {
     }
 }
 
+impl SseDecode for FfiWatchHandle {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <RustOpaqueMoi<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>,
+        >>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
+    }
+}
+
 impl SseDecode for FlutterMutationDriver {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4680,16 +4989,6 @@ impl SseDecode for SpanContext {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <RustOpaqueMoi<
             flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SpanContext>,
-        >>::sse_decode(deserializer);
-        return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
-    }
-}
-
-impl SseDecode for WatchHandle {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <RustOpaqueMoi<
-            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>,
         >>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
     }
@@ -4788,6 +5087,16 @@ impl SseDecode
 }
 
 impl SseDecode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <usize>::sse_decode(deserializer);
+        return decode_rust_opaque_moi(inner);
+    }
+}
+
+impl SseDecode
     for RustOpaqueMoi<
         flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterMutationDriver>,
     >
@@ -4801,16 +5110,6 @@ impl SseDecode
 
 impl SseDecode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SpanContext>>
-{
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <usize>::sse_decode(deserializer);
-        return decode_rust_opaque_moi(inner);
-    }
-}
-
-impl SseDecode
-    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -5733,19 +6032,6 @@ impl SseDecode for Option<i64> {
     }
 }
 
-impl SseDecode for Option<crate::api::shared_pbt::PbtUiOperation> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::shared_pbt::PbtUiOperation>::sse_decode(
-                deserializer,
-            ));
-        } else {
-            return None;
-        }
-    }
-}
-
 impl SseDecode for Option<holon_api::types::QueryLanguage> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -5831,31 +6117,15 @@ impl SseDecode for holon_api::render_types::ParamMapping {
     }
 }
 
-impl SseDecode for crate::api::shared_pbt::PbtStepResult {
+impl SseDecode for crate::api::ffi_bridge::PreferencesRenderData {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_done = <bool>::sse_decode(deserializer);
-        let mut var_transitionName = <String>::sse_decode(deserializer);
-        let mut var_uiOperation =
-            <Option<crate::api::shared_pbt::PbtUiOperation>>::sse_decode(deserializer);
-        return crate::api::shared_pbt::PbtStepResult {
-            done: var_done,
-            transition_name: var_transitionName,
-            ui_operation: var_uiOperation,
-        };
-    }
-}
-
-impl SseDecode for crate::api::shared_pbt::PbtUiOperation {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_entity = <String>::sse_decode(deserializer);
-        let mut var_op = <String>::sse_decode(deserializer);
-        let mut var_paramsJson = <String>::sse_decode(deserializer);
-        return crate::api::shared_pbt::PbtUiOperation {
-            entity: var_entity,
-            op: var_op,
-            params_json: var_paramsJson,
+        let mut var_renderExpr = <holon_api::render_types::RenderExpr>::sse_decode(deserializer);
+        let mut var_rows =
+            <Vec<std::collections::HashMap<String, holon_api::Value>>>::sse_decode(deserializer);
+        return crate::api::ffi_bridge::PreferencesRenderData {
+            render_expr: var_renderExpr,
+            rows: var_rows,
         };
     }
 }
@@ -6593,156 +6863,181 @@ fn pde_ffi_dispatcher_primary_impl(
         49 => wire__holon_api__document__document_to_entity_impl(port, ptr, rust_vec_len, data_len),
         50 => wire__holon_api__document__document_uri_impl(port, ptr, rust_vec_len, data_len),
         51 => wire__holon_api__types__entity_name_as_str_impl(port, ptr, rust_vec_len, data_len),
-        52 => {
+        52 => wire__crate__api__ffi_bridge__eval_binary_impl(port, ptr, rust_vec_len, data_len),
+        53 => {
+            wire__crate__api__ffi_bridge__eval_render_expr_impl(port, ptr, rust_vec_len, data_len)
+        }
+        54 => {
             wire__crate__api__ffi_bridge__execute_operation_impl(port, ptr, rust_vec_len, data_len)
         }
-        53 => wire__holon_api__render_types__extract_widget_names_impl(
+        55 => wire__holon_api__render_types__extract_widget_names_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__holon_api__entity__field_schema_default_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__holon_api__entity__field_type_to_sqlite_type_impl(
+        56 => wire__holon_api__entity__field_schema_default_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__holon_api__entity__field_type_to_sqlite_type_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__ffi_bridge__get_provider_auth_statuses_impl(
+        58 => wire__crate__api__ffi_bridge__get_preference_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__ffi_bridge__get_preferences_render_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => wire__crate__api__ffi_bridge__has_operation_impl(port, ptr, rust_vec_len, data_len),
-        58 => {
+        60 => wire__crate__api__ffi_bridge__get_provider_auth_statuses_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        61 => wire__crate__api__ffi_bridge__has_operation_impl(port, ptr, rust_vec_len, data_len),
+        62 => {
             wire__crate__api__ffi_bridge__init_render_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        59 => wire__crate__api__ffi_bridge__install_pbt_as_global_session_impl(
+        63 => wire__crate__api__ffi_bridge__install_pbt_as_global_session_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => wire__holon_api__document__is_document_uri_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__ffi_bridge__lookup_render_sibling_impl(
+        64 => wire__holon_api__document__is_document_uri_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__ffi_bridge__is_widget_open_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__ffi_bridge__lookup_render_sibling_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__holon_api__render_types__param_mapping_default_impl(
+        67 => wire__holon_api__render_types__param_mapping_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__api__ffi_bridge__pbt_execute_operation_impl(
+        68 => wire__crate__api__ffi_bridge__pbt_execute_operation_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__shared_pbt__pbt_setup_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__shared_pbt__pbt_step_impl(port, ptr, rust_vec_len, data_len),
-        66 => {
-            wire__crate__api__shared_pbt__pbt_step_confirm_impl(port, ptr, rust_vec_len, data_len)
-        }
-        67 => wire__crate__api__shared_pbt__pbt_teardown_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__holon_api__types__priority_from_int_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__holon_api__types__priority_from_letter_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__holon_api__types__priority_to_int_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__holon_api__types__priority_to_letter_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__ffi_bridge__query_and_watch_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__holon_api__types__query_language_sql_in_list_impl(
+        69 => wire__crate__api__shared_pbt__pbt_setup_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__shared_pbt__pbt_teardown_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__holon_api__types__priority_from_int_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__holon_api__types__priority_from_letter_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__holon_api__types__priority_to_int_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__holon_api__types__priority_to_letter_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__ffi_bridge__query_and_watch_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__holon_api__types__query_language_sql_in_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        74 => wire__crate__api__ffi_bridge__redo_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__holon_api__types__region_as_str_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__ffi_bridge__render_block_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__ffi_bridge__root_layout_block_id_impl(
+        77 => wire__crate__api__ffi_bridge__redo_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__holon_api__types__region_as_str_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__ffi_bridge__render_block_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__ffi_bridge__root_layout_block_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        78 => wire__holon_api__root_layout_block_uri_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__shared_pbt__run_shared_pbt_impl(port, ptr, rust_vec_len, data_len),
-        80 => {
+        81 => wire__holon_api__root_layout_block_uri_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__shared_pbt__run_shared_pbt_impl(port, ptr, rust_vec_len, data_len),
+        83 => {
             wire__holon_api__entity__schema_field_is_jsonb_impl(port, ptr, rust_vec_len, data_len)
         }
-        81 => wire__holon_api__entity__schema_to_create_table_sql_impl(
+        84 => wire__holon_api__entity__schema_to_create_table_sql_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        82 => wire__holon_api__entity__schema_to_index_sql_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__ffi_bridge__set_variant_impl(port, ptr, rust_vec_len, data_len),
-        84 => wire__holon_api__block__source_block_is_prql_impl(port, ptr, rust_vec_len, data_len),
-        85 => {
+        85 => wire__holon_api__entity__schema_to_index_sql_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__ffi_bridge__set_preference_impl(port, ptr, rust_vec_len, data_len),
+        87 => wire__crate__api__ffi_bridge__set_preference_bool_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        88 => wire__crate__api__ffi_bridge__set_variant_impl(port, ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__ffi_bridge__set_widget_open_impl(port, ptr, rust_vec_len, data_len),
+        90 => wire__holon_api__block__source_block_is_prql_impl(port, ptr, rust_vec_len, data_len),
+        91 => {
             wire__holon_api__types__source_language_as_query_impl(port, ptr, rust_vec_len, data_len)
         }
-        86 => {
+        92 => {
             wire__holon_api__types__source_language_is_prql_impl(port, ptr, rust_vec_len, data_len)
         }
-        87 => {
+        93 => {
             wire__holon_api__types__task_state_from_keyword_impl(port, ptr, rust_vec_len, data_len)
         }
-        88 => wire__holon_api__types__task_state_from_keyword_with_done_list_impl(
+        94 => wire__holon_api__types__task_state_from_keyword_with_done_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        89 => wire__holon_api__types__task_state_is_active_impl(port, ptr, rust_vec_len, data_len),
-        90 => wire__holon_api__types__task_state_is_doing_impl(port, ptr, rust_vec_len, data_len),
-        91 => wire__holon_api__types__task_state_is_done_impl(port, ptr, rust_vec_len, data_len),
-        92 => wire__crate__api__types__trace_context_from_span_context_impl(
+        95 => wire__holon_api__types__task_state_is_active_impl(port, ptr, rust_vec_len, data_len),
+        96 => wire__holon_api__types__task_state_is_doing_impl(port, ptr, rust_vec_len, data_len),
+        97 => wire__holon_api__types__task_state_is_done_impl(port, ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__types__trace_context_from_span_context_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        93 => wire__crate__api__types__trace_context_to_batch_trace_context_impl(
+        99 => wire__crate__api__types__trace_context_to_batch_trace_context_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        94 => wire__crate__api__types__trace_context_to_span_context_impl(
+        100 => wire__crate__api__types__trace_context_to_span_context_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        95 => wire__holon_api__render_types__type_hint_from_string_impl(
+        101 => wire__holon_api__render_types__type_hint_from_string_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        96 => wire__holon_api__types__ui_info_default_impl(port, ptr, rust_vec_len, data_len),
-        97 => wire__holon_api__types__ui_info_is_permissive_impl(port, ptr, rust_vec_len, data_len),
-        98 => wire__holon_api__types__ui_info_permissive_impl(port, ptr, rust_vec_len, data_len),
-        99 => wire__holon_api__types__ui_info_supports_all_impl(port, ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__ffi_bridge__undo_impl(port, ptr, rust_vec_len, data_len),
-        101 => wire__holon_api__value_as_bool_impl(port, ptr, rust_vec_len, data_len),
-        102 => wire__holon_api__value_as_f64_impl(port, ptr, rust_vec_len, data_len),
-        103 => wire__holon_api__value_as_i64_impl(port, ptr, rust_vec_len, data_len),
-        104 => wire__holon_api__value_as_string_owned_impl(port, ptr, rust_vec_len, data_len),
-        105 => wire__holon_api__value_default_array_impl(port, ptr, rust_vec_len, data_len),
-        106 => wire__holon_api__value_default_object_impl(port, ptr, rust_vec_len, data_len),
-        107 => wire__holon_api__value_from_datetime_impl(port, ptr, rust_vec_len, data_len),
-        108 => wire__holon_api__value_from_json_str_impl(port, ptr, rust_vec_len, data_len),
-        109 => wire__holon_api__value_is_null_impl(port, ptr, rust_vec_len, data_len),
-        110 => wire__holon_api__value_to_json_string_impl(port, ptr, rust_vec_len, data_len),
-        111 => wire__crate__api__ffi_bridge__watch_ui_impl(port, ptr, rust_vec_len, data_len),
-        112 => wire__holon_api__widget_spec__widget_spec_from_rows_impl(
+        102 => wire__holon_api__types__ui_info_default_impl(port, ptr, rust_vec_len, data_len),
+        103 => {
+            wire__holon_api__types__ui_info_is_permissive_impl(port, ptr, rust_vec_len, data_len)
+        }
+        104 => wire__holon_api__types__ui_info_permissive_impl(port, ptr, rust_vec_len, data_len),
+        105 => wire__holon_api__types__ui_info_supports_all_impl(port, ptr, rust_vec_len, data_len),
+        106 => wire__crate__api__ffi_bridge__undo_impl(port, ptr, rust_vec_len, data_len),
+        107 => wire__holon_api__value_as_bool_impl(port, ptr, rust_vec_len, data_len),
+        108 => wire__holon_api__value_as_f64_impl(port, ptr, rust_vec_len, data_len),
+        109 => wire__holon_api__value_as_i64_impl(port, ptr, rust_vec_len, data_len),
+        110 => wire__holon_api__value_as_string_owned_impl(port, ptr, rust_vec_len, data_len),
+        111 => wire__holon_api__value_default_array_impl(port, ptr, rust_vec_len, data_len),
+        112 => wire__holon_api__value_default_object_impl(port, ptr, rust_vec_len, data_len),
+        113 => wire__crate__api__ffi_bridge__value_display_string_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        114 => wire__holon_api__value_from_datetime_impl(port, ptr, rust_vec_len, data_len),
+        115 => wire__holon_api__value_from_json_str_impl(port, ptr, rust_vec_len, data_len),
+        116 => wire__holon_api__value_is_null_impl(port, ptr, rust_vec_len, data_len),
+        117 => wire__holon_api__value_to_display_string_impl(port, ptr, rust_vec_len, data_len),
+        118 => wire__holon_api__value_to_json_string_impl(port, ptr, rust_vec_len, data_len),
+        119 => wire__crate__api__ffi_bridge__watch_ui_impl(port, ptr, rust_vec_len, data_len),
+        120 => wire__holon_api__widget_spec__widget_spec_from_rows_impl(
             port,
             ptr,
             rust_vec_len,
@@ -6846,6 +7141,21 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<EntityUri>> for EntityUri {
 }
 
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<FfiWatchHandle> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
+            .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<FfiWatchHandle> {}
+
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<FfiWatchHandle>> for FfiWatchHandle {
+    fn into_into_dart(self) -> FrbWrapper<FfiWatchHandle> {
+        self.into()
+    }
+}
+
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<FlutterMutationDriver> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
@@ -6876,21 +7186,6 @@ impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<
 
 impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<SpanContext>> for SpanContext {
     fn into_into_dart(self) -> FrbWrapper<SpanContext> {
-        self.into()
-    }
-}
-
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for FrbWrapper<WatchHandle> {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
-            .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<WatchHandle> {}
-
-impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<WatchHandle>> for WatchHandle {
-    fn into_into_dart(self) -> FrbWrapper<WatchHandle> {
         self.into()
     }
 }
@@ -7562,46 +7857,23 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<holon_api::render_types::Param
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::shared_pbt::PbtStepResult {
+impl flutter_rust_bridge::IntoDart for crate::api::ffi_bridge::PreferencesRenderData {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
-            self.done.into_into_dart().into_dart(),
-            self.transition_name.into_into_dart().into_dart(),
-            self.ui_operation.into_into_dart().into_dart(),
+            self.render_expr.into_into_dart().into_dart(),
+            self.rows.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
 }
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::shared_pbt::PbtStepResult
+    for crate::api::ffi_bridge::PreferencesRenderData
 {
 }
-impl flutter_rust_bridge::IntoIntoDart<crate::api::shared_pbt::PbtStepResult>
-    for crate::api::shared_pbt::PbtStepResult
+impl flutter_rust_bridge::IntoIntoDart<crate::api::ffi_bridge::PreferencesRenderData>
+    for crate::api::ffi_bridge::PreferencesRenderData
 {
-    fn into_into_dart(self) -> crate::api::shared_pbt::PbtStepResult {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::shared_pbt::PbtUiOperation {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.entity.into_into_dart().into_dart(),
-            self.op.into_into_dart().into_dart(),
-            self.params_json.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::shared_pbt::PbtUiOperation
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::shared_pbt::PbtUiOperation>
-    for crate::api::shared_pbt::PbtUiOperation
-{
-    fn into_into_dart(self) -> crate::api::shared_pbt::PbtUiOperation {
+    fn into_into_dart(self) -> crate::api::ffi_bridge::PreferencesRenderData {
         self
     }
 }
@@ -8266,6 +8538,13 @@ impl SseEncode for EntityUri {
     }
 }
 
+impl SseEncode for FfiWatchHandle {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
+    }
+}
+
 impl SseEncode for FlutterMutationDriver {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -8282,13 +8561,6 @@ impl SseEncode for SpanContext {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner< SpanContext>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
-    }
-}
-
-impl SseEncode for WatchHandle {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
     }
 }
 
@@ -8381,6 +8653,17 @@ impl SseEncode
 }
 
 impl SseEncode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        let (ptr, size) = self.sse_encode_raw();
+        <usize>::sse_encode(ptr, serializer);
+        <i32>::sse_encode(size, serializer);
+    }
+}
+
+impl SseEncode
     for RustOpaqueMoi<
         flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterMutationDriver>,
     >
@@ -8395,17 +8678,6 @@ impl SseEncode
 
 impl SseEncode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SpanContext>>
-{
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        let (ptr, size) = self.sse_encode_raw();
-        <usize>::sse_encode(ptr, serializer);
-        <i32>::sse_encode(size, serializer);
-    }
-}
-
-impl SseEncode
-    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -9138,16 +9410,6 @@ impl SseEncode for Option<i64> {
     }
 }
 
-impl SseEncode for Option<crate::api::shared_pbt::PbtUiOperation> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::shared_pbt::PbtUiOperation>::sse_encode(value, serializer);
-        }
-    }
-}
-
 impl SseEncode for Option<holon_api::types::QueryLanguage> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -9220,21 +9482,13 @@ impl SseEncode for holon_api::render_types::ParamMapping {
     }
 }
 
-impl SseEncode for crate::api::shared_pbt::PbtStepResult {
+impl SseEncode for crate::api::ffi_bridge::PreferencesRenderData {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.done, serializer);
-        <String>::sse_encode(self.transition_name, serializer);
-        <Option<crate::api::shared_pbt::PbtUiOperation>>::sse_encode(self.ui_operation, serializer);
-    }
-}
-
-impl SseEncode for crate::api::shared_pbt::PbtUiOperation {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.entity, serializer);
-        <String>::sse_encode(self.op, serializer);
-        <String>::sse_encode(self.params_json, serializer);
+        <holon_api::render_types::RenderExpr>::sse_encode(self.render_expr, serializer);
+        <Vec<std::collections::HashMap<String, holon_api::Value>>>::sse_encode(
+            self.rows, serializer,
+        );
     }
 }
 
@@ -9833,6 +10087,20 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_holon_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>>::increment_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_holon_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>>::decrement_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_holon_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
         ptr: *const std::ffi::c_void,
     ) {
@@ -9858,20 +10126,6 @@ mod io {
         ptr: *const std::ffi::c_void,
     ) {
         MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SpanContext>>::decrement_strong_count(ptr as _);
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_holon_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>>::increment_strong_count(ptr as _);
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_holon_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>>::decrement_strong_count(ptr as _);
     }
 }
 #[cfg(not(target_family = "wasm"))]
@@ -9977,6 +10231,20 @@ mod web {
     }
 
     #[wasm_bindgen]
+    pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>>::increment_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FfiWatchHandle>>::decrement_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
     pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
         ptr: *const std::ffi::c_void,
     ) {
@@ -10002,20 +10270,6 @@ mod web {
         ptr: *const std::ffi::c_void,
     ) {
         MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<SpanContext>>::decrement_strong_count(ptr as _);
-    }
-
-    #[wasm_bindgen]
-    pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>>::increment_strong_count(ptr as _);
-    }
-
-    #[wasm_bindgen]
-    pub fn rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<WatchHandle>>::decrement_strong_count(ptr as _);
     }
 }
 #[cfg(target_family = "wasm")]

@@ -6211,6 +6211,7 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework SystemConfiguration",
+					"-framework CoreMedia",
 				);
 				PRODUCT_MODULE_NAME = rust_lib_holon;
 				PRODUCT_NAME = rust_lib_holon;
@@ -6652,6 +6653,7 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework SystemConfiguration",
+					"-framework CoreMedia",
 				);
 				PRODUCT_MODULE_NAME = rust_lib_holon;
 				PRODUCT_NAME = rust_lib_holon;
@@ -6875,6 +6877,7 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework SystemConfiguration",
+					"-framework CoreMedia",
 				);
 				PRODUCT_MODULE_NAME = rust_lib_holon;
 				PRODUCT_NAME = rust_lib_holon;

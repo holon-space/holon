@@ -49,16 +49,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEntityUriPtr;
 
   CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_FfiWatchHandlePtr => wire
+      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandlePtr;
+
+  CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_FlutterMutationDriverPtr => wire
       ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriverPtr;
 
   CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_SpanContextPtr => wire
       ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContextPtr;
-
-  CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_WatchHandlePtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandlePtr;
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
@@ -88,6 +88,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FfiWatchHandle
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    dynamic raw,
+  );
+
+  @protected
   FlutterMutationDriver
   dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
     dynamic raw,
@@ -100,26 +106,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  WatchHandle
-  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-    dynamic raw,
-  );
-
-  @protected
   EntityUri
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEntityUri(
     dynamic raw,
   );
 
   @protected
-  SpanContext
-  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
+  FfiWatchHandle
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
     dynamic raw,
   );
 
   @protected
-  WatchHandle
-  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
+  SpanContext
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
     dynamic raw,
   );
 
@@ -169,6 +169,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FfiWatchHandle
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    dynamic raw,
+  );
+
+  @protected
   FlutterMutationDriver
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
     dynamic raw,
@@ -177,12 +183,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   SpanContext
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
-    dynamic raw,
-  );
-
-  @protected
-  WatchHandle
-  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
     dynamic raw,
   );
 
@@ -294,9 +294,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MapChangeSink dco_decode_box_autoadd_map_change_sink(dynamic raw);
-
-  @protected
-  PbtUiOperation dco_decode_box_autoadd_pbt_ui_operation(dynamic raw);
 
   @protected
   QueryLanguage dco_decode_box_autoadd_query_language(dynamic raw);
@@ -494,9 +491,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
 
   @protected
-  PbtUiOperation? dco_decode_opt_box_autoadd_pbt_ui_operation(dynamic raw);
-
-  @protected
   QueryLanguage? dco_decode_opt_box_autoadd_query_language(dynamic raw);
 
   @protected
@@ -518,10 +512,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ParamMapping dco_decode_param_mapping(dynamic raw);
 
   @protected
-  PbtStepResult dco_decode_pbt_step_result(dynamic raw);
-
-  @protected
-  PbtUiOperation dco_decode_pbt_ui_operation(dynamic raw);
+  PreferencesRenderData dco_decode_preferences_render_data(dynamic raw);
 
   @protected
   Priority dco_decode_priority(dynamic raw);
@@ -650,6 +641,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FfiWatchHandle
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   FlutterMutationDriver
   sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
     SseDeserializer deserializer,
@@ -662,26 +659,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  WatchHandle
-  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   EntityUri
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEntityUri(
     SseDeserializer deserializer,
   );
 
   @protected
-  SpanContext
-  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
+  FfiWatchHandle
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
     SseDeserializer deserializer,
   );
 
   @protected
-  WatchHandle
-  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
+  SpanContext
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
     SseDeserializer deserializer,
   );
 
@@ -731,6 +722,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FfiWatchHandle
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   FlutterMutationDriver
   sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
     SseDeserializer deserializer,
@@ -739,12 +736,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   SpanContext
   sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  WatchHandle
-  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
     SseDeserializer deserializer,
   );
 
@@ -864,11 +855,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MapChangeSink sse_decode_box_autoadd_map_change_sink(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  PbtUiOperation sse_decode_box_autoadd_pbt_ui_operation(
     SseDeserializer deserializer,
   );
 
@@ -1102,11 +1088,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
-  PbtUiOperation? sse_decode_opt_box_autoadd_pbt_ui_operation(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   QueryLanguage? sse_decode_opt_box_autoadd_query_language(
     SseDeserializer deserializer,
   );
@@ -1140,10 +1121,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ParamMapping sse_decode_param_mapping(SseDeserializer deserializer);
 
   @protected
-  PbtStepResult sse_decode_pbt_step_result(SseDeserializer deserializer);
-
-  @protected
-  PbtUiOperation sse_decode_pbt_ui_operation(SseDeserializer deserializer);
+  PreferencesRenderData sse_decode_preferences_render_data(
+    SseDeserializer deserializer,
+  );
 
   @protected
   Priority sse_decode_priority(SseDeserializer deserializer);
@@ -1288,6 +1268,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    FfiWatchHandle self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
     FlutterMutationDriver self,
     SseSerializer serializer,
@@ -1302,13 +1289,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
-  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-    WatchHandle self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEntityUri(
     EntityUri self,
     SseSerializer serializer,
@@ -1316,15 +1296,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
-  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
-    SpanContext self,
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    FfiWatchHandle self,
     SseSerializer serializer,
   );
 
   @protected
   void
-  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-    WatchHandle self,
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
+    SpanContext self,
     SseSerializer serializer,
   );
 
@@ -1389,6 +1369,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    FfiWatchHandle self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
     FlutterMutationDriver self,
     SseSerializer serializer,
@@ -1398,13 +1385,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext(
     SpanContext self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void
-  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-    WatchHandle self,
     SseSerializer serializer,
   );
 
@@ -1551,12 +1531,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_map_change_sink(
     MapChangeSink self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_box_autoadd_pbt_ui_operation(
-    PbtUiOperation self,
     SseSerializer serializer,
   );
 
@@ -1857,12 +1831,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_opt_box_autoadd_pbt_ui_operation(
-    PbtUiOperation? self,
-    SseSerializer serializer,
-  );
-
-  @protected
   void sse_encode_opt_box_autoadd_query_language(
     QueryLanguage? self,
     SseSerializer serializer,
@@ -1902,11 +1870,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_param_mapping(ParamMapping self, SseSerializer serializer);
 
   @protected
-  void sse_encode_pbt_step_result(PbtStepResult self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_pbt_ui_operation(
-    PbtUiOperation self,
+  void sse_encode_preferences_render_data(
+    PreferencesRenderData self,
     SseSerializer serializer,
   );
 
@@ -2185,6 +2150,40 @@ class RustLibWire implements BaseWire {
           .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
 
   void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    ffi.Pointer<ffi.Void> ptr,
+  ) {
+    return _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+      ptr,
+    );
+  }
+
+  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandlePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+        'frbgen_holon_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle',
+      );
+  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle =
+      _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandlePtr
+          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+    ffi.Pointer<ffi.Void> ptr,
+  ) {
+    return _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle(
+      ptr,
+    );
+  }
+
+  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandlePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+        'frbgen_holon_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle',
+      );
+  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandle =
+      _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFfiWatchHandlePtr
+          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
+
+  void
   rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterMutationDriver(
     ffi.Pointer<ffi.Void> ptr,
   ) {
@@ -2250,39 +2249,5 @@ class RustLibWire implements BaseWire {
       );
   late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContext =
       _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerSpanContextPtr
-          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
-
-  void
-  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-    ffi.Pointer<ffi.Void> ptr,
-  ) {
-    return _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-      ptr,
-    );
-  }
-
-  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandlePtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
-        'frbgen_holon_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle',
-      );
-  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle =
-      _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandlePtr
-          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
-
-  void
-  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-    ffi.Pointer<ffi.Void> ptr,
-  ) {
-    return _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle(
-      ptr,
-    );
-  }
-
-  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandlePtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
-        'frbgen_holon_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle',
-      );
-  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandle =
-      _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerWatchHandlePtr
           .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
 }

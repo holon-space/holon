@@ -56,7 +56,7 @@ final class ReactiveQueryStateNotifierProvider
 }
 
 String _$reactiveQueryStateNotifierHash() =>
-    r'51c36886b933086b03d48472ed6c4d7658a2fa80';
+    r'd1b3e06bb7f0d1d6d44692474ae3a493ffbd304c';
 
 /// AsyncNotifier for managing ReactiveQuery state (Riverpod 3.x with code generation).
 
