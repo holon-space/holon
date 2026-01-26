@@ -1,0 +1,64 @@
+[package]
+name = "holon-gpui"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "holon_gpui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "holon-gpui"
+path = "src/main.rs"
+
+[[test]]
+name = "gpui_ui_pbt"
+harness = false
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui_platform"]
+mobile = ["dep:gpui-mobile"]
+chrome-trace = ["holon-frontend/chrome-trace"]
+
+[dependencies]
+# GPUI framework (no rev pin — Cargo.lock pins the commit; adding rev= causes a Cargo bug
+# where two packages from the same git source drops all other --extern flags from rustc)
+gpui = { git = "https://github.com/zed-industries/zed" }
+
+# Desktop-only: native platform (macOS/Linux/Windows)
+gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true }
+
+# Mobile-only: platform implementations for iOS/Android
+gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
+android-activity = { version = "0.6", features = ["native-activity"] }
+log = "0.4"
+
+# Holon workspace crates
+holon-frontend.workspace = true
+holon-api.workspace = true
+holon-macros.workspace = true
+holon-mcp = { path = "../mcp" }
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+smol = "2"
+
+# Serialization
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+holon-integration-tests = { path = "../../crates/holon-integration-tests" }
+gpui_platform = { git = "https://github.com/zed-industries/zed" }
