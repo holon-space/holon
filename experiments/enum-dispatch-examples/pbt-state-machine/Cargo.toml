@@ -1,0 +1,12 @@
+[package]
+name = "pbt-state-machine"
+version = "0.1.0"
+edition = "2024"
+description = "File-per-transition pattern for proptest-state-machine using enum_dispatch + a small declare_transitions! macro."
+
+[workspace]
+
+[dependencies]
+proptest = "1"
+proptest-state-machine = "0.3"
+declarative_enum_dispatch = "0.1"

@@ -1,0 +1,15 @@
+{
+  "lastIndexed": "2026-04-23T00:00:00Z",
+  "componentCount": 18,
+  "externalCount": 6,
+  "categories": {
+    "service": 15
+  },
+  "hashes": {},
+  "interviewResponses": {
+    "externalUrls": ["GPUI", "Loro", "Turso", "FluxDI", "futures-signals"],
+    "externalTools": ["holon MCP server"],
+    "focusAreas": "Full project",
+    "sparseAreas": "None"
+  }
+}
