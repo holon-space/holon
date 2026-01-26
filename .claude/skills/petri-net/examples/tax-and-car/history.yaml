@@ -1,0 +1,9 @@
+# Petri-Net Execution History (append-only)
+#
+# Each entry records one transition firing with all state changes.
+# Current state = initial_state.yaml + replay of these events in order.
+#
+# DO NOT manually edit this file. Use /petri step or /petri simulate.
+# Use /petri reset to clear and start over.
+
+events: []

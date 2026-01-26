@@ -1,0 +1,33 @@
+servers:
+  holon-live:
+    toolNamesPrefix: ""
+    transport:
+      type: streamableHttp
+      url: "http://127.0.0.1:8520/mcp"
+      timeoutMs: 30000
+    restartOnFailure: true
+    restartDelayMs: 3000
+    maxRestarts: 100
+
+  design-gallery:
+    toolNamesPrefix: "design_"
+    transport:
+      type: streamableHttp
+      url: "http://127.0.0.1:8523/mcp"
+      timeoutMs: 30000
+    restartOnFailure: false
+
+proxy:
+  port: 8521
+  host: "127.0.0.1"
+  toolNamesPrefix: ""
+
+healthCheck:
+  intervalSeconds: 10
+  timeoutSeconds: 5
+  enabled: true
+
+webUi:
+  enabled: false
+  port: 8522
+  host: "127.0.0.1"

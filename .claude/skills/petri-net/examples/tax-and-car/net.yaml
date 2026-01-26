@@ -1,0 +1,359 @@
+# Petri-Net Definition: Tax Return + Car Purchase (parallel projects)
+#
+# This models two real projects running in parallel:
+# 1. Filing a tax return (expected refund: 2000 EUR)
+# 2. Buying a car (budget: 35000 EUR, daily utility: 50 EUR)
+#
+# The "self" token represents the person with energy, focus, mental slots.
+# Context switches between projects cost time and focus.
+
+token_types:
+  Monetary:
+    attributes:
+      value: { type: float, unit: EUR }
+    places: [not_realized, available, spent, realized]
+
+  Document:
+    attributes:
+      format: { type: string, optional: true }
+      location: { type: string, optional: true }
+    places: [missing, found, in_progress, completed, submitted]
+
+  Knowledge:
+    attributes:
+      confidence: { type: float, range: [0, 1] }
+      source: { type: string, optional: true }
+    places: [unknown, learning, acquired]
+
+  Person:
+    attributes:
+      energy: { type: float, range: [0, 1], decay_per_hour: -0.05 }
+      focus: { type: float, range: [0, 1] }
+      mental_slots: { type: object, keys: [capacity, used] }
+      health: { type: float, range: [0, 1], decay_per_day: -0.002 }
+      relationships:
+        partner: { type: float, range: [0, 1] }
+
+  Vehicle:
+    attributes:
+      candidates: { type: list, optional: true }
+      selected: { type: string, optional: true }
+    places: [not_started, researched, test_driven, decided, purchased, registered]
+
+  Collection:
+    attributes:
+      items: { type: list }
+    places: [empty, partial, complete]
+
+# --- Transitions ---
+
+transitions:
+
+  # === TAX PROJECT ===
+
+  collect_income_statement:
+    project: tax
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.2"
+      - token: income_statement
+        place: missing
+    outputs:
+      - token: income_statement
+        place: found
+    duration_minutes: 15
+    effects:
+      - self.energy: -0.02
+
+  collect_donation_receipts:
+    project: tax
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.2"
+      - token: donation_receipts
+        place: missing
+    outputs:
+      - token: donation_receipts
+        place: found
+    duration_minutes: 30
+    effects:
+      - self.energy: -0.03
+
+  research_deductions:
+    project: tax
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.3 and self.focus >= 0.2"
+      - token: knowledge_deductions
+        place: unknown
+    outputs:
+      - token: knowledge_deductions
+        place: acquired
+        set_attributes:
+          confidence: 0.8
+          source: "own research"
+    duration_minutes: 60
+    effects:
+      - self.energy: -0.1
+      - self.focus: -0.1
+
+  fill_tax_form_n:
+    project: tax
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.4 and self.focus >= 0.3"
+      - token: income_statement
+        place: found
+      - token: knowledge_deductions
+        place: acquired
+    outputs:
+      - token: tax_form_n
+        place: completed
+    duration_minutes: 45
+    effects:
+      - self.energy: -0.15
+      - self.focus: -0.1
+
+  fill_tax_form_v:
+    project: tax
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.4 and self.focus >= 0.3"
+      - token: donation_receipts
+        place: found
+    outputs:
+      - token: tax_form_v
+        place: completed
+    duration_minutes: 30
+    effects:
+      - self.energy: -0.1
+      - self.focus: -0.05
+
+  submit_tax_return:
+    project: tax
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.2"
+      - token: tax_form_n
+        place: completed
+      - token: tax_form_v
+        place: completed
+    outputs:
+      - token: tax_submission
+        place: submitted
+    duration_minutes: 30
+    effects:
+      - self.energy: -0.03
+    delayed_effects:
+      - after_days: 42
+        changes:
+          - token: tax_refund
+            attribute: place
+            new: realized
+
+  # === CAR PROJECT ===
+
+  research_cars:
+    project: car
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.3 and self.focus >= 0.2"
+      - token: car_candidates
+        place: empty
+    outputs:
+      - token: car_candidates
+        place: partial
+    duration_minutes: 120
+    effects:
+      - self.energy: -0.15
+      - self.focus: -0.15
+
+  compare_financing:
+    project: car
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.3 and self.focus >= 0.3"
+    outputs:
+      - token: financing_options
+        place: completed
+    duration_minutes: 90
+    effects:
+      - self.energy: -0.1
+      - self.focus: -0.1
+
+  schedule_test_drives:
+    project: car
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.2"
+      - token: car_candidates
+        place: partial
+    outputs:
+      - token: test_drive_appointments
+        place: completed
+    duration_minutes: 30
+    effects:
+      - self.energy: -0.03
+
+  do_test_drive:
+    project: car
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.4"
+      - token: test_drive_appointments
+        place: completed
+    outputs:
+      - token: car_candidates
+        place: complete
+    duration_minutes: 180
+    effects:
+      - self.energy: -0.2
+
+  decide_on_car:
+    project: car
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.3 and self.focus >= 0.3"
+      - token: car_candidates
+        place: complete
+      - token: financing_options
+        place: completed
+    outputs:
+      - token: car_decision
+        place: completed
+    duration_minutes: 60
+    effects:
+      - self.energy: -0.1
+      - self.focus: -0.1
+
+  purchase_car:
+    project: car
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.3"
+      - token: car_decision
+        place: completed
+      - token: budget
+        place: available
+    outputs:
+      - token: car
+        place: purchased
+      - token: budget
+        place: spent
+    duration_minutes: 120
+    effects:
+      - self.energy: -0.15
+    triggers:
+      - set:
+          - token: car_utility
+            attribute: place
+            new: realized
+
+  register_car:
+    project: car
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.2"
+      - token: car
+        place: purchased
+    outputs:
+      - token: car
+        place: registered
+    duration_minutes: 120
+    effects:
+      - self.energy: -0.1
+
+  # === MAINTENANCE ===
+
+  exercise:
+    project: maintenance
+    inputs:
+      - token: self
+        guard: "self.energy >= 0.15"
+    outputs:
+      - token: self
+    duration_minutes: 60
+    effects:
+      - self.energy: -0.1
+      - self.health: +0.05
+    delayed_effects:
+      - after_minutes: 120
+        changes:
+          - token: self
+            attribute: energy
+            delta: +0.15
+
+  sleep:
+    project: maintenance
+    inputs:
+      - token: self
+    outputs:
+      - token: self
+    duration_minutes: 480
+    effects:
+      - self.energy: +0.7
+      - self.focus: +0.8
+    notes: "Caps at max (1.0). Represents a full night's sleep."
+
+  # === META ===
+
+  context_switch:
+    project: meta
+    inputs:
+      - token: self
+    outputs:
+      - token: self
+    duration_minutes: 15
+    effects:
+      - self.focus: -0.1
+    value_produced: 0
+    auto: true
+
+# --- Objective Function ---
+
+objective_function:
+  components:
+    - name: tax_refund
+      expr: "token_value(tax_refund) if tax_refund.place == realized else 0"
+      weight: 1.0
+      discount_rate_yearly: 0.05
+
+    - name: car_utility
+      expr: "50.0 * days_since(car_utility.place == realized)"
+      weight: 1.0
+      discount_rate_yearly: 0.05
+      notes: "50 EUR/day utility once car is registered and usable"
+
+    - name: car_cost
+      expr: "-35000 if budget.place == spent else 0"
+      weight: 1.0
+      discount_rate_yearly: 0.05
+
+    - name: health
+      expr: "self.health"
+      weight: 500
+      notes: "Health valued at 500 EUR-equivalent per unit"
+
+    - name: relationship
+      expr: "self.relationships.partner"
+      weight: 300
+
+  constraints:
+    - expr: "self.energy > 0.05"
+      name: "minimum energy"
+    - expr: "self.health > 0.3"
+      name: "minimum health"
+
+# --- Effectiveness Curve ---
+# Maps mental_slots.used → effectiveness multiplier on transition duration
+
+effectiveness_curve:
+  0: 1.00
+  1: 1.00
+  2: 1.00
+  3: 0.95
+  4: 0.90
+  5: 0.85
+  6: 0.70
+  7: 0.50
+  8: 0.30
