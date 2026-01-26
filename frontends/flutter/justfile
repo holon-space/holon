@@ -1,0 +1,83 @@
+# Flutter + Rust Bridge build automation
+
+# Create rust_builder Flutter plugin (only if missing or incomplete)
+integrate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "rust_builder/cargokit/build_pod.sh" ]; then
+        echo "Creating rust_builder plugin via FRB integrate..."
+        rm -rf rust_builder
+        ./run_frb_codegen.sh integrate \
+            --rust-crate-name rust_lib_holon \
+            --rust-crate-dir rust \
+            --no-write-lib \
+            --no-integration-test
+        if [ ! -f "rust_builder/cargokit/build_pod.sh" ]; then
+            echo "FRB integrate did not populate cargokit, copying from FRB example..."
+            cp -R external/flutter_rust_bridge/frb_example/integrate_third_party/rust_builder/cargokit/* rust_builder/cargokit/
+        fi
+        chmod +x rust_builder/cargokit/*.sh 2>/dev/null || true
+    fi
+
+# Install CocoaPods dependencies (only if Podfile.lock is missing or outdated)
+pods: integrate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "macos/Podfile.lock" ] || [ "macos/Podfile" -nt "macos/Podfile.lock" ]; then
+        echo "Installing CocoaPods dependencies..."
+        cd macos && pod install
+    fi
+
+# Generate Rust bridge code
+codegen: integrate
+    ./run_frb_codegen.sh generate
+
+# Run on macOS
+run-macos: codegen pods
+    flutter run -d macos
+
+# Run on iOS
+run-ios: codegen
+    flutter run -d ios
+
+# Run on Android
+run-android: codegen
+    flutter run -d android
+
+# Build for macOS
+build-macos: codegen pods
+    flutter build macos
+
+# Build for iOS
+build-ios: codegen
+    flutter build ios
+
+# Build for Android
+build-android: codegen
+    flutter build apk
+
+# Run tests
+test: codegen
+    flutter test
+
+# Watch mode for development
+watch:
+    ./run_frb_codegen.sh generate --watch
+
+# Clean build artifacts
+clean:
+    flutter clean
+    cd rust && cargo clean
+    rm -rf macos/Pods macos/Podfile.lock
+
+# Run app with Rust and Flutter coverage
+coverage:
+    cd ../.. && ./scripts/run-with-coverage.sh -d macos
+
+# Process Rust coverage data
+coverage-rust:
+    cd ../.. && ./scripts/process-rust-coverage.sh html
+
+# Process Flutter coverage data
+coverage-flutter:
+    cd ../.. && ./scripts/process-flutter-coverage.sh
