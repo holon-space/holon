@@ -1,0 +1,20 @@
+# cargo-crap configuration — CRAP (Change Risk Anti-Patterns) metric.
+# See Phase 5 of devlog/2026-05-19-code-quality-baseline.md.
+#
+# Read from the directory `cargo crap` runs in (repo root, via `just analyze-crap`).
+# Keys mirror the CLI flags.
+
+# CRAP = cyclomatic_complexity * (1 - coverage)^3 + cyclomatic_complexity.
+# Above this score a function is flagged. 30 is the cargo-crap default and the
+# baseline the plan was measured against.
+threshold = 30
+
+# Functions with complexity but no coverage data are scored as 0% covered.
+# Fail loud: an untested complex function is the exact risk CRAP exists to surface.
+missing = "pessimistic"
+
+# `examples/` are self-contained repros and demos, not production code. Their
+# `main()`s are large by nature, never executed by `cargo test` (so they score as
+# 0% covered), and offer no refactor leverage — they only inflate the count.
+# Excluding them flips the worst-offender list from example `main()`s to real code.
+exclude = ["**/examples/**"]
