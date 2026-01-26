@@ -1,0 +1,646 @@
+Clone found (rust):
+ - crates/holon/src/core/transform/json_aggregation.rs [331:5 - 345:9] (14 lines, 136 tokens)
+   crates/holon/src/core/transform/json_aggregation.rs [246:5 - 260:9]
+
+Clone found (rust):
+ - crates/holon/src/core/transform/column_preservation.rs [64:1 - 74:35] (10 lines, 91 tokens)
+   crates/holon/src/core/transform/json_aggregation.rs [112:1 - 122:3]
+
+Clone found (rust):
+ - crates/holon/src/core/transform/column_preservation.rs [79:13 - 102:44] (23 lines, 207 tokens)
+   crates/holon/src/core/transform/json_aggregation.rs [125:13 - 148:74]
+
+Clone found (rust):
+ - crates/holon/src/core/transform/column_preservation.rs [205:2 - 214:8] (9 lines, 87 tokens)
+   crates/holon/src/core/transform/json_aggregation.rs [532:6 - 541:4]
+
+Clone found (rust):
+ - crates/holon/src/core/transform/column_preservation.rs [225:9 - 232:2] (7 lines, 84 tokens)
+   crates/holon/src/core/transform/json_aggregation.rs [534:9 - 214:19]
+
+Clone found (rust):
+ - crates/holon/src/core/transform/column_preservation.rs [277:2 - 290:43] (13 lines, 120 tokens)
+   crates/holon/src/core/transform/column_preservation.rs [247:2 - 260:21]
+
+Clone found (rust):
+ - crates/holon/src/core/transform/column_preservation.rs [308:2 - 321:42] (13 lines, 124 tokens)
+   crates/holon/src/core/transform/column_preservation.rs [277:2 - 260:21]
+
+Clone found (rust):
+ - crates/holon/src/core/transform/column_preservation.rs [334:9 - 345:33] (11 lines, 115 tokens)
+   crates/holon/src/core/transform/column_preservation.rs [249:9 - 260:21]
+
+Clone found (rust):
+ - crates/holon/tests/steps/task_steps.rs [124:7 - 129:8] (5 lines, 72 tokens)
+   crates/holon/tests/steps/task_steps.rs [95:6 - 100:11]
+
+Clone found (rust):
+ - crates/holon/tests/steps/task_steps.rs [137:29 - 143:2] (6 lines, 90 tokens)
+   crates/holon/tests/steps/task_steps.rs [124:25 - 130:5]
+
+Clone found (rust):
+ - crates/holon/tests/steps/task_steps.rs [150:15 - 156:6] (6 lines, 81 tokens)
+   crates/holon/tests/steps/task_steps.rs [124:8 - 101:9]
+
+Clone found (rust):
+ - crates/holon/src/testing/generic_provider_state.rs [335:39 - 375:4] (40 lines, 351 tokens)
+   crates/holon/src/testing/generic_provider_state.rs [286:41 - 326:6]
+
+Clone found (rust):
+ - crates/holon/src/testing/e2e_test_helpers.rs [364:25 - 381:11] (17 lines, 235 tokens)
+   crates/holon/src/testing/e2e_test_helpers.rs [264:17 - 281:2]
+
+Clone found (rust):
+ - crates/holon/src/sync/collaborative_doc.rs [199:53 - 216:38] (17 lines, 113 tokens)
+   crates/holon/src/sync/collaborative_doc.rs [153:2 - 170:3]
+
+Clone found (rust):
+ - crates/holon/src/sync/collaborative_doc.rs [217:9 - 228:89] (11 lines, 82 tokens)
+   crates/holon/src/sync/collaborative_doc.rs [146:9 - 157:27]
+
+Clone found (rust):
+ - crates/holon/src/sync/collaborative_doc.rs [353:28 - 360:8] (7 lines, 130 tokens)
+   crates/holon/src/sync/collaborative_doc.rs [332:29 - 339:7]
+
+Clone found (rust):
+ - crates/holon/src/storage/turso_tests.rs [265:42 - 273:4] (8 lines, 86 tokens)
+   crates/holon/src/storage/turso_tests.rs [201:34 - 208:2]
+
+Clone found (rust):
+ - crates/holon/src/storage/turso_tests.rs [276:8 - 285:2] (9 lines, 105 tokens)
+   crates/holon/src/storage/turso_tests.rs [260:9 - 206:2]
+
+Clone found (rust):
+ - crates/holon/src/storage/task_datasource.rs [397:10 - 406:6] (9 lines, 141 tokens)
+   crates/holon/src/storage/task_datasource.rs [378:12 - 387:10]
+
+Clone found (rust):
+ - crates/holon/src/storage/task_datasource.rs [415:11 - 424:6] (9 lines, 139 tokens)
+   crates/holon/src/storage/task_datasource.rs [378:12 - 387:4]
+
+Clone found (rust):
+ - crates/holon/src/storage/task_datasource.rs [441:12 - 450:11] (9 lines, 139 tokens)
+   crates/holon/src/storage/task_datasource.rs [378:12 - 387:4]
+
+Clone found (rust):
+ - crates/holon/src/examples/task_queries.rs [162:9 - 169:6] (7 lines, 126 tokens)
+   crates/holon/src/examples/task_queries.rs [15:17 - 22:7]
+
+Clone found (rust):
+ - crates/holon/src/examples/task_queries.rs [169:2 - 175:6] (6 lines, 108 tokens)
+   crates/holon/src/examples/task_queries.rs [22:7 - 28:7]
+
+Clone found (rust):
+ - crates/holon/src/examples/task_queries.rs [175:2 - 181:6] (6 lines, 108 tokens)
+   crates/holon/src/examples/task_queries.rs [28:7 - 34:7]
+
+Clone found (rust):
+ - crates/holon/src/di/test_helpers.rs [227:17 - 235:55] (8 lines, 75 tokens)
+   crates/holon/src/di/test_helpers.rs [200:18 - 208:46]
+
+Clone found (rust):
+ - crates/holon/src/core/unified_query.rs [120:5 - 142:2] (22 lines, 234 tokens)
+   crates/holon/src/core/unified_query.rs [66:2 - 89:3]
+
+Clone found (rust):
+ - crates/holon/src/core/unified_query.rs [238:2 - 248:5] (10 lines, 82 tokens)
+   crates/holon/src/core/unified_query.rs [190:2 - 200:6]
+
+Clone found (rust):
+ - crates/holon/src/core/traits.rs [136:3 - 143:3] (7 lines, 77 tokens)
+   crates/holon/src/core/traits.rs [105:4 - 112:3]
+
+Clone found (rust):
+ - crates/holon/src/core/traits.rs [143:2 - 152:15] (9 lines, 110 tokens)
+   crates/holon/src/core/traits.rs [112:2 - 121:16]
+
+Clone found (rust):
+ - crates/holon/src/core/test_macro.rs [90:27 - 97:4] (7 lines, 73 tokens)
+   crates/holon/src/core/test_macro.rs [72:28 - 78:7]
+
+Clone found (rust):
+ - crates/holon/src/core/stream_cache.rs [154:2 - 172:80] (18 lines, 228 tokens)
+   crates/holon/src/core/stream_cache.rs [92:2 - 111:87]
+
+Clone found (rust):
+ - crates/holon/src/core/stream_cache.rs [253:6 - 260:3] (7 lines, 83 tokens)
+   crates/holon/src/core/stream_cache.rs [202:2 - 209:4]
+
+Clone found (rust):
+ - crates/holon/src/core/stream_cache.rs [369:2 - 378:8] (9 lines, 94 tokens)
+   crates/holon/src/core/stream_cache.rs [253:7 - 209:7]
+
+Clone found (rust):
+ - crates/holon/src/core/stream_cache.rs [381:7 - 387:5] (6 lines, 85 tokens)
+   crates/holon/src/core/stream_cache.rs [202:5 - 209:4]
+
+Clone found (rust):
+ - crates/holon/src/core/stream_cache.rs [387:11 - 393:8] (6 lines, 83 tokens)
+   crates/holon/src/core/stream_cache.rs [202:5 - 209:4]
+
+Clone found (rust):
+ - crates/holon/src/core/stream_cache.rs [400:3 - 405:2] (5 lines, 83 tokens)
+   crates/holon/src/core/stream_cache.rs [253:7 - 207:2]
+
+Clone found (rust):
+ - crates/holon/src/core/stream_cache.rs [406:2 - 420:5] (14 lines, 202 tokens)
+   crates/holon/src/core/stream_cache.rs [379:2 - 260:2]
+
+Clone found (rust):
+ - crates/holon/src/core/operation_log.rs [391:9 - 401:15] (10 lines, 106 tokens)
+   crates/holon/src/core/operation_log.rs [373:9 - 383:9]
+
+Clone found (rust):
+ - crates/holon/src/core/operation_log.rs [406:39 - 418:23] (12 lines, 97 tokens)
+   crates/holon/src/core/operation_log.rs [350:28 - 362:20]
+
+Clone found (rust):
+ - crates/holon/src/core/datasource_tests.rs [126:2 - 133:3] (7 lines, 102 tokens)
+   crates/holon/src/core/datasource_tests.rs [98:2 - 105:7]
+
+Clone found (rust):
+ - crates/holon/src/core/datasource_tests.rs [315:23 - 328:27] (13 lines, 189 tokens)
+   crates/holon/src/core/datasource_tests.rs [289:29 - 302:34]
+
+Clone found (rust):
+ - crates/holon/src/core/datasource_tests.rs [341:24 - 354:26] (13 lines, 189 tokens)
+   crates/holon/src/core/datasource_tests.rs [289:29 - 302:34]
+
+Clone found (rust):
+ - crates/holon/src/core/datasource_tests.rs [456:13 - 469:27] (13 lines, 189 tokens)
+   crates/holon/src/core/datasource_tests.rs [289:29 - 302:34]
+
+Clone found (rust):
+ - crates/holon/src/core/datasource_tests.rs [470:4 - 482:15] (12 lines, 105 tokens)
+   crates/holon/src/core/datasource_tests.rs [355:2 - 367:30]
+
+Clone found (rust):
+ - crates/holon/src/core/datasource_tests.rs [482:15 - 495:29] (13 lines, 189 tokens)
+   crates/holon/src/core/datasource_tests.rs [289:29 - 302:34]
+
+Clone found (rust):
+ - crates/holon/src/api/memory_backend.rs [460:4 - 468:17] (8 lines, 87 tokens)
+   crates/holon/src/api/memory_backend.rs [409:13 - 417:39]
+
+Clone found (rust):
+ - crates/holon/src/api/memory_backend.rs [651:5 - 661:2] (10 lines, 94 tokens)
+   crates/holon/src/api/memory_backend.rs [252:3 - 263:2]
+
+Clone found (rust):
+ - crates/holon/src/api/loro_backend_pbt.rs [111:5 - 121:6] (10 lines, 106 tokens)
+   crates/holon/src/api/pbt_infrastructure.rs [509:1 - 519:6]
+
+Clone found (rust):
+ - crates/holon/src/api/loro_backend_pbt.rs [626:29 - 636:8] (10 lines, 90 tokens)
+   crates/holon/src/api/loro_backend_pbt.rs [572:29 - 582:8]
+
+Clone found (rust):
+ - crates/query-render/src/parser.rs [390:2 - 397:4] (7 lines, 76 tokens)
+   crates/query-render/src/parser.rs [376:2 - 383:3]
+
+Clone found (rust):
+ - crates/query-render/src/lineage.rs [447:9 - 461:9] (14 lines, 126 tokens)
+   crates/query-render/src/lineage.rs [404:9 - 419:5]
+
+Clone found (rust):
+ - crates/query-render/src/lineage.rs [533:9 - 548:54] (15 lines, 138 tokens)
+   crates/query-render/src/lineage.rs [404:9 - 462:64]
+
+Clone found (rust):
+ - crates/query-render/src/compiler.rs [33:5 - 44:20] (11 lines, 106 tokens)
+   crates/query-render/src/compiler.rs [7:5 - 18:4]
+
+Clone found (rust):
+ - crates/query-render/src/compiler.rs [226:9 - 236:6] (10 lines, 88 tokens)
+   crates/query-render/src/compiler.rs [190:9 - 200:7]
+
+Clone found (rust):
+ - crates/query-render/examples/trace_target.rs [37:25 - 48:2] (11 lines, 111 tokens)
+   crates/query-render/examples/trace_target2.rs [38:16 - 49:2]
+
+Clone found (rust):
+ - crates/query-render/examples/trace_select_json.rs [14:61 - 31:2] (17 lines, 168 tokens)
+   crates/query-render/examples/trace_target2.rs [32:40 - 49:2]
+
+Clone found (rust):
+ - crates/query-render/examples/compare_approaches2.rs [3:5 - 14:2] (11 lines, 123 tokens)
+   crates/query-render/examples/compare_approaches3.rs [3:5 - 17:2]
+
+Clone found (rust):
+ - crates/holon-todoist/src/stream_integration_test.rs [172:28 - 184:28] (12 lines, 123 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [131:31 - 143:26]
+
+Clone found (rust):
+ - crates/holon-todoist/src/stream_integration_test.rs [213:30 - 229:17] (16 lines, 152 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [131:31 - 188:40]
+
+Clone found (rust):
+ - crates/holon-todoist/src/stream_integration_test.rs [263:9 - 268:16] (5 lines, 73 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [132:9 - 137:4]
+
+Clone found (rust):
+ - crates/holon-todoist/src/stream_integration_test.rs [339:23 - 359:12] (20 lines, 191 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [131:31 - 233:19]
+
+Clone found (rust):
+ - crates/holon-todoist/src/stream_integration_test.rs [386:19 - 402:25] (16 lines, 152 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [131:31 - 188:40]
+
+Clone found (rust):
+ - crates/holon-todoist/src/provider_wrapper.rs [156:76 - 171:78] (15 lines, 119 tokens)
+   crates/holon-todoist/src/provider_wrapper.rs [123:75 - 138:77]
+
+Clone found (rust):
+ - crates/holon-todoist/src/pbt_test.rs [130:9 - 135:2] (5 lines, 76 tokens)
+   crates/holon-todoist/src/pbt_test.rs [116:9 - 121:2]
+
+Clone found (rust):
+ - crates/holon-todoist/src/pbt_test.rs [698:16 - 707:2] (9 lines, 100 tokens)
+   crates/holon-todoist/src/pbt_test.rs [675:7 - 688:2]
+
+Clone found (rust):
+ - crates/holon-todoist/src/integration_test.rs [40:36 - 50:4] (10 lines, 83 tokens)
+   crates/holon-todoist/src/integration_test.rs [20:35 - 31:4]
+
+Clone found (rust):
+ - crates/holon-todoist/src/integration_test.rs [65:31 - 75:13] (10 lines, 91 tokens)
+   crates/holon-todoist/src/integration_test.rs [20:35 - 50:14]
+
+Clone found (rust):
+ - crates/holon-todoist/src/integration_test.rs [148:17 - 161:21] (13 lines, 116 tokens)
+   crates/holon-todoist/src/integration_test.rs [94:28 - 106:35]
+
+Clone found (rust):
+ - crates/holon-todoist/src/integration_test.rs [161:21 - 180:4] (19 lines, 151 tokens)
+   crates/holon-todoist/src/integration_test.rs [107:29 - 125:9]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake_wrapper.rs [7:12 - 17:50] (10 lines, 82 tokens)
+   crates/holon-todoist/src/provider_wrapper.rs [7:22 - 16:4]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake_wrapper.rs [85:13 - 96:6] (11 lines, 81 tokens)
+   crates/holon-todoist/src/provider_wrapper.rs [102:13 - 113:7]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake_wrapper.rs [104:17 - 114:7] (10 lines, 102 tokens)
+   crates/holon-todoist/src/provider_wrapper.rs [127:17 - 137:7]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake_wrapper.rs [119:39 - 142:4] (23 lines, 166 tokens)
+   crates/holon-todoist/src/fake_wrapper.rs [96:37 - 119:6]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake_wrapper.rs [148:2 - 159:29] (11 lines, 87 tokens)
+   crates/holon-todoist/src/provider_wrapper.rs [203:2 - 214:25]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [11:2 - 18:4] (7 lines, 89 tokens)
+   crates/holon/src/storage/task_datasource.rs [3:12 - 10:2]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [128:17 - 144:4] (16 lines, 170 tokens)
+   crates/holon-todoist/src/fake.rs [100:25 - 115:7]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [158:21 - 173:14] (15 lines, 176 tokens)
+   crates/holon-todoist/src/fake.rs [100:25 - 115:13]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [178:17 - 193:14] (15 lines, 174 tokens)
+   crates/holon-todoist/src/fake.rs [100:25 - 144:15]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [192:17 - 204:53] (12 lines, 95 tokens)
+   crates/holon/src/storage/task_datasource.rs [153:17 - 165:78]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [420:9 - 430:38] (10 lines, 79 tokens)
+   crates/holon-todoist/src/fake.rs [270:9 - 280:37]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [449:4 - 464:16] (15 lines, 102 tokens)
+   crates/holon-todoist/src/fake.rs [417:12 - 432:13]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [484:2 - 499:16] (15 lines, 102 tokens)
+   crates/holon-todoist/src/fake.rs [417:12 - 432:13]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [514:6 - 542:56] (28 lines, 242 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [25:12 - 53:28]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [557:3 - 576:15] (19 lines, 140 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [72:2 - 91:65]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [578:6 - 591:2] (13 lines, 91 tokens)
+   crates/holon-todoist/src/stream_integration_test.rs [95:2 - 108:3]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [606:28 - 622:32] (16 lines, 138 tokens)
+   crates/holon-todoist/src/fake.rs [577:34 - 592:8]
+
+Clone found (rust):
+ - crates/holon-todoist/src/fake.rs [639:25 - 658:13] (19 lines, 157 tokens)
+   crates/holon-todoist/src/fake.rs [577:34 - 625:18]
+
+Clone found (rust):
+ - crates/holon-todoist/src/client.rs [387:9 - 427:20] (40 lines, 356 tokens)
+   crates/holon-todoist/src/client.rs [261:9 - 301:23]
+
+Clone found (rust):
+ - crates/holon-todoist/src/client.rs [659:18 - 671:40] (12 lines, 77 tokens)
+   crates/holon-todoist/src/client.rs [645:13 - 657:4]
+
+Clone found (rust):
+ - crates/holon-todoist/src/client.rs [720:14 - 732:40] (12 lines, 77 tokens)
+   crates/holon-todoist/src/client.rs [645:13 - 657:4]
+
+Clone found (rust):
+ - crates/holon-todoist/src/client.rs [750:18 - 762:43] (12 lines, 77 tokens)
+   crates/holon-todoist/src/client.rs [735:17 - 747:61]
+
+Clone found (rust):
+ - crates/holon-todoist/src/client.rs [765:20 - 777:37] (12 lines, 77 tokens)
+   crates/holon-todoist/src/client.rs [735:17 - 747:61]
+
+Clone found (rust):
+ - crates/holon-orgmode/tests/source_block_round_trip.rs [57:2 - 64:9] (7 lines, 73 tokens)
+   crates/holon-orgmode/tests/source_block_round_trip.rs [32:2 - 38:7]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/writer.rs [145:5 - 153:4] (8 lines, 79 tokens)
+   crates/holon-orgmode/src/writer.rs [84:4 - 93:65]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/writer.rs [171:2 - 180:3] (9 lines, 72 tokens)
+   crates/holon-orgmode/src/writer.rs [101:2 - 110:61]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/writer.rs [400:12 - 411:2] (11 lines, 90 tokens)
+   crates/holon-orgmode/src/writer.rs [363:15 - 374:4]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/writer.rs [416:31 - 431:3] (15 lines, 104 tokens)
+   crates/holon-orgmode/src/writer.rs [379:19 - 394:7]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/writer.rs [597:24 - 617:57] (20 lines, 170 tokens)
+   crates/holon-orgmode/src/writer.rs [506:24 - 526:55]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/writer.rs [627:24 - 641:13] (14 lines, 131 tokens)
+   crates/holon-orgmode/src/writer.rs [537:24 - 551:76]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/writer.rs [916:70 - 922:2] (6 lines, 76 tokens)
+   crates/holon-orgmode/src/writer.rs [902:67 - 908:7]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/parser.rs [546:8 - 553:11] (7 lines, 76 tokens)
+   crates/holon-orgmode/tests/source_block_round_trip.rs [30:9 - 37:4]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/parser.rs [564:1 - 573:2] (9 lines, 93 tokens)
+   crates/holon-orgmode/tests/source_block_round_trip.rs [172:1 - 181:2]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/parser.rs [602:1 - 611:11] (9 lines, 94 tokens)
+   crates/holon-orgmode/tests/source_block_round_trip.rs [173:1 - 182:8]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/parser.rs [624:1 - 634:5] (10 lines, 105 tokens)
+   crates/holon-orgmode/tests/source_block_round_trip.rs [172:1 - 574:9]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_sync_provider.rs [186:21 - 197:13] (11 lines, 88 tokens)
+   crates/holon-orgmode/src/orgmode_sync_provider.rs [129:17 - 140:6]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_sync_provider.rs [294:13 - 304:10] (10 lines, 83 tokens)
+   crates/holon-orgmode/src/orgmode_sync_provider.rs [130:21 - 197:5]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_sync_provider.rs [457:7 - 467:2] (10 lines, 92 tokens)
+   crates/holon-orgmode/src/orgmode_sync_provider.rs [345:2 - 355:2]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_sync_provider.rs [576:9 - 589:5] (13 lines, 98 tokens)
+   crates/holon-todoist/src/todoist_sync_provider.rs [247:9 - 260:77]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_datasource.rs [183:20 - 208:12] (25 lines, 229 tokens)
+   crates/holon-orgmode/src/orgmode_datasource.rs [89:16 - 114:8]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_datasource.rs [461:59 - 475:4] (14 lines, 98 tokens)
+   crates/holon-todoist/src/fake.rs [427:2 - 441:38]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_datasource.rs [474:4 - 484:13] (10 lines, 96 tokens)
+   crates/holon-orgmode/src/orgmode_datasource.rs [433:7 - 443:10]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_datasource.rs [495:62 - 509:4] (14 lines, 109 tokens)
+   crates/holon-todoist/src/fake.rs [459:2 - 473:38]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_datasource.rs [601:2 - 612:23] (11 lines, 82 tokens)
+   crates/holon-orgmode/src/orgmode_datasource.rs [590:19 - 600:41]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/orgmode_datasource.rs [627:39 - 640:23] (13 lines, 98 tokens)
+   crates/holon-orgmode/src/orgmode_datasource.rs [613:37 - 626:24]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/models.rs [78:2 - 89:5] (11 lines, 178 tokens)
+   crates/holon-orgmode/src/parser.rs [158:2 - 171:53]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/models.rs [484:9 - 519:4] (35 lines, 164 tokens)
+   crates/holon-todoist/src/models.rs [128:9 - 163:43]
+
+Clone found (rust):
+ - crates/holon-orgmode/src/di.rs [13:20 - 19:42] (6 lines, 64 tokens)
+   crates/holon-todoist/src/di.rs [11:20 - 17:38]
+
+Clone found (rust):
+ - crates/holon-filesystem/src/directory.rs [7:2 - 15:20] (8 lines, 75 tokens)
+   crates/holon-orgmode/src/orgmode_datasource.rs [7:7 - 15:9]
+
+Clone found (rust):
+ - crates/holon-filesystem/src/directory.rs [69:2 - 87:2] (18 lines, 127 tokens)
+   crates/holon-orgmode/src/models.rs [101:2 - 119:5]
+
+Clone found (rust):
+ - crates/holon-filesystem/src/directory.rs [193:9 - 218:2] (25 lines, 225 tokens)
+   crates/holon-orgmode/src/orgmode_datasource.rs [89:2 - 114:11]
+
+Clone found (rust):
+ - crates/holon-core/src/traits.rs [306:7 - 316:7] (10 lines, 107 tokens)
+   crates/holon-core/src/traits.rs [283:4 - 293:40]
+
+Clone found (rust):
+ - crates/holon-core/src/traits.rs [327:17 - 340:5] (13 lines, 140 tokens)
+   crates/holon-core/src/traits.rs [306:17 - 319:5]
+
+Clone found (rust):
+ - crates/holon-core/src/traits.rs [546:17 - 552:13] (6 lines, 77 tokens)
+   crates/holon-core/src/traits.rs [522:13 - 527:25]
+
+Clone found (rust):
+ - crates/holon-core/src/traits.rs [577:9 - 591:60] (14 lines, 80 tokens)
+   crates/holon-core/src/traits.rs [469:9 - 483:86]
+
+Clone found (rust):
+ - crates/holon-core/src/traits.rs [768:10 - 780:2] (12 lines, 121 tokens)
+   crates/holon-core/src/traits.rs [722:8 - 733:2]
+
+Clone found (rust):
+ - crates/holon-core/src/fractional_index.rs [6:1 - 49:2] (43 lines, 302 tokens)
+   crates/holon/src/storage/fractional_index.rs [1:1 - 44:2]
+
+Clone found (rust):
+ - crates/holon-api/src/lib.rs [83:2 - 89:2] (6 lines, 98 tokens)
+   crates/holon/src/core/stream_cache.rs [212:2 - 218:3]
+
+Clone found (rust):
+ - crates/holon-api/src/lib.rs [312:2 - 319:27] (7 lines, 92 tokens)
+   crates/holon-api/src/lib.rs [301:2 - 308:27]
+
+Clone found (rust):
+ - crates/holon-api/src/lib.rs [357:4 - 364:6] (7 lines, 100 tokens)
+   crates/holon-api/src/lib.rs [342:7 - 349:3]
+
+Clone found (rust):
+ - crates/holon-api/src/entity.rs [248:5 - 258:2] (10 lines, 101 tokens)
+   crates/holon/src/storage/schema.rs [29:5 - 39:2]
+
+Clone found (rust):
+ - crates/holon/tests/stress_tests.rs [92:5 - 99:5] (7 lines, 91 tokens)
+   crates/holon/tests/stress_tests.rs [53:5 - 61:4]
+
+Clone found (rust):
+ - crates/holon/tests/stress_tests.rs [230:7 - 240:6] (10 lines, 98 tokens)
+   crates/holon/tests/stress_tests.rs [51:2 - 61:11]
+
+Clone found (rust):
+ - crates/holon/tests/reliability_tests.rs [196:19 - 208:4] (12 lines, 138 tokens)
+   crates/holon/tests/stress_tests.rs [228:15 - 100:4]
+
+Clone found (rust):
+ - crates/holon/tests/reliability_tests.rs [389:12 - 402:4] (13 lines, 137 tokens)
+   crates/holon/tests/stress_tests.rs [230:10 - 211:5]
+
+Clone found (rust):
+ - crates/holon/tests/json_aggregation_test.rs [10:2 - 22:69] (12 lines, 99 tokens)
+   crates/holon/src/core/transform/json_aggregation.rs [401:4 - 413:72]
+
+Clone found (rust):
+ - crates/holon/tests/json_aggregation_test.rs [37:47 - 91:44] (54 lines, 330 tokens)
+   crates/holon/src/core/transform/json_aggregation.rs [423:46 - 476:2]
+
+Clone found (rust):
+ - crates/holon/tests/json_aggregation_e2e_test.rs [339:9 - 356:26] (17 lines, 115 tokens)
+   crates/holon/tests/json_aggregation_e2e_test.rs [79:5 - 96:33]
+
+Clone found (rust):
+ - crates/holon/tests/json_aggregation_e2e_test.rs [423:57 - 442:2] (19 lines, 155 tokens)
+   crates/holon/tests/json_aggregation_e2e_test.rs [293:60 - 312:11]
+
+Clone found (rust):
+ - crates/holon/tests/json_aggregation_e2e_test.rs [550:47 - 559:57] (9 lines, 85 tokens)
+   crates/holon/tests/json_aggregation_e2e_test.rs [459:49 - 469:75]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [14:18 - 29:6] (15 lines, 141 tokens)
+   crates/holon/tests/stress_tests.rs [230:10 - 402:6]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [138:17 - 151:6] (13 lines, 129 tokens)
+   crates/holon/tests/integration_tests.rs [44:14 - 56:4]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [180:2 - 196:4] (16 lines, 156 tokens)
+   crates/holon/tests/stress_tests.rs [230:10 - 30:8]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [244:5 - 253:4] (9 lines, 110 tokens)
+   crates/holon/tests/integration_tests.rs [212:5 - 221:4]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [252:11 - 261:11] (9 lines, 80 tokens)
+   crates/holon/tests/integration_tests.rs [190:11 - 200:3]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [276:2 - 285:4] (9 lines, 95 tokens)
+   crates/holon/tests/integration_tests.rs [210:7 - 220:5]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [378:7 - 388:16] (10 lines, 101 tokens)
+   crates/holon/tests/stress_tests.rs [230:10 - 61:11]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [490:8 - 499:2] (9 lines, 103 tokens)
+   crates/holon/tests/integration_tests.rs [210:11 - 220:2]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [505:6 - 513:6] (8 lines, 92 tokens)
+   crates/holon/tests/integration_tests.rs [214:10 - 257:6]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [526:13 - 540:11] (14 lines, 154 tokens)
+   crates/holon/tests/integration_tests.rs [210:11 - 514:8]
+
+Clone found (rust):
+ - crates/holon/tests/integration_tests.rs [552:16 - 566:16] (14 lines, 159 tokens)
+   crates/holon/tests/integration_tests.rs [210:11 - 540:13]
+
+Clone found (rust):
+ - crates/holon/tests/e2e_backend_engine_test.rs [90:2 - 99:9] (9 lines, 78 tokens)
+   crates/holon/tests/e2e_backend_engine_test.rs [78:17 - 87:9]
+
+Clone found (rust):
+ - crates/holon/tests/e2e_backend_engine_test.rs [182:2 - 196:7] (14 lines, 257 tokens)
+   crates/holon/tests/e2e_backend_engine_test.rs [145:2 - 161:4]
+
+Clone found (rust):
+ - crates/holon/tests/e2e_backend_engine_test.rs [364:5 - 383:14] (19 lines, 154 tokens)
+   crates/holon/tests/e2e_backend_engine_test.rs [298:5 - 317:13]
+
+Clone found (rust):
+ - crates/holon/tests/e2e_backend_engine_test.rs [388:5 - 393:14] (5 lines, 88 tokens)
+   crates/holon/tests/e2e_backend_engine_test.rs [329:5 - 334:18]
+
+Clone found (rust):
+ - crates/holon/tests/e2e_backend_engine_test.rs [410:32 - 434:22] (24 lines, 204 tokens)
+   crates/holon/tests/e2e_backend_engine_test.rs [363:38 - 387:21]
+
+Clone found (rust):
+ - crates/holon/tests/e2e_backend_engine_test.rs [469:34 - 493:31] (24 lines, 204 tokens)
+   crates/holon/tests/e2e_backend_engine_test.rs [363:38 - 387:21]
+
+Clone found (rust):
+ - crates/holon/src/tasks.rs [129:2 - 149:4] (20 lines, 134 tokens)
+   crates/holon/src/tasks.rs [103:2 - 123:3]
+
+Clone found (rust):
+ - crates/holon/examples/test_loro_subscription.rs [65:49 - 70:7] (5 lines, 74 tokens)
+   crates/holon/examples/test_loro_subscription.rs [12:40 - 17:6]
+
+Clone found (rust):
+ - crates/holon/examples/test_loro_multiple_locks.rs [68:9 - 79:41] (11 lines, 88 tokens)
+   crates/holon/examples/test_loro_multiple_locks.rs [48:9 - 59:40]
+
+┌────────┬────────────────┬─────────────┬──────────────┬──────────────┬──────────────────┬───────────────────┐
+│ Format │ Files analyzed │ Total lines │ Total tokens │ Clones found │ Duplicated lines │ Duplicated tokens │
+├────────┼────────────────┼─────────────┼──────────────┼──────────────┼──────────────────┼───────────────────┤
+│ rust   │ 129            │ 32082       │ 256387       │ 159          │ 2027 (6.32%)     │ 19558 (7.63%)     │
+├────────┼────────────────┼─────────────┼──────────────┼──────────────┼──────────────────┼───────────────────┤
+│ Total: │ 129            │ 32082       │ 256387       │ 159          │ 2027 (6.32%)     │ 19558 (7.63%)     │
+└────────┴────────────────┴─────────────┴──────────────┴──────────────┴──────────────────┴───────────────────┘
+Found 159 clones.
+JSON report saved to report/jscpd-report.json
+Detection time:: 1.523s

@@ -1,0 +1,10 @@
+[package]
+name = "example1-build-script"
+version = "0.1.0"
+edition = "2024"
+description = "Build-script approach: add a transition by creating a new file. Nothing else changes."
+
+[workspace]
+
+[dependencies]
+anyhow = "1"

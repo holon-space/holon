@@ -1,0 +1,122 @@
+# Todoist integration config (generic holon-mcp-client form).
+#
+# This is the "fully converted" target: a single file consumed by
+# McpIntegrationsModule::from_dir(...) — exactly like the gmailcal config —
+# so holon-todoist no longer needs its own REST client, sync provider, or
+# datasource. Drop this in the integrations dir (e.g. ~/.config/holon/integrations/).
+#
+# The token:
+#   The Todoist MCP server accepts a personal API token as
+#   `Authorization: Bearer <token>` (verified live — no OAuth needed).
+#   `${VAR}` references in transport/auth fields are expanded from the process
+#   environment at startup (fail-loud if unset), so the secret stays out of the
+#   YAML — set TODOIST_API_KEY in the environment.
+
+transport:
+  http:
+    uri: https://ai.todoist.net/mcp
+
+auth:
+  static_token: "${TODOIST_API_KEY}"   # expanded from $TODOIST_API_KEY at startup
+  oauth: false
+
+entities:
+  todoist_tasks:
+    short_name: task
+    id_column: id
+    schema:
+      - { name: id,            sql_type: TEXT, primary_key: true }
+      - { name: content,       sql_type: TEXT }
+      - { name: description,   sql_type: TEXT }
+      - { name: priority,      sql_type: TEXT }           # "p1".."p4"
+      - { name: dueDate,       sql_type: TEXT }
+      - { name: recurring,     sql_type: TEXT }           # bool or recurrence string
+      - { name: checked,       sql_type: INTEGER }        # completion flag
+      - { name: projectId,     sql_type: TEXT, indexed: true }
+      - { name: sectionId,     sql_type: TEXT }
+      - { name: parentId,      sql_type: TEXT, indexed: true }
+      - { name: labels,        sql_type: TEXT, jsonb: true }
+      - { name: responsibleUid, sql_type: TEXT }
+      - { name: assignedByUid, sql_type: TEXT }
+    sync:
+      list_tool: find-tasks
+      extract_path: tasks
+      list_params: { filter: "all" }
+      cursor:
+        request_param: cursor
+        response_field: nextCursor
+
+  todoist_projects:
+    short_name: project
+    id_column: id
+    schema:
+      - { name: id,           sql_type: TEXT, primary_key: true }
+      - { name: name,         sql_type: TEXT }
+      - { name: color,        sql_type: TEXT }
+      - { name: isFavorite,   sql_type: INTEGER }
+      - { name: isShared,     sql_type: INTEGER }
+      - { name: inboxProject, sql_type: INTEGER }
+      - { name: viewStyle,    sql_type: TEXT }
+      - { name: childOrder,   sql_type: INTEGER }
+      - { name: parentId,     sql_type: TEXT, indexed: true }
+    sync:
+      list_tool: find-projects
+      extract_path: projects
+      cursor:
+        request_param: cursor
+        response_field: nextCursor
+
+tools:
+  complete-tasks:
+    entity: todoist_tasks
+    affected_fields: [completed]
+    triggered_by:
+      - from: completed
+        provides: [ids]
+    precondition: "completed == false"
+    undo:
+      reversible: false
+  update-tasks:
+    entity: todoist_tasks
+    affected_fields: [content, description, priority, dueString, labels]
+    undo:
+      tool: update-tasks
+      capture: [content, description, priority, dueString, labels]
+  add-tasks:
+    entity: todoist_tasks
+    display_name: Create Task
+    undo:
+      reversible: false
+  delete-object:
+    entity: todoist_tasks
+    display_name: Delete
+    undo:
+      reversible: false
+  add-projects:
+    entity: todoist_projects
+    display_name: Create Project
+    undo:
+      reversible: false
+  update-projects:
+    entity: todoist_projects
+    affected_fields: [name, color, isFavorite, viewStyle]
+    undo:
+      tool: update-projects
+      capture: [name, color, isFavorite, viewStyle]
+  find-tasks:
+    entity: todoist_tasks
+  find-tasks-by-date:
+    entity: todoist_tasks
+  find-completed-tasks:
+    entity: todoist_tasks
+  find-projects:
+    entity: todoist_projects
+  add-sections:
+    entity: todoist_projects
+    display_name: Create Section
+  add-comments:
+    entity: todoist_tasks
+    display_name: Add Comment
+  manage-assignments:
+    entity: todoist_tasks
+    affected_fields: [responsibleUid]

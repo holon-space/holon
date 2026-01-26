@@ -1,0 +1,7 @@
+@startuml c4-component
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title Component Diagram (GoF Patterns)
+
+
+@enduml
