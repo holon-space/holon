@@ -126,9 +126,45 @@ lint:
 
 # Watch & run a UI frontend (recompiles on source changes)
 # chrome-trace available for: gpui, blinc, ply
-watch ui='gpui' orgroot='~/Workspaces/pkm/holon-pkm/' *FLAGS:
-    cargo watch \
-        -s 'cargo check -p holon-{{ui}} && cargo run -p holon-{{ui}} --features chrome-trace -- --orgmode-root {{orgroot}} {{FLAGS}}'
+# Only kills the old app if the new build succeeds.
+watch ui='gpui' *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    UI="{{ui}}"
+    EXTRA_FLAGS="{{FLAGS}}"
+    BIN="target/debug/holon-${UI}"
+    APP_PID=""
+    OUTER_PID=$$
+
+    restart_app() {
+        if [ -n "$APP_PID" ]; then
+            kill "$APP_PID" 2>/dev/null || true
+            wait "$APP_PID" 2>/dev/null || true
+        fi
+        "$BIN" $EXTRA_FLAGS &
+        APP_PID=$!
+        echo ">>> App started (PID $APP_PID) <<<"
+    }
+
+    cleanup() {
+        [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null || true
+        [ -n "${WATCH_PID:-}" ] && kill "$WATCH_PID" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+    trap restart_app USR1
+
+    # Initial build and run
+    cargo build -p "holon-${UI}" --features chrome-trace 2>&1 | tee /tmp/holon-build.log
+    restart_app
+
+    # cargo-watch only builds; signals outer script on success
+    cargo watch -s "cargo build -p holon-${UI} --features chrome-trace 2>&1 | tee /tmp/holon-build.log && kill -USR1 ${OUTER_PID} || echo '>>> Build failed — keeping old instance running <<<'" &
+    WATCH_PID=$!
+
+    # Block until cargo-watch exits; USR1 interrupts wait to trigger restart_app
+    while kill -0 "$WATCH_PID" 2>/dev/null; do
+        wait "$WATCH_PID" 2>/dev/null || true
+    done
 
 # --- Flutter Frontend (submodule) -------------------------------------------
 

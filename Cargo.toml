@@ -1,31 +1,63 @@
 [workspace]
 members = [
     "crates/holon",
-    "crates/holon-todoist",
     "crates/holon-api",
     "crates/holon-core",
+    "crates/holon-turso",
     "crates/holon-engine",
+    "crates/holon-expr",
     "crates/holon-org-format",
     "crates/holon-orgmode",
     "crates/holon-markdown",
     "crates/holon-filesystem",
     "crates/holon-frontend",
+    "crates/holon-app",
     "crates/holon-block-roundtrip-testing",
     "crates/holon-layout-testing",
+    "crates/holon-pbt-core",
     "crates/holon-integration-tests",
     "crates/holon-mcp-client",
     "crates/holon-macros",
     "crates/holon-macros-test",
+    "crates/holon-petri",
+    "crates/holon-profiles",
+    "crates/holon-loro",
+    "crates/holon-architecture-tests",
     "frontends/tui",
     "frontends/mcp",
+    "frontends/gpui",
+    "tools",
+    "workspace-hack",
+    "experiments/lorotree-spike",
 ]
 exclude = [
+    # naga 27 (via wgpu) + codespan-reporting 0.12 = WriteColor trait error
+    # when features are unified across the workspace. Known upstream bug:
+    # https://github.com/gfx-rs/wgpu/issues/7915
+    # Fix landed in codespan-reporting 0.13; waiting for wgpu/naga backport:
+    # https://github.com/gfx-rs/wgpu/issues/8366
+    "frontends/waterui",
+    # holon-worker is an out-of-workspace crate targeting wasm32-wasip1-threads
+    # via `napi build`. It has its own Cargo.lock and its own [workspace] table.
+    # See plan: ~/.claude/plans/nifty-bouncing-ladybug.md (Phase 1, H3).
+    "frontends/holon-worker",
+    # dioxus-web targets wasm32 only; web-sys/js-sys are not available on native
+    # so cargo check --workspace would fail. Build via `trunk build` instead.
+    "frontends/dioxus-web",
+    # TEMP (W3 local only): dioxus 0.7 pulls cocoa 0.25 which conflicts with
+    # gpui's pinned cocoa =0.26.0 during workspace resolution. Excluded so the
+    # TUI can build/run in isolation. Revert before landing.
+    "frontends/dioxus",
+    # waterkit-screen (transitive via waterui) uses CGWindowListCreateImage,
+    # which is obsoleted in macOS 15+ (Xcode 26 SDK). Build via the ply-specific
+    # toolchain when needed; excluded from --workspace check.
+    "frontends/ply",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 # === Serialization ===
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
@@ -49,6 +81,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tracing-opentelemetry = { version = "0.32", features = ["tracing-log"] }
 tracing-appender = "0.2"
 tracing-chrome = "0.7"
+# tokio-console async-wait profiler. Requires building with
+# RUSTFLAGS="--cfg tokio_unstable" and tokio's `tracing` feature.
+console-subscriber = "0.4"
 opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["http", "http-proto"] }
@@ -82,7 +117,6 @@ iroh = { version = "0.96.0", default-features = false }
 # === Testing ===
 proptest = "1.6"
 proptest-state-machine = "0.7.0"
-cucumber = "0.22"
 serial_test = "3.2"
 tempfile = "3.23"
 
@@ -139,10 +173,20 @@ r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = 
 holon = { path = "crates/holon" }
 holon-api = { path = "crates/holon-api" }
 holon-core = { path = "crates/holon-core" }
+holon-engine = { path = "crates/holon-engine" }
+holon-expr = { path = "crates/holon-expr" }
+holon-petri = { path = "crates/holon-petri" }
+holon-profiles = { path = "crates/holon-profiles" }
+# default-features = false drops holon-loro's `iroh-sync` (iroh → QUIC/TLS/ring,
+# native-only, fatal on wasm). holon's own `iroh-sync` feature re-enables it, so
+# native builds are unchanged; the wasm worker (holon default-features = false)
+# gets a loro stack with no iroh. holon is the only holon-loro consumer.
+holon-loro = { path = "crates/holon-loro", default-features = false }
+holon-turso = { path = "crates/holon-turso" }
 holon-frontend = { path = "crates/holon-frontend" }
+holon-app = { path = "crates/holon-app" }
 holon-macros = { path = "crates/holon-macros" }
 holon-mcp-client = { path = "crates/holon-mcp-client" }
-holon-todoist = { path = "crates/holon-todoist" }
 holon-org-format = { path = "crates/holon-org-format" }
 holon-orgmode = { path = "crates/holon-orgmode", features = ["di"] }
 holon-markdown = { path = "crates/holon-markdown" }
@@ -164,9 +208,14 @@ lto = "thin"
 
 # Debugger profile: full debug info for variable inspection in LLDB/DAP
 # Usage: cargo build --profile debugger
+# `split-debuginfo = "packed"` consolidates DWARF into a self-contained `.dSYM`
+# bundle (via dsymutil) so LLDB doesn't depend on the per-crate `.o`/`.rlib`
+# files cargo prunes after linking — without this, breakpoints in dependency
+# crates (e.g. holon-gpui lib code) fail to bind in LLDB/DAP.
 [profile.debugger]
 inherits = "dev"
 debug = 2
+split-debuginfo = "packed"
 
 # Coverage profile for runtime code coverage collection
 # This profile enables LLVM source-based coverage instrumentation
@@ -184,3 +233,34 @@ debug = true
 #sqlparser = { version = "0.33", default-features = false, features = [] }
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
 pathfinder_simd = { git = "https://github.com/pbdeuchler/pathfinder.git", branch = "pbd/fix_simd_renames", package = "pathfinder_simd" }
+
+# Holon fork of zed — tracks the `holon` branch so we can add more ports
+# (currently: a one-line `std::mem::forget` of an extra strong Rc<AppCell>
+# inside `Application::run` on iOS so the context survives beyond the single
+# pass through UIApplicationMain's finish-launching callback). Without the
+# iOS patch, every Weak<AppCell> held by windows / async tasks dangles as
+# soon as the first run loop tick fires applicationDidBecomeActive.
+# Rebase the branch periodically onto the upstream rev used by gpui-mobile.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_wgpu = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_macos = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_linux = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_windows = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_web = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_platform = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+
+# Holon fork of gpui-mobile — tracks the `holon` branch. Currently carries
+# a single patch: wire a real display handle into wgpu's `InstanceDescriptor`
+# on iOS so `Instance::create_surface_unsafe` actually produces a Metal
+# surface under wgpu v29. Without this the iOS `IosWindow.renderer` stays
+# `None`, every `draw()` hits the fallback, and the Metal layer shows only
+# its clear color (black screen).
+[patch."https://github.com/itsbalamurali/gpui-mobile"]
+gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch = "holon" }
+
+# Point at local clone while the `context_menu_extender` commit is
+# unpublished — once pushed to holon-space/gpui-component the `path`
+# can be replaced by the git+branch spec used in frontends/gpui/Cargo.toml.
+[patch."https://github.com/holon-space/gpui-component"]
+gpui-component = { path = "/Users/martin/Workspaces/rust/gpui-component/crates/ui" }
