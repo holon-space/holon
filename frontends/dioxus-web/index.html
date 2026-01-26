@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Holon — Browser Demo</title>
+    <link data-trunk rel="rust" data-bin="holon-dioxus-web" data-wasm-opt="z" />
+    <style>
+      :root {
+        --bg: #121212;
+        --bg-sidebar: #1e1e1e;
+        --surface: #1a1a1a;
+        --surface-elevated: #2a2a2a;
+        --border: #333333;
+        --text-primary: #e0e0e0;
+        --text-secondary: #b0b0b0;
+        --text-muted: #808080;
+        --accent: #7b9fff;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text-primary);
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+      * { box-sizing: border-box; }
+      .holon-banner {
+        background: var(--surface-elevated);
+        border-bottom: 1px solid var(--border);
+        padding: 8px 16px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="holon-banner">
+      Holon browser demo — in-memory only. Refreshing wipes state.
+    </div>
+    <div id="main"></div>
+  </body>
+</html>

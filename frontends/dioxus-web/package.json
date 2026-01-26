@@ -1,0 +1,8 @@
+{
+  "name": "holon-dioxus-web-serve",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "ws": "^8"
+  }
+}

@@ -1,0 +1,66 @@
+# Out-of-workspace crate: targets wasm32-wasip1-threads via `napi build`.
+# Intentionally declares its own empty [workspace] to opt out of the holon
+# root workspace. See ~/.claude/plans/nifty-bouncing-ladybug.md H3.
+[workspace]
+
+[package]
+name = "holon-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Holon backend running as a Web Worker on wasm32-wasip1-threads"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+napi = { version = "3.8.3", default-features = false, features = ["napi6", "tokio_rt"] }
+napi-derive = "3.5.2"
+# NOTE: tokio refuses to compile `rt-multi-thread` on any wasm target with a
+# compile_error!(): "Only features sync,macros,io-util,rt,time are supported on
+# wasm." This was discovered during the Phase 1 spike (2026-04-14) and means
+# H4 step 2 is FALSIFIED at compile time. The worker must run a single
+# current-thread runtime; see lib.rs spawn_check() for the validated shape
+# and ~/.claude/plans/nifty-bouncing-ladybug.md H4 for the implications.
+tokio = { version = "1", default-features = false, features = ["rt", "time", "macros", "sync"] }
+
+# Turso database — same fork/branch as holon's root workspace. Only needed
+# when the `browser` feature is on, but we pull it in unconditionally so
+# `cargo check` (native) covers the shim as well.
+turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fs", "json", "uuid", "time", "series", "encryption"] }
+anyhow = "1"
+parking_lot = "0.12"
+tracing = "0.1"
+serde_json = "1"
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+
+# Holon backend, path-deps relative to this manifest. holon-api carries the
+# wire types (Value, EntityUri, UiEvent, etc.) that the worker shuttles over
+# postMessage; holon owns BackendEngine and the DI lifecycle.
+#
+# `default-features = false` disables `iroh-sync` which depends on QUIC and
+# is native-only.
+holon-api = { path = "../../crates/holon-api" }
+holon = { path = "../../crates/holon", default-features = false }
+# holon-frontend: wasi-safe subset. default-features = false ensures no
+# heap-profile / chrome-trace / otel features that pull native-only transitive
+# deps. The wasi cfg gates in holon-frontend/Cargo.toml strip the rest.
+holon-frontend = { path = "../../crates/holon-frontend", default-features = false }
+
+[build-dependencies]
+napi-build = "2.3.1"
+
+[features]
+# `browser` toggles the vendored Turso OPFS shim. Phase 2 enables it by
+# default so the harness exercises OPFS-backed Turso.
+default = ["browser"]
+browser = []
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+
+[profile.release-official]
+inherits = "release"
+codegen-units = 1
