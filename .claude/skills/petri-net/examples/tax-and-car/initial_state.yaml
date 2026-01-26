@@ -1,0 +1,166 @@
+# Initial State: Tax Return + Car Purchase
+#
+# This is the starting state. NEVER modify this file during simulation.
+# All state changes are recorded in history.yaml (append-only event sourcing).
+# Current state = this file + replay(history.yaml)
+
+clock:
+  start: "2025-03-01T08:00:00"
+  current: "2025-03-01T08:00:00"
+
+tokens:
+
+  # --- The Self ---
+  self:
+    type: Person
+    attributes:
+      energy: 0.8
+      focus: 0.9
+      mental_slots:
+        capacity: 7
+        used: 0
+      health: 0.85
+      relationships:
+        partner: 0.9
+
+  # --- Tax Project Tokens ---
+  income_statement:
+    type: Document
+    place: missing
+    attributes:
+      format: pdf
+      location: null
+
+  donation_receipts:
+    type: Document
+    place: missing
+    attributes:
+      format: pdf
+      location: null
+
+  knowledge_deductions:
+    type: Knowledge
+    place: unknown
+    attributes:
+      confidence: 0.0
+      source: null
+
+  tax_form_n:
+    type: Document
+    place: missing
+    attributes: {}
+
+  tax_form_v:
+    type: Document
+    place: missing
+    attributes: {}
+
+  tax_submission:
+    type: Document
+    place: missing
+    attributes: {}
+
+  tax_refund:
+    type: Monetary
+    place: not_realized
+    attributes:
+      value: 2000
+
+  # --- Car Project Tokens ---
+  budget:
+    type: Monetary
+    place: available
+    attributes:
+      value: 35000
+
+  car_candidates:
+    type: Collection
+    place: empty
+    attributes:
+      items: []
+
+  financing_options:
+    type: Document
+    place: missing
+    attributes: {}
+
+  test_drive_appointments:
+    type: Document
+    place: missing
+    attributes: {}
+
+  car_decision:
+    type: Document
+    place: missing
+    attributes: {}
+
+  car:
+    type: Vehicle
+    place: not_started
+    attributes:
+      selected: null
+
+  car_utility:
+    type: Monetary
+    place: not_realized
+    attributes:
+      value: 50
+      unit: EUR/day
+
+# --- WSJF Configuration ---
+
+wsjf_config:
+  priority_weights:
+    P1: 100
+    P2: 40
+    P3: 15
+    P4: 5
+    none: 1
+  default_duration_minutes: 60
+
+task_priorities:
+  collect_income_statement: P3
+  collect_donation_receipts: P3
+  research_deductions: P3
+  fill_tax_form_n: P2
+  fill_tax_form_v: P2
+  submit_tax_return: P1
+  research_cars: P3
+  compare_financing: P3
+  schedule_test_drives: P4
+  do_test_drive: P3
+  decide_on_car: P2
+  purchase_car: P1
+  register_car: P2
+
+task_deadlines:
+  submit_tax_return:
+    deadline: "2025-07-31T23:59:00"
+    buffer_days: 14
+    penalty_eur: 500
+
+# --- Projects (for context-switch tracking) ---
+
+projects:
+  tax:
+    transitions:
+      - collect_income_statement
+      - collect_donation_receipts
+      - research_deductions
+      - fill_tax_form_n
+      - fill_tax_form_v
+      - submit_tax_return
+    completion_token: tax_submission
+    completion_place: submitted
+
+  car:
+    transitions:
+      - research_cars
+      - compare_financing
+      - schedule_test_drives
+      - do_test_drive
+      - decide_on_car
+      - purchase_car
+      - register_car
+    completion_token: car
+    completion_place: registered
