@@ -1,0 +1,70 @@
+[package]
+name = "holon-gpui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "holon_gpui"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "holon-gpui"
+path = "src/main.rs"
+
+[[test]]
+name = "gpui_ui_pbt"
+harness = false
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui_platform"]
+mobile = ["dep:gpui-mobile"]
+chrome-trace = ["holon-frontend/chrome-trace"]
+
+[dependencies]
+# GPUI framework — pinned to same rev as gpui-mobile to ensure single gpui version
+gpui = { git = "https://github.com/zed-industries/zed", rev = "4dd42a0f77b11d0bed2a072919bcd9180b9a577c" }
+
+# Desktop-only: native platform (macOS/Linux/Windows)
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "4dd42a0f77b11d0bed2a072919bcd9180b9a577c", optional = true, features = ["font-kit"] }
+
+# Mobile-only: platform implementations for iOS/Android
+gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", optional = true }
+
+# GPUI component library (buttons, inputs, modals, etc.)
+# Fork pins zed rev to match gpui-mobile; upstream uses unpinned git dep
+gpui-component = { git = "https://github.com/holon-space/gpui-component", branch = "holon" }
+
+# Holon workspace crates
+holon-frontend.workspace = true
+holon-api.workspace = true
+holon-macros.workspace = true
+holon-mcp = { path = "../mcp" }
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+smol = "2"
+
+# Serialization
+serde_json.workspace = true
+toml.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
+android-activity = { version = "0.6", features = ["native-activity"] }
+log = "0.4"
+
+[dev-dependencies]
+holon-integration-tests = { path = "../../crates/holon-integration-tests" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "4dd42a0f77b11d0bed2a072919bcd9180b9a577c", features = ["font-kit"] }

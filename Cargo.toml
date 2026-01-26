@@ -12,8 +12,11 @@ members = [
     "crates/holon-mcp-client",
     "crates/holon-macros",
     "crates/holon-macros-test",
+    "frontends/tui",
     "frontends/mcp",
     "frontends/flutter/rust",
+    "frontends/blinc",
+    "frontends/waterui",
 ]
 exclude = [
 ]
