@@ -1,0 +1,11 @@
+[package]
+name = "example2-disponent"
+version = "0.1.0"
+edition = "2024"
+description = "disponent: declare! macro creates enum + trait dispatch in one place."
+
+[workspace]
+
+[dependencies]
+disponent = "0.2"
+anyhow = "1"

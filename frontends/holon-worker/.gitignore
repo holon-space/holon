@@ -1,0 +1,4 @@
+# napi-rs `copyArtifact` historically dropped the worker wasm here. Do not
+# commit it — it's 600+ MB on dev profile. serve.mjs now serves it directly
+# from cargo target/, so this file should never exist in the worker root.
+holon_worker.wasm32-wasi.wasm
