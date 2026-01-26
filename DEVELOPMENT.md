@@ -1,5 +1,17 @@
 # Development Guide
 
+## First-time setup
+
+- **Rust toolchain** — pinned via `rust-toolchain.toml`, picked up by `rustup` automatically.
+- **Metal toolchain (macOS)** — required for the GPUI frontend (`holon-gpui`) because `gpui_macos` compiles Metal shaders at build time. If you see `cannot execute tool 'metal'` during `cargo build -p holon-gpui`, install it with:
+
+  ```bash
+  xcodebuild -downloadComponent MetalToolchain
+  ```
+
+  Xcode occasionally evicts this component after an update; re-run the command if the error reappears.
+- **Tokio runtime for sync unit tests** — `StubBuilderServices::new()` lazily constructs a process-wide multi-threaded tokio runtime on first use. Non-`#[tokio::main]` unit tests can construct it directly and get a real `runtime_handle()` without any extra scaffolding.
+
 ## Testing with Nextest
 
 We use [`cargo-nextest`](https://nexte.st/) as our test runner for faster parallel test execution and better output formatting.
@@ -206,3 +218,8 @@ The MCP sync pipeline carries span context through the full cycle:
 - `sync_entity{entity, provider}` — per-entity sync with diff stats
 - `resource_fetch{uri}` — individual MCP resource read
 - `subscription_resync{uri}` — notification-triggered resync
+
+## VCS via JJ (Jujutsu)
+This project uses `jj` as VCS.
+A few recommendations:
+* When you're doing experiments, just do a `jj new` before. That allows you to use `jj edit @-` to jump back to the previous rev, `jj abandon @` to throw away the experiment, or `jj describe` to keep a successful experiment

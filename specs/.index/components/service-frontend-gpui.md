@@ -17,7 +17,7 @@ fetch_timestamp: 2026-04-23
 | Module | Role |
 |--------|------|
 | `views/reactive_shell` | `ReactiveShell` — main container; drives CDC → GPUI entity pipeline |
-| `views/render_block_view` | `RenderBlockView` — renders a single block via `WidgetSpec` |
+| `views/render_entity_view` | `RenderBlockView` — renders a single block via `WidgetSpec` |
 | `render/builders/` | Builder impls (view_mode_switcher, etc.) that produce GPUI elements |
 | `navigation_state` | `NavigationState` — tracks current focus, breadcrumb, back/forward |
 | `entity_view_registry` | `EntityViewRegistry` — maps entity names → GPUI view factories |

@@ -1,0 +1,21 @@
+{
+  "name": "holon-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Holon backend Web Worker (wasm32-wasip1-threads). Phase 1 spike.",
+  "scripts": {
+    "napi-build": "napi build --features browser --profile release-official --platform --target wasm32-wasip1-threads --no-js --manifest-path ./Cargo.toml --output-dir .",
+    "build": "bash scripts/build.sh",
+    "serve": "node scripts/serve.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.1.5"
+  },
+  "napi": {
+    "binaryName": "holon_worker",
+    "targets": [
+      "wasm32-wasip1-threads"
+    ]
+  }
+}

@@ -7,6 +7,11 @@ test-seq = "test -- --test-threads=1"
 rustflags = [
   "-Z",
   "threads=8",
+  # Legacy mangling required for subsecond/ThinLink hot-patching (nightly v0 mangling breaks it)
+  "-Z",
+  "unstable-options",
+  "-C",
+  "symbol-mangling-version=legacy",
 ]
 
 # Android NDK configuration for cross-compilation

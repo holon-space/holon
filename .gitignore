@@ -38,3 +38,10 @@ logs/security/
 **/flutter/build/
 **/.dart_tool/
 **/.gradle/
+.gstack/
+frontends/dioxus-web/node_modules/
+
+# Ralph spec state
+specs/.current-spec
+specs/.current-epic
+**/.progress.md

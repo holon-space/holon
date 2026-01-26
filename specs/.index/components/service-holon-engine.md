@@ -42,7 +42,7 @@ fetch_timestamp: 2026-04-23
 
 ### Vision
 
-See `VISION_PETRI_NET.md` — Petri nets model personal workflow automation (task routing, focus management, etc.)
+See `docs/Vision/PetriNet.md` — Petri nets model personal workflow automation (task routing, focus management, etc.)
 
 ### Keywords
 petri-net, state-machine, Rhai, workflow, engine, tokens, transitions

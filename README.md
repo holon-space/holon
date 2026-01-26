@@ -15,7 +15,7 @@ Modern knowledge workers juggle tasks across Todoist, JIRA, Linear; notes across
 - AI helps you see patterns and connections you'd miss
 - You achieve flow states more frequently
 
-Holon is a **trust and flow system** that happens to use productivity data. For the full philosophical foundation, see [VISION_LONG_TERM.md](VISION_LONG_TERM.md).
+Holon is a **trust and flow system** that happens to use productivity data. For the full philosophical foundation, see [docs/Vision/LongTerm.md](docs/Vision/LongTerm.md).
 
 ## Architecture Overview
 
@@ -44,7 +44,7 @@ Operations are fire-and-forget. Effects are observed through reactive CDC stream
 
 Both owned data (Loro CRDT) and third-party data flow into the same Turso cache. The UI queries this single unified surface using PRQL, GQL, or raw SQL. Rendering is specified separately in Rhai-based render expressions.
 
-For the full architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the full architecture, see [docs/Architecture.md](docs/Architecture.md).
 
 ## Crate Structure
 
@@ -86,7 +86,7 @@ from children
 select {id, content, content_type, source_language}
 #+END_SRC
 #+BEGIN_SRC render
-list(#{item_template: render_block()})
+list(#{item_template: render_entity()})
 #+END_SRC
 ```
 
@@ -96,7 +96,7 @@ Org files are bidirectionally synced: edit in Emacs/Vim/any editor, changes appe
 
 ### Petri-Net Engine & WSJF Ranking
 
-Tasks are materialized into a Petri Net model with typed tokens (Person, Organization, Document, Monetary, Knowledge, Resource). The engine computes WSJF (Weighted Shortest Job First) rankings using prototype blocks with Rhai-evaluated scoring expressions. See [VISION_PETRI_NET.md](VISION_PETRI_NET.md).
+Tasks are materialized into a Petri Net model with typed tokens (Person, Organization, Document, Monetary, Knowledge, Resource). The engine computes WSJF (Weighted Shortest Job First) rankings using prototype blocks with Rhai-evaluated scoring expressions. See [docs/Vision/PetriNet.md](docs/Vision/PetriNet.md).
 
 ### MCP Server
 
@@ -104,7 +104,7 @@ Every frontend automatically launches an MCP server, exposing the full query sur
 
 ### Structural Primacy
 
-Intelligence resides in the data structure, not in the AI model. The substitution test: swap the AI model — the system still works. Remove the data structure — nothing can reconstruct it. Schemas, typed relationships, materialized views, and the Petri Net are all structural intelligence. See [VISION_AI.md](VISION_AI.md).
+Intelligence resides in the data structure, not in the AI model. The substitution test: swap the AI model — the system still works. Remove the data structure — nothing can reconstruct it. Schemas, typed relationships, materialized views, and the Petri Net are all structural intelligence. See [docs/Vision/AI.md](docs/Vision/AI.md).
 
 ## Building
 
@@ -127,7 +127,7 @@ Tests use real database connections and must run sequentially:
 cargo test --tests -- --test-threads=1
 ```
 
-See [TESTING.md](TESTING.md) for details.
+See [docs/Testing/Testing.md](docs/Testing/Testing.md) for details.
 
 ### Run the MCP Server
 
@@ -145,12 +145,12 @@ cargo run -p holon-engine -- --help
 
 | Document | Contents |
 |----------|----------|
-| [VISION.md](VISION.md) | Technical vision & phased roadmap |
-| [VISION_LONG_TERM.md](VISION_LONG_TERM.md) | Philosophical foundation: Integral Theory, flow psychology, the Holon promise |
-| [VISION_AI.md](VISION_AI.md) | Three AI roles (Watcher, Integrator, Guide), trust ladder, privacy model |
-| [VISION_PETRI_NET.md](VISION_PETRI_NET.md) | Petri-Net primitives, Digital Twins, WSJF sorting |
-| [VISION_UI.md](VISION_UI.md) | UI/UX design system: three modes (Capture, Orient, Flow), color palette, micro-interactions |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Full technical architecture: traits, data flow, CDC, entity types |
+| [docs/Vision.md](docs/Vision.md) | Technical vision & phased roadmap |
+| [docs/Vision/LongTerm.md](docs/Vision/LongTerm.md) | Philosophical foundation: Integral Theory, flow psychology, the Holon promise |
+| [docs/Vision/AI.md](docs/Vision/AI.md) | Three AI roles (Watcher, Integrator, Guide), trust ladder, privacy model |
+| [docs/Vision/PetriNet.md](docs/Vision/PetriNet.md) | Petri-Net primitives, Digital Twins, WSJF sorting |
+| [docs/Vision/UI.md](docs/Vision/UI.md) | UI/UX design system: three modes (Capture, Orient, Flow), color palette, micro-interactions |
+| [docs/Architecture.md](docs/Architecture.md) | Full technical architecture: traits, data flow, CDC, entity types |
 
 ## Core Dependencies
 

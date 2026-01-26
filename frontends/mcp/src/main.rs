@@ -345,8 +345,7 @@ async fn main() -> Result<()> {
             token_for_signal.cancel();
         });
         let debug = Arc::new(DebugServices::default());
-        holon_mcp::di::run_http_server(None, debug, None, bind_address, cancellation_token)
-            .await?;
+        holon_mcp::di::run_http_server(None, debug, None, bind_address, cancellation_token).await?;
         return Ok(());
     }
 
@@ -452,6 +451,35 @@ async fn main() -> Result<()> {
         .engine()
         .clone();
     let debug = injector.resolve::<DebugServices>();
+
+    // Shutdown flush: spawn a task that awaits Ctrl+C and flushes any
+    // in-flight shared-doc saves before the process exits. The 150ms
+    // debounce window in `SaveWorker` would otherwise drop pending
+    // edits on SIGINT. HTTP mode already has its own ctrl_c handler
+    // for the cancellation token — this one targets the flush side
+    // only and does not exit (the server future completes naturally
+    // once cancellation propagates).
+    //
+    // Relies on `holon` being compiled with its default `iroh-sync`
+    // feature; `try_resolve` returns Err if the backend isn't
+    // registered (e.g. iroh-sync disabled) so this is a no-op then.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let injector_for_signal = injector.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::warn!("ctrl_c handler install failed: {e}");
+                return;
+            }
+            tracing::info!("Ctrl+C received — flushing shared-tree snapshots");
+            if let Ok(backend) = injector_for_signal
+                .try_resolve::<std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>>()
+            {
+                backend.flush_all().await;
+                tracing::info!("flush_all complete");
+            }
+        });
+    }
 
     // Run server based on transport mode
     match config.transport_mode {

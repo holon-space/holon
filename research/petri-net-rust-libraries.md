@@ -2,7 +2,7 @@
 
 ## Requirements Summary
 
-From VISION_PETRI_NET.md, the Holon Petri Net engine needs:
+From docs/Vision/PetriNet.md, the Holon Petri Net engine needs:
 
 1. **Colored/typed tokens** — tokens are Digital Twins with arbitrary attributes (energy, money, health, etc.)
 2. **Guard conditions** on transitions — preconditions like `self.energy >= 0.3`

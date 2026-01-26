@@ -165,7 +165,7 @@ pub async fn init_app_frame(&self) -> Result<AppFrame> {
 from children
 select {id, content, sort_key, width = s"COALESCE(json_extract(properties, '$.width'), 1.0)"}
 sort sort_key
-render (columns item_template:(panel width:width content:(render_block this)))
+render (columns item_template:(panel width:width content:(render_entity this)))
 #+END_SRC
 
 ** Navigation
@@ -185,7 +185,7 @@ render (list item_template:(document_link this))
 from children
 join cf = current_focus (cf.region == "main")
 filter parent_id == cf.block_id
-render (tree item_template:(render_block this))
+render (tree item_template:(render_entity this))
 #+END_SRC
 ```
 

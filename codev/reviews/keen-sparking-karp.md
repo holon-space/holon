@@ -79,7 +79,7 @@ External Org Edit:
 **Changes:**
 - Extended to subscribe to block events (`block.created`, `block.updated`, `block.deleted`)
 - Serializes blocks to Org files when block events occur (Loro → Org)
-- Uses `OrgRenderer::render_blocks()` to convert Loro blocks to Org format
+- Uses `OrgRenderer::render_entitys()` to convert Loro blocks to Org format
 - Marks writes in `WriteTracker` to prevent sync loops
 
 ### Phase 5: DI Integration ✅
@@ -122,7 +122,7 @@ External Org Edit:
 
 **Implementation**:
 - Subscribes to `block.created`, `block.updated`, `block.deleted` events
-- Uses `OrgRenderer::render_blocks()` to serialize
+- Uses `OrgRenderer::render_entitys()` to serialize
 - Marks writes in `WriteTracker` to prevent loops
 
 ### 3. Write Tracker for Loop Prevention ✅

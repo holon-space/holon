@@ -84,7 +84,7 @@ VecDiff::InsertAt { index, value } => {
     self.list_state.splice(index..index, 1);
     // Add a single props watcher for the new item
     self.subscribe_single_props_signal(&value, cx);
-    self.reconcile_render_blocks(cx);
+    self.reconcile_render_entitys(cx);
     cx.notify();
 }
 VecDiff::Push { value } => {
@@ -92,7 +92,7 @@ VecDiff::Push { value } => {
     self.items.push(value.clone());
     self.list_state.splice(index..index, 1);
     self.subscribe_single_props_signal(&value, cx);
-    self.reconcile_render_blocks(cx);
+    self.reconcile_render_entitys(cx);
     cx.notify();
 }
 // RemoveAt/Pop: no explicit watcher cancellation needed — stale watcher breaks naturally
@@ -364,7 +364,7 @@ Classification:
 | Layout containers | row, column, section, card, collapsible, chat_bubble, bottom_dock | No (children) |
 | Wrappers | focusable, selectable, draggable, pie_menu | No (child) |
 | Collections | list, tree, table, columns, outline, query_result | No (ReactiveView) |
-| Side-effect | expand_toggle, block_ref, live_query, view_mode_switcher, render_block, drawer | No (slot/cache/watch) |
+| Side-effect | expand_toggle, block_ref, live_query, view_mode_switcher, render_entity, drawer | No (slot/cache/watch) |
 | Conditional | if_col, if_space | No (conditional logic) |
 | Other | error, loading, drop_zone, transclude, render_entity | No |
 

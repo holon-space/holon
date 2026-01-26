@@ -1,8 +1,8 @@
 use holon::api::backend_engine::BackendEngine;
 use holon::api::holon_service::HolonService;
 use holon::sync::LoroDocumentStore;
+use holon_frontend::focus_path::InputRouter;
 use holon_frontend::reactive::BuilderServices;
-use holon_frontend::shadow_index::IncrementalShadowIndex;
 use holon_frontend::user_driver::UserDriver;
 use rmcp::{
     handler::server::router::tool::ToolRouter, model::*, service::RequestContext, tool_handler,
@@ -29,8 +29,29 @@ pub struct InteractionCommand {
 }
 
 /// Raw input events that the MCP server can inject into the GPUI window.
+///
+/// `MouseClick` is a fused Down+Up at the same coordinate (no movement
+/// between). For anything that depends on the press-hold-release shape
+/// of the gesture — drag&drop, click-and-hold context menus, slider
+/// scrubbing, multi-step pointer sequences — use `MouseDown` /
+/// `MouseUp` separately and emit `MouseMove` events with
+/// `pressed_button = Some("left")` between them.
 pub enum InteractionEvent {
     MouseClick {
+        position: (f32, f32),
+        button: String,
+        modifiers: Vec<String>,
+    },
+    /// Press a mouse button without releasing. Used by drag&drop to keep a
+    /// pointer captured while subsequent `MouseMove` events fire.
+    MouseDown {
+        position: (f32, f32),
+        button: String,
+        modifiers: Vec<String>,
+    },
+    /// Release a mouse button at a position. Pairs with `MouseDown` to
+    /// complete a drag gesture; GPUI's drop handlers fire on this event.
+    MouseUp {
         position: (f32, f32),
         button: String,
         modifiers: Vec<String>,
@@ -43,8 +64,15 @@ pub enum InteractionEvent {
         keystroke: String,
         modifiers: Vec<String>,
     },
+    /// Move the pointer. `pressed_button` mirrors GPUI's `MouseMoveEvent` —
+    /// when set, GPUI treats this as a drag move (which is required for
+    /// `cx.active_drag` to populate after a `MouseDown` on a draggable).
     MouseMove {
         position: (f32, f32),
+        #[allow(dead_code)]
+        pressed_button: Option<String>,
+        #[allow(dead_code)]
+        modifiers: Vec<String>,
     },
     /// Turn the scroll wheel at a window position. `delta` is line-based
     /// (positive `dy` = down, positive `dx` = right).
@@ -71,9 +99,9 @@ pub struct DebugServices {
     /// render, read by the `describe_navigation` MCP tool.
     /// Uses std::sync::RwLock (not tokio) since GPUI writes from sync context.
     pub navigation_state: Arc<std::sync::RwLock<NavigationDebugState>>,
-    /// Shared shadow index for semantic UI interaction (navigation, key chords).
-    /// Written by GPUI on each render pass, read by MCP tools.
-    pub shadow_index: Arc<std::sync::RwLock<Option<IncrementalShadowIndex>>>,
+    /// Shared input router for semantic UI interaction (navigation, key chords).
+    /// Set by the GPUI frontend; MCP tools call `bubble_input` on it.
+    pub input_router: Arc<InputRouter>,
     /// Channel for injecting raw input events into the GPUI window.
     /// Set by the GPUI frontend after window creation.
     /// Uses `futures::channel::mpsc` so the pump awaits messages instead of
@@ -93,8 +121,8 @@ pub struct DebugServices {
 
 /// Snapshot of cross-block navigation state for MCP inspection.
 pub struct NavigationDebugState {
-    /// Shadow index tree dump (from IncrementalShadowIndex::describe).
-    pub shadow_index_description: String,
+    /// Reactive tree dump (from InputRouter::describe).
+    pub tree_description: String,
     /// Editor input row_ids.
     pub editor_input_ids: Vec<String>,
     /// Entity view registries dump (from EntityViewRegistries::describe).
@@ -104,7 +132,7 @@ pub struct NavigationDebugState {
 impl Default for NavigationDebugState {
     fn default() -> Self {
         Self {
-            shadow_index_description: "(not yet built)".to_string(),
+            tree_description: "(not yet built)".to_string(),
             editor_input_ids: Vec::new(),
             entity_registry_description: "(not yet populated)".to_string(),
         }
@@ -117,7 +145,7 @@ impl Default for DebugServices {
             loro_doc_store: std::sync::OnceLock::new(),
             orgmode_root: std::sync::OnceLock::new(),
             navigation_state: Arc::new(std::sync::RwLock::new(NavigationDebugState::default())),
-            shadow_index: Arc::new(std::sync::RwLock::new(None)),
+            input_router: Arc::new(InputRouter::new()),
             interaction_tx: std::sync::OnceLock::new(),
             focused_element_id: Arc::new(std::sync::RwLock::new(None)),
             user_driver: std::sync::OnceLock::new(),

@@ -1101,7 +1101,7 @@ for block in blocks {
     let block_cursors = cursors.iter()
         .filter(|c| c.block_id == block.id)
         .collect();
-    render_block_with_cursors(block, block_cursors)?;
+    render_entity_with_cursors(block, block_cursors)?;
 }
 
 Abstraction Needed: ephemeral_state() primitive that renders know to fetch from Loro

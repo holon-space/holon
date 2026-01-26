@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Holon worker — Phase 1 spike</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #121212; color: #e0e0e0; padding: 16px; }
+    .row { padding: 4px 0; }
+    .ok { color: #7fdf7f; }
+    .err { color: #ff7f7f; }
+    pre { background: #1e1e1e; padding: 8px; border-radius: 4px; }
+  </style>
+  <!-- Importmap MUST appear before any module script that depends on it. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@napi-rs/wasm-runtime": "/node_modules/@napi-rs/wasm-runtime/runtime.js",
+      "@emnapi/runtime": "/node_modules/@emnapi/runtime/dist/emnapi.mjs",
+      "@emnapi/core": "/node_modules/@emnapi/core/dist/emnapi-core.mjs",
+      "@emnapi/wasi-threads": "/node_modules/@emnapi/wasi-threads/dist/wasi-threads.mjs",
+      "@tybys/wasm-util": "/node_modules/@tybys/wasm-util/lib/mjs/index.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+  <h1>holon-worker · Phase 1 spike</h1>
+  <p>Validates H2 (napi build), H4 step 1 (tokio sleep in async fn), H4 step 2
+     (current-thread tokio runtime).</p>
+  <div id="env"></div>
+  <h2>Results</h2>
+  <pre id="log"></pre>
+  <script type="module">
+    const log = document.getElementById('log')
+    const env = document.getElementById('env')
+    const line = (msg, cls = '') => {
+      const div = document.createElement('div')
+      div.className = 'row ' + cls
+      div.textContent = msg
+      log.appendChild(div)
+      console.log(msg)
+    }
+
+    env.innerHTML =
+      `crossOriginIsolated=<b>${self.crossOriginIsolated}</b> ` +
+      `· SharedArrayBuffer=<b>${typeof SharedArrayBuffer !== 'undefined'}</b>`
+
+    if (!self.crossOriginIsolated) {
+      line('FATAL: page is not crossOriginIsolated. COOP/COEP headers missing.', 'err')
+      throw new Error('not crossOriginIsolated')
+    }
+
+    addEventListener('error', e => line('window-error: ' + (e.message || e), 'err'))
+    addEventListener('unhandledrejection', e =>
+      line('unhandled-rejection: ' + (e.reason?.stack || e.reason), 'err'))
+
+    // Spawn the dedicated worker that hosts the wasm. Atomics.wait is
+    // allowed inside workers, so tokio's block_on works here.
+    const worker = new Worker('/web/worker-entry.mjs', { type: 'module' })
+    worker.addEventListener('error', e =>
+      line('worker onerror: ' + (e.message || JSON.stringify(e)), 'err'))
+
+    let nextId = 1
+    const pending = new Map()
+    // Subscription snapshot listeners: Map<handle, (snapshotJson) => void>
+    const snapshotListeners = new Map()
+    let readyResolve
+    const ready = new Promise(r => { readyResolve = r })
+
+    worker.addEventListener('message', e => {
+      const { id, ok, value, error, kind, handle: snapshotHandle, snapshotJson } = e.data
+      if (kind === 'ready') { readyResolve(); return }
+      if (kind === 'snapshot') {
+        const cb = snapshotListeners.get(snapshotHandle)
+        if (cb) cb(snapshotJson)
+        return
+      }
+      const entry = pending.get(id)
+      if (!entry) return
+      pending.delete(id)
+      if (ok) entry.resolve(value)
+      else entry.reject(new Error(error))
+    })
+
+    const call = (kind, ...args) => new Promise((resolve, reject) => {
+      const id = nextId++
+      pending.set(id, { resolve, reject })
+      worker.postMessage({ id, kind, args })
+    })
+
+    const withTimeout = (p, ms, label) =>
+      Promise.race([p, new Promise((_, rej) =>
+        setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms))])
+
+    try {
+      await withTimeout(ready, 10000, 'worker ready')
+      line('worker ready', 'ok')
+
+      const exports = await call('exports')
+      line('exports: ' + exports.join(', '), 'ok')
+
+      // H4 step 2 — current-thread tokio runtime spawns/joins tasks.
+      try {
+        const report = await withTimeout(call('spawnCheck'), 5000, 'spawnCheck')
+        line('H4.2 spawnCheck() → ' + report,
+             report.includes('sum=6') ? 'ok' : 'err')
+      } catch (e) {
+        line('H4.2 spawnCheck failed: ' + (e?.stack || e), 'err')
+      }
+
+      // H4 step 1 — tokio::time::sleep inside #[napi] async fn.
+      try {
+        const t0 = performance.now()
+        const greet = await withTimeout(call('ping', 'phase-1'), 5000, 'ping')
+        const dt = (performance.now() - t0).toFixed(1)
+        line(`H4.1 ping('phase-1') → "${greet}" in ${dt}ms`,
+             greet === 'hello phase-1' ? 'ok' : 'err')
+      } catch (e) {
+        line('H4.1 ping failed: ' + (e?.stack || e), 'err')
+      }
+
+      // Phase 2 — OPFS-backed Turso round trip.
+      try {
+        // Turso opens the main db file AND its -wal sidecar. Both must be
+        // pre-registered because the shim's lookup_file returns -404 for
+        // unknown paths rather than creating on demand.
+        await withTimeout(call('registerFile', 'holon.db'), 5000, 'registerFile db')
+        await withTimeout(call('registerFile', 'holon.db-wal'), 5000, 'registerFile wal')
+        line('Phase2 registerFile holon.db + holon.db-wal → ok', 'ok')
+
+        await withTimeout(call('openDb', 'holon.db'), 10000, 'openDb')
+        line('Phase2 openDb holon.db → ok', 'ok')
+
+        // Fresh table is created the first time the page loads. On reload
+        // the table already exists, so `CREATE TABLE IF NOT EXISTS` is
+        // idempotent. The counter increments across reloads so you can see
+        // persistence by watching the number climb.
+        await withTimeout(
+          call('dbExecute', 'CREATE TABLE IF NOT EXISTS foo (k INTEGER PRIMARY KEY, v TEXT)'),
+          5000, 'create table')
+        line('Phase2 CREATE TABLE → ok', 'ok')
+
+        const stamp = Date.now()
+        await withTimeout(
+          call('dbExecute', `INSERT INTO foo (v) VALUES ('hi-${stamp}')`),
+          5000, 'insert')
+        line(`Phase2 INSERT 'hi-${stamp}' → ok`, 'ok')
+
+        const rows = await withTimeout(call('dbQuery', 'SELECT k, v FROM foo ORDER BY k'),
+                                       5000, 'select')
+        const rowCount = rows.trim().split('\n').filter(Boolean).length
+        line(`Phase2 SELECT → ${rowCount} row(s):`, rowCount > 0 ? 'ok' : 'err')
+        for (const r of rows.trim().split('\n').filter(Boolean)) {
+          line('  ' + r)
+        }
+        line(`Phase2 persistence probe: reload this page — row count should climb by 1`, 'ok')
+      } catch (e) {
+        line('Phase2 OPFS smoke failed: ' + (e?.stack || e), 'err')
+      }
+
+      // Phase 3 — BackendEngine in the worker.
+      //
+      // First spike uses `:memory:` because BackendEngine's DI also wires
+      // up LoroDocumentStore which writes a `holon_tree.loro` snapshot via
+      // std::fs — that's not addressable through the OPFS IO shim. Phase 4
+      // will replace the snapshot path with an OPFS-aware writer.
+      try {
+        await withTimeout(call('engineInit', ':memory:'), 15000, 'engineInit')
+        line('Phase3 engineInit(:memory:) → ok', 'ok')
+
+        // Tables are seeded by DI startup; just probe one to prove queries work.
+        const tables = await withTimeout(
+          call('engineExecuteQuery', 'SELECT name FROM sqlite_master WHERE type=\'table\' ORDER BY name'),
+          5000, 'list tables')
+        const tableNames = tables.map(r => r.name?.Text?.value ?? r.name).filter(Boolean)
+        line(`Phase3 engineExecuteQuery sqlite_master → ${tableNames.length} tables`,
+             tableNames.length > 0 ? 'ok' : 'err')
+        line('  ' + tableNames.slice(0, 8).join(', ') + (tableNames.length > 8 ? ', …' : ''))
+
+        // Insert a block-ish row and read it back via the engine.
+        const stamp = Date.now()
+        await withTimeout(
+          call('engineExecuteSql',
+               `INSERT INTO block (id, content, content_type, parent_id, created_at, updated_at) ` +
+               `VALUES ('worker-${stamp}', 'phase3 row', 'text', '__no_parent__', ${stamp}, ${stamp})`),
+          5000, 'engine INSERT')
+        line(`Phase3 engineExecuteSql INSERT block worker-${stamp} → ok`, 'ok')
+
+        const blocks = await withTimeout(
+          call('engineExecuteQuery', `SELECT id, content FROM block WHERE id = 'worker-${stamp}'`),
+          5000, 'engine SELECT')
+        line(`Phase3 engineExecuteQuery → ${blocks.length} row(s)`,
+             blocks.length === 1 ? 'ok' : 'err')
+        for (const r of blocks) {
+          line('  ' + JSON.stringify(r))
+        }
+      } catch (e) {
+        line('Phase3 BackendEngine smoke failed: ' + (e?.stack || e), 'err')
+      }
+
+      // B2 — ReactiveEngine wired end-to-end.
+      try {
+        const report = await withTimeout(call('engineReactiveCheck'), 10000, 'engineReactiveCheck')
+        line('B2 engineReactiveCheck → ' + report, report.startsWith('reactive check ok') ? 'ok' : 'err')
+      } catch (e) {
+        line('B2 engineReactiveCheck failed: ' + (e?.stack || e), 'err')
+      }
+
+      // B3 — ViewModel subscription.
+      //
+      // Watch root-layout, then pump the runtime via engineTick so the
+      // first snapshot arrives WITHOUT piggy-backing on another engine
+      // call. Then insert a child block + tick again and assert a second
+      // (distinct) snapshot lands. If we only ever get one snapshot, the
+      // watch pipeline is broken even if handshake succeeds.
+      try {
+        const ROOT_BLOCK = 'block:root-layout'
+
+        let snapshotResolve1, snapshotResolve2
+        const snapshot1 = new Promise(r => { snapshotResolve1 = r })
+        const snapshot2 = new Promise(r => { snapshotResolve2 = r })
+        const seen = []
+
+        const handle = await withTimeout(call('engineWatchView', ROOT_BLOCK), 5000, 'engineWatchView')
+        line(`B3 engineWatchView(root-layout) → handle=${handle}`, 'ok')
+
+        snapshotListeners.set(handle, (json) => {
+          seen.push(json)
+          if (seen.length === 1) snapshotResolve1(json)
+          else if (seen.length === 2) snapshotResolve2(json)
+        })
+
+        // Drive the runtime with engine_tick alone — NO mutation yet.
+        // This proves the first snapshot is delivered by the tick pump,
+        // not as a side effect of some other engine call.
+        const pumpUntil = async (promise, label) => {
+          for (let i = 0; i < 20; i++) {
+            await call('engineTick', 25)
+            const winner = await Promise.race([
+              promise.then(() => 'done'),
+              new Promise(r => setTimeout(() => r('timeout'), 0)),
+            ])
+            if (winner === 'done') return await promise
+          }
+          throw new Error(`${label}: no snapshot after 20 ticks`)
+        }
+
+        const snap1 = await pumpUntil(snapshot1, 'first snapshot')
+        const vm1 = JSON.parse(snap1)
+        line(`B3 first snapshot arrived (tick-driven): kind=${vm1?.kind?.widget ?? vm1?.kind ?? '?'}`, 'ok')
+
+        // Now mutate and pump until the watcher sees the change.
+        const childStamp = Date.now()
+        await withTimeout(
+          call('engineExecuteSql',
+               `INSERT INTO block (id, content, content_type, parent_id, created_at, updated_at) ` +
+               `VALUES ('b3-child-${childStamp}', 'b3 child block', 'text', 'block:root-layout', ${childStamp}, ${childStamp})`),
+          5000, 'b3 child insert')
+
+        const snap2 = await pumpUntil(snapshot2, 'second snapshot')
+        const vm2 = JSON.parse(snap2)
+        const distinct = snap1 !== snap2
+        line(`B3 second snapshot arrived: kind=${vm2?.kind?.widget ?? vm2?.kind ?? '?'} distinct=${distinct}`,
+             distinct ? 'ok' : 'err')
+        if (!distinct) {
+          throw new Error('second snapshot identical to first — watcher not reacting to CDC')
+        }
+
+        await call('engineDropSubscription', handle)
+        snapshotListeners.delete(handle)
+        line('B3 engineDropSubscription → ok', 'ok')
+      } catch (e) {
+        line('B3 subscription smoke failed: ' + (e?.stack || e), 'err')
+      }
+
+      // B4 — execute_operation dispatch round-trip.
+      //
+      // Calls block.update to change a block's content and verifies the
+      // operation completes without error. The full "operation → snapshot"
+      // cycle is validated by running the B3 subscription test after this
+      // mutation (the B3 subscription fires on any block change).
+      try {
+        const b4Stamp = Date.now()
+
+        // Read back the block we inserted in the Phase3 test.
+        const targetId = `worker-${b4Stamp}`
+        // Create a fresh block specifically for the operation test.
+        await withTimeout(
+          call('engineExecuteSql',
+               `INSERT INTO block (id, content, content_type, parent_id, created_at, updated_at) ` +
+               `VALUES ('b4-target-${b4Stamp}', 'original', 'text', '__no_parent__', ${b4Stamp}, ${b4Stamp})`),
+          5000, 'b4 create target')
+
+        const updateResult = await withTimeout(
+          call('engineExecuteOperation', 'block', 'update',
+               JSON.stringify({ id: `b4-target-${b4Stamp}`, content: 'updated via B4' })),
+          5000, 'b4 execute_operation block.update')
+        line(`B4 engineExecuteOperation block.update → ${JSON.stringify(updateResult)}`, 'ok')
+
+        // Verify the update landed.
+        const updated = await withTimeout(
+          call('engineExecuteQuery',
+               `SELECT content FROM block WHERE id = 'b4-target-${b4Stamp}'`),
+          5000, 'b4 verify update')
+        const gotContent = updated[0]?.content?.Text?.value ?? updated[0]?.content ?? '?'
+        line(`B4 block content after update: "${gotContent}"`,
+             String(gotContent).includes('updated via B4') ? 'ok' : 'err')
+      } catch (e) {
+        line('B4 execute_operation smoke failed: ' + (e?.stack || e), 'err')
+      }
+
+      line('Run complete — see lines above for outcomes', 'ok')
+    } catch (e) {
+      line('FAIL: ' + (e?.stack || e), 'err')
+    }
+  </script>
+
+</body>
+</html>

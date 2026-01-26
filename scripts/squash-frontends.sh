@@ -2,16 +2,36 @@
 set -euo pipefail
 
 # Squash directory-specific changes from the working copy (@) into jj
-# bookmarks whose name matches the directory path. Discovers candidates
-# by listing all bookmarks and checking if a corresponding directory exists.
+# bookmarks whose name matches the directory path.
+#
+# Usage: squash-frontends.sh [--dry-run] [folder ...]
+#   No folders: discovers candidates from all bookmarks with matching directories.
+#   With folders: only processes the specified folders.
 
 DRY_RUN=false
-if [[ "${1:-}" == "--dry-run" ]]; then
-    DRY_RUN=true
+FOLDERS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--dry-run" ]]; then
+        DRY_RUN=true
+    else
+        FOLDERS+=("$arg")
+    fi
+done
+
+if [[ "$DRY_RUN" == true ]]; then
     echo "=== DRY RUN ==="
 fi
 
-jj bookmark list --template 'name ++ "\n"' 2>/dev/null | while read -r bookmark; do
+if [[ ${#FOLDERS[@]} -gt 0 ]]; then
+    bookmarks=("${FOLDERS[@]}")
+else
+    bookmarks=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && bookmarks+=("$line")
+    done < <(jj bookmark list --template 'name ++ "\n"' 2>/dev/null)
+fi
+
+for bookmark in "${bookmarks[@]}"; do
     [[ -d "$bookmark" ]] || continue
 
     dir="$bookmark/"

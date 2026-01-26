@@ -13,11 +13,7 @@
 //! The relay connects to the hub as role=native and reconnects automatically on
 //! disconnect (handles trunk --watch restarts without dropping in-flight MCP sessions).
 
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
 use rmcp::{
@@ -204,15 +200,11 @@ async fn dispatch_response(pending: Arc<Mutex<HashMap<String, ResultSender>>>, t
         .get("is_error")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let content_str = msg
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("[]");
+    let content_str = msg.get("content").and_then(|v| v.as_str()).unwrap_or("[]");
 
     // content_str is a JSON-encoded Vec<Content>: "[{\"type\":\"text\",\"text\":\"...\"}]"
-    let content: Vec<Content> = serde_json::from_str(content_str).unwrap_or_else(|_| {
-        vec![Content::text(content_str.to_string())]
-    });
+    let content: Vec<Content> = serde_json::from_str(content_str)
+        .unwrap_or_else(|_| vec![Content::text(content_str.to_string())]);
 
     let result = if is_error {
         Ok(CallToolResult::error(content))
@@ -244,8 +236,8 @@ impl ServerHandler for BrowserRelayServer {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let tools = (HolonMcpServer::tool_router_ui() + HolonMcpServer::tool_router_backend())
-            .list_all();
+        let tools =
+            (HolonMcpServer::tool_router_ui() + HolonMcpServer::tool_router_backend()).list_all();
         async move { Ok(ListToolsResult::with_all_items(tools)) }
     }
 

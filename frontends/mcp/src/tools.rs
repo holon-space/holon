@@ -5,7 +5,7 @@ use holon::api::repository::CoreOperations;
 use holon::api::types::Traversal;
 use holon::api::LoroBackend;
 use holon::storage::types::StorageEntity;
-use holon_api::{Block, Change, EntityUri, QueryLanguage, Value};
+use holon_api::{Block, Change, EntityName, EntityUri, QueryLanguage, Value};
 use holon_orgmode::org_renderer::OrgRenderer;
 use rmcp::{handler::server::wrapper::Parameters, model::*, tool, tool_router};
 use std::collections::HashMap;
@@ -644,7 +644,11 @@ impl HolonMcpServer {
 
         let response = self
             .service()
-            .execute_operation(&params.entity_name, &params.operation, storage_entity)
+            .execute_operation(
+                &EntityName::new(&params.entity_name),
+                &params.operation,
+                storage_entity,
+            )
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
@@ -1076,7 +1080,11 @@ impl HolonMcpServer {
 
         let response = self
             .service()
-            .execute_operation(&params.entity_name, &params.command_name, storage_entity)
+            .execute_operation(
+                &EntityName::new(&params.entity_name),
+                &params.command_name,
+                storage_entity,
+            )
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
@@ -1344,7 +1352,7 @@ impl HolonMcpServer {
 
         let doc_uri =
             EntityUri::parse(&params.doc_id).unwrap_or_else(|_| EntityUri::block(&params.doc_id));
-        let rendered = OrgRenderer::render_blocks(&blocks, &file_path, &doc_uri);
+        let rendered = OrgRenderer::render_entitys(&blocks, &file_path, &doc_uri);
 
         let result = serde_json::json!({
             "doc_id": params.doc_id,
@@ -1449,13 +1457,15 @@ impl HolonMcpServer {
     }
 
     #[tool(
-        description = "Inspect the GPUI cross-block navigation state and entity registries. Shows the shadow index tree (widget hierarchy with navigators and entity IDs), registered editor inputs, and all live entity view registries (blocks, editors, live queries, collections, render blocks). Use this to debug navigation issues or understand which GPUI entities are currently alive."
+        description = "Inspect the GPUI cross-block navigation state and entity registries. Shows the reactive tree (widget hierarchy with navigators and entity IDs), the cached focus path (ancestor chain from root to focused entity, with operations and collection markers), registered editor inputs, and all live entity view registries. Use this to debug navigation issues or understand which GPUI entities are currently alive."
     )]
     async fn describe_navigation(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let state = self.debug.navigation_state.read().unwrap();
+        let focus_path_desc = self.debug.input_router.describe_focus_path();
         let output = format!(
-            "{}\nEditor inputs: {} entries\n{}\n\n── Entity View Registries ──\n{}",
-            state.shadow_index_description,
+            "── Reactive Tree ──\n{}\n\n── Focus Path ──\n{}\n\nEditor inputs: {} entries\n{}\n\n── Entity View Registries ──\n{}",
+            state.tree_description,
+            focus_path_desc,
             state.editor_input_ids.len(),
             state
                 .editor_input_ids
@@ -1471,7 +1481,7 @@ impl HolonMcpServer {
     // ── UI interaction tools (semantic level) ──────────────────────────
 
     #[tool(
-        description = "Simulate arrow-key navigation between blocks. Reads the shared shadow index to find the next focusable block in the given direction. Returns the target block_id and cursor placement."
+        description = "Simulate arrow-key navigation between blocks. Walks the reactive tree via focus-path to find the next focusable block in the given direction. Returns the target block_id and cursor placement."
     )]
     async fn send_navigation(
         &self,
@@ -1506,15 +1516,11 @@ impl HolonMcpServer {
         };
         let input = WidgetInput::Navigate { direction, hint };
 
-        let shadow = self.debug.shadow_index.read().unwrap();
-        let index = shadow.as_ref().ok_or_else(|| {
-            rmcp::ErrorData::internal_error(
-                "Shadow index not yet built (no GPUI render has occurred)",
-                None,
-            )
-        })?;
-
-        match index.bubble_input(&params.from_entity_id, &input) {
+        match self
+            .debug
+            .input_router
+            .bubble_input(&params.from_entity_id, &input)
+        {
             Some(holon_frontend::input::InputAction::Focus {
                 block_id,
                 placement,
@@ -1542,7 +1548,7 @@ impl HolonMcpServer {
     }
 
     #[tool(
-        description = "Simulate a keyboard shortcut (key chord) at a specific entity. The chord bubbles up through the shadow index tree, matching against bound operations. If a match is found, the operation is executed."
+        description = "Simulate a keyboard shortcut (key chord) at a specific entity. The chord bubbles up through the reactive tree via focus-path, matching against bound operations. If a match is found, the operation is executed."
     )]
     async fn send_key_chord(
         &self,
@@ -1559,18 +1565,11 @@ impl HolonMcpServer {
 
         let input = WidgetInput::KeyChord { keys };
 
-        let action = {
-            let shadow = self.debug.shadow_index.read().unwrap();
-            let index = shadow.as_ref().ok_or_else(|| {
-                rmcp::ErrorData::internal_error(
-                    "Shadow index not yet built (no GPUI render has occurred)",
-                    None,
-                )
-            })?;
-            index.bubble_input(&params.entity_id, &input)
-        };
-
-        match action {
+        match self
+            .debug
+            .input_router
+            .bubble_input(&params.entity_id, &input)
+        {
             Some(holon_frontend::input::InputAction::ExecuteOperation {
                 entity_name,
                 operation,
@@ -1582,9 +1581,10 @@ impl HolonMcpServer {
                     holon_api::Value::String(entity_id.clone()),
                 );
 
+                let entity_name_typed = EntityName::new(&entity_name);
                 let response = self
                     .engine()
-                    .execute_operation(&entity_name, &operation.name, op_params)
+                    .execute_operation(&entity_name_typed, &operation.name, op_params)
                     .await
                     .map_err(|e| {
                         rmcp::ErrorData::internal_error(

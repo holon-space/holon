@@ -43,7 +43,7 @@ This duplication:
   ```dart
   const defaultMainQuery = r'''
   from blocks
-  render (list sortkey:sort_key item_template:(render_block this))
+  render (list sortkey:sort_key item_template:(render_entity this))
   ''';
   ```
 - `navigation_provider.dart` manages document navigation state client-side
@@ -153,7 +153,7 @@ filter (
 )
 render (tree
     hierarchical_sort:[parent_id, sort_key]
-    item_template:(render_block this)
+    item_template:(render_entity this)
 )
 ```
 
@@ -364,7 +364,7 @@ Backend processing:
 ```dart
 const defaultMainQuery = r'''
 from blocks
-render (list sortkey:sort_key item_template:(render_block this))
+render (list sortkey:sort_key item_template:(render_entity this))
 ''';
 
 // Watch navigation state

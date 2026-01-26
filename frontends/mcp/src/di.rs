@@ -229,7 +229,10 @@ pub async fn run_http_server(
             .nest_service("/mcp", mcp_service);
 
         let listener = tokio::net::TcpListener::bind(bind_address).await?;
-        tracing::info!("[mcp] browser relay HTTP listening on http://{}", bind_address);
+        tracing::info!(
+            "[mcp] browser relay HTTP listening on http://{}",
+            bind_address
+        );
 
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {

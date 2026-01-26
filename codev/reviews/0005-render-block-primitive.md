@@ -1,4 +1,4 @@
-# Review 0005: Implement `render_block` Primitive with Live Query Support
+# Review 0005: Implement `render_entity` Primitive with Live Query Support
 
 ## Outcomes
 
@@ -7,7 +7,7 @@
   - Renders results with `ReactiveQueryWidget` and handles loading/error states
   - Each instance creates its own independent CDC subscription for live updates
 
-- **Added `render_block` primitive to RenderInterpreter**
+- **Added `render_entity` primitive to RenderInterpreter**
   - Polymorphic dispatch based on block `content_type` and `source_language`
   - Three dispatch paths:
     1. `content_type: "source"` + `source_language: "prql"` → `LiveQueryWidget` (executes embedded query)
@@ -27,7 +27,7 @@
 ### Files Modified
 - `frontends/flutter/lib/render/render_interpreter.dart`
   - Added import for `LiveQueryWidget`
-  - Added `case 'render_block':` to switch statement (line ~256)
+  - Added `case 'render_entity':` to switch statement (line ~256)
   - Added `_buildRenderBlock()` method (lines 2753-2801)
 
 ### Files Deleted
@@ -50,7 +50,7 @@
 
 - ⚠️ **Runtime Testing**: Partial - data layer verified, UI rendering needs Flutter app
   - ✅ Created test PRQL block with `content_type: "source"`, `source_language: "prql"`, `content: "<prql>"`
-  - ✅ Query with `render_block` in render spec compiles and returns correct data
+  - ✅ Query with `render_entity` in render spec compiles and returns correct data
   - ⚠️ LiveQueryWidget execution and CDC streaming require Flutter app to verify
 
 ## Architecture Notes
@@ -65,7 +65,7 @@
 `LiveQueryWidget` is a thin wrapper that just connects the provider to `ReactiveQueryWidget`. No new compilation or streaming logic needed.
 
 ### Dispatch Logic
-The `render_block` primitive reads block metadata from `context.rowData`:
+The `render_entity` primitive reads block metadata from `context.rowData`:
 - Checks `content_type` and `source_language` fields
 - Falls back to `content` column for text blocks
 - Uses assertions for error handling (fail hard on missing required fields)
@@ -88,13 +88,13 @@ The `render_block` primitive reads block metadata from `context.rowData`:
    - `content_type: "source"`
    - `source_language: "prql"`
    - `content: "from blocks select { id, content } render (list item_template:(text content))"`
-2. Render it via a parent query using `render_block(this)`
+2. Render it via a parent query using `render_entity(this)`
 3. Verify:
    - The nested query executes
    - Results appear inline
    - CDC updates flow through (modify a block, see it update in nested query)
 
 ## Related Documents
-- Implementation handoff: `frontends/flutter/HANDOFF_RENDER_BLOCK.md`
+- Implementation handoff: `frontends/flutter/HANDOFF_render_entity.md`
 - Multi-view render context: `docs/HANDOFF_MULTI_VIEW_RENDER.md`
 - Layout architecture: `frontends/flutter/HANDOFF_LAYOUT_ARCHITECTURE.md`

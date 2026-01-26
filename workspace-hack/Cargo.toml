@@ -14,7 +14,11 @@ publish = false
 # are managed by hakari.
 
 ### BEGIN HAKARI SECTION
-[dependencies]
+# Target-gated to skip on wasm32. Hakari regeneration erases this line —
+# re-add `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` after
+# running `cargo hakari generate` when working on the wasm32 browser demo.
+# See devlog/handoff-2026-04-14-holon-wasm-browser-demo.md.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 aho-corasick = { version = "1" }
 bit-vec = { version = "0.8" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
@@ -32,7 +36,7 @@ derive_more = { version = "2", features = ["as_ref", "debug", "deref", "deref_mu
 either = { version = "1", features = ["use_std"] }
 euclid = { version = "0.22" }
 fastrand = { version = "2" }
-ferrous-di = { git = "https://github.com/nightscape/ferrous-di.git", branch = "main", default-features = false, features = ["async", "wasm"] }
+fluxdi = { git = "https://github.com/nightscape/fluxdi.git", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
@@ -101,7 +105,7 @@ twox-hash = { version = "2" }
 uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
-[build-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.build-dependencies]
 aho-corasick = { version = "1" }
 bit-vec = { version = "0.8" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
@@ -120,7 +124,7 @@ derive_more-impl = { version = "2", features = ["as_ref", "debug", "deref", "der
 either = { version = "1", features = ["use_std"] }
 euclid = { version = "0.22" }
 fastrand = { version = "2" }
-ferrous-di = { git = "https://github.com/nightscape/ferrous-di.git", branch = "main", default-features = false, features = ["async", "wasm"] }
+fluxdi = { git = "https://github.com/nightscape/fluxdi.git", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
