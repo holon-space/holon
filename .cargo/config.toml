@@ -3,10 +3,22 @@
 [alias]
 test-seq = "test -- --test-threads=1"
 
+# Local path overrides for turso (not checked in) — uncomment for local turso dev
+# [patch.'https://github.com/nightscape/turso.git']
+# turso = { path = "/Users/martin/Workspaces/bigdata/turso/bindings/rust" }
+# turso_core = { path = "/Users/martin/Workspaces/bigdata/turso/core" }
+# turso_sdk_kit = { path = "/Users/martin/Workspaces/bigdata/turso/sdk-kit" }
+# turso_ext = { path = "/Users/martin/Workspaces/bigdata/turso/extensions/core" }
+
 [target.'cfg(target_vendor = "apple")']
 rustflags = [
   "-Z",
   "threads=8",
+  # Legacy mangling required for subsecond/ThinLink hot-patching (nightly v0 mangling breaks it)
+  "-Z",
+  "unstable-options",
+  "-C",
+  "symbol-mangling-version=legacy",
 ]
 
 # Android NDK configuration for cross-compilation

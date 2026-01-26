@@ -68,23 +68,18 @@ impl LoroSut {
             let loro_filtered: Vec<_> = loro_blocks
                 .iter()
                 .filter(|b| !seed_block_ids.contains(&b.id))
-                .filter(|b| !b.is_document())
-                // Exclude document placeholder roots created by reverse sync
+                .filter(|b| !b.is_page())
+                // Exclude page placeholder roots created by reverse sync.
                 .filter(|b| {
-                    !(b.parent_id.is_no_parent() && b.content.is_empty() && b.name.is_none())
+                    !(b.parent_id.is_no_parent() && b.content.is_empty() && b.tags.is_empty())
                 })
                 .cloned()
                 .collect();
 
-            // Normalize document parent_ids on both sides. Documents are managed
+            // Normalize page parent_ids on both sides. Pages are managed
             // separately (DocumentManager) and their identity mapping is tested
             // by the SQL assertions, not the Loro assertion.
-            //
-            // Detect document IDs as parent_ids referenced by content blocks
-            // that don't correspond to any content block in the filtered set.
-            // This is more robust than relying on is_document() which requires
-            // name to be set (child documents in Loro may not have it).
-            let ref_filtered: Vec<_> = ref_blocks.iter().filter(|b| !b.is_document()).collect();
+            let ref_filtered: Vec<_> = ref_blocks.iter().filter(|b| !b.is_page()).collect();
 
             let loro_content_ids: HashSet<&EntityUri> =
                 loro_filtered.iter().map(|b| &b.id).collect();
@@ -153,37 +148,37 @@ fn build_diagnostic(loro: &[Block], reference: &[Block]) -> String {
 
     // Per-block diffs for shared IDs
     for ref_block in reference {
-        if let Some(loro_block) = loro.iter().find(|b| b.id == ref_block.id) {
-            if loro_block != ref_block {
-                let _ = writeln!(out, "DIFF {}:", ref_block.id);
-                if loro_block.content != ref_block.content {
-                    let _ = writeln!(
-                        out,
-                        "  content: {:?} vs {:?}",
-                        loro_block.content, ref_block.content
-                    );
-                }
-                if loro_block.parent_id != ref_block.parent_id {
-                    let _ = writeln!(
-                        out,
-                        "  parent_id: {} vs {}",
-                        loro_block.parent_id, ref_block.parent_id
-                    );
-                }
-                if loro_block.content_type != ref_block.content_type {
-                    let _ = writeln!(
-                        out,
-                        "  content_type: {:?} vs {:?}",
-                        loro_block.content_type, ref_block.content_type
-                    );
-                }
-                if loro_block.properties != ref_block.properties {
-                    let _ = writeln!(
-                        out,
-                        "  properties: {:?} vs {:?}",
-                        loro_block.properties, ref_block.properties
-                    );
-                }
+        if let Some(loro_block) = loro.iter().find(|b| b.id == ref_block.id)
+            && loro_block != ref_block
+        {
+            let _ = writeln!(out, "DIFF {}:", ref_block.id);
+            if loro_block.content != ref_block.content {
+                let _ = writeln!(
+                    out,
+                    "  content: {:?} vs {:?}",
+                    loro_block.content, ref_block.content
+                );
+            }
+            if loro_block.parent_id != ref_block.parent_id {
+                let _ = writeln!(
+                    out,
+                    "  parent_id: {} vs {}",
+                    loro_block.parent_id, ref_block.parent_id
+                );
+            }
+            if loro_block.content_type != ref_block.content_type {
+                let _ = writeln!(
+                    out,
+                    "  content_type: {:?} vs {:?}",
+                    loro_block.content_type, ref_block.content_type
+                );
+            }
+            if loro_block.properties != ref_block.properties {
+                let _ = writeln!(
+                    out,
+                    "  properties: {:?} vs {:?}",
+                    loro_block.properties, ref_block.properties
+                );
             }
         }
     }

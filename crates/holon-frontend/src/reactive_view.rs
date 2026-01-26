@@ -9,6 +9,7 @@
 //!                                               Frontend shell subscribes
 //! ```
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures::future::AbortHandle;
@@ -77,7 +78,32 @@ pub(crate) fn row_render_context(
 pub struct ReactiveView {
     inner: ReactiveViewInner,
     pub items: MutableVec<Arc<ReactiveViewModel>>,
+    /// Optional placeholder ViewModel rendered after all real `items`.
+    ///
+    /// Built once at construction from a `creation_slot` template (not from a
+    /// synthetic data row). Frontends should subscribe to `children_signal_vec()`
+    /// rather than `items.signal_vec_cloned()` so they see the slot as an
+    /// additional reactive child without it leaking into the data path.
+    pub trailing_slot: Option<TrailingSlot>,
     driver_handle: Mutex<Option<AbortHandle>>,
+}
+
+/// A placeholder reactive child appended after the collection's real `items`.
+///
+/// Unlike `VirtualChildSlot` (which injects a synthetic `DataRow` upstream of
+/// row interpretation, requiring downstream consumers to recognise a `virtual:`
+/// id prefix), `TrailingSlot` is built directly at the ViewModel level. The
+/// slot's submit handler fires a real `create_entity` operation; CDC delivers
+/// the new row through the normal data path.
+#[derive(Clone)]
+pub struct TrailingSlot {
+    pub view_model: Arc<ReactiveViewModel>,
+}
+
+impl std::fmt::Debug for TrailingSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrailingSlot").finish_non_exhaustive()
+    }
 }
 
 /// Virtual child slot: entity profile defaults + parent context.
@@ -224,6 +250,33 @@ enum ReactiveViewInner {
         /// after all real rows, rendered via `render_entity()`.
         virtual_child: Option<VirtualChildSlot>,
     },
+    /// A grouped collection (board, future calendar, …): rows are
+    /// partitioned by a row column at runtime and the result is a list of
+    /// "lane" view models, each containing the cards that fall into that
+    /// group. Driven by a SINGLE upstream subscription that owns the
+    /// partitioning, so cross-lane row movement is atomic from the GPUI
+    /// render's perspective — there is no race between independent
+    /// per-lane filters.
+    Grouped {
+        layout: CollectionVariant,
+        data_source: Arc<dyn ReactiveRowProvider>,
+        /// Per-card render expression. Each row that lands in a lane is
+        /// interpreted through this template.
+        item_template: RenderExpr,
+        /// Column name used to bucket rows into lanes (e.g. `task_state`).
+        lane_field: String,
+        /// Title for the lane that collects rows whose `lane_field` is
+        /// missing or empty.
+        lane_label_default: String,
+        /// Caller-preferred lane order. Lanes not listed are appended in
+        /// lexicographic order — matches the static-path semantics.
+        lane_order: Vec<String>,
+        /// Per-card sort column inside a lane. Rows missing this column
+        /// fall back to insertion order.
+        sort_key: Option<String>,
+        /// Container-query allocation for this collection's subtree.
+        space: Mutable<Option<AvailableSpace>>,
+    },
     /// Static content — no driver, no signals.
     Static,
     /// Static collection with a layout variant (for snapshot consumers).
@@ -262,6 +315,7 @@ impl ReactiveView {
                 space: Mutable::new(initial_space),
             },
             items: MutableVec::new(),
+            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -286,8 +340,51 @@ impl ReactiveView {
                 virtual_child: config.virtual_child,
             },
             items: MutableVec::new(),
+            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
+    }
+
+    /// Attach a trailing slot ViewModel to be rendered after `items`.
+    ///
+    /// Spike-only setter — for the final design this should move into
+    /// `CollectionConfig` so construction is atomic. Used by collection
+    /// builders that opt in via `creation_slot: true` in the DSL.
+    pub fn set_trailing_slot(&mut self, slot: TrailingSlot) {
+        self.trailing_slot = Some(slot);
+    }
+
+    /// SignalVec exposing real `items` followed by the optional trailing slot.
+    ///
+    /// Frontends should subscribe to this rather than `items.signal_vec_cloned()`
+    /// directly when they want to render the trailing slot. The chain is at
+    /// the ViewModel layer — the slot's ViewModel is built from a real
+    /// `creation_slot` template, never as a synthetic `DataRow` passing
+    /// through `render_entity()`.
+    pub fn children_signal_vec(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn futures_signals::signal_vec::SignalVec<Item = Arc<ReactiveViewModel>> + Send>,
+    > {
+        use futures_signals::signal_vec::{always, SignalVecExt};
+        let real = self.items.signal_vec_cloned();
+        let suffix = match &self.trailing_slot {
+            Some(slot) => vec![slot.view_model.clone()],
+            None => vec![],
+        };
+        Box::pin(real.chain(always(suffix)))
+    }
+
+    /// Eager snapshot of `items` followed by the optional trailing slot.
+    ///
+    /// Used by initial-render sites that read `view.items.lock_ref()` today
+    /// and need to also see the slot.
+    pub fn children_snapshot(&self) -> Vec<Arc<ReactiveViewModel>> {
+        let mut out: Vec<Arc<ReactiveViewModel>> = self.items.lock_ref().iter().cloned().collect();
+        if let Some(slot) = &self.trailing_slot {
+            out.push(slot.view_model.clone());
+        }
+        out
     }
 
     /// Handle to the container-query space `Mutable` for this view, if the
@@ -300,7 +397,8 @@ impl ReactiveView {
     pub fn space_mutable(&self) -> Option<&Mutable<Option<AvailableSpace>>> {
         match &self.inner {
             ReactiveViewInner::Block { space, .. }
-            | ReactiveViewInner::Collection { space, .. } => Some(space),
+            | ReactiveViewInner::Collection { space, .. }
+            | ReactiveViewInner::Grouped { space, .. } => Some(space),
             ReactiveViewInner::PartitionedStatic { parent_space, .. } => Some(parent_space),
             ReactiveViewInner::Static | ReactiveViewInner::StaticCollection { .. } => None,
         }
@@ -336,6 +434,37 @@ impl ReactiveView {
                 gap,
             },
             items: MutableVec::new_with_values(arced),
+            trailing_slot: None,
+            driver_handle: Mutex::new(None),
+        }
+    }
+
+    /// Create a grouped view (board, future calendar, …) — partitioning is
+    /// owned by ONE driver so cross-lane row movement is atomic from
+    /// GPUI's render perspective.
+    pub fn new_grouped(
+        layout: CollectionVariant,
+        data_source: Arc<dyn ReactiveRowProvider>,
+        item_template: RenderExpr,
+        lane_field: String,
+        lane_label_default: String,
+        lane_order: Vec<String>,
+        sort_key: Option<String>,
+        initial_space: Option<AvailableSpace>,
+    ) -> Self {
+        Self {
+            inner: ReactiveViewInner::Grouped {
+                layout,
+                data_source,
+                item_template,
+                lane_field,
+                lane_label_default,
+                lane_order,
+                sort_key,
+                space: Mutable::new(initial_space),
+            },
+            items: MutableVec::new(),
+            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -346,6 +475,7 @@ impl ReactiveView {
         Self {
             inner: ReactiveViewInner::Static,
             items: MutableVec::new_with_values(arced),
+            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -359,6 +489,7 @@ impl ReactiveView {
         Self {
             inner: ReactiveViewInner::StaticCollection { layout },
             items: MutableVec::new_with_values(arced),
+            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -367,8 +498,9 @@ impl ReactiveView {
     pub fn layout(&self) -> Option<CollectionVariant> {
         match &self.inner {
             ReactiveViewInner::Collection { layout, .. }
+            | ReactiveViewInner::Grouped { layout, .. }
             | ReactiveViewInner::StaticCollection { layout }
-            | ReactiveViewInner::PartitionedStatic { layout, .. } => Some(*layout),
+            | ReactiveViewInner::PartitionedStatic { layout, .. } => Some(layout.clone()),
             _ => None,
         }
     }
@@ -458,6 +590,16 @@ impl ReactiveView {
                 // define their own identity policy).
                 data_source.cache_identity().hash(&mut h);
                 format!("{:?}", item_template).hash(&mut h);
+            }
+            ReactiveViewInner::Grouped {
+                data_source,
+                item_template,
+                lane_field,
+                ..
+            } => {
+                data_source.cache_identity().hash(&mut h);
+                format!("{:?}", item_template).hash(&mut h);
+                lane_field.hash(&mut h);
             }
             ReactiveViewInner::PartitionedStatic {
                 children_config, ..
@@ -551,8 +693,7 @@ impl ReactiveView {
                     Some(slot) => Arc::new(VirtualChildRowProvider::new(data_source.clone(), slot)),
                     None => data_source.clone(),
                 };
-                let is_tree =
-                    matches!(layout, CollectionVariant::Tree | CollectionVariant::Outline);
+                let is_tree = layout.is_hierarchical();
                 if is_tree {
                     self.create_tree_driver(&effective_source, item_template, space, services)
                 } else {
@@ -572,6 +713,25 @@ impl ReactiveView {
                 gap,
                 ..
             } => self.create_partitioned_driver(children_config, parent_space, *gap, services),
+            ReactiveViewInner::Grouped {
+                data_source,
+                item_template,
+                lane_field,
+                lane_label_default,
+                lane_order,
+                sort_key,
+                space,
+                ..
+            } => self.create_grouped_driver(
+                data_source,
+                item_template,
+                lane_field,
+                lane_label_default,
+                lane_order,
+                sort_key,
+                space,
+                services,
+            ),
             ReactiveViewInner::Static | ReactiveViewInner::StaticCollection { .. } => {
                 Box::pin(std::future::pending())
             }
@@ -656,7 +816,7 @@ impl ReactiveView {
             }
         };
 
-        let get_sort_key = move |row: &holon_api::widget_spec::DataRow| -> f64 {
+        let get_sort_key = move |row: &holon_api::widget_spec::DataRow| -> String {
             match &config_sort_key {
                 Some(col) => holon_api::render_eval::sort_value(row.get(col)),
                 None => extract_sort_key(row),
@@ -797,6 +957,11 @@ impl ReactiveView {
         };
 
         // Helper: interpret a row and attach the self-interpretation closure.
+        // Each interpreted node also carries its source row in `data` so
+        // downstream renderers (e.g. the GPUI board's per-card lane lookup)
+        // can read row columns without going back through context. Builders
+        // that don't read `data` are unaffected — `with_entity` just sets a
+        // ReadOnlyMutable cell that's never observed.
         let interpret_and_attach = {
             let svc = services.clone();
             let nif = node_interpret_fn.clone();
@@ -805,6 +970,7 @@ impl ReactiveView {
                   row: Arc<holon_api::widget_spec::DataRow>,
                   child_space: Option<AvailableSpace>|
                   -> Arc<ReactiveViewModel> {
+                let entity_row = row.clone();
                 let handle = row
                     .get("id")
                     .and_then(|v| v.as_string())
@@ -812,6 +978,7 @@ impl ReactiveView {
                 let ctx = row_render_context(row, handle, svc.as_ref(), child_space);
                 let mut node = svc.interpret(tmpl, &ctx);
                 node.interpret_fn = Some(nif.clone());
+                node = node.with_entity(entity_row);
                 Arc::new(node)
             }
         };
@@ -873,19 +1040,23 @@ impl ReactiveView {
                         index,
                         value: (key, row),
                     } => {
-                        entries.lock().unwrap()[index] = (key, row);
-                        if has_sort {
+                        entries.lock().unwrap()[index] = (key, row.clone());
+                        if has_sort || csf.is_some() {
                             // Sort key may have changed → reorder.
                             rebuild();
+                        } else {
+                            // Re-interpret the row: variant selection can
+                            // depend on row data (computed fields like
+                            // `has_task_state`), so a data update can flip
+                            // which variant is active and change the widget
+                            // kind. Per-row signal cells handle leaf-level
+                            // prop updates, but they can't switch the
+                            // active variant — only re-interpret can.
+                            let parent_space = space.get_cloned();
+                            target
+                                .lock_mut()
+                                .set_cloned(index, interpret(&tmpl, row, parent_space));
                         }
-                        // Otherwise: nothing to do. The per-row signal cell
-                        // in `ReactiveRowSet` was already updated by
-                        // `apply_change`; every leaf rendered for this row
-                        // shares that cell as a `ReadOnlyMutable` clone and
-                        // re-derives its props via its own signal
-                        // subscription. No tree walk, no `set_data`, no
-                        // `target.set_cloned` notification required —
-                        // structural identity is unchanged.
                     }
                     VecDiff::InsertAt {
                         index,
@@ -953,6 +1124,28 @@ impl ReactiveView {
             })
         };
 
+        // Profile driver: full re-interpret when the profile cache changes.
+        // `render_entity` resolves the per-row profile inside `interpret`,
+        // but data-driven `interpret_row` only fires on row changes — so an
+        // edit to an entity_profile_yaml block otherwise leaves rows of
+        // OTHER entities frozen at the pre-mutation profile.
+        let profile_driver = {
+            let rebuild = full_rebuild.clone();
+            let entries = entries.clone();
+            let mut first = true;
+            services
+                .profile_signal()
+                .signal_cloned()
+                .for_each(move |_cache| {
+                    if first {
+                        first = false;
+                    } else if !entries.lock().unwrap().is_empty() {
+                        rebuild();
+                    }
+                    async {}
+                })
+        };
+
         // Template driver: re-interpret all items' props when the shared
         // template Mutable changes. Items are updated in place — no new
         // Arc<ReactiveViewModel>, no MutableVec signals. GPUI's props
@@ -978,10 +1171,205 @@ impl ReactiveView {
         Box::pin(async move {
             futures::future::join(
                 futures::future::join(data_driver, space_driver),
-                template_driver,
+                futures::future::join(template_driver, profile_driver),
             )
             .await;
         })
+    }
+
+    /// Grouped driver: ONE subscription that owns lane partitioning.
+    ///
+    /// Subscribes to the upstream's `keyed_rows_signal_vec` once and, on
+    /// each `VecDiff`, fully rebuilds the lane list (board → lanes → cards).
+    /// Each rebuild atomically replaces `self.items` — there is no window
+    /// where two lanes can be observed in inconsistent post-update states,
+    /// which was the failure mode of N independent per-lane filtered
+    /// providers (a row in transit could appear in BOTH source and target
+    /// lanes for one frame).
+    ///
+    /// Cost: every row event re-interprets all cards. For typical kanban
+    /// sizes (≤ 1k rows / ~5 lanes) this is fine; if it ever isn't, the
+    /// rebuild can be replaced with fine-grained per-lane diff emission
+    /// without changing the public surface.
+    fn create_grouped_driver(
+        &self,
+        data_source: &Arc<dyn ReactiveRowProvider>,
+        item_template: &RenderExpr,
+        lane_field: &str,
+        lane_label_default: &str,
+        lane_order: &[String],
+        sort_key: &Option<String>,
+        space: &Mutable<Option<AvailableSpace>>,
+        services: Arc<dyn crate::reactive::BuilderServices>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        // Snapshot config that the closure needs.
+        let target = self.items.clone();
+        let space_handle = space.clone();
+        let lane_field = lane_field.to_string();
+        let lane_label_default = lane_label_default.to_string();
+        let lane_order: Vec<String> = lane_order.to_vec();
+        let sort_key = sort_key.clone();
+        let tmpl = item_template.clone();
+        let ds = data_source.clone();
+        let svc = services;
+
+        // Per-row entry tracking. Mirrors flat_driver's `entries` shape so
+        // we can rebuild lanes deterministically on every event.
+        let entries: Arc<Mutex<Vec<(String, Arc<holon_api::widget_spec::DataRow>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        let lane_field_for_partition = lane_field.clone();
+        let label_default_for_partition = lane_label_default.clone();
+        let lane_order_for_partition = lane_order.clone();
+
+        let rebuild = {
+            let entries = entries.clone();
+            let target = target.clone();
+            let svc = svc.clone();
+            let ds = ds.clone();
+            let tmpl = tmpl.clone();
+            let space_handle = space_handle.clone();
+            let sort_key = sort_key.clone();
+            let lane_field = lane_field_for_partition;
+            let lane_label_default = label_default_for_partition;
+            let lane_order = lane_order_for_partition;
+            Arc::new(move || {
+                let lock = entries.lock().unwrap();
+                let parent_space = space_handle.get_cloned();
+
+                // Bucket entries by lane_value (raw → label-substitute).
+                let mut buckets: HashMap<String, Vec<Arc<holon_api::widget_spec::DataRow>>> =
+                    HashMap::new();
+                for (_key, row) in lock.iter() {
+                    let raw = row
+                        .get(&lane_field)
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("");
+                    let title = if raw.is_empty() {
+                        lane_label_default.clone()
+                    } else {
+                        raw.to_string()
+                    };
+                    buckets.entry(title).or_default().push(row.clone());
+                }
+
+                // Sort within each bucket by sort_key when configured.
+                if let Some(ref key) = sort_key {
+                    for rows in buckets.values_mut() {
+                        rows.sort_by(|a, b| {
+                            holon_api::render_eval::cmp_values(a.get(key), b.get(key)).then_with(
+                                || {
+                                    let id_a =
+                                        a.get("id").and_then(|v| v.as_string()).unwrap_or("");
+                                    let id_b =
+                                        b.get("id").and_then(|v| v.as_string()).unwrap_or("");
+                                    id_a.cmp(id_b)
+                                },
+                            )
+                        });
+                    }
+                }
+
+                // Order lanes: caller-preferred first (only those present),
+                // remaining lex.
+                let mut ordered: Vec<String> = Vec::new();
+                for k in &lane_order {
+                    if buckets.contains_key(k) {
+                        ordered.push(k.clone());
+                    }
+                }
+                let mut remaining: Vec<String> = buckets
+                    .keys()
+                    .filter(|k| !ordered.contains(k))
+                    .cloned()
+                    .collect();
+                remaining.sort();
+                ordered.extend(remaining);
+
+                // Build lane VMs. Each lane is a `board_lane` with cards as
+                // its `children`. The static-children shape works because
+                // we replace the whole lane list atomically per event —
+                // GPUI never sees mid-update state.
+                let mut lane_vms: Vec<Arc<ReactiveViewModel>> = Vec::with_capacity(ordered.len());
+                for title in ordered {
+                    let rows = buckets.remove(&title).unwrap_or_default();
+                    let cards: Vec<Arc<ReactiveViewModel>> = rows
+                        .into_iter()
+                        .map(|row| {
+                            let entity_row = row.clone();
+                            let handle = row
+                                .get("id")
+                                .and_then(|v| v.as_string())
+                                .and_then(|id| ds.row_mutable(id));
+                            let ctx = row_render_context(row, handle, svc.as_ref(), parent_space);
+                            let mut node = svc.interpret(&tmpl, &ctx);
+                            node = node.with_entity(entity_row);
+                            Arc::new(node)
+                        })
+                        .collect();
+
+                    let mut lane_props = HashMap::new();
+                    lane_props.insert("title".to_string(), holon_api::Value::String(title.clone()));
+                    let lane_vm = ReactiveViewModel {
+                        children: cards,
+                        ..ReactiveViewModel::from_widget("board_lane", lane_props)
+                    };
+                    lane_vms.push(Arc::new(lane_vm));
+                }
+
+                drop(lock);
+                target.lock_mut().replace_cloned(lane_vms);
+            })
+        };
+
+        let initial_rebuild = rebuild.clone();
+
+        let data_driver = ds.keyed_rows_signal_vec().for_each(move |diff| {
+            match diff {
+                VecDiff::Replace { values } => {
+                    *entries.lock().unwrap() = values;
+                }
+                VecDiff::InsertAt {
+                    index,
+                    value: (key, row),
+                } => {
+                    entries.lock().unwrap().insert(index, (key, row));
+                }
+                VecDiff::UpdateAt {
+                    index,
+                    value: (key, row),
+                } => {
+                    entries.lock().unwrap()[index] = (key, row);
+                }
+                VecDiff::RemoveAt { index } => {
+                    entries.lock().unwrap().remove(index);
+                }
+                VecDiff::Push { value: (key, row) } => {
+                    entries.lock().unwrap().push((key, row));
+                }
+                VecDiff::Pop {} => {
+                    entries.lock().unwrap().pop();
+                }
+                VecDiff::Move {
+                    old_index,
+                    new_index,
+                } => {
+                    let mut lock = entries.lock().unwrap();
+                    let entry = lock.remove(old_index);
+                    lock.insert(new_index, entry);
+                }
+                VecDiff::Clear {} => {
+                    entries.lock().unwrap().clear();
+                }
+            }
+            rebuild();
+            futures::future::ready(())
+        });
+
+        // Trigger an initial rebuild so the first render after `start()`
+        // sees lanes (driver futures don't poll until the runtime ticks).
+        initial_rebuild();
+        Box::pin(data_driver)
     }
 
     /// Partitioned driver for heterogeneous positional children.
@@ -1204,7 +1592,8 @@ mod tests {
 
         let view = ReactiveView::new_collection(
             CollectionConfig {
-                layout: CollectionVariant::List { gap: 0.0 },
+                layout: CollectionVariant::from_name("list", 0.0)
+                    .expect("`list` layout is registered as a builtin"),
                 item_template: RenderExpr::FunctionCall {
                     name: "row".to_string(),
                     args: vec![],

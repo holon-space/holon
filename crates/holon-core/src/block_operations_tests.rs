@@ -34,8 +34,8 @@ mod tests {
         fn content(&self) -> &str {
             &self.content
         }
-        fn name(&self) -> Option<&str> {
-            None
+        fn tags(&self) -> &[String] {
+            &[]
         }
     }
 
@@ -132,7 +132,7 @@ mod tests {
                 sort_key: fields
                     .get("sort_key")
                     .and_then(|v| v.as_string())
-                    .unwrap_or("a0")
+                    .unwrap_or("A0")
                     .to_string(),
                 depth: fields.get("depth").and_then(|v| v.as_i64()).unwrap_or(0),
                 content: fields
@@ -378,6 +378,172 @@ mod tests {
         assert!(result.is_err());
 
         let result = store.split_block("A", -1).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn join_block_into_prev_sibling_concatenates_content() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: "A".to_string(),
+            parent_id: Some("P".to_string()),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "foo".to_string(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: "B".to_string(),
+            parent_id: Some("P".to_string()),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "bar".to_string(),
+        });
+
+        store.join_block("B", 0).await.unwrap();
+
+        let a = store.get("A").unwrap();
+        assert_eq!(a.content, "foobar");
+        assert!(store.get("B").is_none());
+        let children = store.sorted_children("P");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, "A");
+    }
+
+    #[tokio::test]
+    async fn join_block_into_parent_when_first_child() {
+        // Layout:
+        //   P (content "parent ")
+        //     A (content "child")  <- first child, no prev sibling
+        //     B (content "sib1")
+        //     C (content "sib2")
+        // After `join_block("A", 0)`:
+        //   P (content "parent child")
+        //     B (content "sib1")
+        //     C (content "sib2")
+        let store = MemStore::new();
+        store.insert(TestBlock {
+            id: "P".to_string(),
+            parent_id: None,
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 0,
+            content: "parent ".to_string(),
+        });
+        store.insert(TestBlock {
+            id: "A".to_string(),
+            parent_id: Some("P".to_string()),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "child".to_string(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: "B".to_string(),
+            parent_id: Some("P".to_string()),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "sib1".to_string(),
+        });
+        let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: "C".to_string(),
+            parent_id: Some("P".to_string()),
+            sort_key: gen_key_between(Some(&key_b), None).unwrap(),
+            depth: 1,
+            content: "sib2".to_string(),
+        });
+
+        store.join_block("A", 0).await.unwrap();
+
+        let p = store.get("P").unwrap();
+        assert_eq!(p.content, "parent child");
+        assert!(store.get("A").is_none());
+        let children = store.sorted_children("P");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].id, "B");
+        assert_eq!(children[1].id, "C");
+    }
+
+    #[tokio::test]
+    async fn join_block_into_parent_reparents_grandchildren_to_old_slot() {
+        // Layout:
+        //   P (content "parent ")
+        //     A (content "child")  <- first child, has its own children X, Y
+        //       X (content "x")
+        //       Y (content "y")
+        //     B (content "sib")
+        // After `join_block("A", 0)`:
+        //   P (content "parent child")
+        //     X (content "x")  <- now first child of P, occupying A's slot
+        //     Y (content "y")
+        //     B (content "sib")
+        let store = MemStore::new();
+        store.insert(TestBlock {
+            id: "P".to_string(),
+            parent_id: None,
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 0,
+            content: "parent ".to_string(),
+        });
+        store.insert(TestBlock {
+            id: "A".to_string(),
+            parent_id: Some("P".to_string()),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "child".to_string(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: "B".to_string(),
+            parent_id: Some("P".to_string()),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "sib".to_string(),
+        });
+        store.insert(TestBlock {
+            id: "X".to_string(),
+            parent_id: Some("A".to_string()),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "x".to_string(),
+        });
+        let key_x = store.sorted_children("A").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: "Y".to_string(),
+            parent_id: Some("A".to_string()),
+            sort_key: gen_key_between(Some(&key_x), None).unwrap(),
+            depth: 2,
+            content: "y".to_string(),
+        });
+
+        store.join_block("A", 0).await.unwrap();
+
+        let p = store.get("P").unwrap();
+        assert_eq!(p.content, "parent child");
+        assert!(store.get("A").is_none());
+
+        let children = store.sorted_children("P");
+        assert_eq!(
+            children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["X", "Y", "B"],
+            "X and Y should occupy A's old slot before B"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_block_root_has_no_target_fails() {
+        // Block with no prev sibling AND no parent → both fallbacks unavailable.
+        let store = MemStore::new();
+        store.insert(TestBlock {
+            id: "Root".to_string(),
+            parent_id: None,
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 0,
+            content: "alone".to_string(),
+        });
+
+        let result = store.join_block("Root", 0).await;
         assert!(result.is_err());
     }
 

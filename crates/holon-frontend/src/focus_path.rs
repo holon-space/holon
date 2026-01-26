@@ -696,11 +696,41 @@ fn try_keychord(
     keys: &std::collections::BTreeSet<crate::input::Key>,
 ) -> Option<InputAction> {
     let chord = KeyChord(keys.clone());
-    let op = entry
+    let op_match = entry
         .node
         .operations
         .iter()
-        .find(|ow: &&OperationWiring| ow.descriptor.key_chord() == Some(&chord))?;
+        .find(|ow: &&OperationWiring| ow.descriptor.key_chord() == Some(&chord));
+
+    if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
+        let ops: Vec<String> = entry
+            .node
+            .operations
+            .iter()
+            .map(|ow| {
+                format!(
+                    "{}::{}{}",
+                    ow.descriptor.entity_name,
+                    ow.descriptor.name,
+                    if let Some(kc) = ow.descriptor.key_chord() {
+                        format!(" [{kc:?}]")
+                    } else {
+                        String::new()
+                    }
+                )
+            })
+            .collect();
+        tracing::debug!(
+            "[CHORD] entry.widget={:?} origin={} chord={:?} ops=[{}] match={}",
+            entry.widget_name,
+            origin_id,
+            chord,
+            ops.join(", "),
+            op_match.is_some(),
+        );
+    }
+
+    let op = op_match?;
     Some(InputAction::ExecuteOperation {
         entity_name: op.descriptor.entity_name.to_string(),
         operation: op.descriptor.clone(),

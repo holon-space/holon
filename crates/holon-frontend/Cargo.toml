@@ -58,6 +58,7 @@ clap.workspace = true
 holon-filesystem = { path = "../holon-filesystem" }
 holon-mcp-client.workspace = true
 holon-todoist.workspace = true
+loro.workspace = true
 memory-stats.workspace = true
 # holon-orgmode uses tokio::fs + tokio::process which are unavailable on wasm32
 holon-orgmode.workspace = true

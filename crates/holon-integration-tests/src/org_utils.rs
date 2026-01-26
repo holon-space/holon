@@ -100,7 +100,7 @@ pub fn serialize_block_recursive(
                     )
             })
             .collect();
-        extra_props.sort_by(|(a, _), (b, _)| a.cmp(b));
+        extra_props.sort_by_key(|(a, _)| *a);
         for (k, v) in extra_props {
             let value_str = match v {
                 Value::String(s) => s.clone(),

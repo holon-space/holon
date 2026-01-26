@@ -594,6 +594,43 @@ impl RenderExpr {
             RenderExpr::LiveBlock { .. } | RenderExpr::Literal { .. } => {}
         }
     }
+
+    /// Recursively collect every `LiveBlock` target block_id referenced by this
+    /// expression. Used by the PBT to determine which panel blocks (and thus
+    /// regions) the active root layout actually renders.
+    ///
+    /// flutter_rust_bridge:ignore
+    pub fn live_block_targets(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_live_block_targets(&mut out);
+        out
+    }
+
+    fn collect_live_block_targets(&self, out: &mut Vec<String>) {
+        match self {
+            RenderExpr::LiveBlock { block_id } => out.push(block_id.clone()),
+            RenderExpr::FunctionCall { args, .. } => {
+                for arg in args {
+                    arg.value.collect_live_block_targets(out);
+                }
+            }
+            RenderExpr::BinaryOp { left, right, .. } => {
+                left.collect_live_block_targets(out);
+                right.collect_live_block_targets(out);
+            }
+            RenderExpr::Array { items } => {
+                for item in items {
+                    item.collect_live_block_targets(out);
+                }
+            }
+            RenderExpr::Object { fields } => {
+                for expr in fields.values() {
+                    expr.collect_live_block_targets(out);
+                }
+            }
+            RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. } => {}
+        }
+    }
 }
 
 fn value_to_rhai(value: &Value) -> String {

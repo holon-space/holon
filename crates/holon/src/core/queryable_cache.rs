@@ -724,9 +724,10 @@ where
                             .and_then(|v| v.as_string())
                             .unwrap_or("")
                             .to_string();
-                        eprintln!(
+                        tracing::trace!(
                             "[CACHE_APPLY_TRACE] INSERT OR IGNORE block id={} content={:?}",
-                            id_val, content_val
+                            id_val,
+                            content_val
                         );
                     }
                     statements.push((insert_ignore_sql.clone(), values));
@@ -761,9 +762,12 @@ where
                             .get("properties")
                             .map(|v| format!("{:?}", v))
                             .unwrap_or_else(|| "<none>".to_string());
-                        eprintln!(
+                        tracing::trace!(
                             "[CACHE_APPLY_TRACE] UPSERT block id={} content={:?} properties={} origin={:?}",
-                            id_val, content_val, props_val, origin
+                            id_val,
+                            content_val,
+                            props_val,
+                            origin
                         );
                     }
                     statements.push((upsert_sql.clone(), values));
@@ -849,15 +853,19 @@ where
             .await
             .map_err(|e| format!("Failed to execute query: {}", e))?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(rows.len());
         for storage_entity in rows {
             let entity = DynamicEntity {
                 type_name: type_def.name.clone(),
                 fields: storage_entity,
             };
-            if let Ok(item) = T::from_entity(entity) {
-                results.push(item);
-            }
+            let item = T::from_entity(entity).map_err(|e| {
+                format!(
+                    "[QueryableCache::get_all] from_entity failed for type {}: {}",
+                    type_def.name, e
+                )
+            })?;
+            results.push(item);
         }
 
         Ok(results)
@@ -889,15 +897,19 @@ where
                 .await
                 .map_err(|e| format!("Failed to execute query: {}", e))?;
 
-            let mut results = Vec::new();
+            let mut results = Vec::with_capacity(rows.len());
             for storage_entity in rows {
                 let entity = DynamicEntity {
                     type_name: type_def.name.clone(),
                     fields: storage_entity,
                 };
-                if let Ok(item) = T::from_entity(entity) {
-                    results.push(item);
-                }
+                let item = T::from_entity(entity).map_err(|e| {
+                    format!(
+                        "[QueryableCache::query] from_entity failed for type {}: {}",
+                        type_def.name, e
+                    )
+                })?;
+                results.push(item);
             }
 
             return Ok(results);

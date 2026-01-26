@@ -20,7 +20,7 @@ pub fn normalize_block(block: &Block) -> Block {
     // assigns real fractional indices (e.g. "7E80"), the reference model only
     // tracks `sequence`. Normalize to a fixed value so structural comparison
     // ignores it; ordering is validated separately via `assert_block_order`.
-    normalized.sort_key = "a0".to_string();
+    normalized.sort_key = "A0".to_string();
     // Trim overall content and normalize internal trailing whitespace per line
     // (org round-trip strips trailing whitespace from source block lines)
     normalized.content = normalized
@@ -114,15 +114,13 @@ pub fn assert_block_order(org_blocks: &[Block], ref_blocks: &[Block], message: &
             if all_source {
                 continue;
             }
-            if org_order != ref_order {
-                eprintln!(
-                    "WARNING: {}: Block order mismatch under parent '{}'\n  \
-                     Org file order:  {:?}\n  \
-                     Expected order:  {:?}\n  \
-                     (soft assertion — ordering bugs tracked separately)",
-                    message, parent_id, org_order, ref_order
-                );
-            }
+            assert_eq!(
+                org_order, ref_order,
+                "{}: Block order mismatch under parent '{}'\n  \
+                 Org file order:  {:?}\n  \
+                 Expected order:  {:?}",
+                message, parent_id, org_order, ref_order
+            );
         }
     }
 }

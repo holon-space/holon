@@ -177,7 +177,7 @@ impl LoroSyncController {
             collab.doc()
         };
         let subscription = {
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             doc.subscribe_root(Arc::new(move |_event| {
                 wake_for_callback.notify_one();
             }))
@@ -318,14 +318,14 @@ impl LoroSyncController {
         // Read current state.
         let doc_arc = self.raw_doc().await?;
         let after: HashMap<String, Block> = {
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             snapshot_blocks_from_doc(&doc)
         };
 
         // Fork at the watermark to read the "before" state. fork_at returns
         // an independent LoroDoc rewound to the watermark's position.
         let before: HashMap<String, Block> = {
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             if is_empty_frontiers(&last) {
                 HashMap::new()
             } else {
@@ -370,7 +370,7 @@ impl LoroSyncController {
         Ok(LoroBackend::from_document(collab))
     }
 
-    async fn raw_doc(&self) -> Result<Arc<RwLock<LoroDoc>>> {
+    async fn raw_doc(&self) -> Result<Arc<LoroDoc>> {
         let store = self.doc_store.read().await;
         let collab = store
             .get_global_doc()
@@ -381,7 +381,7 @@ impl LoroSyncController {
 
     async fn current_frontiers(&self) -> Result<Frontiers> {
         let doc_arc = self.raw_doc().await?;
-        let doc = doc_arc.read().await;
+        let doc = &*doc_arc;
         Ok(doc.oplog_frontiers())
     }
 
@@ -467,9 +467,10 @@ pub(crate) fn diff_snapshots_to_ops(
         .collect();
     let ordered_creates = topological_sort_creates(creates, after);
     for block in ordered_creates {
-        eprintln!(
+        tracing::trace!(
             "[LORO_DIFF_TRACE] CREATE id={} content={:?}",
-            block.id, block.content
+            block.id,
+            block.content
         );
         ops.push(("create".to_string(), block_to_params(block)));
     }
@@ -513,9 +514,11 @@ pub(crate) fn diff_snapshots_to_ops(
                     };
                     params.insert("_expected_marks".to_string(), Value::String(pre_image));
                 }
-                eprintln!(
+                tracing::trace!(
                     "[LORO_DIFF_TRACE] UPDATE id={} content_before={:?} content_after={:?}",
-                    id, old_block.content, new_block.content
+                    id,
+                    old_block.content,
+                    new_block.content
                 );
                 ops.push(("update".to_string(), params));
             }
@@ -607,8 +610,13 @@ pub(crate) fn block_to_params(block: &Block) -> HashMap<String, Value> {
     params.insert("created_at".to_string(), Value::Integer(created));
     params.insert("updated_at".to_string(), Value::Integer(now));
 
-    if let Some(ref name) = block.name {
-        params.insert("name".to_string(), Value::String(name.clone()));
+    if !block.tags.is_empty() {
+        let arr: Vec<Value> = block
+            .tags
+            .iter()
+            .map(|t| Value::String(t.clone()))
+            .collect();
+        params.insert("tags".to_string(), Value::Array(arr));
     }
 
     if block.content_type == ContentType::Source {
@@ -677,10 +685,9 @@ fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
             Value::String(new.content_type.to_string()),
         );
     }
-    if old.name != new.name {
-        if let Some(ref name) = new.name {
-            params.insert("name".to_string(), Value::String(name.clone()));
-        }
+    if old.tags != new.tags {
+        let arr: Vec<Value> = new.tags.iter().map(|t| Value::String(t.clone())).collect();
+        params.insert("tags".to_string(), Value::Array(arr));
     }
     if old.source_language != new.source_language {
         if let Some(ref lang) = new.source_language {
@@ -735,7 +742,7 @@ fn blocks_differ(a: &Block, b: &Block) -> bool {
         || a.content_type != b.content_type
         || a.source_language != b.source_language
         || a.source_name != b.source_name
-        || a.name != b.name
+        || a.tags != b.tags
         || a.properties_map() != b.properties_map()
         || a.marks != b.marks
 }
@@ -908,11 +915,9 @@ async fn apply_create(backend: &LoroBackend, data: &serde_json::Value) -> Result
         .await
         .map_err(|e| anyhow::anyhow!("create_block failed: {}", e))?;
 
-    let name = data.get("name").and_then(|v| v.as_str());
-    if name.is_some() {
-        backend
-            .set_document_metadata(created.id.as_str(), name)
-            .await?;
+    let tags = parse_tags_from_json(data)?;
+    if !tags.is_empty() {
+        backend.set_block_tags(created.id.as_str(), &tags).await?;
     }
 
     apply_properties_from_json(backend, created.id.as_str(), data).await?;
@@ -988,6 +993,38 @@ fn json_str<'a>(data: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     data.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Block data missing '{}'", key))
+}
+
+/// Parse the `tags` field of an inbound JSON block payload into a typed
+/// `Vec<String>`. Accepts `Array<String>`, a JSON-encoded string of an array,
+/// or absent/Null (treated as empty). Any other shape — non-string array
+/// elements, malformed JSON string, unexpected variant — fails loudly so a
+/// peer-shipped malformation can't silently drop tag data.
+fn parse_tags_from_json(data: &serde_json::Value) -> Result<Vec<String>> {
+    match data.get("tags") {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .map(|elem| match elem {
+                serde_json::Value::String(s) => Ok(s.clone()),
+                other => Err(anyhow::anyhow!(
+                    "[apply_create] tag entry is not a string: {:?}",
+                    other
+                )),
+            })
+            .collect(),
+        Some(serde_json::Value::String(s)) => serde_json::from_str::<Vec<String>>(s).map_err(|e| {
+            anyhow::anyhow!(
+                "[apply_create] tags string is not a JSON list: {} (raw: {:?})",
+                e,
+                s
+            )
+        }),
+        Some(other) => Err(anyhow::anyhow!(
+            "[apply_create] tags has unexpected shape: {:?}",
+            other
+        )),
+    }
 }
 
 fn content_from_json(data: &serde_json::Value) -> BlockContent {

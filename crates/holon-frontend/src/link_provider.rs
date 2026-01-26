@@ -62,11 +62,17 @@ impl PopupProvider for LinkProvider {
                     let f = f.clone();
                     async move {
                         let escaped = f.replace('\'', "''");
-                        // Subquery wrapping required — Turso rejects bare UNION
+                        // Subquery wrapping required — Turso rejects bare UNION.
+                        // Page rows: block has a 'Page' tag in block_tags junction table;
+                        // surface the first content line as the label.
                         let sql = format!(
                             "SELECT * FROM (SELECT id, content AS label FROM block WHERE content LIKE '%{escaped}%' LIMIT 15) \
                              UNION ALL \
-                             SELECT * FROM (SELECT id, name AS label FROM block WHERE name IS NOT NULL AND name LIKE '%{escaped}%' LIMIT 5)"
+                             SELECT * FROM (SELECT b.id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) AS label \
+                                            FROM block b \
+                                            JOIN block_tags bt ON bt.block_id = b.id \
+                                            WHERE bt.tag = 'Page' \
+                                              AND b.content LIKE '%{escaped}%' LIMIT 5)"
                         );
                         services
                             .popup_query(sql)

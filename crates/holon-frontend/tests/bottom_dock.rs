@@ -207,10 +207,10 @@ fn root_layout_mobile_viewport_has_bottom_dock() {
     // view with Columns layout (not, say, a snapshot fallback).
     let dock_slot = &dock.children[1];
     let is_streaming_columns = dock_slot.collection.as_ref().map_or(false, |view| {
-        matches!(
-            view.layout(),
-            Some(holon_frontend::CollectionVariant::Columns { .. })
-        )
+        view.layout()
+            .as_ref()
+            .map(|l| l.name() == "columns")
+            .unwrap_or(false)
     });
     assert!(
         is_streaming_columns,

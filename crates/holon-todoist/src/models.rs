@@ -105,7 +105,7 @@ impl holon::core::datasource::BlockEntity for TodoistTask {
     fn sort_key(&self) -> &str {
         // TODO: Use order field or compute from parent_id + created_at
         // For now, return a placeholder - this should be computed from order or created_at
-        "a0"
+        "A0"
     }
 
     fn depth(&self) -> i64 {
@@ -117,8 +117,8 @@ impl holon::core::datasource::BlockEntity for TodoistTask {
     fn content(&self) -> &str {
         &self.content
     }
-    fn name(&self) -> Option<&str> {
-        None
+    fn tags(&self) -> &[String] {
+        &[]
     }
 }
 

@@ -34,7 +34,7 @@ impl HeadlessLiveTree {
         rt: &tokio::runtime::Handle,
     ) -> Self {
         let config = CollectionConfig {
-            layout: CollectionVariant::List { gap: 0.0 },
+            layout: CollectionVariant::list(0.0),
             item_template,
             sort_key: None,
             virtual_child: None,

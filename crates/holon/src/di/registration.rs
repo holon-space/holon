@@ -12,10 +12,11 @@ use crate::api::operation_dispatcher::{OperationDispatcher, OperationModule};
 use crate::core::datasource::{OperationObserver, OperationProvider, SyncTokenStore};
 use crate::core::operation_log::{OperationLogObserver, OperationLogStore};
 use crate::entity_profile::{LiveEntities, ProfileResolver, parse_entity_profile};
+use crate::identity::IdentityProvider;
 use crate::navigation::NavigationProvider;
 use crate::storage::graph_schema::GraphSchemaRegistry;
 use crate::storage::schema_module::SchemaModule;
-use crate::storage::schema_modules::{LinkSchemaModule, NavigationSchemaModule};
+use crate::storage::schema_modules::{BlockSchemaModule, LinkSchemaModule, NavigationSchemaModule};
 use crate::storage::sync_token_store::DatabaseSyncTokenStore;
 use crate::storage::turso::{DbHandle, TursoBackend};
 use crate::storage::{ChangeOriginInjector, JsonAggregationSqlTransformer, SqlTransformer};
@@ -23,8 +24,8 @@ use crate::sync::LiveData;
 use crate::type_registry::{TypeRegistry, create_default_registry};
 
 use super::schema_providers::{
-    BlockHierarchyView, CoreTables, DbReady, GraphEavSchema, LinkTables, NavigationTables,
-    OperationTables, SyncStateTables, register_schema_providers,
+    BlockHierarchyView, CoreTables, DbReady, GraphEavSchema, IdentityTables, LinkTables,
+    NavigationTables, OperationTables, SyncStateTables, register_schema_providers,
 };
 use super::{
     DatabasePathConfig, DbHandleProvider, DbHandleProviderImpl, TursoBackendProvider,
@@ -77,6 +78,8 @@ fn build_graph_schema_registry(type_registry: &TypeRegistry) -> GraphSchemaRegis
     registry.register_nodes(nodes);
     registry.register_edges(edges);
 
+    registry.register_edge_fields(BlockSchemaModule.edge_fields());
+
     registry
 }
 
@@ -96,11 +99,20 @@ async fn create_initialized_engine(
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
 
-    // Build type-defined profiles from TypeRegistry
+    // Build type-defined profiles from TypeRegistry. `profile_from_type_def`
+    // can't see `virtual_child` because it's stored in a side map on the
+    // registry (TypeDefinition lives in holon-api, VirtualChildConfig in
+    // holon — keeping them split avoids a cross-crate dep flip), so we
+    // attach it here.
     let type_profiles: Vec<_> = type_registry
         .all()
         .iter()
-        .filter_map(|td| crate::entity_profile::profile_from_type_def(td))
+        .filter_map(|td| {
+            crate::entity_profile::profile_from_type_def(td).map(|mut p| {
+                p.virtual_child = type_registry.virtual_child_config(&td.name);
+                p
+            })
+        })
         .collect();
 
     let ddl_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(()));
@@ -153,6 +165,11 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
     injector.provide_into_set::<dyn OperationProvider>(Provider::root(|inj| {
         let nav_provider = inj.resolve::<NavigationProvider>();
         nav_provider as Arc<dyn OperationProvider>
+    }));
+
+    injector.provide_into_set::<dyn OperationProvider>(Provider::root(|inj| {
+        let identity_provider = inj.resolve::<IdentityProvider>();
+        identity_provider as Arc<dyn OperationProvider>
     }));
 
     OperationModule
@@ -244,6 +261,14 @@ pub fn register_core_services(injector: &Injector, db_path: PathBuf) -> Result<(
         .with_dependency::<DbReady<NavigationTables>>(),
     );
 
+    injector.provide::<IdentityProvider>(
+        Provider::root(move |inj| {
+            let db_handle_provider = inj.resolve::<dyn DbHandleProvider>();
+            Shared::new(IdentityProvider::new(db_handle_provider.handle()))
+        })
+        .with_dependency::<DbReady<IdentityTables>>(),
+    );
+
     register_shared_services(injector)?;
     register_schema_providers(injector);
 
@@ -286,6 +311,7 @@ pub fn register_core_services(injector: &Injector, db_path: PathBuf) -> Result<(
         .with_dependency::<DbReady<SyncStateTables>>()
         .with_dependency::<DbReady<OperationTables>>()
         .with_dependency::<DbReady<LinkTables>>()
+        .with_dependency::<DbReady<IdentityTables>>()
         .with_dependency::<DbReady<GraphEavSchema>>(),
     );
 
@@ -437,6 +463,7 @@ pub fn register_core_services_with_backend(
     let db_handle_for_sync = db_handle.clone();
     let db_handle_for_log = db_handle.clone();
     let db_handle_for_nav = db_handle.clone();
+    let db_handle_for_identity = db_handle.clone();
 
     injector.provide::<dyn DbHandleProvider>(Provider::root(move |_| {
         tracing::debug!("[DI] Registering pre-created DbHandle");
@@ -470,6 +497,11 @@ pub fn register_core_services_with_backend(
     injector.provide::<NavigationProvider>(
         Provider::root(move |_| Shared::new(NavigationProvider::new(db_handle_for_nav.clone())))
             .with_dependency::<DbReady<NavigationTables>>(),
+    );
+
+    injector.provide::<IdentityProvider>(
+        Provider::root(move |_| Shared::new(IdentityProvider::new(db_handle_for_identity.clone())))
+            .with_dependency::<DbReady<IdentityTables>>(),
     );
 
     injector.provide::<crate::sync::MatviewManager>(Provider::root(|inj| {
@@ -522,6 +554,7 @@ pub fn register_core_services_with_backend(
         .with_dependency::<DbReady<SyncStateTables>>()
         .with_dependency::<DbReady<OperationTables>>()
         .with_dependency::<DbReady<LinkTables>>()
+        .with_dependency::<DbReady<IdentityTables>>()
         .with_dependency::<DbReady<GraphEavSchema>>(),
     );
 

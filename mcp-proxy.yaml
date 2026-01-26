@@ -8,6 +8,15 @@ servers:
     restartOnFailure: true
     restartDelayMs: 3000
     maxRestarts: 100
+  holon-pbt:
+    toolNamesPrefix: ""
+    transport:
+      type: streamableHttp
+      url: "http://127.0.0.1:8521/mcp"
+      timeoutMs: 30000
+    restartOnFailure: true
+    restartDelayMs: 3000
+    maxRestarts: 100
 
   design-gallery:
     toolNamesPrefix: "design_"

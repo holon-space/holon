@@ -8,9 +8,11 @@ use std::collections::HashMap;
 
 use gql_transform::resolver::{
     ColumnMapping, EavEdgeResolver, EavNodeResolver, EdgeDef, ForeignKeyEdgeResolver, GraphSchema,
-    MappedNodeResolver, NodeResolver,
+    JoinTableEdgeResolver, MappedNodeResolver, NodeResolver,
 };
 use holon_api::entity::{GraphEdgeDef, GraphNodeDef, TypeDefinition};
+
+use super::schema_module::EdgeFieldDescriptor;
 
 /// Collects entity type definitions and module contributions, then builds a `GraphSchema`.
 ///
@@ -21,6 +23,7 @@ pub struct GraphSchemaRegistry {
     type_defs: Vec<TypeDefinition>,
     extra_nodes: Vec<GraphNodeDef>,
     extra_edges: Vec<GraphEdgeDef>,
+    edge_fields: Vec<EdgeFieldDescriptor>,
 }
 
 impl GraphSchemaRegistry {
@@ -29,6 +32,7 @@ impl GraphSchemaRegistry {
             type_defs: Vec::new(),
             extra_nodes: Vec::new(),
             extra_edges: Vec::new(),
+            edge_fields: Vec::new(),
         }
     }
 
@@ -46,6 +50,16 @@ impl GraphSchemaRegistry {
     /// Register additional graph edges from a SchemaModule.
     pub fn register_edges(&mut self, edges: Vec<GraphEdgeDef>) {
         self.extra_edges.extend(edges);
+    }
+
+    /// Register edge-typed fields from a SchemaModule.
+    ///
+    /// Each descriptor wires a `JoinTableEdgeResolver` so GQL
+    /// `MATCH (a)-[:edge]->(b)` patterns dispatch to a JOIN against the
+    /// junction table — distinct from `register_edges`, which always wires
+    /// `ForeignKeyEdgeResolver`.
+    pub fn register_edge_fields(&mut self, edge_fields: Vec<EdgeFieldDescriptor>) {
+        self.edge_fields.extend(edge_fields);
     }
 
     /// Build the final `GraphSchema` from all registered types and contributions.
@@ -155,6 +169,26 @@ impl GraphSchemaRegistry {
                         fk_column: edge_def.fk_column,
                         target_table: edge_def.target_table,
                         target_id_column: edge_def.target_id_column,
+                    }),
+                },
+            );
+        }
+
+        // Register edge-typed fields (junction-table edges). Source/target
+        // labels are looked up from the entity registry by entity name.
+        for descriptor in self.edge_fields {
+            let source_label = entity_info
+                .get(descriptor.entity.as_str())
+                .map(|(_, lbl)| (*lbl).to_string());
+            edges.insert(
+                descriptor.field.clone(),
+                EdgeDef {
+                    source_label,
+                    target_label: None,
+                    resolver: Box::new(JoinTableEdgeResolver {
+                        join_table: descriptor.join_table,
+                        source_column: descriptor.source_col,
+                        target_column: descriptor.target_col,
                     }),
                 },
             );

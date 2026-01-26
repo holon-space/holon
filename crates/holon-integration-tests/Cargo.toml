@@ -41,6 +41,7 @@ pbt = [
     "test-infra",
     "otel-testing",
     "dep:holon-layout-testing",
+    "dep:holon-mcp",
     "dep:proptest",
     "dep:proptest-state-machine",
     "dep:loro",
@@ -73,6 +74,7 @@ ab_glyph = "0.2"
 xcap = { git = "https://github.com/nightscape/xcap", branch = "feat/macos-offscreen-windows" }
 signal-hook = "0.3"
 holon-layout-testing = { path = "../holon-layout-testing", optional = true }
+holon-mcp = { path = "../../frontends/mcp", optional = true }
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
 loro = { workspace = true, optional = true }

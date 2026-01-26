@@ -33,7 +33,7 @@ pub fn root_layout_block_uri() -> EntityUri {
 // Re-export block types
 pub use block::{
     blocks_by_document, Block, BlockContent, BlockMetadata, BlockResult, BlockWithDepth,
-    ResultOutput, SourceBlock,
+    ResultOutput, SourceBlock, PAGE_TAG,
 };
 
 // Re-export typed domain types
@@ -466,7 +466,25 @@ where
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::Array(arr) => arr.into_iter().map(T::try_from).collect(),
-            _ => Err("Value is not an array".into()),
+            Value::Json(s) | Value::String(s) => {
+                if s.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let json: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
+                    format!("Vec<T>::try_from JSON parse failed for {:?}: {}", s, e)
+                })?;
+                match json {
+                    serde_json::Value::Array(arr) => arr
+                        .into_iter()
+                        .map(|j| T::try_from(Value::from_json_value(j)))
+                        .collect(),
+                    other => {
+                        Err(format!("Vec<T>::try_from expected JSON array, got {:?}", other).into())
+                    }
+                }
+            }
+            Value::Null => Ok(Vec::new()),
+            other => Err(format!("Vec<T>::try_from cannot convert {:?}", other).into()),
         }
     }
 }

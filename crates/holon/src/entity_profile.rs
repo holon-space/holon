@@ -23,6 +23,8 @@ use holon_api::render_types::{OperationDescriptor, RenderExpr, RenderVariant};
 use holon_api::{EntityName, Value, row_id};
 use rhai::{Engine as RhaiEngine, Scope};
 
+use futures_signals::signal_map::SignalMapExt;
+
 use crate::storage::types::StorageEntity;
 use crate::sync::LiveData;
 
@@ -770,20 +772,31 @@ pub trait ProfileResolving: Send + Sync {
         Vec::new()
     }
 
-    /// Get a watch receiver that fires when the underlying profile data changes.
+    /// Mutable holding the current profile cache snapshot.
     ///
-    /// UiWatcher uses this to re-render when profile blocks are edited,
-    /// without waiting for a structural CDC event.
+    /// Each rebuild swaps in a fresh `Arc<ProfileCache>`, so consumers can
+    /// `.signal_cloned()` it to react to profile YAML edits without waiting
+    /// for a structural CDC event.
     ///
-    /// Default: returns a receiver that never fires (for mock resolvers / tests).
-    fn subscribe_version(&self) -> tokio::sync::watch::Receiver<u64> {
-        let (_tx, rx) = tokio::sync::watch::channel(0u64);
-        rx
+    /// Default: a Mutable holding an empty cache that never changes
+    /// (for mock resolvers / tests).
+    fn profile_signal(&self) -> futures_signals::signal::Mutable<Arc<ProfileCache>> {
+        futures_signals::signal::Mutable::new(Arc::new(ProfileCache::empty()))
     }
 }
 
-struct ProfileCache {
+#[derive(Debug)]
+pub struct ProfileCache {
     profiles: HashMap<EntityName, EntityProfile>,
+}
+
+impl ProfileCache {
+    /// Empty cache used by stub/mock resolvers.
+    pub fn empty() -> Self {
+        Self {
+            profiles: HashMap::new(),
+        }
+    }
 }
 
 /// Concrete profile resolver backed by LiveData (CDC-driven, live-updating).
@@ -796,7 +809,7 @@ struct ProfileCache {
 /// just an Arc clone, no RwLock contention on the hot path.
 pub struct ProfileResolver {
     source: Arc<crate::sync::LiveData<EntityProfile>>,
-    cache_rx: tokio::sync::watch::Receiver<Arc<ProfileCache>>,
+    cache_signal: futures_signals::signal::Mutable<Arc<ProfileCache>>,
     /// Entity operations from the OperationDispatcher, keyed by entity name.
     /// Injected at DI time — this is the single source of truth for operations.
     entity_operations: Arc<HashMap<EntityName, Vec<OperationDescriptor>>>,
@@ -839,30 +852,31 @@ impl ProfileResolver {
             &ui_info,
             &type_profiles,
         ));
-        let (cache_tx, cache_rx) = tokio::sync::watch::channel(initial_cache);
+        let cache_signal = futures_signals::signal::Mutable::new(initial_cache);
 
         let bg_source = Arc::clone(&source);
         let bg_type_profiles = Arc::clone(&type_profiles);
-        let mut version_rx = source.subscribe_version();
+        let signal = source.signal_map();
+        let bg_signal = cache_signal.clone();
         crate::util::spawn_actor(async move {
-            version_rx.borrow_and_update();
-            while version_rx.changed().await.is_ok() {
-                let new_cache = Arc::new(Self::build_cache_from_source(
-                    &bg_source,
-                    &ui_info,
-                    &bg_type_profiles,
-                ));
-                if cache_tx.send(new_cache).is_err() {
-                    break;
-                }
-            }
+            signal
+                .for_each(move |_diff| {
+                    let new_cache = Arc::new(Self::build_cache_from_source(
+                        &bg_source,
+                        &ui_info,
+                        &bg_type_profiles,
+                    ));
+                    bg_signal.set(new_cache);
+                    async {}
+                })
+                .await;
         });
 
         let rhai_engine = Arc::new(Self::build_rhai_engine(&live_entities));
 
         ProfileResolver {
             source,
-            cache_rx,
+            cache_signal,
             entity_operations,
             rhai_engine: std::sync::RwLock::new(rhai_engine),
             live_entities: std::sync::RwLock::new(live_entities),
@@ -1011,23 +1025,31 @@ impl ProfileResolving for ProfileResolver {
         &self,
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RowProfile>, HashMap<String, holon_api::Value>) {
-        let cache = self.cache_rx.borrow().clone();
+        let cache = self.cache_signal.get_cloned();
 
         let entity_uri = row_id(row).expect("No id found");
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
-        let entity_profile = cache.profiles.get(&entity_name).unwrap_or_else(|| {
-            panic!(
-                "No profile registered for entity '{entity_name_str}' (row id='{entity_uri}'). \
-                 Known profiles: {:?}",
-                cache
-                    .profiles
-                    .keys()
-                    .map(|k| k.as_str())
-                    .collect::<Vec<_>>()
-            )
-        });
+        let entity_profile = match cache.profiles.get(&entity_name) {
+            Some(profile) => profile.clone(),
+            None => {
+                tracing::trace!(
+                    "No profile registered for entity '{entity_name_str}' — using default",
+                );
+                return (
+                    Arc::new(RowProfile {
+                        name: "default".to_string(),
+                        render: holon_api::RenderExpr::Literal {
+                            value: holon_api::Value::String("".to_string()),
+                        },
+                        operations: vec![],
+                        variants: vec![],
+                    }),
+                    HashMap::new(),
+                );
+            }
+        };
 
         let engine = self.rhai_engine.read().unwrap().clone();
         let (stored, computed) = entity_profile.resolve_with_computed(row, &engine);
@@ -1060,22 +1082,30 @@ impl ProfileResolving for ProfileResolver {
         &self,
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RowProfile>, HashMap<String, holon_api::Value>) {
-        let cache = self.cache_rx.borrow().clone();
+        let cache = self.cache_signal.get_cloned();
         let entity_uri = row_id(row).expect("No id found");
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
-        let entity_profile = cache.profiles.get(&entity_name).unwrap_or_else(|| {
-            panic!(
-                "No profile registered for entity '{entity_name_str}' (row id='{entity_uri}'). \
-                 Known profiles: {:?}",
-                cache
-                    .profiles
-                    .keys()
-                    .map(|k| k.as_str())
-                    .collect::<Vec<_>>()
-            )
-        });
+        let entity_profile = match cache.profiles.get(&entity_name) {
+            Some(profile) => profile.clone(),
+            None => {
+                tracing::trace!(
+                    "No profile registered for entity '{entity_name_str}' — using default",
+                );
+                return (
+                    Arc::new(RowProfile {
+                        name: "default".to_string(),
+                        render: holon_api::RenderExpr::Literal {
+                            value: holon_api::Value::String("".to_string()),
+                        },
+                        operations: vec![],
+                        variants: vec![],
+                    }),
+                    HashMap::new(),
+                );
+            }
+        };
 
         let engine = self.rhai_engine.read().unwrap().clone();
         let (candidates, computed) = entity_profile.resolve_candidates(row, &engine);
@@ -1121,7 +1151,7 @@ impl ProfileResolving for ProfileResolver {
     }
 
     fn resolve_collection_variants(&self) -> Vec<RenderVariant> {
-        let cache = self.cache_rx.borrow().clone();
+        let cache = self.cache_signal.get_cloned();
         let collection_name = EntityName::new("collection");
         let Some(collection_profile) = cache.profiles.get(&collection_name) else {
             return Vec::new();
@@ -1140,15 +1170,15 @@ impl ProfileResolving for ProfileResolver {
     }
 
     fn virtual_child_config(&self, entity_name: &str) -> Option<VirtualChildConfig> {
-        let cache = self.cache_rx.borrow().clone();
+        let cache = self.cache_signal.get_cloned();
         cache
             .profiles
             .get(entity_name)
             .and_then(|p| p.virtual_child.clone())
     }
 
-    fn subscribe_version(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.source.subscribe_version()
+    fn profile_signal(&self) -> futures_signals::signal::Mutable<Arc<ProfileCache>> {
+        self.cache_signal.clone()
     }
 }
 

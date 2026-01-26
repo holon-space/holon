@@ -107,10 +107,6 @@ pub struct DebugServices {
     /// Uses `futures::channel::mpsc` so the pump awaits messages instead of
     /// polling at 16ms — eliminates executor starvation during heavy workloads.
     pub interaction_tx: std::sync::OnceLock<futures::channel::mpsc::Sender<InteractionCommand>>,
-    /// Entity ID of the currently focused editor element.
-    /// Written by GPUI on every focus change (cross-block nav, mouse click).
-    /// Read by PBT to verify navigation results.
-    pub focused_element_id: Arc<std::sync::RwLock<Option<String>>>,
     /// Frontend-supplied `UserDriver` for dispatching real UI mutations
     /// through the same channel used by click/key/scroll MCP tools.
     /// The GPUI frontend installs a channel-based driver here after
@@ -123,18 +119,12 @@ pub struct DebugServices {
 pub struct NavigationDebugState {
     /// Reactive tree dump (from InputRouter::describe).
     pub tree_description: String,
-    /// Editor input row_ids.
-    pub editor_input_ids: Vec<String>,
-    /// Entity view registries dump (from EntityViewRegistries::describe).
-    pub entity_registry_description: String,
 }
 
 impl Default for NavigationDebugState {
     fn default() -> Self {
         Self {
             tree_description: "(not yet built)".to_string(),
-            editor_input_ids: Vec::new(),
-            entity_registry_description: "(not yet populated)".to_string(),
         }
     }
 }
@@ -147,7 +137,6 @@ impl Default for DebugServices {
             navigation_state: Arc::new(std::sync::RwLock::new(NavigationDebugState::default())),
             input_router: Arc::new(InputRouter::new()),
             interaction_tx: std::sync::OnceLock::new(),
-            focused_element_id: Arc::new(std::sync::RwLock::new(None)),
             user_driver: std::sync::OnceLock::new(),
         }
     }

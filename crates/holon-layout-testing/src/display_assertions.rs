@@ -561,6 +561,31 @@ pub fn count_error_nodes(node: &ViewModel) -> usize {
     self_count + node.children().iter().map(count_error_nodes).sum::<usize>()
 }
 
+/// Collect a one-line summary of every Error node in the tree. Used by
+/// inv14b to surface the actual error messages without needing to dump
+/// the full ViewModel.
+pub fn collect_error_node_summaries(node: &ViewModel) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_error_nodes(node, &mut out);
+    out
+}
+
+fn walk_error_nodes(node: &ViewModel, out: &mut Vec<String>) {
+    if node.widget_name() == Some("error") {
+        let entity_id = node.entity_id().unwrap_or("<no entity_id>");
+        // The error message lives in `kind: ViewKind::Error { message }`,
+        // not in `entity` — `ViewModel::error()` discards the entity row.
+        let message = match &node.kind {
+            ViewKind::Error { message } => message.clone(),
+            _ => "<not Error variant>".to_string(),
+        };
+        out.push(format!("entity={entity_id} message={message}"));
+    }
+    for child in node.children() {
+        walk_error_nodes(child, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use holon_api::Value;

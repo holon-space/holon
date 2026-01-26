@@ -222,8 +222,14 @@ pub trait BlockEntity: MaybeSendSync {
     /// Get the block content (text content of the block)
     fn content(&self) -> &str;
 
-    /// File stem name for document blocks (e.g. "projects", "todo").
-    fn name(&self) -> Option<&str>;
+    /// Tags attached to this block. The literal `"Page"` tag marks the
+    /// block as a page (org file root).
+    fn tags(&self) -> &[String];
+
+    /// Whether this block is a page (its `tags` contains `"Page"`).
+    fn is_page(&self) -> bool {
+        self.tags().iter().any(|t| t == holon_api::PAGE_TAG)
+    }
 }
 
 /// Entities that support task management (completion, priority, etc.)
@@ -492,64 +498,42 @@ pub trait BlockOperations<T>: BlockDataSourceHelpers<T>
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
-    /// Move block under its previous sibling (increase indentation)
+    /// Move block under its previous sibling (increase indentation).
+    ///
+    /// Delegates to [`move_block`] for the actual reparenting. The hand-rolled
+    /// version of `indent` previously called `self.set_field("parent_id", …)`
+    /// directly, which mutated SQL but did not fire the matview CDC events the
+    /// UI watcher subscribes to — pressing Tab would land in the DB but the
+    /// tree never re-rendered. `outdent` already routes through `move_block`
+    /// and works correctly; mirroring that path here yields the same CDC
+    /// propagation, plus the recursive-depth-update for descendants that the
+    /// inline implementation was missing.
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
     async fn indent(&self, id: &str) -> Result<OperationResult> {
-        // Capture old state before mutation
         let block = self
             .get_by_id(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let old_parent_id = block
+        // `move_block` enforces the "must have a parent" invariant, but we
+        // check up-front to keep the indent-specific error message.
+        block
             .parent_id()
-            .ok_or_else(|| anyhow::anyhow!("Cannot indent root block"))?
-            .to_string();
-        let old_predecessor = self.get_prev_sibling(id).await?;
-        let old_predecessor_id = old_predecessor.as_ref().map(|p| p.id().to_string());
+            .ok_or_else(|| anyhow::anyhow!("Cannot indent root block"))?;
 
-        // Previous sibling becomes the new parent
-        let prev_sibling = old_predecessor.ok_or_else(|| {
+        let prev_sibling = self.get_prev_sibling(id).await?.ok_or_else(|| {
             anyhow::anyhow!("Cannot indent: no previous sibling to become parent")
         })?;
-        let parent_id = prev_sibling.id();
+        let new_parent_id = prev_sibling.id().to_string();
 
-        // Query cache for current state (fast - no network)
-        let maybe_parent: Option<T> = self.get_by_id(parent_id).await?;
-        let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
-        let siblings: Vec<T> = self.get_children(parent_id).await?;
+        // Indent semantics: the indented block becomes the LAST child of the
+        // previous sibling. `move_block` interprets `after_block_id = None`
+        // as "insert at the beginning", so we look up the new parent's
+        // current last child and pass its id as the anchor.
+        let new_parent_children: Vec<T> = self.get_children(&new_parent_id).await?;
+        let after_id_owned = new_parent_children.last().map(|c| c.id().to_string());
 
-        // Calculate new position via fractional indexing
-        let sort_key = gen_key_between(siblings.last().map(|s| s.sort_key()), None)
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        // Execute primitives (delegates to self.set_field) and collect FieldDeltas
-        let mut changes = Vec::new();
-        let parent_id_result = self
-            .set_field(id, "parent_id", Value::String(parent_id.to_string()))
-            .await?;
-        changes.extend(parent_id_result.changes);
-        let depth_result = self
-            .set_field(id, "depth", Value::Integer(parent.depth() + 1))
-            .await?;
-        changes.extend(depth_result.changes);
-        let sort_key_result = self
-            .set_field(id, "sort_key", Value::String(sort_key))
-            .await?;
-        changes.extend(sort_key_result.changes);
-
-        // Return inverse operation using macro-generated helper
-        use crate::__operations_block_operations;
-
-        // Entity name will be set by OperationProvider when operation is executed
-        Ok(OperationResult::new(
-            changes,
-            __operations_block_operations::move_block_op(
-                "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
-                id,
-                &old_parent_id,
-                old_predecessor_id.as_deref(),
-            ),
-        ))
+        self.move_block(id, &new_parent_id, after_id_owned.as_deref())
+            .await
     }
 
     /// Move block to different position (reorder within same parent or different parent)
@@ -824,6 +808,142 @@ where
             .with_follow_ups(vec![editor_focus]))
     }
 
+    /// Join a block into its merge target.
+    ///
+    /// Two cases, both triggered by Backspace at position 0:
+    ///   1. **Previous sibling exists** — symmetric inverse of `split_block`:
+    ///        - appends `id`'s content to the end of the previous sibling
+    ///        - re-parents `id`'s children under the previous sibling, placed
+    ///          after any existing children of the previous sibling
+    ///        - deletes `id`
+    ///   2. **No previous sibling** (block is the first child) — child→parent
+    ///      join, the natural extension when there's no prev to merge into:
+    ///        - appends `id`'s content to the end of the **parent**
+    ///        - re-parents `id`'s children under the parent, placed at `id`'s
+    ///          old slot (i.e. before any of `id`'s former siblings)
+    ///        - deletes `id`
+    ///
+    /// In either case the editor cursor moves onto the merge target at the
+    /// join boundary (= old target content length).
+    ///
+    /// # Parameters
+    /// * `id` - Block to join
+    /// * `position` - Cursor position; non-zero positions are no-ops (returns
+    ///   `Ok` with no changes). Real frontends only dispatch this op when
+    ///   the cursor is at byte 0, but the SQL caller path may pass through
+    ///   stale positions, so we re-check here.
+    #[holon_macros::affects("content", "parent_id", "sort_key")]
+    async fn join_block(&self, id: &str, position: i64) -> Result<OperationResult> {
+        if position != 0 {
+            return Ok(OperationResult::irreversible(vec![]));
+        }
+
+        let block: T = self
+            .get_by_id(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let block_content = block.content().to_string();
+        let block_id_str = block.id().to_string();
+
+        // Pick merge target: prev sibling if any, else the parent.
+        let prev_opt: Option<T> = self.get_prev_sibling(id).await?;
+        let into_parent = prev_opt.is_none();
+        let target: T = if let Some(prev) = prev_opt {
+            prev
+        } else {
+            let parent_id = block.parent_id().ok_or_else(|| {
+                anyhow::anyhow!("Cannot join: block has no previous sibling and no parent")
+            })?;
+            self.get_by_id(parent_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Cannot join: parent {parent_id} not found"))?
+        };
+
+        let target_content = target.content().to_string();
+        let join_offset = target_content.len();
+        let new_content = format!("{}{}", target_content, block_content);
+        let target_id = target.id().to_string();
+
+        let mut changes = Vec::new();
+
+        // Re-parent children of `id` under `target_id`. Placement differs:
+        //   - prev-sibling path: append after target's existing children
+        //   - parent path: place at `id`'s old slot (before the remaining
+        //     siblings of `id` under `target`).
+        let block_children: Vec<T> = self.get_children(&block_id_str).await?;
+        if into_parent {
+            // Find the immediate next sibling of `id` under `target` (i.e.
+            // `id`'s former following sibling). Block's children's new
+            // sort_keys must lex-sort below that sibling's sort_key so they
+            // occupy `id`'s old slot. If there is no following sibling,
+            // pass `None` for the upper bound (sort to end).
+            let target_children_now: Vec<T> = self.get_children(&target_id).await?;
+            let next_sibling_sort_key: Option<String> = target_children_now
+                .iter()
+                .filter(|c| c.id() != block_id_str)
+                .find(|c| c.sort_key() > block.sort_key())
+                .map(|c| c.sort_key().to_string());
+            let mut last_sort_key: Option<String> = None;
+            for child in block_children.iter() {
+                let new_sort_key =
+                    gen_key_between(last_sort_key.as_deref(), next_sibling_sort_key.as_deref())
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                let pid_result = self
+                    .set_field(child.id(), "parent_id", Value::String(target_id.clone()))
+                    .await?;
+                changes.extend(pid_result.changes);
+                let sort_result = self
+                    .set_field(child.id(), "sort_key", Value::String(new_sort_key.clone()))
+                    .await?;
+                changes.extend(sort_result.changes);
+                last_sort_key = Some(new_sort_key);
+            }
+        } else {
+            // Prev-sibling path: append block's children after target's
+            // existing children. Same logic as the original implementation.
+            let target_children: Vec<T> = self.get_children(&target_id).await?;
+            let mut last_sort_key: Option<String> =
+                target_children.last().map(|c| c.sort_key().to_string());
+            for child in block_children.iter() {
+                let new_sort_key = gen_key_between(last_sort_key.as_deref(), None)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let pid_result = self
+                    .set_field(child.id(), "parent_id", Value::String(target_id.clone()))
+                    .await?;
+                changes.extend(pid_result.changes);
+                let sort_result = self
+                    .set_field(child.id(), "sort_key", Value::String(new_sort_key.clone()))
+                    .await?;
+                changes.extend(sort_result.changes);
+                last_sort_key = Some(new_sort_key);
+            }
+        }
+
+        // Append `id`'s content to the merge target.
+        let content_result = self
+            .set_field(&target_id, "content", Value::String(new_content))
+            .await?;
+        changes.extend(content_result.changes);
+
+        // Delete `id` (its children have already been re-parented).
+        let delete_result = self.delete(&block_id_str).await?;
+        changes.extend(delete_result.changes);
+
+        // Follow-up: park the editor cursor on the merge target at the
+        // join boundary, mirroring `split_block`'s editor_focus handoff.
+        use crate::__operations_editor_cursor_operations;
+        let editor_focus = __operations_editor_cursor_operations::editor_focus_op(
+            "navigation",
+            "main",
+            &target_id,
+            join_offset as i64,
+        );
+
+        Ok(OperationResult::irreversible(changes)
+            .with_response(Value::String(target_id))
+            .with_follow_ups(vec![editor_focus]))
+    }
+
     /// Move a block up (swap with previous sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
     async fn move_up(&self, id: &str) -> Result<OperationResult> {
@@ -944,42 +1064,39 @@ where
         ))
     }
 
-    /// Set whether this block is a document (org file root).
+    /// Set whether this block is a page (org file root).
     ///
-    /// Promoting (`is_document=true`) makes the block the root of a new org file.
-    /// When promoting, a `name` is auto-derived from the first line of content
-    /// if not already set. Demoting (`is_document=false`) makes it a regular
-    /// heading under its parent document.
-    #[holon_macros::affects("name")]
+    /// Promoting (`is_document=true`) adds the literal tag `"Page"` to the
+    /// block's `tags` list. Demoting removes it. The block's title is the
+    /// first line of `content`, so no separate name field is written.
+    #[holon_macros::affects("tags")]
     async fn set_is_document(&self, id: &str, is_document: bool) -> Result<OperationResult> {
         let block = self
             .get_by_id(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
 
-        let old_value = block.name().is_some();
+        let old_value = block.is_page();
         let mut changes = Vec::new();
 
-        if is_document {
-            // Promoting to document: derive name from content if not already set
-            if block.name().is_none() {
-                let title = block.content();
-                let name = title
-                    .lines()
-                    .next()
-                    .unwrap_or("untitled")
-                    .trim_start_matches("* ")
-                    .trim();
-                let name_result = self
-                    .set_field(id, "name", Value::String(name.to_string()))
-                    .await?;
-                changes.extend(name_result.changes);
-            }
+        let mut new_tags = block.tags().to_vec();
+        let already = new_tags.iter().any(|t| t == holon_api::PAGE_TAG);
+        if is_document && !already {
+            new_tags.push(holon_api::PAGE_TAG.to_string());
+        } else if !is_document && already {
+            new_tags.retain(|t| t != holon_api::PAGE_TAG);
         } else {
-            // Demoting from document: clear the name
-            let name_result = self.set_field(id, "name", Value::Null).await?;
-            changes.extend(name_result.changes);
+            // No change required.
+            use crate::__operations_block_operations;
+            return Ok(OperationResult::new(
+                Vec::new(),
+                __operations_block_operations::set_is_document_op("placeholder", id, old_value),
+            ));
         }
+
+        let arr: Vec<Value> = new_tags.iter().map(|t| Value::String(t.clone())).collect();
+        let tags_result = self.set_field(id, "tags", Value::Array(arr)).await?;
+        changes.extend(tags_result.changes);
 
         use crate::__operations_block_operations;
         Ok(OperationResult::new(
@@ -1236,8 +1353,8 @@ impl BlockEntity for holon_api::block::Block {
         &self.content
     }
 
-    fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    fn tags(&self) -> &[String] {
+        &self.tags
     }
 }
 

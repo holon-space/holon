@@ -36,15 +36,12 @@ pub trait BlockResolver {
     fn get_block(&self, id: &str) -> Option<Block>;
 }
 
-/// Find the document ID for a block by walking up the parent chain
+/// Find the page ID for a block by walking up the parent chain.
 ///
-/// For org-mode blocks:
-/// Find the document ancestor of a block.
-///
-/// Walks up the parent chain until it finds a document block (one with a `name`),
-/// or a parent with a `doc:` URI (legacy compat).
+/// Walks up the parent chain until it finds a page block (one tagged
+/// with `"Page"`).
 pub fn find_document_id<R: BlockResolver>(block: &Block, resolver: &R) -> Option<String> {
-    if block.is_document() {
+    if block.is_page() {
         return Some(block.id.to_string());
     }
 
@@ -58,7 +55,7 @@ pub fn find_document_id<R: BlockResolver>(block: &Block, resolver: &R) -> Option
         visited.insert(current_parent_id.clone());
 
         let parent = resolver.get_block(&current_parent_id)?;
-        if parent.is_document() {
+        if parent.is_page() {
             return Some(parent.id.to_string());
         }
         if parent.parent_id.is_no_parent() || parent.parent_id.is_sentinel() {
@@ -68,12 +65,14 @@ pub fn find_document_id<R: BlockResolver>(block: &Block, resolver: &R) -> Option
     }
 }
 
-/// Get the file path for a block by finding its document ancestor.
+/// Get the title (first content line) of a block's owning page.
+///
+/// Walks up to the nearest page ancestor and returns its title.
 pub fn get_block_file_path<R: BlockResolver>(block: &Block, resolver: &R) -> Option<String> {
     let doc_id = find_document_id(block, resolver)?;
     let uri = EntityUri::from_raw(&doc_id);
     let doc_block = resolver.get_block(uri.as_str())?;
-    doc_block.name.clone()
+    Some(doc_block.title())
 }
 
 /// Simple in-memory block resolver using a HashMap
@@ -575,19 +574,11 @@ impl OrgBlockExt for Block {
     }
 
     fn tags(&self) -> Tags {
-        self.get_property(org_props::TAGS)
-            .and_then(|v| v.as_string().map(|s| Tags::from_csv(&s)))
-            .unwrap_or_default()
+        Tags::from(self.tags.clone())
     }
 
     fn set_tags(&mut self, tags: Tags) {
-        if !tags.is_empty() {
-            self.set_property(org_props::TAGS, holon_api::Value::String(tags.to_csv()));
-        } else {
-            let mut props = self.properties_map();
-            props.remove(org_props::TAGS);
-            self.set_properties_map(props);
-        }
+        self.tags = tags.as_slice().to_vec();
     }
 
     fn scheduled(&self) -> Option<Timestamp> {
@@ -1012,8 +1003,8 @@ mod tests {
     }
 
     fn make_doc_block() -> Block {
-        let mut doc = Block::new_text(doc_uri(), EntityUri::no_parent(), "");
-        doc.name = Some("test.org".to_string());
+        let mut doc = Block::new_text(doc_uri(), EntityUri::no_parent(), "test.org");
+        doc.set_page(true);
         doc
     }
 
@@ -1072,8 +1063,12 @@ mod tests {
     #[test]
     fn test_get_block_file_path() {
         let notes_uri = EntityUri::file("/path/to/notes.org");
-        let mut notes_doc = Block::new_text(notes_uri.clone(), EntityUri::no_parent(), "");
-        notes_doc.name = Some("/path/to/notes.org".to_string());
+        let mut notes_doc = Block::new_text(
+            notes_uri.clone(),
+            EntityUri::no_parent(),
+            "/path/to/notes.org",
+        );
+        notes_doc.set_page(true);
         let block = Block::new_text(EntityUri::block("block1"), notes_uri.clone(), "Test");
         let resolver = HashMapBlockResolver::from_blocks(vec![notes_doc, block.clone()]);
 
@@ -1092,8 +1087,8 @@ mod tests {
 
     #[test]
     fn test_document_todo_keywords() {
-        let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "");
-        doc.name = Some("test.org".to_string());
+        let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "test.org");
+        doc.set_page(true);
         doc.set_todo_keywords(Some(vec![
             TaskState::active("TODO"),
             TaskState::active("INPROGRESS"),
@@ -1154,8 +1149,8 @@ mod tests {
 
     #[test]
     fn test_document_to_org() {
-        let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "");
-        doc.name = Some("test.org".to_string());
+        let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "test.org");
+        doc.set_page(true);
         doc.set_file_title(Some("My Document".to_string()));
         doc.set_todo_keywords(Some(vec![
             TaskState::active("TODO"),

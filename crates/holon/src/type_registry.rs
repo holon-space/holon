@@ -29,13 +29,34 @@ pub type CompiledComputedField = (String, CompiledExpr);
 /// and topo-sorted for correct evaluation order.
 pub struct TypeRegistry {
     types: RwLock<HashMap<String, TypeDefinition>>,
+    /// Per-entity creation defaults declared in profile YAML (the
+    /// `virtual_child:` block). Held alongside `types` because
+    /// `TypeDefinition` lives in `holon-api` and shouldn't depend on
+    /// `holon`-side types like `VirtualChildConfig`. `apply_parsed_profile`
+    /// inserts here; `profile_from_type_def` callers read here.
+    virtual_children: RwLock<HashMap<String, crate::entity_profile::VirtualChildConfig>>,
 }
 
 impl TypeRegistry {
     pub fn new() -> Self {
         Self {
             types: RwLock::new(HashMap::new()),
+            virtual_children: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Look up creation defaults for an entity type. Used by
+    /// `BuilderServices::virtual_child_config` to seed the trailing-slot
+    /// data row in tree's `creation_slot` path.
+    pub fn virtual_child_config(
+        &self,
+        entity_name: &str,
+    ) -> Option<crate::entity_profile::VirtualChildConfig> {
+        self.virtual_children
+            .read()
+            .expect("TypeRegistry poisoned")
+            .get(entity_name)
+            .cloned()
     }
 
     /// Register a type definition. Topo-sorts computed fields for correct evaluation order.
@@ -120,6 +141,12 @@ impl TypeRegistry {
         }
         if !profile.variants.is_empty() {
             self.add_profile_variants(&entity_name, profile.variants)?;
+        }
+        if let Some(vc) = profile.virtual_child {
+            self.virtual_children
+                .write()
+                .expect("TypeRegistry poisoned")
+                .insert(entity_name.clone(), vc);
         }
         Ok(())
     }

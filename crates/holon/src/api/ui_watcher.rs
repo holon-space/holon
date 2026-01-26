@@ -58,8 +58,8 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
 
     // Merge structural CDC + commands into a single trigger stream.
     let profile_resolver = engine.profile_resolver().clone();
-    let profile_version_rx = profile_resolver.subscribe_version();
-    let trigger_stream = merge_triggers(struct_stream, command_rx, profile_version_rx);
+    let profile_signal = profile_resolver.profile_signal();
+    let trigger_stream = merge_triggers(struct_stream, command_rx, profile_signal);
 
     crate::util::spawn_actor(run_reactive_watcher(
         trigger_stream,
@@ -72,12 +72,12 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
     Ok(WatchHandle::new(output_rx, command_tx))
 }
 
-/// Merge structural CDC events, WatcherCommands, and profile version changes
+/// Merge structural CDC events, WatcherCommands, and profile cache changes
 /// into a single `RenderTrigger` stream, prepended with an `Initial` trigger.
 fn merge_triggers(
     struct_stream: RowChangeStream,
     command_rx: mpsc::Receiver<WatcherCommand>,
-    mut profile_version_rx: tokio::sync::watch::Receiver<u64>,
+    profile_signal: futures_signals::signal::Mutable<Arc<crate::entity_profile::ProfileCache>>,
 ) -> ReceiverStream<RenderTrigger> {
     let (tx, rx) = mpsc::channel(64);
 
@@ -116,12 +116,15 @@ fn merge_triggers(
         }
     });
 
-    // Profile version changes → RenderTrigger::ProfileChange
+    // Profile cache changes → RenderTrigger::ProfileChange
     let tx_profile = tx;
     crate::util::spawn_actor(async move {
-        // Mark current version as seen so we don't fire immediately
-        profile_version_rx.borrow_and_update();
-        while profile_version_rx.changed().await.is_ok() {
+        use futures_signals::signal::SignalExt;
+        // signal_cloned fires the initial value first; skip it so we only
+        // react to subsequent profile rebuilds.
+        let mut stream = profile_signal.signal_cloned().to_stream();
+        let _initial = futures::StreamExt::next(&mut stream).await;
+        while futures::StreamExt::next(&mut stream).await.is_some() {
             if tx_profile.send(RenderTrigger::ProfileChange).await.is_err() {
                 break;
             }

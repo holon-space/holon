@@ -1,0 +1,21 @@
+{
+  "files": {
+    "src/test_environment.rs": {
+      "modifiedRanges": [
+        {
+          "start": 669,
+          "end": 669
+        },
+        {
+          "start": 687,
+          "end": 689
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-04-28T22:12:54.654Z"
+    }
+  },
+  "turnCycles": 0,
+  "maxCycles": 3,
+  "lastUpdated": "2026-04-28T22:12:54.654Z"
+}

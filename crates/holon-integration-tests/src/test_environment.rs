@@ -22,7 +22,7 @@ use futures::StreamExt;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
-use crate::{assign_reference_sequences, serialize_blocks_to_org, wait_for_file_condition};
+use crate::{assign_reference_sequences, wait_for_file_condition};
 use holon_api::reactive::CdcAccumulator;
 
 use holon::api::backend_engine::QueryContext;
@@ -327,7 +327,7 @@ impl TestEnvironmentBuilder {
 
         let ctx = E2ETestContext::from_engine(session.engine().clone());
 
-        let startup_errors = session.error_tracker().errors();
+        let _startup_errors = session.error_tracker().errors();
 
         Ok(TestEnvironment {
             temp_dir,
@@ -666,6 +666,7 @@ impl TestEnvironment {
             _ => return,
         };
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut delay = std::time::Duration::from_millis(1);
         loop {
             let mut all_caught_up = true;
             for c in consumers {
@@ -684,7 +685,8 @@ impl TestEnvironment {
                 );
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_millis(100));
         }
     }
 
@@ -704,8 +706,7 @@ impl TestEnvironment {
                 match store.get_global_doc().await {
                     Ok(collab) => {
                         let doc = collab.doc();
-                        let d = doc.read().await;
-                        d.oplog_frontiers()
+                        doc.oplog_frontiers()
                     }
                     Err(_) => return,
                 }
@@ -744,16 +745,19 @@ impl TestEnvironment {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(file_name);
-        let sql = format!("SELECT id FROM block WHERE name = '{}'", doc_name);
+        let sql = format!(
+            "SELECT b.id FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' \
+             AND substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) = '{}'",
+            doc_name
+        );
         let timeout = std::time::Duration::from_secs(5);
         let start = std::time::Instant::now();
         let doc_uri = loop {
-            if let Ok(rows) = self.query_sql(&sql).await {
-                if let Some(row) = rows.first() {
-                    if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
-                        break EntityUri::parse(id)?;
-                    }
-                }
+            if let Ok(rows) = self.query_sql(&sql).await
+                && let Some(row) = rows.first()
+                && let Some(id) = row.get("id").and_then(|v| v.as_string())
+            {
+                break EntityUri::parse(id)?;
             }
             assert!(
                 start.elapsed() < timeout,
@@ -799,7 +803,11 @@ impl TestEnvironment {
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow::anyhow!("Cannot extract name from URI: {}", file_uri))?;
 
-        let sql = format!("SELECT id FROM block WHERE name = '{}'", name);
+        let sql = format!(
+            "SELECT b.id FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' \
+             AND substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) = '{}'",
+            name
+        );
         let rows = self.query_sql(&sql).await?;
         let id = rows
             .first()
@@ -822,7 +830,11 @@ impl TestEnvironment {
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow::anyhow!("Cannot extract stem from filename: {}", filename))?;
 
-        let sql = format!("SELECT id FROM block WHERE name = '{}'", name);
+        let sql = format!(
+            "SELECT b.id FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' \
+             AND substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) = '{}'",
+            name
+        );
         let rows = self.query_sql(&sql).await?;
         let id = rows
             .first()
@@ -970,35 +982,34 @@ impl TestEnvironment {
                 .map(|s| s.parse().expect("Invalid content_type in row"));
             let source_language = row.get("source_language").and_then(|v| v.as_string());
 
-            if content_type == Some(ContentType::Source) {
-                if let Some(query_lang) = source_language
+            if content_type == Some(ContentType::Source)
+                && let Some(query_lang) = source_language
                     .and_then(|s| s.parse::<SourceLanguage>().ok()) // ALLOW(ok): boundary parse
                     .and_then(|sl| sl.as_query())
+            {
                 {
-                    {
-                        let block_id = row.get("id").and_then(|v| v.as_string());
-                        let parent_id = row
-                            .get("parent_id")
-                            .and_then(|v| v.as_string())
-                            .map(|s| EntityUri::parse(s).expect("valid parent_id URI"));
-                        let query_content = row.get("content").and_then(|v| v.as_string());
+                    let block_id = row.get("id").and_then(|v| v.as_string());
+                    let parent_id = row
+                        .get("parent_id")
+                        .and_then(|v| v.as_string())
+                        .map(|s| EntityUri::parse(s).expect("valid parent_id URI"));
+                    let query_content = row.get("content").and_then(|v| v.as_string());
 
-                        if let (Some(_block_id), Some(parent_id), Some(source)) =
-                            (block_id, parent_id, query_content)
+                    if let (Some(_block_id), Some(parent_id), Some(source)) =
+                        (block_id, parent_id, query_content)
+                    {
+                        match self
+                            .query_with_context(source, query_lang, &parent_id)
+                            .await
                         {
-                            match self
-                                .query_with_context(source, query_lang, &parent_id)
-                                .await
-                            {
-                                Ok(nested_rows) => {
-                                    all_data.extend(nested_rows);
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[test] Failed to render nested block under {}: {}",
-                                        parent_id, e
-                                    );
-                                }
+                            Ok(nested_rows) => {
+                                all_data.extend(nested_rows);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[test] Failed to render nested block under {}: {}",
+                                    parent_id, e
+                                );
                             }
                         }
                     }
@@ -1134,15 +1145,13 @@ impl TestEnvironment {
                         if let Some(ui_data) = self.ui_model.get_mut(query_id) {
                             for change in &batch.inner.items {
                                 if let holon_api::Change::Updated { id, data, .. } = &change.change
-                                {
-                                    if let Some(content) =
+                                    && let Some(content) =
                                         data.get("content").and_then(|v| v.as_string())
-                                    {
-                                        eprintln!(
-                                            "[drain_cdc] watch '{}': Updated id={} content={:?}",
-                                            query_id, id, content
-                                        );
-                                    }
+                                {
+                                    eprintln!(
+                                        "[drain_cdc] watch '{}': Updated id={} content={:?}",
+                                        query_id, id, content
+                                    );
                                 }
                                 ui_data.apply_change(change.change.clone());
                             }
@@ -1241,6 +1250,11 @@ impl TestEnvironment {
         // wasted 49 ms per transition.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(50);
         let mut spurious: Vec<(String, usize)> = Vec::new();
+        // For each spurious source, keep a compact one-line summary of every
+        // change record so a failure dump shows what actually leaked, not
+        // just the count. inv16 is the panic path, so the cost of the
+        // extra Strings only ever matters when the test is failing.
+        let mut spurious_dump: Vec<(String, u64, String)> = Vec::new();
         let mut watch_seen: HashMap<String, u64> = HashMap::new();
         let mut region_seen: HashMap<String, u64> = HashMap::new();
         let mut all_blocks_seen: u64 = 0;
@@ -1256,6 +1270,13 @@ impl TestEnvironment {
                     *known_seq = (*known_seq).max(batch_seq);
                     if batch_seq > target_seq {
                         count += batch.inner.items.len();
+                        for change in &batch.inner.items {
+                            spurious_dump.push((
+                                format!("watch:{query_id}"),
+                                batch_seq,
+                                summarize_change(&change.change),
+                            ));
+                        }
                     }
                     if let Some(ui_data) = self.ui_model.get_mut(query_id) {
                         for change in &batch.inner.items {
@@ -1279,6 +1300,13 @@ impl TestEnvironment {
                     *known_seq = (*known_seq).max(batch_seq);
                     if batch_seq > target_seq {
                         count += batch.inner.items.len();
+                        for change in &batch.inner.items {
+                            spurious_dump.push((
+                                format!("region:{region_id}"),
+                                batch_seq,
+                                summarize_change(&change.change),
+                            ));
+                        }
                     }
                     if let Some(region_data) = self.region_data.get_mut(region_id) {
                         for change in &batch.inner.items {
@@ -1301,6 +1329,13 @@ impl TestEnvironment {
                     all_blocks_seen = all_blocks_seen.max(batch_seq);
                     if batch_seq > target_seq {
                         count += batch.inner.items.len();
+                        for change in &batch.inner.items {
+                            spurious_dump.push((
+                                "all_blocks".to_string(),
+                                batch_seq,
+                                summarize_change(&change.change),
+                            ));
+                        }
                     }
                     for change in batch.inner.items {
                         acc.apply_change(change.change);
@@ -1328,6 +1363,18 @@ impl TestEnvironment {
                 "[inv16] CDC not quiescent — spurious events after seq watermark {target_seq}: {:?}",
                 spurious,
             );
+            // Dump every leaked change so the panic log is enough to
+            // identify which writes are firing CDC, without needing MCP
+            // attachment or sqlite inspection.
+            eprintln!("[inv16] spurious change records (source, seq, change):");
+            for (source, seq, summary) in &spurious_dump {
+                eprintln!("    [{source} seq={seq}] {summary}");
+            }
+            crate::debug_pause::pause_on_fail(&format!(
+                "inv16 CDC quiescence violation — spurious events after seq watermark \
+                 {target_seq}: {:?}",
+                spurious,
+            ));
         }
 
         assert!(
@@ -1354,7 +1401,7 @@ impl TestEnvironment {
         let mut all_blocks = Vec::new();
         let root = self.temp_dir.path();
 
-        for (_doc_uri, file_path) in &self.documents {
+        for file_path in self.documents.values() {
             let raw = tokio::fs::read_to_string(file_path).await?;
             let content = match todo_header {
                 Some(header) if !raw.contains("#+TODO:") => format!("{}\n{}", header, raw),
@@ -1603,12 +1650,7 @@ impl TestEnvironment {
         // Each CDC event is free (no SQL query — matview push).
         if let (Some(stream), Some(acc)) = (&mut self.all_blocks_stream, &mut self.all_blocks) {
             while start.elapsed() < timeout {
-                // Count non-document blocks (name IS NULL equivalent)
-                let non_doc_count = acc
-                    .state()
-                    .values()
-                    .filter(|row| row.get("name").map(|v| v.is_null()).unwrap_or(true))
-                    .count();
+                let non_doc_count = acc.state().len();
                 if non_doc_count == expected_count {
                     break;
                 }
@@ -1625,8 +1667,11 @@ impl TestEnvironment {
             }
         }
 
-        // Final verification via single SQL query (1 read instead of N polls)
-        let sql = "SELECT id FROM block WHERE name IS NULL".to_string();
+        // Final verification via single SQL query (1 read instead of N polls).
+        // Non-page blocks are those without a "Page" tag in block_tags.
+        let sql = "SELECT id FROM block \
+                   WHERE id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page')"
+            .to_string();
         self.engine()
             .execute_query(sql, HashMap::new(), None)
             .await
@@ -1693,7 +1738,7 @@ impl TestEnvironment {
 
             let doc_block = expected_blocks
                 .iter()
-                .find(|b| b.id == *doc_uri && b.is_document());
+                .find(|b| b.id == *doc_uri && b.is_page());
             let org_content =
                 crate::serialize_blocks_to_org_with_doc(&doc_blocks, doc_uri, doc_block);
             tokio::fs::write(file_path, &org_content).await?;
@@ -1908,7 +1953,7 @@ impl TestEnvironment {
 
             let mut current_snapshot: HashMap<PathBuf, Option<std::time::SystemTime>> =
                 HashMap::new();
-            for (_doc_uri, file_path) in &self.documents {
+            for file_path in self.documents.values() {
                 let mtime = tokio::fs::metadata(file_path)
                     .await
                     .ok() // ALLOW(ok): file may not exist
@@ -1951,3 +1996,84 @@ pub type TestContext = TestEnvironment;
 
 /// Alias for backward compatibility
 pub type TestContextBuilder = TestEnvironmentBuilder;
+
+/// Compact one-line summary of a CDC change record. Used by inv16 to
+/// dump spurious leaked items without the noise of full Debug output.
+fn summarize_change(change: &holon_api::streaming::MapChange) -> String {
+    use holon_api::streaming::Change;
+    match change {
+        Change::Created { data, origin } => {
+            format!("Created id={} origin={origin:?}", data_row_id(data))
+        }
+        Change::Updated { id, data, origin } => {
+            format!(
+                "Updated id={id} origin={origin:?} fields={:?}",
+                data_row_field_names(data)
+            )
+        }
+        Change::Deleted { id, origin } => {
+            format!("Deleted id={id} origin={origin:?}")
+        }
+        Change::FieldsChanged {
+            entity_id,
+            fields,
+            origin,
+        } => {
+            let pairs: Vec<String> = fields
+                .iter()
+                .map(|(name, old, new)| format!("{name}: {old:?} → {new:?}"))
+                .collect();
+            format!(
+                "FieldsChanged id={entity_id} origin={origin:?} [{}]",
+                pairs.join(", ")
+            )
+        }
+    }
+}
+
+fn data_row_id(row: &holon_api::widget_spec::DataRow) -> String {
+    row.get("id")
+        .map(|v| format!("{v:?}"))
+        .unwrap_or_else(|| "<no id>".to_string())
+}
+
+fn data_row_field_names(row: &holon_api::widget_spec::DataRow) -> Vec<&String> {
+    row.keys().collect()
+}
+
+/// True when a CDC row's `tags` value contains the literal `"Page"` tag.
+///
+/// The `tags` column is `#[jsonb]` and CDC events deliver it in any of these
+/// shapes: `Value::Array(["Page", ...])`, `Value::Json("[\"Page\",...]")`,
+/// `Value::String("[\"Page\",...]")`, `Value::Null`, or absent. We check all
+/// shapes uniformly so the page filter doesn't silently misclassify by shape.
+fn row_tags_contain_page(row: &holon_api::widget_spec::DataRow) -> bool {
+    use holon_api::Value;
+    let Some(value) = row.get("tags") else {
+        return false;
+    };
+    match value {
+        Value::Array(arr) => arr
+            .iter()
+            .any(|v| matches!(v, Value::String(s) if s == "Page")),
+        Value::Json(s) | Value::String(s) => {
+            if s.is_empty() {
+                false
+            } else {
+                serde_json::from_str::<Vec<String>>(s)
+                    .map(|tags| tags.iter().any(|t| t == "Page"))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "[row_tags_contain_page] tags column contained invalid JSON {:?}: {}",
+                            s, e
+                        )
+                    })
+            }
+        }
+        Value::Null => false,
+        other => panic!(
+            "[row_tags_contain_page] unexpected tags value shape: {:?}",
+            other
+        ),
+    }
+}

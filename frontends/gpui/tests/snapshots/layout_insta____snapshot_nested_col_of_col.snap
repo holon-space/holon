@@ -1,0 +1,12 @@
+---
+source: frontends/gpui/tests/layout_insta.rs
+assertion_line: 104
+expression: snap.structural_dump()
+---
+column 9x116
+  column 9x56
+    text 9x26
+    text 9x26
+  column 9x56
+    text 9x26
+    text 9x26

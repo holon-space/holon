@@ -18,6 +18,32 @@ use super::resource::Resource;
 use super::turso::DbHandle;
 use super::types::Result;
 
+/// Descriptor for a multi-valued edge-typed field that projects to a junction
+/// table (per Track 1A / H5).
+///
+/// At write time, `SqlOperationProvider` recognises a param whose key matches
+/// `field` and routes the `Value::Array` payload through DELETE+INSERT against
+/// `join_table` instead of folding it into the `properties` JSON blob. At
+/// query time, `graph_schema::build()` wires a `JoinTableEdgeResolver` so GQL
+/// `MATCH (a)-[:edge]->(b)` patterns dispatch to a JOIN against the same
+/// junction.
+#[derive(Debug, Clone)]
+pub struct EdgeFieldDescriptor {
+    /// Owning entity type name (e.g. "block") — matches the entity the
+    /// field appears on.
+    pub entity: String,
+    /// Field name as it appears in `Block.properties` / params (e.g.
+    /// "blocked_by", "tags").
+    pub field: String,
+    /// Junction table name (e.g. "task_blockers", "block_tags").
+    pub join_table: String,
+    /// Column on `join_table` holding the source entity's id.
+    pub source_col: String,
+    /// Column on `join_table` holding the target entity's id (or, for tag-style
+    /// edges, the literal tag value).
+    pub target_col: String,
+}
+
 /// A module that manages a set of database schema objects.
 ///
 /// Implement this trait for each logical group of database objects that
@@ -60,5 +86,15 @@ pub trait SchemaModule: Send + Sync {
     /// that aren't derivable from Entity `#[reference]` annotations.
     fn graph_contributions(&self) -> (Vec<GraphNodeDef>, Vec<GraphEdgeDef>) {
         (vec![], vec![])
+    }
+
+    /// Multi-valued edge-typed fields that project to a junction table.
+    ///
+    /// Returned descriptors are consumed by both `SqlOperationProvider`
+    /// (for DELETE+INSERT routing on writes) and `graph_schema::build()`
+    /// (for `JoinTableEdgeResolver` wiring on reads). Default is empty —
+    /// only modules that own entities with edge-typed fields override this.
+    fn edge_fields(&self) -> Vec<EdgeFieldDescriptor> {
+        Vec::new()
     }
 }

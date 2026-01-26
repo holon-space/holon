@@ -219,7 +219,6 @@ impl PopupMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_signals::signal_vec::MutableVec;
 
     struct MockProvider {
         items: Vec<PopupItem>,

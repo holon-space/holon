@@ -276,10 +276,12 @@ pub struct Block {
     #[reference(Block, edge = "CHILD_OF")]
     pub parent_id: EntityUri,
 
-    /// For document blocks: the file stem name (e.g. "projects", "todo").
-    /// `Some(name)` means this block is a document root; `None` means regular block.
-    #[serde(default)]
-    pub name: Option<String>,
+    /// Tags attached to this block. The literal tag `"Page"` marks the block
+    /// as a page (formerly `is_document()`). Other tags are user-defined.
+    /// Managed through the block_tags junction table (edge field), not a
+    /// direct column.
+    #[serde(skip, default)]
+    pub tags: Vec<String>,
 
     // --- Content fields (flattened from BlockContent) ---
     /// Text content (raw text or source code)
@@ -331,7 +333,15 @@ pub struct Block {
 }
 
 fn default_sort_key() -> String {
-    "a0".to_string()
+    // Must lex-sort consistently with `FractionalIndex::to_string()` outputs,
+    // which use upper-case hex (e.g. `"7F80"`, `"A180"`). Lower-case `"a0"`
+    // (ASCII 0x61) sorts AFTER `"FF"` but BEFORE `"a"` itself, so a default
+    // `"a0"` collides with — and lex-orders incorrectly against — keys
+    // produced by `gen_key_between(Some("a0"), None)` which returns
+    // `"A180"`. Upper-case `"A0"` keeps lex order in agreement with
+    // fractional-index order across both the SQL renderer and direct
+    // string compares.
+    "A0".to_string()
 }
 
 impl Default for Block {
@@ -340,7 +350,7 @@ impl Default for Block {
         Self {
             id: EntityUri::block_random(),
             parent_id: EntityUri::no_parent(),
-            name: None,
+            tags: Vec::new(),
             content: String::new(),
             content_type: ContentType::Text,
             source_language: None,
@@ -354,11 +364,24 @@ impl Default for Block {
     }
 }
 
+/// Literal tag value that marks a block as a page (formerly "document").
+pub const PAGE_TAG: &str = "Page";
+
 impl Block {
-    /// Whether this block represents a document (org file root).
-    /// A block is a document iff it has a `name` (file stem).
-    pub fn is_document(&self) -> bool {
-        self.name.is_some()
+    /// Whether this block is a page. A block is a page iff its `tags` list
+    /// contains the literal string [`PAGE_TAG`].
+    pub fn is_page(&self) -> bool {
+        self.tags.iter().any(|t| t == PAGE_TAG)
+    }
+
+    /// Mark or unmark this block as a page by toggling [`PAGE_TAG`] in `tags`.
+    pub fn set_page(&mut self, is_page: bool) {
+        let already = self.is_page();
+        if is_page && !already {
+            self.tags.push(PAGE_TAG.to_string());
+        } else if !is_page && already {
+            self.tags.retain(|t| t != PAGE_TAG);
+        }
     }
 
     /// Create a new text block with sensible defaults.
@@ -713,27 +736,47 @@ impl TryFrom<HashMap<String, Value>> for Block {
         let properties = row
             .get("properties")
             .cloned()
-            .and_then(|v| match v {
-                Value::Json(s) => Some(
-                    serde_json::from_str::<HashMap<String, Value>>(&s)
-                        .expect("stored properties JSON must be valid"),
-                ),
-                _ => None,
+            .map(|v| match v {
+                Value::Json(s) | Value::String(s) => {
+                    if s.is_empty() {
+                        HashMap::new()
+                    } else {
+                        serde_json::from_str::<HashMap<String, Value>>(&s)
+                            .expect("stored properties JSON must be valid")
+                    }
+                }
+                Value::Object(m) => m,
+                _ => HashMap::new(),
             })
             .unwrap_or_default();
         let created_at = row.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
         let updated_at = row.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
 
-        let block_name = row
-            .get("name")
-            .and_then(|v| v.as_string().map(|s| s.to_string()));
+        let tags = row
+            .get("tags")
+            .cloned()
+            .map(|v| match v {
+                Value::Array(arr) => arr
+                    .into_iter()
+                    .filter_map(|elem| elem.as_string().map(|s| s.to_string()))
+                    .collect(),
+                Value::Json(s) | Value::String(s) => {
+                    if s.is_empty() {
+                        Vec::new()
+                    } else {
+                        serde_json::from_str::<Vec<String>>(&s)
+                            .expect("stored tags JSON must be valid")
+                    }
+                }
+                Value::Null => Vec::new(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default();
         let sort_key = row
             .get("sort_key")
             .and_then(|v| v.as_string())
             .map(|s| s.to_string())
             .unwrap_or_else(default_sort_key);
-        // marks: stored as JSON string (Value::Json) by the entity framework's
-        // #[jsonb] adapter; absent or NULL → None (plain block).
         let marks = row.get("marks").cloned().and_then(|v| match v {
             Value::Json(s) => Some(
                 serde_json::from_str::<Vec<MarkSpan>>(&s).expect("stored marks JSON must be valid"),
@@ -744,7 +787,7 @@ impl TryFrom<HashMap<String, Value>> for Block {
         Ok(Block {
             id,
             parent_id,
-            name: block_name,
+            tags,
             content,
             content_type,
             source_language,
@@ -810,18 +853,17 @@ mod tests {
     }
 }
 
-/// Group blocks by their owning document block.
+/// Group blocks by their owning page block.
 ///
 /// Builds a `parent_id → children` index in one pass, then walks from each
-/// document block (is_document=true) to collect all descendants. Blocks whose
-/// ancestor chain doesn't reach a document block are collected under `None`.
+/// page block (`is_page() == true`) to collect all descendants. Blocks whose
+/// ancestor chain doesn't reach a page block are collected under `None`.
 ///
-/// Returns `(doc_id, Vec<Block>)` pairs. The document block itself is NOT
+/// Returns `(page_id, Vec<Block>)` pairs. The page block itself is NOT
 /// included in its own descendant list.
 pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
-    // 1. Build parent → children index
     let mut children_of: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, block) in blocks.iter().enumerate() {
         children_of
@@ -830,26 +872,20 @@ pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
             .push(i);
     }
 
-    // 2. Find document blocks, ordered leaf-first (non-root before root).
-    // This ensures nested documents claim their children before a parent
-    // document's BFS traverses through them and steals their descendants.
     let mut doc_indices: Vec<usize> = blocks
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.is_document())
+        .filter(|(_, b)| b.is_page())
         .map(|(i, _)| i)
         .collect();
-    // Documents whose parent_id is another document come first (leaf docs).
-    // Root documents (parent_id = sentinel/no_parent) come last.
     doc_indices.sort_by_key(|&i| {
         if blocks[i].parent_id.is_no_parent() || blocks[i].parent_id.is_sentinel() {
-            1 // root docs last
+            1
         } else {
-            0 // nested docs first
+            0
         }
     });
 
-    // 3. BFS from each document block to collect descendants
     let mut claimed: HashSet<usize> = HashSet::new();
     let mut result: Vec<(EntityUri, Vec<Block>)> = Vec::new();
 
@@ -863,8 +899,7 @@ pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
         while let Some(parent_key) = queue.pop_front() {
             if let Some(child_indices) = children_of.get(parent_key) {
                 for &ci in child_indices {
-                    // Skip other document blocks — they form their own group
-                    if blocks[ci].is_document() {
+                    if blocks[ci].is_page() {
                         continue;
                     }
                     if claimed.insert(ci) {

@@ -331,7 +331,7 @@ mod tests {
             let be = backend_fresh(dir_path, bus).await;
             let collab = be.test_global_doc().await;
             let doc_arc = collab.doc();
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             let _ = rehydrate_shared_trees(&be, &doc).await.unwrap();
             be
         }
@@ -348,7 +348,7 @@ mod tests {
         async fn seed(be: &LoroShareBackend, stable_id: &str, parent: Option<&str>, content: &str) {
             let collab = be.test_global_doc().await;
             let doc_arc = collab.doc();
-            let doc = doc_arc.write().await;
+            let doc = &*doc_arc;
             let tree = doc.get_tree(TREE_NAME);
             let parent_tid = parent.map(|pid| find(&doc, pid).unwrap());
             let node = tree.create(parent_tid).unwrap();
@@ -481,7 +481,7 @@ mod tests {
         async fn find_mount_id(be: &LoroShareBackend, shared_tree_id: &str) -> bool {
             let collab = be.test_global_doc().await;
             let doc_arc = collab.doc();
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             let tree = doc.get_tree(TREE_NAME);
             for n in tree.get_nodes(false) {
                 if matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist) {

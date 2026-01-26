@@ -127,6 +127,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
                                     .to_string()
                             })?
                             .to_string();
+                        // `obj` is a Value::Object payload (set_field caller serialized
+                        // marks as a JSON string), not a CDC row from the jsonb column.
+                        // ALLOW(jsonb_as_string): payload field, not CDC row.
                         let marks_json = obj.get("marks").and_then(|v| v.as_string()).ok_or_else(
                             || {
                                 "set_field('content', Object): missing 'marks' JSON string field"

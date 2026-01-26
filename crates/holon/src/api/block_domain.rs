@@ -13,6 +13,52 @@ const BLOCK_WITH_QUERY_SOURCE_SQL: &str =
 
 pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
 
+/// Walk a `RenderExpr` and substitute `virtual_parent: Bool(true)` (the DSL
+/// sentinel) with `virtual_parent: String(<parent_id>)` so the tree builder's
+/// trailing-slot construction sees the resolved id.
+///
+/// Mirrors `holon_frontend::render_interpreter::resolve_virtual_parent` but
+/// lives in the `holon` crate so the live_block path
+/// (`collection_render_from_profile`) can use it without violating the crate
+/// dependency direction (`holon-frontend → holon → holon-api`). One level
+/// deep — the only place `virtual_parent` legitimately appears today.
+fn resolve_virtual_parent(expr: RenderExpr, parent_id: &str) -> RenderExpr {
+    use holon_api::render_types::Arg;
+    match expr {
+        RenderExpr::FunctionCall { name, args } => {
+            let mut substituted = false;
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    if arg.name.as_deref() == Some("virtual_parent")
+                        && matches!(
+                            &arg.value,
+                            RenderExpr::Literal {
+                                value: Value::Boolean(true)
+                            }
+                        )
+                    {
+                        substituted = true;
+                        Arg {
+                            name: arg.name,
+                            value: RenderExpr::Literal {
+                                value: Value::String(parent_id.to_string()),
+                            },
+                        }
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
+            tracing::info!(
+                "[resolve_virtual_parent] name={name} parent_id={parent_id} substituted={substituted}"
+            );
+            RenderExpr::FunctionCall { name, args }
+        }
+        other => other,
+    }
+}
+
 /// Domain layer for block-specific operations.
 ///
 /// Wraps a `BackendEngine` reference and provides methods that encode
@@ -102,11 +148,18 @@ impl<'a> BlockDomain<'a> {
             .get("render_source")
             .is_some_and(|v| !v.is_null());
 
-        let render_expr = if has_render_source {
+        let result_expr = if has_render_source {
             Self::parse_render_source(&block_info)
         } else {
             self.collection_render_from_profile(block_id)
         };
+
+        let render_expr = Self::wrap_in_query_source_switcher(
+            block_id,
+            result_expr,
+            &query_source,
+            query_language,
+        );
 
         Ok((render_expr, change_stream))
     }
@@ -139,7 +192,7 @@ impl<'a> BlockDomain<'a> {
 
         // If only one variant (the Always default), use it directly — no switcher needed
         if variants.len() == 1 {
-            return variants[0].render.clone();
+            return resolve_virtual_parent(variants[0].render.clone(), &entity_uri.to_string());
         }
 
         // Build a view_mode_switcher with entity_uri + mode_* template args
@@ -177,13 +230,125 @@ impl<'a> BlockDomain<'a> {
         for variant in &variants {
             args.push(Arg {
                 name: Some(format!("mode_{}", variant.name)),
-                value: variant.render.clone(),
+                value: resolve_virtual_parent(variant.render.clone(), &entity_uri.to_string()),
             });
         }
 
         RenderExpr::FunctionCall {
             name: "view_mode_switcher".to_string(),
             args,
+        }
+    }
+
+    /// Add a `source` mode to a query-source block's render expression.
+    ///
+    /// If the underlying expression is already a `view_mode_switcher` (i.e. the
+    /// collection has multiple variants like tree/table/board), `source` is
+    /// appended as another mode so the user sees a single icon row and a
+    /// single per-block view-mode state. Otherwise (single-variant collection,
+    /// or explicit render source), a 2-mode (result + source) switcher wraps
+    /// the expression.
+    fn wrap_in_query_source_switcher(
+        block_id: &holon_api::EntityUri,
+        result_expr: RenderExpr,
+        query_source: &str,
+        query_language: QueryLanguage,
+    ) -> RenderExpr {
+        use holon_api::render_types::Arg;
+
+        let mode_source_expr = RenderExpr::FunctionCall {
+            name: "source_editor".to_string(),
+            args: vec![
+                Arg {
+                    name: Some("language".to_string()),
+                    value: RenderExpr::Literal {
+                        value: Value::String(query_language.to_string()),
+                    },
+                },
+                Arg {
+                    name: Some("content".to_string()),
+                    value: RenderExpr::Literal {
+                        value: Value::String(query_source.to_string()),
+                    },
+                },
+            ],
+        };
+
+        // Merge path: if result_expr is already a view_mode_switcher, append
+        // `source` to its modes + add a `mode_source` template arg.
+        if let RenderExpr::FunctionCall { name, mut args } = result_expr {
+            if name == "view_mode_switcher" {
+                for arg in args.iter_mut() {
+                    if arg.name.as_deref() == Some("modes") {
+                        if let RenderExpr::Literal {
+                            value: Value::String(modes_json),
+                        } = &mut arg.value
+                        {
+                            if let Ok(mut modes) =
+                                serde_json::from_str::<Vec<serde_json::Value>>(modes_json)
+                            {
+                                modes.push(serde_json::json!({"name": "source", "icon": "code"}));
+                                if let Ok(updated) = serde_json::to_string(&modes) {
+                                    *modes_json = updated;
+                                }
+                            }
+                        }
+                    }
+                }
+                args.push(Arg {
+                    name: Some("mode_source".to_string()),
+                    value: mode_source_expr,
+                });
+                return RenderExpr::FunctionCall { name, args };
+            }
+            // Reconstruct so we can fall through to the wrap path.
+            return Self::wrap_with_outer_switcher(
+                block_id,
+                RenderExpr::FunctionCall { name, args },
+                mode_source_expr,
+            );
+        }
+        Self::wrap_with_outer_switcher(block_id, result_expr, mode_source_expr)
+    }
+
+    /// Fallback for when the inner expression isn't a `view_mode_switcher`:
+    /// wrap with a 2-mode (result, source) switcher. The `#qsrc` URI fragment
+    /// keeps the wrap's state separate from any inner per-entity state.
+    fn wrap_with_outer_switcher(
+        block_id: &holon_api::EntityUri,
+        result_expr: RenderExpr,
+        mode_source_expr: RenderExpr,
+    ) -> RenderExpr {
+        use holon_api::render_types::Arg;
+
+        let switcher_uri = format!("{}#qsrc", block_id);
+        let modes_json =
+            r#"[{"name":"result","icon":"list"},{"name":"source","icon":"code"}]"#.to_string();
+
+        RenderExpr::FunctionCall {
+            name: "view_mode_switcher".to_string(),
+            args: vec![
+                Arg {
+                    name: Some("entity_uri".to_string()),
+                    value: RenderExpr::Literal {
+                        value: Value::String(switcher_uri),
+                    },
+                },
+                Arg {
+                    name: Some("modes".to_string()),
+                    value: RenderExpr::Literal {
+                        value: Value::String(modes_json),
+                    },
+                },
+                Arg {
+                    name: Some("mode_result".to_string()),
+                    value: result_expr,
+                },
+                Arg {
+                    name: Some("mode_source".to_string()),
+                    value: mode_source_expr,
+                },
+            ],
         }
     }
 

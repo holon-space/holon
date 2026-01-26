@@ -273,6 +273,29 @@ pub trait UserDriver: Send + Sync {
         source_id: &str,
         target_id: &str,
     ) -> Result<bool>;
+
+    /// Send a single keystroke through the platform input pipeline. Used by
+    /// the PBT's atomic editor primitives (`MoveCursor`, `TypeChars`,
+    /// `DeleteBackward`, `PressKey`, `Blur`) so that each user gesture
+    /// reaches the editor's `capture_action` / `InputState` pipeline the
+    /// same way a real keypress would.
+    ///
+    /// `keystroke` is a GPUI-style key name (e.g. `"home"`, `"right"`,
+    /// `"a"`, `"backspace"`, `"enter"`, `"escape"`). `modifiers` is a list
+    /// of modifier names like `"cmd"` / `"ctrl"` / `"alt"` / `"shift"`.
+    ///
+    /// Default impl is `unimplemented!` — headless drivers have no
+    /// `InputState`, so the bug class these primitives target (in-memory-
+    /// vs-DB content divergence) doesn't exist there. Tests that use these
+    /// primitives must run against a real-input driver (e.g. `GpuiUserDriver`).
+    async fn send_raw_keystroke(&self, keystroke: &str, modifiers: &[&str]) -> Result<()> {
+        let _ = (keystroke, modifiers);
+        anyhow::bail!(
+            "send_raw_keystroke is unimplemented for this UserDriver. \
+             Atomic editor primitives need a real-input driver (GpuiUserDriver). \
+             Was PBT_ATOMIC_EDITOR=1 set in a headless run?"
+        )
+    }
 }
 
 /// Dispatches mutations via `BuilderServices::dispatch_intent` — the same
@@ -312,39 +335,80 @@ impl UserDriver for ReactiveEngineDriver {
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
     ) -> Result<bool> {
-        // Mirror production GPUI: build a focus path with a resolver that
-        // calls `engine.snapshot_reactive` synchronously. No drain-task
-        // race, no `wait_until_ready` timing gap — the resolver gives us
-        // the current per-block tree on demand. See
-        // `frontends/gpui/src/lib.rs` `nav.set_block_resolver`.
-        let engine_for_resolver = self.engine.clone();
-        let resolver: crate::focus_path::LiveBlockResolver = Arc::new(move |block_id: &str| {
-            let uri = EntityUri::from_raw(block_id);
-            Some(Arc::new(engine_for_resolver.snapshot_reactive(&uri)))
-        });
-
-        let root_uri = EntityUri::from_raw(root_block_id);
-        let root_tree = Arc::new(self.engine.snapshot_reactive(&root_uri));
-        let fp = crate::focus_path::build_focus_path_with_resolver(
-            &root_tree,
-            entity_id,
-            resolver.as_ref(),
-        );
-
-        let input = WidgetInput::KeyChord {
-            keys: chord.0.clone(),
-        };
-        let action = fp.and_then(|fp| fp.bubble_input(entity_id, &input));
-
-        // Keep the per-block drain map alive as a quiescence barrier:
-        // dispatching mutations triggers CDC; tests rely on
-        // `wait_for_quiescence` to know when the resulting cascade has
-        // settled before checking invariants.
+        // Establish the router's drain tasks (root + recursively-watched
+        // descendants) and wait for the first emission to land BEFORE
+        // building the focus path. The router warms `block_contents` as
+        // each `live_block` becomes visible; without this barrier, fresh
+        // descendant watchers return empty rows from `snapshot_reactive`
+        // and the focus path can't find blocks rendered through nested
+        // queries (main panel rows, sidebar items).
         self.router.ensure_block_watch(root_block_id);
         self.router
             .wait_until_ready(Duration::from_secs(2))
             .await
             .context("block contents not populated within timeout")?;
+
+        let input = WidgetInput::KeyChord {
+            keys: chord.0.clone(),
+        };
+
+        // Poll the router's cross-block focus path until either the entity
+        // is reachable or we time out. The router auto-extends watches to
+        // nested live_blocks via `process_emission`, but those emissions
+        // are async — root emits first, then sidebars/main panel, then
+        // their descendants. A bulk-added block (`block:bulk-0-7` in the
+        // PBT) may live three levels deep, and `wait_until_ready` only
+        // confirms root populated. Without the poll we race the chord
+        // against the descendant fan-out.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let action = loop {
+            if let Some(action) = self.router.bubble_input(entity_id, &input) {
+                break Some(action);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        // Final fallback: if the router never saw the entity within the
+        // poll window, build a fresh engine-snapshot focus path. This is
+        // the same pattern GPUI uses for chord resolution when its router
+        // is mid-fan-out, and it forces `ensure_watching` for every
+        // live_block on the descent.
+        let action = match action {
+            Some(action) => Some(action),
+            None => {
+                let engine_for_resolver = self.engine.clone();
+                let resolver: crate::focus_path::LiveBlockResolver =
+                    Arc::new(move |block_id: &str| {
+                        let uri = EntityUri::from_raw(block_id);
+                        Some(Arc::new(engine_for_resolver.snapshot_reactive(&uri)))
+                    });
+
+                let root_uri = EntityUri::from_raw(root_block_id);
+                let root_tree = Arc::new(self.engine.snapshot_reactive(&root_uri));
+                let fp = crate::focus_path::build_focus_path_with_resolver(
+                    &root_tree,
+                    entity_id,
+                    resolver.as_ref(),
+                );
+                if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
+                    eprintln!(
+                        "[CHORD-FALLBACK] router timeout for entity={} chord={:?}; \
+                         engine fp_found={}",
+                        entity_id,
+                        chord,
+                        fp.is_some(),
+                    );
+                    if let Some(fp) = &fp {
+                        eprintln!("  engine path ids: {:?}", fp.entity_ids());
+                    }
+                    eprintln!("  router state:\n{}", self.router.diagnostic_snapshot());
+                }
+                fp.and_then(|fp| fp.bubble_input(entity_id, &input))
+            }
+        };
 
         match action {
             Some(InputAction::ExecuteOperation {

@@ -74,8 +74,7 @@ impl LoroDocumentStore {
             let snapshot_path = self.snapshot_path();
             if snapshot_path.exists() {
                 info!("Loading global LoroTree from {}", snapshot_path.display());
-                match LoroDocument::load_from_file(&snapshot_path, GLOBAL_DOC_ID.to_string()).await
-                {
+                match LoroDocument::load_from_file(&snapshot_path, GLOBAL_DOC_ID.to_string()) {
                     Ok(loaded) => Arc::new(loaded),
                     Err(e) => {
                         let error_str = e.to_string();
@@ -159,7 +158,7 @@ impl LoroDocumentStore {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            d.save_to_file(&path).await?;
+            d.save_to_file(&path)?;
         }
         Ok(())
     }
@@ -245,13 +244,13 @@ mod tests {
         let store = LoroDocumentStore::new(store_dir.clone());
         let doc1 = store.get_global_doc().await?;
 
-        doc1.insert_text("test", 0, "Hello").await?;
+        doc1.insert_text("test", 0, "Hello")?;
         store.save_all().await?;
 
         // New store should load persisted data
         let store2 = LoroDocumentStore::new(store_dir);
         let doc2 = store2.get_global_doc().await?;
-        let text = doc2.get_text("test").await?;
+        let text = doc2.get_text("test")?;
         assert_eq!(text, "Hello");
         Ok(())
     }

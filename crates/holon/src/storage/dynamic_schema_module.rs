@@ -82,7 +82,7 @@ impl SchemaModule for DynamicSchemaModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holon_api::{FieldLifetime, FieldSchema};
+    use holon_api::FieldSchema;
 
     #[test]
     fn dynamic_module_provides_and_requires() {

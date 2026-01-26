@@ -849,7 +849,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // runs and the source stays untouched — no rollback.
         let (shared_arc, shared_root) = {
             let doc_arc = collab.doc();
-            let doc = doc_arc.write().await;
+            let doc = &*doc_arc;
 
             let tid = find_tree_id_by_stable_id(&doc, &id_uri)
                 .ok_or_else(|| err(format!("block {id} not found in Loro tree")))?;
@@ -1061,7 +1061,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         let collab = self.global_doc().await?;
         let mount_stable_id = {
             let doc_arc = collab.doc();
-            let doc = doc_arc.write().await;
+            let doc = &*doc_arc;
 
             if let Some((_tid, existing_uri)) = find_mount_by_shared_tree_id(&doc, &shared_tree_id)
             {
@@ -1149,7 +1149,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         let collab = self.global_doc().await?;
         let known: std::collections::HashSet<String> = {
             let doc_arc = collab.doc();
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
             tree.get_nodes(false)
                 .into_iter()
@@ -1621,7 +1621,7 @@ mod tests {
     ) {
         let collab = backend.global_doc().await.unwrap();
         let doc_arc = collab.doc();
-        let doc = doc_arc.write().await;
+        let doc = &*doc_arc;
         let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
         let parent_tid = parent_stable_id.map(|pid| {
             let parent_uri = EntityUri::block(pid);
@@ -1642,7 +1642,7 @@ mod tests {
     async fn read_text(backend: &LoroShareBackend, stable_id: &str) -> Option<String> {
         let collab = backend.global_doc().await.unwrap();
         let doc_arc = collab.doc();
-        let doc = doc_arc.read().await;
+        let doc = &*doc_arc;
         let uri = EntityUri::block(stable_id);
         let tid = find_tree_id_by_stable_id(&doc, &uri)?;
         let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
@@ -1976,7 +1976,7 @@ mod tests {
         let backend_a = LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key);
         let collab = backend_a.test_global_doc().await;
         let doc_arc = collab.doc();
-        let doc = doc_arc.read().await;
+        let doc = &*doc_arc;
         let n = rehydrate_shared_trees(&backend_a, &doc).await.unwrap();
         drop(doc);
         assert_eq!(n, 1, "A should rehydrate exactly 1 share");
@@ -2019,7 +2019,7 @@ mod tests {
                 _ => String::new(),
             };
             if text.contains("[edit-from-B]") {
-                eprintln!("[debug] A picked up B's edit: {text}");
+                tracing::debug!("[debug] A picked up B's edit: {text}");
                 break;
             }
             if std::time::Instant::now() >= deadline {

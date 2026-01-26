@@ -17,11 +17,13 @@ use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_block_operations::SqlBlockOperations;
 use crate::core::sql_operation_provider::SqlOperationProvider;
 use crate::di::DbHandleProvider;
+use crate::storage::schema_module::SchemaModule;
+use crate::storage::schema_modules::BlockSchemaModule;
 use crate::sync::PublishErrorTracker;
 use crate::sync::cache_event_subscriber::CacheEventSubscriber;
 use crate::sync::event_bus::EventBus;
 use crate::sync::link_event_subscriber::LinkEventSubscriber;
-use crate::sync::turso_event_bus::TursoEventBus;
+use crate::sync::turso_event_bus::{TursoEventBus, WatermarkState};
 use holon_api::block::Block;
 
 /// Marker type for the CacheEventSubscriber background wiring.
@@ -50,12 +52,14 @@ impl Module for EventInfraModule {
 
         injector.provide::<TursoEventBus>(Provider::root_async(|resolver| async move {
             let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
-            let event_bus = TursoEventBus::new(db_handle_provider.handle());
-            event_bus
-                .init_schema()
+            let db_handle = db_handle_provider.handle();
+            TursoEventBus::init_schema(&db_handle)
                 .await
                 .expect("Failed to initialize EventBus schema");
-            Shared::new(event_bus)
+            let watermark_state = WatermarkState::start(&db_handle)
+                .await
+                .expect("Failed to start WatermarkState");
+            Shared::new(TursoEventBus::new(db_handle, watermark_state))
         }));
 
         injector.provide(Provider::root(move |_| {
@@ -97,12 +101,13 @@ impl Module for EventInfraModule {
                 let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
                 let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
 
-                let sql_ops = Arc::new(SqlOperationProvider::with_event_bus(
+                let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
                     db_handle_provider.handle(),
                     "block".to_string(),
                     "block".to_string(),
                     "block".to_string(),
                     event_bus_arc,
+                    BlockSchemaModule.edge_fields(),
                 ));
 
                 Arc::new(SqlBlockOperations::new(sql_ops, block_cache))

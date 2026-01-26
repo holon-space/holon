@@ -1,9 +1,18 @@
 # RULES
-- Whenever there's a bug in Flutter, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_pbt.rs can reproduce it.
+- Whenever there's a bug in the UI, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_pbt.rs can reproduce it.
 - If the E2E test doesn't reproduce the issue think about how prod and E2E test can be made more similar, so that the E2E test can reproduce it.
-- Don't add new PBTs for Flutter bugs, only use the existing PBT in general_e2e_pbt.rs
+- Don't add new PBT tests, only use the existing PBT in general_e2e_pbt.rs
 - **NEVER** swallow errors!! Use `Result` and enrich the error message with information.
-- **ALWAYS** `tee` before filtering output
+- **ALWAYS** `tee` before filtering output.
+  Advantages:
+  1. You can get all information you need by filtering the `tee`ed output without having to run again.
+  2. In non-deterministic tests like PBTs you don't need to cross-reference things that e.g. got different UUIDs.
+- **ALWAYS** try `debugger-mcp` before falling back to adding `eprintln`/...
+  Advantages:
+  1. You get both more information out of one debug session.
+  2. You spend less wall-time because you don't have to re-compile and re-start when you need the value for another variable.
+  3. You don't have to remove any `eprintln`/... after the session.
+- Even if you add debug output, do this only for things that you can't get via debugger and still run the app/test via debugger so you can react to the output immediately and inspect additional variables, set additional breakpoints, etc.
 
 ## Error Handling Philosophy: Fail Loud, Never Fake
 
@@ -43,7 +52,57 @@ Use it whenever you have a running application and you want to look under the ho
 See [docs/ORG_SYNTAX.md](docs/ORG_SYNTAX.md) — org files store **bare IDs** without `block:`/`doc:` scheme prefixes. The parser adds schemes at the boundary, the renderer strips them.
 
 # Architecture
-See ARCHITECTURE.md
+See docs/Architecture.md
 
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.
+
+# Wiki
+See [wiki/index.md](wiki/index.md) — living codebase documentation (Karpathy-wiki pattern). Covers all crates, frontends, and architectural concepts with source file references. Start with [wiki/overview.md](wiki/overview.md) for the big picture.
+
+<!-- ooo:START -->
+<!-- ooo:VERSION:0.31.1 -->
+# Ouroboros — Specification-First AI Development
+
+> Before telling AI what to build, define what should be built.
+> As Socrates asked 2,500 years ago — "What do you truly know?"
+> Ouroboros turns that question into an evolutionary AI workflow engine.
+
+Most AI coding fails at the input, not the output. Ouroboros fixes this by
+**exposing hidden assumptions before any code is written**.
+
+1. **Socratic Clarity** — Question until ambiguity ≤ 0.2
+2. **Ontological Precision** — Solve the root problem, not symptoms
+3. **Evolutionary Loops** — Each evaluation cycle feeds back into better specs
+
+```
+Interview → Seed → Execute → Evaluate
+    ↑                           ↓
+    └─── Evolutionary Loop ─────┘
+```
+
+## ooo Commands
+
+Each command loads its agent/MCP on-demand. Details in each skill file.
+
+| Command | Loads |
+|---------|-------|
+| `ooo` | — |
+| `ooo interview` | `ouroboros:socratic-interviewer` |
+| `ooo seed` | `ouroboros:seed-architect` |
+| `ooo run` | MCP required |
+| `ooo evolve` | MCP: `evolve_step` |
+| `ooo evaluate` | `ouroboros:evaluator` |
+| `ooo unstuck` | `ouroboros:{persona}` |
+| `ooo status` | MCP: `session_status` |
+| `ooo setup` | — |
+| `ooo help` | — |
+
+## Agents
+
+Loaded on-demand — not preloaded.
+
+**Core**: socratic-interviewer, ontologist, seed-architect, evaluator,
+wonder, reflect, advocate, contrarian, judge
+**Support**: hacker, simplifier, researcher, architect
+<!-- ooo:END -->

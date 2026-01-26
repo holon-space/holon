@@ -1457,23 +1457,14 @@ impl HolonMcpServer {
     }
 
     #[tool(
-        description = "Inspect the GPUI cross-block navigation state and entity registries. Shows the reactive tree (widget hierarchy with navigators and entity IDs), the cached focus path (ancestor chain from root to focused entity, with operations and collection markers), registered editor inputs, and all live entity view registries. Use this to debug navigation issues or understand which GPUI entities are currently alive."
+        description = "Inspect the GPUI cross-block navigation state. Shows the reactive tree (widget hierarchy with navigators and entity IDs) and the cached focus path (ancestor chain from root to focused entity, with operations and collection markers). Use this to debug navigation issues."
     )]
     async fn describe_navigation(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let state = self.debug.navigation_state.read().unwrap();
         let focus_path_desc = self.debug.input_router.describe_focus_path();
         let output = format!(
-            "── Reactive Tree ──\n{}\n\n── Focus Path ──\n{}\n\nEditor inputs: {} entries\n{}\n\n── Entity View Registries ──\n{}",
-            state.tree_description,
-            focus_path_desc,
-            state.editor_input_ids.len(),
-            state
-                .editor_input_ids
-                .iter()
-                .map(|id| format!("  {id}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            state.entity_registry_description,
+            "── Reactive Tree ──\n{}\n\n── Focus Path ──\n{}",
+            state.tree_description, focus_path_desc,
         );
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }

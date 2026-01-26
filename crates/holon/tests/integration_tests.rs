@@ -15,7 +15,7 @@ async fn test_basic_two_peer_sync() -> Result<()> {
     let doc1 = LoroDocument::new("two-peer-sync".to_string())?;
     let doc2 = LoroDocument::new("two-peer-sync".to_string())?;
 
-    doc1.insert_text("editor", 0, "Initial content").await?;
+    doc1.insert_text("editor", 0, "Initial content")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -33,7 +33,7 @@ async fn test_basic_two_peer_sync() -> Result<()> {
 
     let _ = accept_handle.await?;
 
-    let text1 = doc1.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
     assert!(text1.contains("Initial content"));
 
     Ok(())
@@ -47,9 +47,9 @@ async fn test_three_peer_synchronization() -> Result<()> {
     let doc2 = LoroDocument::new("three-peer".to_string())?;
     let doc3 = LoroDocument::new("three-peer".to_string())?;
 
-    doc1.insert_text("editor", 0, "From peer 1").await?;
-    doc2.insert_text("editor", 0, "From peer 2").await?;
-    doc3.insert_text("editor", 0, "From peer 3").await?;
+    doc1.insert_text("editor", 0, "From peer 1")?;
+    doc2.insert_text("editor", 0, "From peer 2")?;
+    doc3.insert_text("editor", 0, "From peer 3")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -78,9 +78,9 @@ async fn test_three_peer_synchronization() -> Result<()> {
     let _ = accept1_handle.await?;
     let _ = accept2_handle.await?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
-    let text3 = doc3.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
+    let text3 = doc3.get_text("editor")?;
 
     assert!(text1.contains("From peer 1"));
     assert!(text1.contains("From peer 3"));
@@ -106,8 +106,8 @@ async fn test_bidirectional_sync() -> Result<()> {
     let doc1 = LoroDocument::new("bidirectional".to_string())?;
     let doc2 = LoroDocument::new("bidirectional".to_string())?;
 
-    doc1.insert_text("editor", 0, "Peer 1 initial").await?;
-    doc2.insert_text("editor", 0, "Peer 2 initial").await?;
+    doc1.insert_text("editor", 0, "Peer 1 initial")?;
+    doc2.insert_text("editor", 0, "Peer 2 initial")?;
 
     let doc1 = Arc::new(doc1);
     let doc2 = Arc::new(doc2);
@@ -142,7 +142,7 @@ async fn test_bidirectional_sync() -> Result<()> {
 
     let _ = accept2_handle.await?;
 
-    let text1 = doc1.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
 
     assert!(text1.contains("Peer 2 initial") || text1.contains("Peer 1 initial"));
 
@@ -172,8 +172,8 @@ async fn test_empty_document_sync() -> Result<()> {
 
     let _ = accept_handle.await?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1, text2);
 
@@ -188,7 +188,7 @@ async fn test_large_document_sync() -> Result<()> {
     let doc2 = LoroDocument::new("large-doc".to_string())?;
 
     let large_text = "Lorem ipsum dolor sit amet, ".repeat(10000);
-    doc1.insert_text("editor", 0, &large_text).await?;
+    doc1.insert_text("editor", 0, &large_text)?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -206,8 +206,8 @@ async fn test_large_document_sync() -> Result<()> {
 
     let _ = accept_handle.await?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1.len(), text2.len());
     assert!(text1.len() > 100000);
@@ -223,7 +223,7 @@ async fn test_rapid_sequential_edits() -> Result<()> {
     let doc2 = LoroDocument::new("rapid-edits".to_string())?;
 
     for i in 0..100 {
-        doc1.insert_text("editor", i, "x").await?;
+        doc1.insert_text("editor", i, "x")?;
     }
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
@@ -242,8 +242,8 @@ async fn test_rapid_sequential_edits() -> Result<()> {
 
     let _ = accept_handle.await?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1, text2);
     assert_eq!(text1.len(), 100);
@@ -258,9 +258,9 @@ async fn test_multiple_containers() -> Result<()> {
     let doc1 = LoroDocument::new("multi-container".to_string())?;
     let doc2 = LoroDocument::new("multi-container".to_string())?;
 
-    doc1.insert_text("title", 0, "Document Title").await?;
-    doc1.insert_text("body", 0, "Document Body").await?;
-    doc1.insert_text("footer", 0, "Footer Text").await?;
+    doc1.insert_text("title", 0, "Document Title")?;
+    doc1.insert_text("body", 0, "Document Body")?;
+    doc1.insert_text("footer", 0, "Footer Text")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -278,9 +278,9 @@ async fn test_multiple_containers() -> Result<()> {
 
     let _ = accept_handle.await?;
 
-    let title2 = doc2.get_text("title").await?;
-    let body2 = doc2.get_text("body").await?;
-    let footer2 = doc2.get_text("footer").await?;
+    let title2 = doc2.get_text("title")?;
+    let body2 = doc2.get_text("body")?;
+    let footer2 = doc2.get_text("footer")?;
 
     assert_eq!(title2, "Document Title");
     assert_eq!(body2, "Document Body");
@@ -295,7 +295,7 @@ async fn test_multiple_containers() -> Result<()> {
 async fn test_sync_timeout_protection() -> Result<()> {
     let doc1 = LoroDocument::new("timeout-test".to_string())?;
 
-    doc1.insert_text("editor", 0, "Test content").await?;
+    doc1.insert_text("editor", 0, "Test content")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
 
@@ -323,8 +323,8 @@ async fn test_alpn_mismatch_detection() -> Result<()> {
     let doc1 = LoroDocument::new("doc-alpha".to_string())?;
     let doc2 = LoroDocument::new("doc-beta".to_string())?;
 
-    doc1.insert_text("editor", 0, "Alpha").await?;
-    doc2.insert_text("editor", 0, "Beta").await?;
+    doc1.insert_text("editor", 0, "Alpha")?;
+    doc2.insert_text("editor", 0, "Beta")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -367,13 +367,13 @@ async fn test_update_idempotency() -> Result<()> {
     let doc1 = LoroDocument::new("idempotent".to_string())?;
     let doc2 = LoroDocument::new("idempotent".to_string())?;
 
-    let update = doc1.insert_text("editor", 0, "Test").await?;
+    let update = doc1.insert_text("editor", 0, "Test")?;
 
-    doc2.apply_update(&update).await?;
-    doc2.apply_update(&update).await?;
-    doc2.apply_update(&update).await?;
+    doc2.apply_update(&update)?;
+    doc2.apply_update(&update)?;
+    doc2.apply_update(&update)?;
 
-    let text = doc2.get_text("editor").await?;
+    let text = doc2.get_text("editor")?;
 
     assert_eq!(
         text, "Test",
@@ -388,11 +388,11 @@ async fn test_update_idempotency() -> Result<()> {
 async fn test_snapshot_consistency() -> Result<()> {
     let doc1 = LoroDocument::new("snapshot".to_string())?;
 
-    doc1.insert_text("editor", 0, "Hello").await?;
-    doc1.insert_text("editor", 5, " World").await?;
+    doc1.insert_text("editor", 0, "Hello")?;
+    doc1.insert_text("editor", 5, " World")?;
 
-    let snapshot1 = doc1.export_snapshot().await?;
-    let snapshot2 = doc1.export_snapshot().await?;
+    let snapshot1 = doc1.export_snapshot()?;
+    let snapshot2 = doc1.export_snapshot()?;
 
     assert_eq!(
         snapshot1, snapshot2,
@@ -427,7 +427,7 @@ async fn test_sequential_sync_sessions() -> Result<()> {
     let doc1 = LoroDocument::new("sequential".to_string())?;
     let doc2 = LoroDocument::new("sequential".to_string())?;
 
-    doc1.insert_text("editor", 0, "First").await?;
+    doc1.insert_text("editor", 0, "First")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
 
@@ -448,7 +448,7 @@ async fn test_sequential_sync_sessions() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
     let _ = accept_handle.await?;
 
-    doc1.insert_text("editor", 5, " Second").await?;
+    doc1.insert_text("editor", 5, " Second")?;
 
     let adapter3 = IrohSyncAdapter::new("loro-sync").await?;
     let peer2_addr2 = adapter3.addr();
@@ -462,7 +462,7 @@ async fn test_sequential_sync_sessions() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
     let _ = accept_handle.await?;
 
-    let text2 = doc2.get_text("editor").await?;
+    let text2 = doc2.get_text("editor")?;
     assert!(text2.contains("Second"));
 
     Ok(())
@@ -475,12 +475,12 @@ async fn test_utf8_content_sync() -> Result<()> {
     let doc2 = LoroDocument::new("utf8".to_string())?;
 
     let utf8_content = "Hello 世界 🌍 Здравствуй مرحبا";
-    doc1.insert_text("editor", 0, utf8_content).await?;
+    doc1.insert_text("editor", 0, utf8_content)?;
 
-    let snapshot = doc1.export_snapshot().await?;
-    doc2.apply_update(&snapshot).await?;
+    let snapshot = doc1.export_snapshot()?;
+    doc2.apply_update(&snapshot)?;
 
-    let text2 = doc2.get_text("editor").await?;
+    let text2 = doc2.get_text("editor")?;
     assert_eq!(text2, utf8_content);
 
     Ok(())
@@ -493,12 +493,12 @@ async fn test_special_characters_in_content() -> Result<()> {
     let doc2 = LoroDocument::new("special-chars".to_string())?;
 
     let special_content = "Line1\nLine2\tTabbed\r\nWindows\0Null";
-    doc1.insert_text("editor", 0, special_content).await?;
+    doc1.insert_text("editor", 0, special_content)?;
 
-    let snapshot = doc1.export_snapshot().await?;
-    doc2.apply_update(&snapshot).await?;
+    let snapshot = doc1.export_snapshot()?;
+    doc2.apply_update(&snapshot)?;
 
-    let text2 = doc2.get_text("editor").await?;
+    let text2 = doc2.get_text("editor")?;
     assert_eq!(text2, special_content);
 
     Ok(())
@@ -509,8 +509,8 @@ async fn test_special_characters_in_content() -> Result<()> {
 async fn test_zero_length_insert() -> Result<()> {
     let doc = LoroDocument::new("zero-insert".to_string())?;
 
-    doc.insert_text("editor", 0, "").await?;
-    let text = doc.get_text("editor").await?;
+    doc.insert_text("editor", 0, "")?;
+    let text = doc.get_text("editor")?;
 
     assert_eq!(text, "");
 
@@ -524,28 +524,28 @@ async fn test_conflicting_edits_convergence() -> Result<()> {
     let doc2 = LoroDocument::new("conflict-test".to_string())?;
     let doc3 = LoroDocument::new("conflict-test".to_string())?;
 
-    doc1.insert_text("editor", 0, "Base").await?;
+    doc1.insert_text("editor", 0, "Base")?;
 
-    let update_base = doc1.export_snapshot().await?;
-    doc2.apply_update(&update_base).await?;
-    doc3.apply_update(&update_base).await?;
+    let update_base = doc1.export_snapshot()?;
+    doc2.apply_update(&update_base)?;
+    doc3.apply_update(&update_base)?;
 
-    let update1 = doc1.insert_text("editor", 4, " from 1").await?;
-    let update2 = doc2.insert_text("editor", 4, " from 2").await?;
-    let update3 = doc3.insert_text("editor", 4, " from 3").await?;
+    let update1 = doc1.insert_text("editor", 4, " from 1")?;
+    let update2 = doc2.insert_text("editor", 4, " from 2")?;
+    let update3 = doc3.insert_text("editor", 4, " from 3")?;
 
-    doc1.apply_update(&update2).await?;
-    doc1.apply_update(&update3).await?;
+    doc1.apply_update(&update2)?;
+    doc1.apply_update(&update3)?;
 
-    doc2.apply_update(&update1).await?;
-    doc2.apply_update(&update3).await?;
+    doc2.apply_update(&update1)?;
+    doc2.apply_update(&update3)?;
 
-    doc3.apply_update(&update1).await?;
-    doc3.apply_update(&update2).await?;
+    doc3.apply_update(&update1)?;
+    doc3.apply_update(&update2)?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
-    let text3 = doc3.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
+    let text3 = doc3.get_text("editor")?;
 
     assert_eq!(text1, text2);
     assert_eq!(text2, text3);

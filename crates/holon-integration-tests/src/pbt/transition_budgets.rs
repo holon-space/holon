@@ -96,6 +96,13 @@ pub fn expected_sql(transition: &E2ETransition, ref_state: &ReferenceState) -> E
 
     use E2ETransition::*;
     match transition {
+        E2ETransition::Nothing => ExpectedSql {
+            reads: 0,
+            writes: 0,
+            ddl: 0,
+            tolerance: 0,
+        },
+
         // Pre-startup: filesystem only, no SQL
         WriteOrgFile { .. }
         | CreateDirectory { .. }
@@ -294,6 +301,17 @@ pub fn expected_sql(transition: &E2ETransition, ref_state: &ReferenceState) -> E
                 tolerance: update.tolerance + create.tolerance,
             }
         }
+        // JoinBlock is the inverse: 1 update (prev's content) + 1 delete (current).
+        JoinBlock { .. } => {
+            let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
+            let delete = expected_sql_for_kind(MutationKind::Delete, watches, blocks, docs);
+            ExpectedSql {
+                reads: update.reads + delete.reads - REACTIVE_BASE,
+                writes: update.writes + delete.writes,
+                ddl: 0,
+                tolerance: update.tolerance + delete.tolerance,
+            }
+        }
 
         // EmitMcpData: real MCP pipeline — resource fetch → sync engine diff →
         // cache apply_batch → Turso write. Reads: cache get_all_ids + get_all
@@ -321,12 +339,43 @@ pub fn expected_sql(transition: &E2ETransition, ref_state: &ReferenceState) -> E
         // In production, SyncWithPeer / MergeFromPeer fire Loro's
         // `subscribe_root` callback, which wakes `LoroSyncController` to
         // reconcile the diff into the command/event bus.
-        AddPeer | PeerEdit { .. } | SyncWithPeer { .. } | MergeFromPeer { .. } => ExpectedSql {
+        AddPeer
+        | PeerEdit { .. }
+        | PeerCharEdit { .. }
+        | SyncWithPeer { .. }
+        | MergeFromPeer { .. } => ExpectedSql {
             reads: 5,
             writes: 0,
             ddl: 0,
             tolerance: 5,
         },
+
+        // Atomic editor primitives: pure InputState mutations (Focus,
+        // MoveCursor, TypeChars, DeleteBackward, Blur) issue no SQL on
+        // their own — the commit happens later via PressKey or Blur.
+        // PressKey is variable: dispatching Enter→split fires create+update,
+        // Tab→indent fires update, Escape fires nothing. Use the most
+        // permissive bound and let real chord handlers settle.
+        FocusEditableText { .. }
+        | MoveCursor { .. }
+        | TypeChars { .. }
+        | DeleteBackward { .. }
+        | Blur => ExpectedSql {
+            reads: REACTIVE_BASE,
+            writes: 0,
+            ddl: 0,
+            tolerance: 5,
+        },
+        PressKey { .. } => {
+            let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
+            let create = expected_sql_for_kind(MutationKind::Create, watches, blocks, docs);
+            ExpectedSql {
+                reads: update.reads + create.reads - REACTIVE_BASE,
+                writes: update.writes + create.writes,
+                ddl: 0,
+                tolerance: update.tolerance + create.tolerance,
+            }
+        }
     }
 }
 
@@ -473,6 +522,7 @@ fn expected_mutation_sql(
 pub fn transition_key(transition: &E2ETransition) -> String {
     use E2ETransition::*;
     match transition {
+        E2ETransition::Nothing => "Nothing".into(),
         WriteOrgFile { .. } => "WriteOrgFile".into(),
 
         CreateDirectory { .. } => "CreateDirectory".into(),
@@ -512,6 +562,7 @@ pub fn transition_key(transition: &E2ETransition) -> String {
         MoveDown { .. } => "MoveDown".into(),
         DragDropBlock { .. } => "DragDropBlock".into(),
         SplitBlock { .. } => "SplitBlock".into(),
+        JoinBlock { .. } => "JoinBlock".into(),
         UndoLastMutation => "UndoLastMutation".into(),
         Redo => "Redo".into(),
         EmitMcpData => "EmitMcpData".into(),
@@ -519,6 +570,13 @@ pub fn transition_key(transition: &E2ETransition) -> String {
         PeerEdit { .. } => "PeerEdit".into(),
         SyncWithPeer { .. } => "SyncWithPeer".into(),
         MergeFromPeer { .. } => "MergeFromPeer".into(),
+        PeerCharEdit { .. } => "PeerCharEdit".into(),
+        FocusEditableText { .. } => "FocusEditableText".into(),
+        MoveCursor { .. } => "MoveCursor".into(),
+        TypeChars { .. } => "TypeChars".into(),
+        DeleteBackward { .. } => "DeleteBackward".into(),
+        PressKey { .. } => "PressKey".into(),
+        Blur => "Blur".into(),
     }
 }
 
@@ -551,6 +609,7 @@ pub fn expected_renders(
 
     use E2ETransition::*;
     match transition {
+        E2ETransition::Nothing => None,
         // Pre-startup: no UI
         WriteOrgFile { .. }
         | CreateDirectory { .. }
@@ -585,6 +644,7 @@ pub fn expected_renders(
         | MoveDown { .. }
         | DragDropBlock { .. }
         | SplitBlock { .. }
+        | JoinBlock { .. }
         | UndoLastMutation
         | Redo => Some(ExpectedRenders {
             max_total: 30 + blocks * 3,
@@ -632,12 +692,38 @@ pub fn expected_renders(
         }),
 
         // Peer transitions: Loro-only in PBT, minimal UI impact
-        AddPeer | PeerEdit { .. } | SyncWithPeer { .. } | MergeFromPeer { .. } => {
+        AddPeer
+        | PeerEdit { .. }
+        | PeerCharEdit { .. }
+        | SyncWithPeer { .. }
+        | MergeFromPeer { .. } => Some(ExpectedRenders {
+            max_total: 10 + blocks * 2,
+            max_root: 5,
+        }),
+
+        // Atomic editor primitives: Focus rebuilds the editor,
+        // MoveCursor/TypeChars/DeleteBackward only update InputState
+        // (no widget re-render), Blur dispatches set_field. PressKey
+        // is variable like a chord — covered by the most generous bound.
+        FocusEditableText { .. } | Blur => Some(ExpectedRenders {
+            max_total: 20 + blocks,
+            max_root: 5,
+        }),
+        MoveCursor { .. } | DeleteBackward { .. } => Some(ExpectedRenders {
+            max_total: 10,
+            max_root: 3,
+        }),
+        TypeChars { text } => {
+            let keystrokes = text.len().max(1);
             Some(ExpectedRenders {
-                max_total: 10 + blocks * 2,
-                max_root: 5,
+                max_total: keystrokes * (3 + blocks / 4),
+                max_root: keystrokes * 2,
             })
         }
+        PressKey { .. } => Some(ExpectedRenders {
+            max_total: 30 + blocks * 3,
+            max_root: 10,
+        }),
     }
 }
 
@@ -927,13 +1013,12 @@ pub fn diagnose_memory(key: &str) {
         .args(["-o", "pid,rss,vsz,command", "-p"])
         .arg(std::process::id().to_string())
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            eprintln!(
-                "[MEMORY DIAG] {key}: ps:\n{}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
+        eprintln!(
+            "[MEMORY DIAG] {key}: ps:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }
 

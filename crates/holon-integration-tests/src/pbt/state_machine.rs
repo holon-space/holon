@@ -31,13 +31,18 @@ use crate::LoroCorruptionType;
 use loro::{ExportMode, LoroDoc};
 
 /// Whether the PBT generator may produce mutations that overwrite the root
-/// layout (render-source content, layout headline content). Disabled while
-/// we nail down the base reproduction scenario for the
-/// `set_data`-doesn't-propagate-to-children bug — those mutations can swap
-/// the main panel's render expression to one without `state_toggle`, hiding
-/// the bug. Re-enable once the reproduction is reliable and we want to
-/// extend coverage to user-customized layouts.
-const LAYOUT_MUTATIONS_ENABLED: bool = false;
+/// layout (render-source content, layout headline content). The original
+/// disable was to keep the `set_data`-doesn't-propagate-to-children bug
+/// reproducible (layout mutations could swap out `state_toggle`, hiding it).
+/// That bug is now fixed (ReactiveRowSet single-writer + ReadOnlyMutable
+/// downstream + leaf signal subscriptions; see
+/// `reactive_view_model::tests::shared_data_cell_updates_propagate_to_state_toggle_child`).
+///
+/// Custom `index.org` layouts that drop a sidebar (and layout-mutated panel
+/// render sources) are handled in the generator: `ref_state.region_predictable(region)`
+/// short-circuits `focusable_rendered_block_ids` so ClickBlock candidates only
+/// arise for regions where ref_state can predict production's rendering.
+const LAYOUT_MUTATIONS_ENABLED: bool = true;
 
 /// Block-tree manipulation transitions (Indent, Outdent, MoveUp, MoveDown,
 /// SplitBlock) drive `BlockOperations` via key chords (Tab/Shift+Tab/...).
@@ -364,7 +369,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
             }
 
             // Add CreateStaleLoro transition if there are org files to corrupt (Loro only)
-            let org_filenames: Vec<String> = state.documents.values().map(|f| f.clone()).collect();
+            let org_filenames: Vec<String> = state.documents.values().cloned().collect();
             if state.variant.enable_loro && !org_filenames.is_empty() {
                 strategies.push((
                     1, // Lower weight - only occasionally create stale loro files
@@ -409,13 +414,13 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
             .iter()
             .filter(|(_, b)| {
                 // Exclude seed blocks (belong to default doc) and document blocks
-                !b.is_document()
+                !b.is_page()
                     && !is_peer_modified(&b.id)
                     && state
                         .block_state
                         .block_documents
                         .get(&b.id)
-                        .map_or(true, |doc| *doc != default_doc)
+                        .is_none_or(|doc| *doc != default_doc)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -425,17 +430,17 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
             .iter()
             .filter(|(_, b)| {
                 b.content_type == ContentType::Text
-                    && !b.is_document()
+                    && !b.is_page()
                     && !is_peer_modified(&b.id)
                     && state
                         .block_state
                         .block_documents
                         .get(&b.id)
-                        .map_or(true, |doc| *doc != default_doc)
+                        .is_none_or(|doc| *doc != default_doc)
             })
             .map(|(id, _)| id.clone())
             .collect();
-        let doc_uris: Vec<EntityUri> = state.documents.keys().map(|u| u.clone()).collect();
+        let doc_uris: Vec<EntityUri> = state.documents.keys().cloned().collect();
         let next_id = state.block_state.next_id;
         let next_doc_id = state.next_doc_id;
 
@@ -554,6 +559,15 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
         // cannot fire. Includes layout headline blocks (e.g. default-main-panel)
         // because those are the typical navigation targets, even though they're
         // excluded from the mutation pool.
+        //
+        // EXCLUDES `root-layout`: focusing region='main' on root-layout makes
+        // `focus_roots` resolve to {default-main-panel, default-left-sidebar,
+        // default-right-sidebar}. The main panel's own GQL query
+        // (`CHILD_OF*0..20` from focus_root) then returns `default-main-panel`
+        // itself among the descendants, and the renderer's
+        // block_ref(default-main-panel) recurses inside default-main-panel's
+        // own snapshot — `snapshot()` detects the cycle and emits an Error
+        // widget that trips inv14b. See HANDOFF_TURSO_IVM_FOCUS_ROOTS_CHURN.md.
         let parents_with_focusable_children: std::collections::HashSet<EntityUri> = state
             .block_state
             .blocks
@@ -568,6 +582,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
             .filter(|id| {
                 !id.is_no_parent() && !id.is_sentinel() && state.block_state.blocks.contains_key(id)
             })
+            .filter(|id| id.as_str() != "block:root-layout")
             .collect();
         if !navigable_block_ids.is_empty() {
             strategies.add_weighted(
@@ -737,11 +752,33 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
         // to reproduce.
         if LAYOUT_MUTATIONS_ENABLED {
             // Exclude seed render sources (e.g. `holon-app-layout::render::0`)
-            // for the same reason as seed headline blocks — these come from the
-            // default `index.org` and have the Loro seed-block sync issue.
+            // for two reasons: (1) Loro seed-block sync issue (same as seed
+            // headline blocks), and (2) the sidebar/main-panel render exprs
+            // are load-bearing UI infrastructure — the default sidebar render
+            // is a `list()` of all documents; mutating it to e.g. a
+            // `focus_chain()`-driven `columns()` empties the sidebar
+            // permanently (focus_chain is empty when nothing's focused),
+            // hiding all documents and trapping the test in a state where
+            // subsequent transitions can't exercise anything meaningful.
             let seed_render_source_ids: std::collections::HashSet<&str> = [
                 "block:holon-app-layout::render::0",
                 "block:holon-app-layout::src::0",
+                "block:root-layout::src::0",
+                // Test-env seed (uses `block:left_sidebar::...` raw IDs,
+                // which become `block:block:...` once wrapped as EntityUri).
+                "block:block:left_sidebar::render::0",
+                "block:block:left_sidebar::src::0",
+                "block:block:right_sidebar::render::0",
+                "block:block:right_sidebar::src::0",
+                "block:block:main_panel::render::0",
+                "block:block:main_panel::src::0",
+                // Worker-env seed (`block:default-*` raw IDs).
+                "block:default-left-sidebar::render::0",
+                "block:default-left-sidebar::src::0",
+                "block:default-right-sidebar::render::0",
+                "block:default-right-sidebar::src::0",
+                "block:default-main-panel::render::0",
+                "block:default-main-panel::src::0",
             ]
             .into_iter()
             .collect();
@@ -847,9 +884,12 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
         let editable_block_ids: Vec<EntityUri> =
             if state.is_properly_setup() && focused_in_main.is_some() {
                 let focused = focused_in_main.as_ref().unwrap();
-                let valid = state.block_state.blocks.get(focused).map_or(false, |b| {
-                    b.content_type == ContentType::Text && !b.is_document()
-                }) && state.layout_blocks.is_focusable(focused)
+                let valid = state
+                    .block_state
+                    .blocks
+                    .get(focused)
+                    .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page())
+                    && state.layout_blocks.is_focusable(focused)
                     && !no_content_update.contains(focused)
                     && state.is_descendant_of_any(focused, &focus_roots);
                 if valid { vec![focused.clone()] } else { vec![] }
@@ -995,8 +1035,8 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                     let bid = id.clone();
                     candidate_states
                         .iter()
+                        .filter(move |&s| s != &current_state)
                         .cloned()
-                        .filter(move |s| s != &current_state)
                         .map(move |s| (bid.clone(), s))
                 })
                 .collect();
@@ -1020,7 +1060,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
         let deletable_block_ids: Vec<EntityUri> =
             if state.is_properly_setup() && focused_in_main.is_some() {
                 let focused = focused_in_main.as_ref().unwrap();
-                let valid = state.block_state.blocks.get(focused).map_or(false, |b| {
+                let valid = state.block_state.blocks.get(focused).is_some_and(|b| {
                     b.content_type == ContentType::Text
                         && !state.layout_blocks.contains(&b.id)
                         && !b.id.as_str().contains("default-")
@@ -1149,6 +1189,60 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                         })
                         .boxed(),
                 );
+            }
+
+            // JoinBlock: two cases that both fire on Backspace at position 0.
+            //   1. Block has a previous text sibling → merge into prev sibling.
+            //   2. Block is the first child of a text parent → merge into parent.
+            // Either case requires the merge target to be a text block (joining
+            // into a headline / source / document has different semantics we
+            // don't model). The parent target also must not be a layout
+            // headline, since those host their own render expression and
+            // mutating their content would corrupt the active layout.
+            {
+                let joinable: Vec<EntityUri> = editable_block_ids
+                    .iter()
+                    .filter(|id| {
+                        // Case 1: prev sibling is text
+                        let prev_text = state.previous_sibling(id).is_some_and(|prev| {
+                            state
+                                .block_state
+                                .blocks
+                                .get(&prev)
+                                .is_some_and(|b| b.content_type == ContentType::Text)
+                        });
+                        if prev_text {
+                            return true;
+                        }
+                        // Case 2: no prev sibling (first child) and parent is
+                        // a non-layout text block.
+                        if state.previous_sibling(id).is_some() {
+                            return false;
+                        }
+                        let parent_id = match state.block_state.blocks.get(*id) {
+                            Some(b) => b.parent_id.clone(),
+                            None => return false,
+                        };
+                        if parent_id.is_no_parent() || parent_id.is_sentinel() {
+                            return false;
+                        }
+                        let parent_is_text = state
+                            .block_state
+                            .blocks
+                            .get(&parent_id)
+                            .is_some_and(|b| b.content_type == ContentType::Text);
+                        parent_is_text && !state.layout_blocks.contains(&parent_id)
+                    })
+                    .cloned()
+                    .collect();
+                if !joinable.is_empty() {
+                    strategies.add(
+                        "join_block",
+                        prop::sample::select(joinable)
+                            .prop_map(|block_id| E2ETransition::JoinBlock { block_id })
+                            .boxed(),
+                    );
+                }
             }
 
             // DragDropBlock: drag the currently-focused block onto another
@@ -1364,7 +1458,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                     .collect();
 
                 // Peers with blocks (for update/delete) — includes all blocks.
-                let peers_with_blocks: Vec<(usize, Vec<String>)> = all_peer_block_ids
+                let _peers_with_blocks: Vec<(usize, Vec<String>)> = all_peer_block_ids
                     .iter()
                     .filter(|(_, ids)| !ids.is_empty())
                     .cloned()
@@ -1454,380 +1548,192 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
             }
         }
 
+        // ── Atomic editor primitives — gated to GPUI runs ──
+        //
+        // Markov-style adaptive weights: condition each primitive's weight
+        // on `state.last_transition_kind`, the variant tag of the most
+        // recently applied transition. This biases the generator toward
+        // *natural follow-ups* without locking out unknown-unknowns:
+        // every transition keeps a weight floor of ≥1 so wild-card
+        // sequences still appear ~1% of steps. The split-with-pending-edit
+        // bug needs `Focus → TypeChars → DeleteBackward → PressKey(Enter)`,
+        // so we boost TypeChars/DeleteBackward/PressKey right after Focus
+        // and TypeChars right after themselves. PressKey gets a big boost
+        // after a non-empty in-memory edit.
+        if ReferenceState::atomic_editor_enabled()
+            && state.app_started
+            && state.is_properly_setup()
+            && state.current_focus(holon_api::Region::Main).is_some()
+        {
+            let last = state.last_transition_kind;
+            let editor_active = state.active_editor.is_some();
+            let pending_edit = state
+                .active_editor
+                .as_ref()
+                .map(|e| {
+                    state
+                        .block_state
+                        .blocks
+                        .get(&e.block_id)
+                        .is_some_and(|b| b.content != e.in_memory_content)
+                })
+                .unwrap_or(false);
+
+            // FocusEditableText candidates: text blocks that are
+            // (a) descendants of the Main region's focus root in the ref
+            // model AND (b) actually rendered in the live GPUI tree
+            // (read from `BoundsRegistry` via `live_geometry`). The (b)
+            // gate is essential — the ref model sees blocks that the
+            // live tree doesn't (CDC lag, peer-pending, inv10i ghosts),
+            // and proposing those tanks the SUT click into a missing
+            // element.
+            let main_focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+            let live_rendered = super::live_geometry::rendered_entity_ids();
+            let focus_candidates: Vec<EntityUri> = state
+                .block_state
+                .blocks
+                .iter()
+                .filter(|(id, b)| {
+                    b.content_type == ContentType::Text
+                        && !b.is_page()
+                        && !state.layout_blocks.contains(id)
+                        && state.is_descendant_of_any(id, &main_focus_roots)
+                        && !no_content_update.contains(id)
+                        && live_rendered
+                            .as_ref()
+                            .is_some_and(|s| s.contains(id.as_str()))
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+
+            if !editor_active && !focus_candidates.is_empty() {
+                // Boost focus when nothing happened editor-wise yet, low
+                // weight when we already have an open editor (prefer to
+                // continue interacting with it).
+                let weight = match last {
+                    Some("StartApp")
+                    | Some("NavigateFocus")
+                    | Some("NavigateSidebar")
+                    | Some("ClickBlock")
+                    | Some("Blur") => 5,
+                    _ => 2,
+                };
+                strategies.add_weighted(
+                    "focus_editable_text",
+                    weight,
+                    prop::sample::select(focus_candidates)
+                        .prop_map(|block_id| E2ETransition::FocusEditableText { block_id })
+                        .boxed(),
+                );
+            }
+
+            if editor_active {
+                let in_memory_len = state
+                    .active_editor
+                    .as_ref()
+                    .map(|e| e.in_memory_content.len())
+                    .unwrap_or(0);
+
+                // MoveCursor — boost right after Focus (positioning the caret).
+                let mc_weight = match last {
+                    Some("FocusEditableText") => 4,
+                    _ => 1,
+                };
+                strategies.add_weighted(
+                    "move_cursor",
+                    mc_weight,
+                    (0..=in_memory_len)
+                        .prop_map(|byte_position| E2ETransition::MoveCursor { byte_position })
+                        .boxed(),
+                );
+
+                // TypeChars — boost after Focus, MoveCursor, and itself.
+                let tc_weight = match last {
+                    Some("FocusEditableText") | Some("MoveCursor") => 6,
+                    Some("TypeChars") => 4,
+                    _ => 1,
+                };
+                strategies.add_weighted(
+                    "type_chars",
+                    tc_weight,
+                    "[a-z]{1,4}"
+                        .prop_map(|text: String| E2ETransition::TypeChars { text })
+                        .boxed(),
+                );
+
+                // DeleteBackward — boost after TypeChars (typo-correction
+                // pattern) and after Focus when content already has length.
+                let db_weight = match last {
+                    Some("TypeChars") => 5,
+                    Some("FocusEditableText") if in_memory_len > 0 => 4,
+                    _ => 1,
+                };
+                if in_memory_len > 0 {
+                    let max_delete = in_memory_len.min(4);
+                    strategies.add_weighted(
+                        "delete_backward",
+                        db_weight,
+                        (1usize..=max_delete)
+                            .prop_map(|count| E2ETransition::DeleteBackward { count })
+                            .boxed(),
+                    );
+                }
+
+                // PressKey — heavy boost after TypeChars/DeleteBackward
+                // (this is the chord-after-edit class that exposes the
+                // commit-then-mutate contract violation).
+                let pk_weight = if pending_edit {
+                    10 // pending in-memory edit + chord = the bug class
+                } else {
+                    match last {
+                        Some("TypeChars") | Some("DeleteBackward") => 6,
+                        Some("MoveCursor") => 3,
+                        _ => 1,
+                    }
+                };
+                let chord_strategy = prop_oneof![
+                    // Enter (no modifier) → split_block path.
+                    3 => Just(holon_api::KeyChord(
+                        std::iter::once(holon_api::Key::Enter).collect()
+                    )),
+                    // Backspace (no modifier) — only structural at cursor=0,
+                    // but the SUT issues it unconditionally and the system
+                    // routes mid-line backspace to InputState. Both paths
+                    // are useful coverage.
+                    2 => Just(holon_api::KeyChord(
+                        std::iter::once(holon_api::Key::Backspace).collect()
+                    )),
+                    // Escape — blur-ish; production may discard pending.
+                    1 => Just(holon_api::KeyChord(
+                        std::iter::once(holon_api::Key::Escape).collect()
+                    )),
+                ];
+                strategies.add_weighted(
+                    "press_key",
+                    pk_weight,
+                    chord_strategy
+                        .prop_map(|chord| E2ETransition::PressKey { chord })
+                        .boxed(),
+                );
+
+                // Blur — low constant weight (Escape covers similar ground).
+                strategies.add_weighted("blur", 1, Just(E2ETransition::Blur).boxed());
+            }
+        }
+
         strategies.build()
     }
 
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        // Preconditions are a SAFETY NET, not a filter. The generators above
-        // should produce only valid transitions; precondition rejections waste
-        // proptest's shrink budget. If you see high local-reject rates, fix
-        // the generator rather than adding precondition checks.
-        //
-        // WriteOrgFile: always valid (can write files before or after startup)
-        // StartApp: only valid when app is not started
-        // All other transitions: only valid after startup
-        match transition {
-            // Pre-startup transitions
-            E2ETransition::WriteOrgFile { filename, content } => {
-                if state.app_started {
-                    return false;
-                }
-                // Reject if any block IDs in this file already exist under a different document.
-                // Org :ID: properties must be globally unique — the system asserts on duplicates.
-                let doc_name = std::path::Path::new(filename.as_str())
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(filename);
-                let doc_uri = state
-                    .doc_uri_by_name(doc_name)
-                    .unwrap_or_else(|| EntityUri::block("precondition-placeholder"));
-                let id_re = regex::Regex::new(r":ID:\s*(\S+)").unwrap();
-                for caps in id_re.captures_iter(content) {
-                    let block_id = caps.get(1).unwrap().as_str();
-                    let block_entity = EntityUri::block(block_id);
-                    if let Some(existing_doc) = state.block_state.block_documents.get(&block_entity)
-                    {
-                        if *existing_doc != doc_uri {
-                            return false;
-                        }
-                    }
-                }
-                true
-            }
-            E2ETransition::CreateDirectory { .. } => !state.app_started, // Only before startup
-            E2ETransition::GitInit => !state.app_started && !state.git_initialized, // Once only
-            E2ETransition::JjGitInit => !state.app_started && !state.jj_initialized, // Once only
-            E2ETransition::CreateStaleLoro { org_filename, .. } => {
-                // Only valid before startup, and org file must exist
-                !state.app_started && state.documents.values().any(|f| f == org_filename)
-            }
-            E2ETransition::StartApp { .. } => {
-                // Require at least one org file before startup. The system always loads
-                // assets/default/index.org, but the reference model only tracks blocks
-                // from explicitly written files.
-                !state.app_started && state.pre_startup_file_count > 0
-            }
-
-            // Post-startup transitions (require app to be running)
-            E2ETransition::CreateDocument { .. } => state.app_started,
-            E2ETransition::ApplyMutation(event) => {
-                if !state.app_started {
-                    return false;
-                }
-                match &event.mutation {
-                    Mutation::Delete { id, .. } => {
-                        state.block_state.blocks.contains_key(id)
-                            && !state.layout_blocks.contains(id)
-                    }
-                    Mutation::Update { id, .. } => {
-                        state.block_state.blocks.contains_key(id)
-                            && !state.layout_blocks.is_immutable(id)
-                    }
-                    Mutation::Move {
-                        id, new_parent_id, ..
-                    } => {
-                        state.block_state.blocks.contains_key(id)
-                            // Don't move source blocks — Org format determines their parent
-                            // by heading position, so moves can't round-trip correctly.
-                            && state
-                                .block_state.blocks
-                                .get(id)
-                                .map_or(false, |b| b.content_type != ContentType::Source)
-                            && state
-                                .block_state.blocks
-                                .get(new_parent_id)
-                                .map_or(state.documents.contains_key(new_parent_id), |b| {
-                                    b.content_type != ContentType::Source
-                                })
-                    }
-                    Mutation::Create { parent_id, .. } => {
-                        state.documents.contains_key(parent_id)
-                            || state.block_state.blocks.get(parent_id).map_or(false, |b| {
-                                // Don't create children under source blocks — Org format
-                                // can't represent children inside #+begin_src blocks, so
-                                // the Org round-trip would flatten the hierarchy.
-                                b.content_type != ContentType::Source
-                            })
-                    }
-                    Mutation::RestartApp => true,
-                }
-            }
-            E2ETransition::SetupWatch { .. } => state.app_started,
-            E2ETransition::RemoveWatch { query_id } => {
-                state.app_started && state.active_watches.contains_key(query_id)
-            }
-            E2ETransition::SwitchView { .. } => state.app_started,
-            E2ETransition::NavigateFocus { block_id, .. } => {
-                state.app_started && state.block_state.blocks.contains_key(block_id)
-            }
-            E2ETransition::NavigateBack { region } => {
-                state.app_started && state.can_go_back(*region)
-            }
-            E2ETransition::NavigateForward { region } => {
-                state.app_started && state.can_go_forward(*region)
-            }
-            E2ETransition::NavigateHome { .. } => state.app_started,
-            E2ETransition::ClickBlock { block_id, region } => {
-                state.app_started
-                    && state.block_state.blocks.contains_key(block_id)
-                    && state.layout_blocks.is_focusable(block_id)
-                    && !state.focusable_rendered_block_ids(*region).is_empty()
-            }
-            E2ETransition::ArrowNavigate { region, .. } => {
-                state.app_started && state.focused_entity_id.contains_key(region)
-            }
-            E2ETransition::SimulateRestart => {
-                state.app_started && !state.block_state.blocks.is_empty()
-            }
-            E2ETransition::BulkExternalAdd { doc_uri, .. } => {
-                state.app_started && state.documents.contains_key(doc_uri)
-            }
-            E2ETransition::ConcurrentSchemaInit => {
-                state.app_started
-                    && !state.block_state.blocks.is_empty()
-                    && !state.active_watches.is_empty()
-            }
-            E2ETransition::EditViaDisplayTree { block_id, .. } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && state.block_state.blocks.contains_key(block_id)
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-            }
-            E2ETransition::EditViaViewModel { block_id, .. } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && state.block_state.blocks.contains_key(block_id)
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-            }
-            // Generator is the single authority for ToggleState — it only produces
-            // transitions for blocks confirmed to have StateToggle via ViewModel construction.
-            E2ETransition::ToggleState { .. } => state.app_started,
-            E2ETransition::TriggerSlashCommand { block_id } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && state.block_state.blocks.contains_key(block_id)
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && !block_id.as_str().contains("default-")
-                    && state.block_state.blocks.len() > 2
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-            }
-            E2ETransition::TriggerDocLink {
-                block_id,
-                target_block_id,
-            } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && state.block_state.blocks.contains_key(block_id)
-                    && state.block_state.blocks.contains_key(target_block_id)
-                    && block_id != target_block_id
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-            }
-            E2ETransition::ConcurrentMutations {
-                ui_mutation,
-                external_mutation,
-            } => {
-                if !state.app_started {
-                    return false;
-                }
-                // Both sub-mutations must pass preconditions individually
-                let ui_ok =
-                    Self::preconditions(state, &E2ETransition::ApplyMutation(ui_mutation.clone()));
-                let ext_ok = Self::preconditions(
-                    state,
-                    &E2ETransition::ApplyMutation(external_mutation.clone()),
-                );
-                // Reject if both are creates with the same ID (impossible in practice)
-                let same_create_id = matches!(
-                    (&ui_mutation.mutation, &external_mutation.mutation),
-                    (Mutation::Create { id: id1, .. }, Mutation::Create { id: id2, .. }) if id1 == id2
-                );
-                ui_ok && ext_ok && !same_create_id
-            }
-            E2ETransition::Indent { block_id } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                let focused_in_main = state.focused_entity(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && focused_in_main == Some(block_id)
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-                    && state.previous_sibling(block_id).is_some()
-            }
-            E2ETransition::Outdent { block_id } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                let focused_in_main = state.focused_entity(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && focused_in_main == Some(block_id)
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-                    && state.grandparent(block_id).is_some()
-            }
-            E2ETransition::MoveUp { block_id } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                let focused_in_main = state.focused_entity(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && focused_in_main == Some(block_id)
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-                    && state.previous_sibling(block_id).is_some()
-            }
-            E2ETransition::MoveDown { block_id } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                let focused_in_main = state.focused_entity(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && focused_in_main == Some(block_id)
-                    && state
-                        .block_state
-                        .blocks
-                        .get(block_id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-                    && state.next_sibling(block_id).is_some()
-            }
-            E2ETransition::DragDropBlock { source, target } => {
-                // Source must be the currently-focused block: this guarantees
-                // it is rendered with a `Draggable` wrapper (the production
-                // shape — a real user typically clicks the block before
-                // dragging it). Target must be a different text block in the
-                // focus tree so its `DropZone` widget is also rendered.
-                if !state.app_started || !state.is_properly_setup() {
-                    return false;
-                }
-                if source == target {
-                    return false;
-                }
-                let focused_in_main = state.focused_entity(holon_api::Region::Main);
-                if focused_in_main != Some(source) {
-                    return false;
-                }
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                let is_text = |id: &EntityUri| {
-                    state
-                        .block_state
-                        .blocks
-                        .get(id)
-                        .map_or(false, |b| b.content_type == ContentType::Text)
-                };
-                if !is_text(source) || !is_text(target) {
-                    return false;
-                }
-                if state.layout_blocks.contains(source) || state.layout_blocks.contains(target) {
-                    return false;
-                }
-                if !state.is_descendant_of_any(source, &focus_roots)
-                    || !state.is_descendant_of_any(target, &focus_roots)
-                {
-                    return false;
-                }
-                // No-op: target is already source's parent.
-                if state
-                    .block_state
-                    .blocks
-                    .get(source)
-                    .map_or(true, |b| &b.parent_id == target)
-                {
-                    return false;
-                }
-                // Cycle: target is a descendant of source.
-                let mut singleton = std::collections::BTreeSet::new();
-                singleton.insert(source.clone());
-                if state.is_descendant_of_any(target, &singleton) {
-                    return false;
-                }
-                true
-            }
-            E2ETransition::SplitBlock { block_id, position } => {
-                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-                let focused_in_main = state.focused_entity(holon_api::Region::Main);
-                state.app_started
-                    && state.is_properly_setup()
-                    && focused_in_main == Some(block_id)
-                    && state.block_state.blocks.get(block_id).map_or(false, |b| {
-                        b.content_type == ContentType::Text && *position <= b.content_text().len()
-                    })
-                    && !state.layout_blocks.contains(block_id)
-                    && state.is_descendant_of_any(block_id, &focus_roots)
-            }
-            E2ETransition::UndoLastMutation => state.app_started && !state.undo_stack.is_empty(),
-            E2ETransition::Redo => state.app_started && !state.redo_stack.is_empty(),
-            E2ETransition::EmitMcpData => state.app_started,
-            E2ETransition::AddPeer => {
-                state.app_started && state.variant.enable_loro && state.peers.len() < 3
-            }
-            E2ETransition::PeerEdit { peer_idx, op } => {
-                if !state.app_started || *peer_idx >= state.peers.len() {
-                    return false;
-                }
-                let peer = &state.peers[*peer_idx];
-                match op {
-                    super::transitions::PeerEditOp::Create {
-                        parent_stable_id, ..
-                    } => parent_stable_id
-                        .as_ref()
-                        .map_or(true, |pid| peer.blocks.contains_key(pid)),
-                    super::transitions::PeerEditOp::Update { stable_id, .. } => {
-                        peer.blocks.contains_key(stable_id)
-                    }
-                    super::transitions::PeerEditOp::Delete { stable_id } => {
-                        peer.blocks.contains_key(stable_id)
-                    }
-                }
-            }
-            E2ETransition::SyncWithPeer { peer_idx }
-            | E2ETransition::MergeFromPeer { peer_idx } => {
-                state.app_started && *peer_idx < state.peers.len()
-            }
-        }
+        // Single source of truth: `E2ETransition::precondition` is also
+        // reusable from generator filters (`.prop_filter`) so a generator
+        // and the proptest precondition function can never drift apart.
+        // VariantRef derefs to ReferenceState.
+        transition.precondition(state)
     }
-
     fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
         match transition {
+            E2ETransition::Nothing => {}
             // Pre-startup transitions
             E2ETransition::WriteOrgFile { filename, content } => {
                 use regex::Regex;
@@ -1851,17 +1757,18 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in &old_block_ids {
-                    state.block_state.blocks.remove(&id);
+                    state.block_state.blocks.remove(id);
                     state.block_state.block_documents.remove(id);
-                    state.layout_blocks.remove(&id);
+                    state.layout_blocks.remove(id);
                 }
 
-                // Add the document block (is_document=1) for this org file.
+                // Add the page block (tags ⊇ ["Page"]) for this org file.
                 // In production, OrgSyncController creates this with a UUID-based ID.
                 // We use a synthetic block:ref-doc-N URI; doc_uri_map translates
                 // it to the real UUID during invariant comparison.
-                let mut doc_block = Block::new_text(doc_uri.clone(), EntityUri::no_parent(), "");
-                doc_block.name = Some(doc_name.clone());
+                let mut doc_block =
+                    Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name.clone());
+                doc_block.set_page(true);
                 // Set todo_keywords on document block so serialize_blocks_to_org_with_doc
                 // outputs the #+TODO: header. Without this, non-default keywords like
                 // WAITING are not recognized on re-parse, causing content corruption.
@@ -1970,27 +1877,24 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                                 ..Block::default()
                             };
                             // Classify layout blocks in index.org by source language
-                            if filename == "index.org" {
-                                if let Some(sl) = src_block.source_language.as_ref() {
-                                    if sl.as_query().is_some() {
-                                        state.layout_blocks.headline_ids.insert(parent_key.clone());
-                                        state
-                                            .layout_blocks
-                                            .query_source_ids
-                                            .insert(src_uri.clone());
-                                    } else if matches!(sl, SourceLanguage::Render) {
-                                        state.layout_blocks.headline_ids.insert(parent_key.clone());
-                                        state
-                                            .layout_blocks
-                                            .render_source_ids
-                                            .insert(src_uri.clone());
-                                        if let Some(expr) =
-                                            super::reference_state::render_expr_from_rhai(
-                                                src_block.content.as_str(),
-                                            )
-                                        {
-                                            state.render_expressions.insert(src_uri.clone(), expr);
-                                        }
+                            if filename == "index.org"
+                                && let Some(sl) = src_block.source_language.as_ref()
+                            {
+                                if sl.as_query().is_some() {
+                                    state.layout_blocks.headline_ids.insert(parent_key.clone());
+                                    state.layout_blocks.query_source_ids.insert(src_uri.clone());
+                                } else if matches!(sl, SourceLanguage::Render) {
+                                    state.layout_blocks.headline_ids.insert(parent_key.clone());
+                                    state
+                                        .layout_blocks
+                                        .render_source_ids
+                                        .insert(src_uri.clone());
+                                    if let Some(expr) =
+                                        super::reference_state::render_expr_from_rhai(
+                                            src_block.content.as_str(),
+                                        )
+                                    {
+                                        state.render_expressions.insert(src_uri.clone(), expr);
                                     }
                                 }
                             }
@@ -2048,11 +1952,13 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                 // If OrgSync creates a real layout later, it upserts blocks with the same IDs.
                 let default_doc_uri = EntityUri::no_parent();
                 {
-                    // Add the seed document block itself (is_document=1)
-                    // Production code creates this via INSERT INTO block with is_document=1
-                    let mut seed_doc_block =
-                        Block::new_text(default_doc_uri.clone(), EntityUri::no_parent(), "");
-                    seed_doc_block.name = Some("__default__".to_string());
+                    // Add the seed page block itself (tags ⊇ ["Page"])
+                    let mut seed_doc_block = Block::new_text(
+                        default_doc_uri.clone(),
+                        EntityUri::no_parent(),
+                        "__default__",
+                    );
+                    seed_doc_block.set_page(true);
                     if let Some(ref ks) = state.keyword_set {
                         use holon_orgmode::models::OrgDocumentExt;
                         seed_doc_block.set_todo_keywords(Some(ks.0.clone()));
@@ -2074,9 +1980,12 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                                 .filename
                                 .strip_suffix(".org")
                                 .unwrap_or(asset.filename);
-                            let mut block =
-                                Block::new_text(uri.clone(), EntityUri::no_parent(), "");
-                            block.name = Some(name.to_string());
+                            let mut block = Block::new_text(
+                                uri.clone(),
+                                EntityUri::no_parent(),
+                                name.to_string(),
+                            );
+                            block.set_page(true);
                             state.block_state.blocks.insert(uri.clone(), block);
                             state.block_state.block_documents.insert(uri.clone(), uri);
                         }
@@ -2111,11 +2020,10 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                         if b.content_type == ContentType::Source
                             && b.source_language
                                 .as_ref()
-                                .map_or(false, |sl| matches!(sl, SourceLanguage::Render))
+                                .is_some_and(|sl| matches!(sl, SourceLanguage::Render))
+                            && let Ok(expr) = state.interpreter.parse_dsl(&b.content)
                         {
-                            if let Ok(expr) = state.interpreter.parse_dsl(&b.content) {
-                                state.render_expressions.insert(block_id.clone(), expr);
-                            }
+                            state.render_expressions.insert(block_id.clone(), expr);
                         }
                         state.block_state.blocks.insert(block_id, b);
                     }
@@ -2131,7 +2039,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                                 .block_state
                                 .block_documents
                                 .get(*id)
-                                .map_or(false, |doc| doc.is_no_parent() || doc.is_sentinel())
+                                .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel())
                         })
                         .cloned()
                         .collect();
@@ -2219,14 +2127,15 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                 let doc_uri = state.next_synthetic_doc_uri();
                 state.documents.insert(doc_uri.clone(), file_name.clone());
 
-                // Add the document block (is_document=1)
+                // Add the page block (tags ⊇ ["Page"])
                 let doc_name = std::path::Path::new(file_name.as_str())
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or(file_name)
                     .to_string();
-                let mut doc_block = Block::new_text(doc_uri.clone(), EntityUri::no_parent(), "");
-                doc_block.name = Some(doc_name);
+                let mut doc_block =
+                    Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name);
+                doc_block.set_page(true);
                 // New empty documents don't have #+TODO: headers — keywords only
                 // appear after the file is written with content. The on_file_changed
                 // handler syncs parsed keywords to the document block.
@@ -2268,28 +2177,22 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                 state.rebuild_profile_tracking();
 
                 // Update tracked render expressions if a render source block was mutated
-                if let Mutation::Update { id, fields, .. } = &event.mutation {
-                    if state.layout_blocks.render_source_ids.contains(id)
-                        && fields.contains_key("content")
-                    {
-                        if let Some(block) = state.block_state.blocks.get(id) {
-                            if let Some(expr) = super::reference_state::render_expr_from_rhai(
-                                block.content.as_str(),
-                            ) {
-                                state.render_expressions.insert(id.clone(), expr);
-                            }
-                        }
-                    }
+                if let Mutation::Update { id, fields, .. } = &event.mutation
+                    && state.layout_blocks.render_source_ids.contains(id)
+                    && fields.contains_key("content")
+                    && let Some(block) = state.block_state.blocks.get(id)
+                    && let Some(expr) =
+                        super::reference_state::render_expr_from_rhai(block.content.as_str())
+                {
+                    state.render_expressions.insert(id.clone(), expr);
                 }
 
                 state.block_state.next_id += 1;
 
                 // Update focus tracking after mutation
                 match &event.mutation {
-                    Mutation::Update { id, fields, .. } => {
-                        if fields.contains_key("content") {
-                            state.reset_cursor_if_focused(id);
-                        }
+                    Mutation::Update { id, fields, .. } if fields.contains_key("content") => {
+                        state.reset_cursor_if_focused(id);
                     }
                     Mutation::Delete { id, .. } => {
                         state.clear_focus_if_deleted(id);
@@ -2337,19 +2240,19 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                 state.focused_block = Some(block_id.clone());
             }
             E2ETransition::NavigateBack { region } => {
-                if let Some(history) = state.navigation_history.get_mut(region) {
-                    if history.cursor > 0 {
-                        history.cursor -= 1;
-                    }
+                if let Some(history) = state.navigation_history.get_mut(region)
+                    && history.cursor > 0
+                {
+                    history.cursor -= 1;
                 }
                 state.focused_entity_id.remove(region);
                 state.focused_cursor.remove(region);
             }
             E2ETransition::NavigateForward { region } => {
-                if let Some(history) = state.navigation_history.get_mut(region) {
-                    if history.cursor < history.entries.len() - 1 {
-                        history.cursor += 1;
-                    }
+                if let Some(history) = state.navigation_history.get_mut(region)
+                    && history.cursor < history.entries.len() - 1
+                {
+                    history.cursor += 1;
                 }
                 state.focused_entity_id.remove(region);
                 state.focused_cursor.remove(region);
@@ -2400,6 +2303,10 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                     // Clicking sets editor focus but does NOT change the navigation cursor.
                     // The user is still viewing the same document; only the focused editor
                     // changes. Arrow keys will now navigate among the clicked block's siblings.
+                    // The global `focused_block` mirror also follows the click — production
+                    // GPUI's `render_entity` click handler calls `services.set_focus(Some(id))`
+                    // before dispatching `editor_focus`.
+                    state.focused_block = Some(block_id.clone());
                     state.focused_entity_id.insert(*region, block_id.clone());
                     state
                         .focused_cursor
@@ -2534,6 +2441,12 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
 
                 // Update focused entity and cursor. Arrow keys change editor
                 // focus but NOT navigation — navigation_history is untouched.
+                // The global `focused_block` mirror also moves: production
+                // GPUI's arrow handler calls `services.set_focus()` on the
+                // new target (mirroring what a click would do), so the
+                // engine's `UiState.focused_block` follows the per-region
+                // pointer.
+                state.focused_block = Some(current_id.clone());
                 state.focused_entity_id.insert(*region, current_id);
                 state.focused_cursor.insert(*region, cursor);
             }
@@ -2542,12 +2455,19 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                 // The SUT will clear last_projection and trigger file re-processing.
             }
             E2ETransition::BulkExternalAdd { blocks, .. } => {
-                // Add all blocks to the reference state
+                // Add all blocks to the reference state, normalizing each
+                // block's content the same way `Mutation::apply_to` does for
+                // Create. The org renderer round-trips through the parser
+                // (which `.trim()`s headlines and `.trim_end()`s content),
+                // so the ref must mirror that normalization or `text(col(...))`
+                // displays diverge by the trailing-whitespace the parser
+                // strips. Without this, `inv-displayed-text` panics on bulk
+                // blocks whose generator-produced content ends in a space.
                 for block in blocks {
-                    state
-                        .block_state
-                        .blocks
-                        .insert(block.id.clone(), block.clone());
+                    let mut block = block.clone();
+                    block.content =
+                        normalize_content_for_org_roundtrip(&block.content, block.content_type);
+                    state.block_state.blocks.insert(block.id.clone(), block);
                 }
                 // BulkExternalAdd serializes via serialize_blocks_to_org (canonical order)
                 let mut all_blocks: Vec<Block> =
@@ -2728,13 +2648,20 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
             E2ETransition::Indent { block_id } => {
                 state.push_undo_snapshot();
                 let prev_id = state.previous_sibling(block_id).unwrap();
-                state.set_parent(block_id, prev_id);
+                // Production indent re-parents the block under its previous
+                // sibling, anchored after that parent's current last child —
+                // i.e. it lands at the end of the new sibling group. Mirror
+                // that with `move_block(after = last_child_of(prev_id))`.
+                let after = state
+                    .sorted_children_of(&prev_id)
+                    .last()
+                    .map(|b| b.id.clone());
+                state.move_block(block_id, prev_id, after.as_ref());
             }
 
             E2ETransition::Outdent { block_id } => {
                 state.push_undo_snapshot();
-                let grandparent_id = state.grandparent(block_id).unwrap();
-                state.set_parent(block_id, grandparent_id);
+                state.outdent_block(block_id);
             }
 
             E2ETransition::MoveUp { block_id } => {
@@ -2751,13 +2678,43 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
 
             E2ETransition::DragDropBlock { source, target } => {
                 state.push_undo_snapshot();
-                state.set_parent(source, target.clone());
+                // Production's drop_zone dispatches `move_block(id=source,
+                // parent_id=target, after_block_id=None)` which inserts at
+                // the beginning of the target's children.
+                state.move_block(source, target.clone(), None);
             }
 
             E2ETransition::SplitBlock { block_id, position } => {
                 state.push_undo_snapshot();
                 state.split_block(block_id, *position);
                 state.reset_cursor_if_focused(block_id);
+            }
+
+            E2ETransition::JoinBlock { block_id } => {
+                state.push_undo_snapshot();
+                // Determine the merge target before mutation: prev sibling if
+                // present, otherwise the parent block (child→parent join).
+                let target_id = state.previous_sibling(block_id).unwrap_or_else(|| {
+                    state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .map(|b| b.parent_id.clone())
+                        .expect("JoinBlock precondition: block must exist with a parent")
+                });
+                state.join_block(block_id);
+                // Focus moves to the merge target (prev sibling OR parent);
+                // cursor lands at the join boundary, but the reference model
+                // tracks (line, column) — match SplitBlock's behaviour and
+                // reset to start. Production sets cursor at join boundary
+                // via the editor_focus follow-up; PBT cursor checks are
+                // best-effort and do not gate the test.
+                use holon_api::Region;
+                state.focused_entity_id.insert(Region::Main, target_id);
+                state.focused_cursor.insert(
+                    Region::Main,
+                    super::reference_state::CursorPosition::start(),
+                );
             }
 
             E2ETransition::UndoLastMutation => {
@@ -2794,10 +2751,10 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                             .block_state
                             .block_documents
                             .get(&b.id)
-                            .map_or(false, |doc| doc.is_no_parent() || doc.is_sentinel());
+                            .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
                         // Exclude document blocks (name != None) — they exist
                         // in the reference model but not as Loro tree nodes.
-                        !is_seed && b.name.is_none()
+                        !is_seed && !b.is_page()
                     })
                     .map(|b| {
                         let pb = super::peer_ops::PeerBlock {
@@ -2875,6 +2832,16 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                     &created,
                     &baseline,
                 );
+                // Newly-created peer blocks are inserted with the default
+                // `sequence=0` (via `Block::default()` in `from_block_content`),
+                // colliding with whatever sequence the parent's existing
+                // children already have. Production renders by
+                // `(content_type group, sort_key, id)` and re-parses sequences
+                // 0..N in render order — so the parent's child ordering only
+                // converges after a recanon. Without this, the assertion at
+                // `assertions.rs:117` flags an order mismatch on the next
+                // org-file round-trip.
+                state.recanon_and_rebuild();
                 refresh_peer_baseline(&mut state.peers[*peer_idx]);
             }
 
@@ -2904,6 +2871,8 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                     &created,
                     &baseline,
                 );
+                // See the matching comment in `MergeFromPeer` above.
+                state.recanon_and_rebuild();
 
                 // Primary → peer: add any primary blocks missing from peer,
                 // but skip blocks the peer deleted in this round (already removed
@@ -2925,8 +2894,8 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                             .block_state
                             .block_documents
                             .get(&b.id)
-                            .map_or(false, |doc| doc.is_no_parent() || doc.is_sentinel());
-                        !is_seed && b.name.is_none()
+                            .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
+                        !is_seed && !b.is_page()
                     })
                     .map(|b| super::peer_ops::PeerBlock {
                         stable_id: b.id.id().to_string(),
@@ -2948,7 +2917,647 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
                 }
                 refresh_peer_baseline(peer);
             }
+
+            E2ETransition::PeerCharEdit {
+                peer_idx,
+                block_id,
+                op: _,
+            } => {
+                // Reference model: PeerCharEdit doesn't change block-level
+                // content (it operates at the LoroText character level).
+                // The block content in the reference model stays the same;
+                // cross-peer text convergence is checked by inv-cross-peer-
+                // text-convergence after SyncWithPeer.
+                let _ = (peer_idx, block_id);
+            }
+
+            // ── Atomic editor primitives ──
+            E2ETransition::FocusEditableText { block_id } => {
+                let saved = state
+                    .block_state
+                    .blocks
+                    .get(block_id)
+                    .map(|b| b.content.clone())
+                    .unwrap_or_default();
+                let cursor_byte = saved.len();
+                state.active_editor = Some(super::reference_state::ActiveEditor {
+                    block_id: block_id.clone(),
+                    in_memory_content: saved,
+                    cursor_byte,
+                });
+                // NOTE: deliberately do NOT update `focused_entity_id` /
+                // `focused_block`. inv15 compares those to
+                // `engine.focused_block()`, but production's set_focus()
+                // path is signal-loop driven and a synthetic click may
+                // not update it deterministically. `active_editor` is the
+                // source of truth for editor focus; navigation focus
+                // stays untouched.
+            }
+            E2ETransition::MoveCursor { byte_position } => {
+                if let Some(editor) = state.active_editor.as_mut() {
+                    editor.move_cursor(*byte_position);
+                }
+            }
+            E2ETransition::TypeChars { text } => {
+                if let Some(editor) = state.active_editor.as_mut() {
+                    editor.type_chars(text);
+                }
+            }
+            E2ETransition::DeleteBackward { count } => {
+                if let Some(editor) = state.active_editor.as_mut() {
+                    editor.delete_backward(*count);
+                }
+            }
+            E2ETransition::Blur => {
+                state.commit_active_editor_if_changed();
+                state.active_editor = None;
+            }
+            E2ETransition::PressKey { chord } => {
+                use holon_api::{Key, Region};
+
+                let Some(editor) = state.active_editor.clone() else {
+                    return state;
+                };
+                let block_id = editor.block_id.clone();
+                let cursor_byte = editor.cursor_byte;
+
+                let has_modifier = chord
+                    .0
+                    .iter()
+                    .any(|k| matches!(k, Key::Cmd | Key::Ctrl | Key::Alt | Key::Shift));
+                let regulars: Vec<Key> = chord
+                    .0
+                    .iter()
+                    .filter(|k| !matches!(k, Key::Cmd | Key::Ctrl | Key::Alt | Key::Shift))
+                    .cloned()
+                    .collect();
+                let single = if regulars.len() == 1 {
+                    Some(regulars[0].clone())
+                } else {
+                    None
+                };
+
+                // Enter (no modifier): commit pending edit, then split
+                // at cursor against the post-commit content.
+                if matches!(single, Some(Key::Enter)) && !has_modifier {
+                    state.commit_active_editor_if_changed();
+                    state.push_undo_snapshot();
+                    state.split_block(&block_id, cursor_byte);
+                    state.reset_cursor_if_focused(&block_id);
+                    state.active_editor = None;
+                    state.focused_entity_id.remove(&Region::Main);
+                }
+                // Backspace at position 0: commit, then join.
+                else if matches!(single, Some(Key::Backspace))
+                    && !has_modifier
+                    && cursor_byte == 0
+                {
+                    state.commit_active_editor_if_changed();
+                    let prev = state.previous_sibling(&block_id);
+                    let parent = state
+                        .block_state
+                        .blocks
+                        .get(&block_id)
+                        .map(|b| b.parent_id.clone());
+                    let target_id = match (&prev, &parent) {
+                        (Some(p), _) => Some(p.clone()),
+                        (None, Some(p)) => {
+                            // Only join into parent if parent is a non-layout text block.
+                            let parent_ok = state
+                                .block_state
+                                .blocks
+                                .get(p)
+                                .is_some_and(|b| b.content_type == ContentType::Text)
+                                && !state.layout_blocks.contains(p)
+                                && !p.is_no_parent()
+                                && !p.is_sentinel();
+                            if parent_ok { Some(p.clone()) } else { None }
+                        }
+                        _ => None,
+                    };
+                    if let Some(target_id) = target_id {
+                        state.push_undo_snapshot();
+                        state.join_block(&block_id);
+                        state.focused_entity_id.insert(Region::Main, target_id);
+                        state.focused_cursor.insert(
+                            Region::Main,
+                            super::reference_state::CursorPosition::start(),
+                        );
+                        state.active_editor = None;
+                    }
+                }
+                // Other chords (Tab, Escape, etc.): no structural change
+                // modeled in v1. Pending edits remain in InputState.
+            }
         }
+        state.last_transition_kind = Some(transition.variant_name());
         state
+    }
+}
+
+impl E2ETransition {
+    /// Whether this transition is valid against the given reference state.
+    ///
+    /// Used both by proptest's `preconditions` (which the shrinker consults
+    /// when removing transitions from a sequence — it doesn't re-run the
+    /// generator) and by per-transition generator filters (so a generator
+    /// can't produce a transition that the precondition would reject).
+    pub fn precondition(&self, state: &ReferenceState) -> bool {
+        // Preconditions are a SAFETY NET as well as a generator filter: the
+        // generators above pre-narrow candidate args for low rejection
+        // rates, but they call this method as a final check so they
+        // can't drift from the precondition's view of validity.
+        //
+        // WriteOrgFile: always valid (can write files before or after startup)
+        // StartApp: only valid when app is not started
+        // All other transitions: only valid after startup
+        match self {
+            E2ETransition::Nothing => true,
+            // Pre-startup transitions
+            E2ETransition::WriteOrgFile { filename, content } => {
+                if state.app_started {
+                    return false;
+                }
+                // Reject if any block IDs in this file already exist under a different document.
+                // Org :ID: properties must be globally unique — the system asserts on duplicates.
+                let doc_name = std::path::Path::new(filename.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(filename);
+                let doc_uri = state
+                    .doc_uri_by_name(doc_name)
+                    .unwrap_or_else(|| EntityUri::block("precondition-placeholder"));
+                let id_re = regex::Regex::new(r":ID:\s*(\S+)").unwrap();
+                for caps in id_re.captures_iter(content) {
+                    let block_id = caps.get(1).unwrap().as_str();
+                    let block_entity = EntityUri::block(block_id);
+                    if let Some(existing_doc) = state.block_state.block_documents.get(&block_entity)
+                        && *existing_doc != doc_uri
+                    {
+                        return false;
+                    }
+                }
+                true
+            }
+            E2ETransition::CreateDirectory { .. } => !state.app_started, // Only before startup
+            E2ETransition::GitInit => !state.app_started && !state.git_initialized, // Once only
+            E2ETransition::JjGitInit => !state.app_started && !state.jj_initialized, // Once only
+            E2ETransition::CreateStaleLoro { org_filename, .. } => {
+                // Only valid before startup, and org file must exist
+                !state.app_started && state.documents.values().any(|f| f == org_filename)
+            }
+            E2ETransition::StartApp { .. } => {
+                // Require at least one org file before startup. The system always loads
+                // assets/default/index.org, but the reference model only tracks blocks
+                // from explicitly written files.
+                !state.app_started && state.pre_startup_file_count > 0
+            }
+
+            // Post-startup transitions (require app to be running)
+            E2ETransition::CreateDocument { .. } => state.app_started,
+            E2ETransition::ApplyMutation(event) => {
+                if !state.app_started {
+                    return false;
+                }
+                match &event.mutation {
+                    Mutation::Delete { id, .. } => {
+                        state.block_state.blocks.contains_key(id)
+                            && !state.layout_blocks.contains(id)
+                    }
+                    Mutation::Update { id, .. } => {
+                        state.block_state.blocks.contains_key(id)
+                            && !state.layout_blocks.is_immutable(id)
+                    }
+                    Mutation::Move {
+                        id, new_parent_id, ..
+                    } => {
+                        state.block_state.blocks.contains_key(id)
+                            // Don't move source blocks — Org format determines their parent
+                            // by heading position, so moves can't round-trip correctly.
+                            && state
+                                .block_state.blocks
+                                .get(id)
+                                .is_some_and(|b| b.content_type != ContentType::Source)
+                            && state
+                                .block_state.blocks
+                                .get(new_parent_id)
+                                .map_or(state.documents.contains_key(new_parent_id), |b| {
+                                    b.content_type != ContentType::Source
+                                })
+                    }
+                    Mutation::Create { parent_id, .. } => {
+                        state.documents.contains_key(parent_id)
+                            || state.block_state.blocks.get(parent_id).is_some_and(|b| {
+                                // Don't create children under source blocks — Org format
+                                // can't represent children inside #+begin_src blocks, so
+                                // the Org round-trip would flatten the hierarchy.
+                                b.content_type != ContentType::Source
+                            })
+                    }
+                    Mutation::RestartApp => true,
+                }
+            }
+            E2ETransition::SetupWatch { .. } => state.app_started,
+            E2ETransition::RemoveWatch { query_id } => {
+                state.app_started && state.active_watches.contains_key(query_id)
+            }
+            E2ETransition::SwitchView { .. } => state.app_started,
+            E2ETransition::NavigateFocus { block_id, .. } => {
+                state.app_started && state.block_state.blocks.contains_key(block_id)
+            }
+            E2ETransition::NavigateBack { region } => {
+                state.app_started && state.can_go_back(*region)
+            }
+            E2ETransition::NavigateForward { region } => {
+                state.app_started && state.can_go_forward(*region)
+            }
+            E2ETransition::NavigateHome { .. } => state.app_started,
+            E2ETransition::ClickBlock { block_id, region } => {
+                state.app_started
+                    && state.block_state.blocks.contains_key(block_id)
+                    && state.layout_blocks.is_focusable(block_id)
+                    && !state.focusable_rendered_block_ids(*region).is_empty()
+            }
+            E2ETransition::ArrowNavigate { region, .. } => {
+                state.app_started && state.focused_entity_id.contains_key(region)
+            }
+            E2ETransition::SimulateRestart => {
+                state.app_started && !state.block_state.blocks.is_empty()
+            }
+            E2ETransition::BulkExternalAdd { doc_uri, .. } => {
+                state.app_started && state.documents.contains_key(doc_uri)
+            }
+            E2ETransition::ConcurrentSchemaInit => {
+                state.app_started
+                    && !state.block_state.blocks.is_empty()
+                    && !state.active_watches.is_empty()
+            }
+            E2ETransition::EditViaDisplayTree { block_id, .. } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && state.block_state.blocks.contains_key(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+            }
+            E2ETransition::EditViaViewModel { block_id, .. } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && state.block_state.blocks.contains_key(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+            }
+            // ToggleState requires the block to be a *direct child* of the
+            // current Main navigation focus — i.e. in `expected_focus_root_ids(Main)`.
+            // The generator filter at state_machine.rs:935 only emits ToggleState
+            // for blocks whose ID is in `main_focus_roots`, but the proptest
+            // shrinker can drop the establishing ClickBlock/NavigateFocus,
+            // leaving an orphan ToggleState in the sequence whose target block
+            // is not actually rendered in the Main panel — `wait_for_entity_in_resolved_view_model`
+            // then times out at sut.rs:1727. Mirror the generator's visibility
+            // filter here so shrunk sequences without a valid Main focus are
+            // rejected.
+            //
+            // The generator is still the authority for *which* state value to
+            // pick (it walks the rendered ViewModel for state_toggle widgets);
+            // we only re-validate the structural prerequisites the shrinker
+            // could violate.
+            E2ETransition::ToggleState { block_id, .. } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                state.app_started
+                    && state.current_focus(holon_api::Region::Main).is_some()
+                    // `region_predictable(Main)` rejects both custom/unparseable
+                    // root layouts and layout-mutated panel render sources —
+                    // either case produces rows with no entity binding, so
+                    // `wait_for_entity_in_resolved_view_model` would time out.
+                    && state.region_predictable(holon_api::Region::Main)
+                    && focus_roots.contains(block_id)
+                    // Layout headlines (in `layout_blocks.headline_ids`) define
+                    // their own render expression via a child render source.
+                    // Production renders the headline through that custom
+                    // layout, which can omit `state_toggle` entirely. The
+                    // headline never appears as a state_toggle entity in the
+                    // resolved ViewModel, so ToggleState would time out.
+                    // EditViaViewModel/Indent/MoveUp etc. already exclude
+                    // layout blocks for the same reason.
+                    && !state.layout_blocks.contains(block_id)
+                    // A custom entity profile for `block` can replace the
+                    // default render with anything (e.g. just an
+                    // `editable_text`) — losing the state_toggle widget.
+                    // The reference state doesn't introspect the active
+                    // variant's widget set, so conservatively skip
+                    // ToggleState whenever a custom block profile is loaded.
+                    && !state.has_blocks_profile()
+            }
+            E2ETransition::TriggerSlashCommand { block_id } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && state.block_state.blocks.contains_key(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && !block_id.as_str().contains("default-")
+                    && state.block_state.blocks.len() > 2
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+            }
+            E2ETransition::TriggerDocLink {
+                block_id,
+                target_block_id,
+            } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && state.block_state.blocks.contains_key(block_id)
+                    && state.block_state.blocks.contains_key(target_block_id)
+                    && block_id != target_block_id
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+            }
+            E2ETransition::ConcurrentMutations {
+                ui_mutation,
+                external_mutation,
+            } => {
+                if !state.app_started {
+                    return false;
+                }
+                // Both sub-mutations must pass preconditions individually
+                let ui_ok = E2ETransition::ApplyMutation(ui_mutation.clone()).precondition(state);
+                let ext_ok =
+                    E2ETransition::ApplyMutation(external_mutation.clone()).precondition(state);
+                // Reject if both are creates with the same ID (impossible in practice)
+                let same_create_id = matches!(
+                    (&ui_mutation.mutation, &external_mutation.mutation),
+                    (Mutation::Create { id: id1, .. }, Mutation::Create { id: id2, .. }) if id1 == id2
+                );
+                ui_ok && ext_ok && !same_create_id
+            }
+            E2ETransition::Indent { block_id } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                let focused_in_main = state.focused_entity(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && focused_in_main == Some(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+                    && state.previous_sibling(block_id).is_some()
+            }
+            E2ETransition::Outdent { block_id } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                let focused_in_main = state.focused_entity(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && focused_in_main == Some(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+                    && state.grandparent(block_id).is_some()
+            }
+            E2ETransition::MoveUp { block_id } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                let focused_in_main = state.focused_entity(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && focused_in_main == Some(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+                    && state.previous_sibling(block_id).is_some()
+            }
+            E2ETransition::MoveDown { block_id } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                let focused_in_main = state.focused_entity(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && focused_in_main == Some(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+                    && state.next_sibling(block_id).is_some()
+            }
+            E2ETransition::DragDropBlock { source, target } => {
+                // Source must be the currently-focused block: this guarantees
+                // it is rendered with a `Draggable` wrapper (the production
+                // shape — a real user typically clicks the block before
+                // dragging it). Target must be a different text block in the
+                // focus tree so its `DropZone` widget is also rendered.
+                if !state.app_started || !state.is_properly_setup() {
+                    return false;
+                }
+                if source == target {
+                    return false;
+                }
+                let focused_in_main = state.focused_entity(holon_api::Region::Main);
+                if focused_in_main != Some(source) {
+                    return false;
+                }
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                let is_text = |id: &EntityUri| {
+                    state
+                        .block_state
+                        .blocks
+                        .get(id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                };
+                if !is_text(source) || !is_text(target) {
+                    return false;
+                }
+                if state.layout_blocks.contains(source) || state.layout_blocks.contains(target) {
+                    return false;
+                }
+                if !state.is_descendant_of_any(source, &focus_roots)
+                    || !state.is_descendant_of_any(target, &focus_roots)
+                {
+                    return false;
+                }
+                // No-op: target is already source's parent.
+                if state
+                    .block_state
+                    .blocks
+                    .get(source)
+                    .is_none_or(|b| &b.parent_id == target)
+                {
+                    return false;
+                }
+                // Cycle: target is a descendant of source.
+                let mut singleton = std::collections::BTreeSet::new();
+                singleton.insert(source.clone());
+                if state.is_descendant_of_any(target, &singleton) {
+                    return false;
+                }
+                true
+            }
+            E2ETransition::SplitBlock { block_id, position } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                let focused_in_main = state.focused_entity(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && focused_in_main == Some(block_id)
+                    && state.block_state.blocks.get(block_id).is_some_and(|b| {
+                        b.content_type == ContentType::Text && *position <= b.content_text().len()
+                    })
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+            }
+            E2ETransition::JoinBlock { block_id } => {
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                let focused_in_main = state.focused_entity(holon_api::Region::Main);
+                let base_ok = state.app_started
+                    && state.is_properly_setup()
+                    && focused_in_main == Some(block_id)
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots);
+                if !base_ok {
+                    return false;
+                }
+                // Case 1: previous text sibling exists → join into prev sibling.
+                let prev_text = state
+                    .previous_sibling(block_id)
+                    .and_then(|prev| {
+                        state
+                            .block_state
+                            .blocks
+                            .get(&prev)
+                            .map(|b| b.content_type == ContentType::Text)
+                    })
+                    .unwrap_or(false);
+                if prev_text {
+                    return true;
+                }
+                // Case 2: no previous sibling AND parent is a non-layout text block
+                // → join into parent. Mirrors the production semantics added
+                // for child→parent join.
+                if state.previous_sibling(block_id).is_some() {
+                    return false;
+                }
+                let parent_id = match state.block_state.blocks.get(block_id) {
+                    Some(b) => b.parent_id.clone(),
+                    None => return false,
+                };
+                if parent_id.is_no_parent() || parent_id.is_sentinel() {
+                    return false;
+                }
+                let parent_is_text = state
+                    .block_state
+                    .blocks
+                    .get(&parent_id)
+                    .is_some_and(|b| b.content_type == ContentType::Text);
+                parent_is_text && !state.layout_blocks.contains(&parent_id)
+            }
+            E2ETransition::UndoLastMutation => state.app_started && !state.undo_stack.is_empty(),
+            E2ETransition::Redo => state.app_started && !state.redo_stack.is_empty(),
+            E2ETransition::EmitMcpData => state.app_started,
+            E2ETransition::AddPeer => {
+                state.app_started && state.variant.enable_loro && state.peers.len() < 3
+            }
+            E2ETransition::PeerEdit { peer_idx, op } => {
+                if !state.app_started || *peer_idx >= state.peers.len() {
+                    return false;
+                }
+                let peer = &state.peers[*peer_idx];
+                match op {
+                    super::transitions::PeerEditOp::Create {
+                        parent_stable_id, ..
+                    } => parent_stable_id
+                        .as_ref()
+                        .is_none_or(|pid| peer.blocks.contains_key(pid)),
+                    super::transitions::PeerEditOp::Update { stable_id, .. } => {
+                        peer.blocks.contains_key(stable_id)
+                    }
+                    super::transitions::PeerEditOp::Delete { stable_id } => {
+                        peer.blocks.contains_key(stable_id)
+                    }
+                }
+            }
+            E2ETransition::SyncWithPeer { peer_idx }
+            | E2ETransition::MergeFromPeer { peer_idx } => {
+                state.app_started && *peer_idx < state.peers.len()
+            }
+            E2ETransition::PeerCharEdit {
+                peer_idx, block_id, ..
+            } => {
+                ReferenceState::mutable_text_enabled()
+                    && state.app_started
+                    && *peer_idx < state.peers.len()
+                    && state.peers[*peer_idx].blocks.contains_key(block_id)
+            }
+
+            // Atomic editor primitives — gated to GPUI runs (PBT_ATOMIC_EDITOR=1).
+            // Headless drivers have no `InputState` so these would just shadow
+            // bookkeeping with no real-system counterpart.
+            E2ETransition::FocusEditableText { block_id } => {
+                if !ReferenceState::atomic_editor_enabled() {
+                    return false;
+                }
+                // Require a *live-rendered* candidate. The ref-state's
+                // descendant set leaks blocks that are in the model but
+                // not yet (or no longer) in the GPUI tree (CDC lag, ghost
+                // matview rows from inv10i, peer-pending). Filtering by
+                // the live `BoundsRegistry` snapshot is what keeps the
+                // SUT click from landing on a non-existent element.
+                let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+                state.app_started
+                    && state.is_properly_setup()
+                    && state.current_focus(holon_api::Region::Main).is_some()
+                    && state
+                        .block_state
+                        .blocks
+                        .get(block_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page())
+                    && !state.layout_blocks.contains(block_id)
+                    && state.is_descendant_of_any(block_id, &focus_roots)
+                    && super::live_geometry::is_entity_rendered(block_id.as_str())
+            }
+            E2ETransition::MoveCursor { byte_position: _ }
+            | E2ETransition::TypeChars { .. }
+            | E2ETransition::DeleteBackward { .. }
+            | E2ETransition::Blur => {
+                ReferenceState::atomic_editor_enabled() && state.active_editor.is_some()
+            }
+            E2ETransition::PressKey { .. } => {
+                ReferenceState::atomic_editor_enabled() && state.active_editor.is_some()
+            }
+        }
     }
 }

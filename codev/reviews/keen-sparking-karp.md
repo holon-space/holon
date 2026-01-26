@@ -291,5 +291,5 @@ External Org Edit:
 ## Appendix: Related Documents
 
 - Plan: `~/.claude/plans/keen-sparking-karp.md`
-- Architecture Discussion: `docs/event-bus-architecture-discussion.md`
-- Event Bus Refactoring: `docs/event-bus-refactoring-plan.md`
+- Architecture Discussion: `devlog/event-bus-architecture-discussion.md`
+- Event Bus Refactoring: `devlog/event-bus-refactoring-plan.md`

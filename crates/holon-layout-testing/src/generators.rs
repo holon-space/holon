@@ -199,21 +199,12 @@ where
     })
 }
 
-fn layout_name(layout: &CollectionVariant) -> &'static str {
-    match layout {
-        CollectionVariant::Tree => "tree",
-        CollectionVariant::Outline => "outline",
-        CollectionVariant::Table => "table",
-        CollectionVariant::List { .. } => "list",
-        CollectionVariant::Columns { .. } => "columns",
-    }
+fn layout_name(layout: &CollectionVariant) -> &str {
+    layout.name()
 }
 
 fn layout_gap(layout: &CollectionVariant) -> f32 {
-    match layout {
-        CollectionVariant::List { gap } | CollectionVariant::Columns { gap } => *gap,
-        _ => 0.0,
-    }
+    layout.gap
 }
 
 pub fn vm_reactive_text_items(n: usize, layout: CollectionVariant) -> Shape {
@@ -221,7 +212,7 @@ pub fn vm_reactive_text_items(n: usize, layout: CollectionVariant) -> Shape {
 }
 
 pub fn vm_reactive_list_of(n: usize, template: Shape) -> Shape {
-    vm_reactive(n, CollectionVariant::List { gap: 0.0 }, move |_| {
+    vm_reactive(n, CollectionVariant::list(0.0), move |_| {
         template.materialize()
     })
 }
@@ -302,10 +293,10 @@ pub fn vm_shared_collection(
         if let Some(ref view) = tree.collection {
             let rows: Vec<Arc<DataRow>> = data_source.snapshot().1;
             let layout = view.layout();
-            let is_tree_variant = matches!(
-                layout,
-                Some(CollectionVariant::Tree) | Some(CollectionVariant::Outline)
-            );
+            let is_tree_variant = layout
+                .as_ref()
+                .map(|v| v.is_hierarchical())
+                .unwrap_or(false);
             let tmpl = text_item_template_expr();
             let items: Vec<Arc<ReactiveViewModel>> = rows
                 .iter()
@@ -520,36 +511,32 @@ pub fn arb_reactive_collection() -> BoxedStrategy<Blueprint> {
     prop_oneof![
         Just(Blueprint::leaf(vm_reactive_text_items(
             0,
-            CollectionVariant::List { gap: 0.0 }
+            CollectionVariant::list(0.0)
         ))),
         Just(Blueprint::leaf(vm_reactive_text_items(
             0,
-            CollectionVariant::Tree
+            CollectionVariant::tree()
         ))),
         Just(Blueprint::leaf(vm_reactive_text_items(
             0,
-            CollectionVariant::Outline
+            CollectionVariant::outline()
         ))),
         Just(Blueprint::leaf(vm_reactive_text_items(
             0,
-            CollectionVariant::Table
-        ))),
-        (1usize..=5).prop_map(|n| Blueprint::leaf(vm_reactive_text_items(
-            n,
-            CollectionVariant::List { gap: 0.0 }
+            CollectionVariant::table()
         ))),
         (1usize..=5)
-            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::Tree))),
+            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::list(0.0)))),
         (1usize..=5)
-            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::Outline))),
+            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::tree()))),
         (1usize..=5)
-            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::Table))),
-        (20usize..=60).prop_map(|n| Blueprint::leaf(vm_reactive_text_items(
-            n,
-            CollectionVariant::List { gap: 0.0 }
-        ))),
+            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::outline()))),
+        (1usize..=5)
+            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::table()))),
         (20usize..=60)
-            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::Tree))),
+            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::list(0.0)))),
+        (20usize..=60)
+            .prop_map(|n| Blueprint::leaf(vm_reactive_text_items(n, CollectionVariant::tree()))),
         (1usize..=8, arb_row_template_shape())
             .prop_map(|(n, tmpl)| Blueprint::leaf(vm_reactive_list_of(n, tmpl))),
     ]
@@ -575,14 +562,8 @@ pub fn arb_wrapped_collection() -> BoxedStrategy<Blueprint> {
         inner.clone().prop_map(bp_view_mode_switcher),
         inner.prop_map(|c| { bp_live_block_with_modes(vec![("only".to_string(), c)]) }),
         (1usize..=4, 6usize..=12).prop_map(|(n_a, n_b)| {
-            let mode_a = Blueprint::leaf(vm_reactive_text_items(
-                n_a,
-                CollectionVariant::List { gap: 0.0 },
-            ));
-            let mode_b = Blueprint::leaf(vm_reactive_text_items(
-                n_b,
-                CollectionVariant::List { gap: 0.0 },
-            ));
+            let mode_a = Blueprint::leaf(vm_reactive_text_items(n_a, CollectionVariant::list(0.0)));
+            let mode_b = Blueprint::leaf(vm_reactive_text_items(n_b, CollectionVariant::list(0.0)));
             bp_view_mode_switcher(bp_live_block_with_modes(vec![
                 ("mode-a".to_string(), mode_a),
                 ("mode-b".to_string(), mode_b),
@@ -719,11 +700,11 @@ pub fn make_streaming_live_block_fixture(
         let empty_shape: Shape = Shape(Arc::new(|| {
             let view = Arc::new(ReactiveView::new_static_with_layout(
                 vec![],
-                CollectionVariant::List { gap: 0.0 },
+                CollectionVariant::list(0.0),
             ));
             ReactiveViewModel {
                 collection: Some(view),
-                ..ReactiveViewModel::default()
+                ..ReactiveViewModel::from_widget("list", std::collections::HashMap::new())
             }
         }));
 
@@ -731,7 +712,7 @@ pub fn make_streaming_live_block_fixture(
         // Create the ReactiveView ONCE so the MutableVec is shared across calls.
         let streaming_view = Arc::new(ReactiveView::new_static_with_layout(
             vec![],
-            CollectionVariant::List { gap: 4.0 },
+            CollectionVariant::list(4.0),
         ));
         let items_handle = streaming_view.items.clone();
         let streaming_view_for_thunk = streaming_view.clone();
@@ -756,7 +737,7 @@ pub fn make_streaming_live_block_fixture(
                 Arc::new(move || empty_shape.materialize()) as BlockTreeThunk,
                 Arc::new(move || ReactiveViewModel {
                     collection: Some(streaming_view_for_thunk.clone()),
-                    ..ReactiveViewModel::default()
+                    ..ReactiveViewModel::from_widget("list", std::collections::HashMap::new())
                 }) as BlockTreeThunk,
             ],
             in_drawer: false,
@@ -769,11 +750,11 @@ pub fn make_streaming_live_block_fixture(
 
     let view = Arc::new(ReactiveView::new_static_with_layout(
         all_items,
-        CollectionVariant::Tree,
+        CollectionVariant::tree(),
     ));
     let shape = Shape(Arc::new(move || ReactiveViewModel {
         collection: Some(view.clone()),
-        ..ReactiveViewModel::default()
+        ..ReactiveViewModel::from_widget("tree", std::collections::HashMap::new())
     }));
 
     let bp = Blueprint {
@@ -807,11 +788,11 @@ fn arb_tree_with_live_block_items_inner(deferred: bool) -> BoxedStrategy<Bluepri
                 let empty_shape: Shape = Shape(Arc::new(|| {
                     let view = Arc::new(ReactiveView::new_static_with_layout(
                         vec![],
-                        CollectionVariant::List { gap: 0.0 },
+                        CollectionVariant::list(0.0),
                     ));
                     ReactiveViewModel {
                         collection: Some(view),
-                        ..ReactiveViewModel::default()
+                        ..ReactiveViewModel::from_widget("list", std::collections::HashMap::new())
                     }
                 }));
 
@@ -833,11 +814,11 @@ fn arb_tree_with_live_block_items_inner(deferred: bool) -> BoxedStrategy<Bluepri
 
             let view = Arc::new(ReactiveView::new_static_with_layout(
                 all_items,
-                CollectionVariant::Tree,
+                CollectionVariant::tree(),
             ));
             let shape = Shape(Arc::new(move || ReactiveViewModel {
                 collection: Some(view.clone()),
-                ..ReactiveViewModel::default()
+                ..ReactiveViewModel::from_widget("tree", std::collections::HashMap::new())
             }));
 
             Blueprint {
@@ -882,11 +863,11 @@ pub fn arb_tree_with_offscreen_live_blocks() -> BoxedStrategy<Blueprint> {
                 let empty_shape: Shape = Shape(Arc::new(|| {
                     let view = Arc::new(ReactiveView::new_static_with_layout(
                         vec![],
-                        CollectionVariant::List { gap: 0.0 },
+                        CollectionVariant::list(0.0),
                     ));
                     ReactiveViewModel {
                         collection: Some(view),
-                        ..ReactiveViewModel::default()
+                        ..ReactiveViewModel::from_widget("list", std::collections::HashMap::new())
                     }
                 }));
 
@@ -907,11 +888,11 @@ pub fn arb_tree_with_offscreen_live_blocks() -> BoxedStrategy<Blueprint> {
 
             let view = Arc::new(ReactiveView::new_static_with_layout(
                 all_items,
-                CollectionVariant::Tree,
+                CollectionVariant::tree(),
             ));
             let shape = Shape(Arc::new(move || ReactiveViewModel {
                 collection: Some(view.clone()),
-                ..ReactiveViewModel::default()
+                ..ReactiveViewModel::from_widget("tree", std::collections::HashMap::new())
             }));
 
             Blueprint {

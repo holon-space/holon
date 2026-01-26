@@ -244,7 +244,7 @@ mod tests {
         Block {
             id: holon_api::EntityUri::from_raw(id),
             parent_id: holon_api::EntityUri::from_raw(parent_id),
-            name: None,
+            tags: Vec::new(),
             content: content.to_string(),
             content_type: holon_api::types::ContentType::Text,
             source_language: None,
@@ -253,7 +253,7 @@ mod tests {
             marks: None,
             created_at: now,
             updated_at: now,
-            sort_key: "a0".to_string(),
+            sort_key: "A0".to_string(),
         }
     }
 

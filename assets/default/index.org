@@ -8,12 +8,10 @@
 :collapse_to: drawer
 :END:
 #+BEGIN_SRC render :id block:left_sidebar::render::0
-list(#{sortkey: "name", item_template: selectable(row(icon("notebook"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
+list(#{sortkey: "content", item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
 #+END_SRC
-#+BEGIN_SRC holon_prql :id block:left_sidebar::src::0
-from block
-filter name != null
-filter name != "" && name != "index" && name != "__default__"
+#+BEGIN_SRC holon_sql :id block:left_sidebar::src::0
+SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page'
 #+END_SRC
 ** Main Panel
 :PROPERTIES:

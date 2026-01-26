@@ -1,14 +1,15 @@
 //! CDC-aware self-updating collection keyed by entity ID.
 //!
-//! Uses `tokio::sync::watch` for push-based version notification (no polling)
-//! and delegates CDC change application to `MapDiff` from `holon_api::reactive`.
+//! Uses `futures_signals::signal_map::MutableBTreeMap` for reactive storage:
+//! change events are broadcast natively as `MapDiff` values — no separate
+//! version channel needed.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::Result;
+use futures_signals::signal_map::{MutableBTreeMap, MutableBTreeMapLockRef, MutableSignalMap};
 use holon_api::Change;
-use holon_api::reactive::MapDiff;
 
 use crate::storage::turso::RowChange;
 use crate::storage::types::StorageEntity;
@@ -19,57 +20,56 @@ use crate::storage::types::StorageEntity;
 /// via the `parse_fn` provided at construction.
 /// CDC events (Created/Updated/Deleted) are applied incrementally.
 ///
-/// Version changes are broadcast via `tokio::sync::watch` — consumers can use
-/// `subscribe_version()` for push-based cache invalidation instead of polling.
+/// Change notifications are emitted reactively via `MutableBTreeMap`'s signal map.
+/// Consumers can subscribe via [`signal_map()`](Self::signal_map) for push-based
+/// cache invalidation.
 ///
 /// Both `id_fn` and `parse_fn` return `Result` — if they fail, it's a programming
 /// error (wrong table, schema mismatch) and should be loud, not silently swallowed.
-pub struct LiveData<T: Send + Sync + 'static> {
-    items: RwLock<HashMap<String, T>>,
-    version_tx: tokio::sync::watch::Sender<u64>,
+pub struct LiveData<T: Clone + Send + Sync + 'static> {
+    items: MutableBTreeMap<String, T>,
     id_fn: Box<dyn Fn(&StorageEntity) -> Result<String> + Send + Sync>,
     parse_fn: Box<dyn Fn(&StorageEntity) -> Result<T> + Send + Sync>,
 }
 
-impl<T: Send + Sync + 'static> LiveData<T> {
+impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     pub fn new(
         initial_rows: Vec<StorageEntity>,
         id_fn: impl Fn(&StorageEntity) -> Result<String> + Send + Sync + 'static,
         parse_fn: impl Fn(&StorageEntity) -> Result<T> + Send + Sync + 'static,
     ) -> Arc<Self> {
-        let mut items = HashMap::new();
+        let mut items = BTreeMap::new();
         for row in initial_rows {
             let id = (id_fn)(&row).expect("id_fn failed on initial row");
             let parsed = (parse_fn)(&row).expect("parse_fn failed on initial row");
             items.insert(id, parsed);
         }
 
-        let (version_tx, _) = tokio::sync::watch::channel(1u64);
-
         Arc::new(Self {
-            items: RwLock::new(items),
-            version_tx,
+            items: MutableBTreeMap::with_values(items),
             id_fn: Box::new(id_fn),
             parse_fn: Box::new(parse_fn),
         })
     }
 
-    /// Current version number (incremented on each batch of changes).
-    pub fn version(&self) -> u64 {
-        *self.version_tx.borrow()
-    }
-
     /// Read the current snapshot. Returns a guard — hold briefly.
-    pub fn read(&self) -> RwLockReadGuard<'_, HashMap<String, T>> {
-        self.items.read().unwrap()
+    ///
+    /// The guard `Deref`s to `BTreeMap<String, T>`, so callers can use
+    /// `.get(&key)`, `.values()`, `.len()`, etc. directly.
+    pub fn read(&self) -> MutableBTreeMapLockRef<'_, String, T> {
+        self.items.lock_ref()
     }
 
-    /// Get a `watch::Receiver` that is notified on every version change.
+    /// Get a reactive signal map that emits `MapDiff` on every change.
     ///
-    /// Use `rx.changed().await` for push-based cache invalidation instead of
-    /// polling `version()`.
-    pub fn subscribe_version(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.version_tx.subscribe()
+    /// The signal emits an initial `MapDiff::Replace` with all current entries,
+    /// followed by `MapDiff::Insert` / `MapDiff::Update` / `MapDiff::Remove`
+    /// for each subsequent change.
+    ///
+    /// Use [`SignalMapExt::for_each`] (or [`SignalMapExt::key_cloned`]) to react
+    /// to changes in a background task.
+    pub fn signal_map(&self) -> MutableSignalMap<String, T> {
+        self.items.signal_map_cloned()
     }
 
     /// Insert or update an item directly (bypasses CDC).
@@ -78,36 +78,25 @@ impl<T: Send + Sync + 'static> LiveData<T> {
     /// the LiveData is immediately consistent, without waiting for the
     /// CDC roundtrip through matview → stream → apply_changes.
     pub fn insert(&self, key: String, value: T) {
-        self.items.write().unwrap().insert(key, value);
-        self.version_tx.send_modify(|v| *v += 1);
+        self.items.lock_mut().insert_cloned(key, value);
     }
 
     /// Apply a batch of CDC changes incrementally.
     pub fn apply_changes(&self, changes: Vec<RowChange>) {
-        let mut items = self.items.write().unwrap();
+        let mut lock = self.items.lock_mut();
         for rc in changes {
-            let diff = self.row_change_to_diff(rc);
-            holon_api::reactive::apply_map_diff(&mut items, diff);
-        }
-        // Bump version and notify watchers
-        self.version_tx.send_modify(|v| *v += 1);
-    }
-
-    /// Convert a RowChange into a MapDiff, parsing the entity via id_fn/parse_fn.
-    fn row_change_to_diff(&self, rc: RowChange) -> MapDiff<String, T> {
-        match rc.change {
-            Change::Created { data, .. } | Change::Updated { data, .. } => {
-                let id = (self.id_fn)(&data).expect("id_fn failed on CDC row");
-                let parsed = (self.parse_fn)(&data).expect("parse_fn failed on CDC row");
-                MapDiff::Insert {
-                    key: id,
-                    value: parsed,
+            match rc.change {
+                Change::Created { data, .. } | Change::Updated { data, .. } => {
+                    let id = (self.id_fn)(&data).expect("id_fn failed on CDC row");
+                    let parsed = (self.parse_fn)(&data).expect("parse_fn failed on CDC row");
+                    lock.insert_cloned(id, parsed);
                 }
-            }
-            Change::Deleted { id, .. } => MapDiff::Remove { key: id },
-            Change::FieldsChanged { entity_id, .. } => {
-                // Matview CDC emits Created/Deleted (not FieldsChanged).
-                panic!("LiveData: unexpected FieldsChanged for {entity_id}");
+                Change::Deleted { id, .. } => {
+                    lock.remove(&id);
+                }
+                Change::FieldsChanged { entity_id, .. } => {
+                    panic!("LiveData: unexpected FieldsChanged for {entity_id}");
+                }
             }
         }
     }
@@ -128,6 +117,10 @@ impl<T: Send + Sync + 'static> LiveData<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::task::{Context, Poll};
+
+    use futures_signals::signal_map::{MapDiff, SignalMapExt};
     use holon_api::Value;
 
     fn make_row(id: &str, content: &str) -> StorageEntity {
@@ -146,7 +139,6 @@ mod tests {
             |row| Ok(row.get("content").unwrap().as_string().unwrap().to_string()),
         );
 
-        assert_eq!(live.version(), 1);
         let items = live.read();
         assert_eq!(items.len(), 2);
         assert_eq!(items.get("a").unwrap(), "hello");
@@ -154,14 +146,12 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_changes_increments_version() {
+    fn test_apply_changes() {
         let live: Arc<LiveData<String>> = LiveData::new(
             vec![],
             |row| Ok(row.get("id").unwrap().as_string().unwrap().to_string()),
             |row| Ok(row.get("content").unwrap().as_string().unwrap().to_string()),
         );
-
-        assert_eq!(live.version(), 1);
 
         let created = RowChange {
             relation_name: "test".to_string(),
@@ -175,7 +165,6 @@ mod tests {
         };
         live.apply_changes(vec![created]);
 
-        assert_eq!(live.version(), 2);
         let items = live.read();
         assert_eq!(items.get("c").unwrap(), "new");
     }
@@ -206,20 +195,32 @@ mod tests {
     }
 
     #[test]
-    fn test_subscribe_version_notifies() {
+    fn test_signal_map_notifies() {
         let live: Arc<LiveData<String>> = LiveData::new(
-            vec![],
+            vec![make_row("pre", "seeded")],
             |row| Ok(row.get("id").unwrap().as_string().unwrap().to_string()),
             |row| Ok(row.get("content").unwrap().as_string().unwrap().to_string()),
         );
 
-        let mut rx = live.subscribe_version();
-        assert_eq!(*rx.borrow(), 1);
+        let mut signal = live.signal_map();
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
 
+        // First poll: initial MapDiff::Replace with pre-seeded entries
+        match signal.poll_map_change_unpin(&mut cx) {
+            Poll::Ready(Some(MapDiff::Replace { entries })) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0, "pre");
+                assert_eq!(entries[0].1, "seeded");
+            }
+            other => panic!("Expected Ready(Some(Replace)), got {:?}", other),
+        }
+
+        // Apply a CDC change
         live.apply_changes(vec![RowChange {
             relation_name: "test".to_string(),
             change: Change::Created {
-                data: make_row("a", "test"),
+                data: make_row("a", "new-item"),
                 origin: holon_api::ChangeOrigin::Local {
                     operation_id: None,
                     trace_id: None,
@@ -227,8 +228,13 @@ mod tests {
             },
         }]);
 
-        // rx.has_changed() should be true
-        assert!(rx.has_changed().unwrap());
-        assert_eq!(*rx.borrow_and_update(), 2);
+        // Second poll: MapDiff::Insert for the new entry
+        match signal.poll_map_change_unpin(&mut cx) {
+            Poll::Ready(Some(MapDiff::Insert { key, value })) => {
+                assert_eq!(key, "a");
+                assert_eq!(value, "new-item");
+            }
+            other => panic!("Expected Ready(Some(Insert)), got {:?}", other),
+        }
     }
 }

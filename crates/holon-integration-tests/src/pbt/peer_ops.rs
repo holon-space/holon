@@ -35,10 +35,10 @@ pub fn find_node_by_stable_id(doc: &LoroDoc, stable_id: &str) -> Option<TreeID> 
         ) {
             continue;
         }
-        if let Some(sid) = read_node_stable_id(doc, node.id) {
-            if sid == stable_id {
-                return Some(node.id);
-            }
+        if let Some(sid) = read_node_stable_id(doc, node.id)
+            && sid == stable_id
+        {
+            return Some(node.id);
         }
     }
     None
@@ -97,4 +97,37 @@ pub fn peer_alive_blocks(doc: &LoroDoc) -> Vec<PeerBlock> {
         });
     }
     blocks
+}
+
+/// Insert text into a block's LoroText container on a peer.
+pub fn peer_insert_text(doc: &LoroDoc, stable_id: &str, pos_codepoint: usize, text: &str) {
+    let node = find_node_by_stable_id(doc, stable_id)
+        .unwrap_or_else(|| panic!("peer_insert_text: block {} not found", stable_id));
+    let tree = doc.get_tree(multi_peer::TREE_NAME);
+    let meta = tree.get_meta(node).unwrap();
+    let field = multi_peer::content_field_for(&meta);
+    let text_container: loro::LoroText = meta
+        .get_or_create_container(field, loro::LoroText::new())
+        .unwrap();
+    text_container.insert(pos_codepoint, text).unwrap();
+    doc.commit();
+}
+
+/// Delete text from a block's LoroText container on a peer.
+pub fn peer_delete_text(
+    doc: &LoroDoc,
+    stable_id: &str,
+    pos_codepoint: usize,
+    len_codepoint: usize,
+) {
+    let node = find_node_by_stable_id(doc, stable_id)
+        .unwrap_or_else(|| panic!("peer_delete_text: block {} not found", stable_id));
+    let tree = doc.get_tree(multi_peer::TREE_NAME);
+    let meta = tree.get_meta(node).unwrap();
+    let field = multi_peer::content_field_for(&meta);
+    let text_container: loro::LoroText = meta
+        .get_or_create_container(field, loro::LoroText::new())
+        .unwrap();
+    text_container.delete(pos_codepoint, len_codepoint).unwrap();
+    doc.commit();
 }

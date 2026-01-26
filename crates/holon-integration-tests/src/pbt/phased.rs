@@ -39,10 +39,6 @@ pub struct PbtReadyResult {
     pub frontend_geometry: Option<Box<dyn holon_frontend::geometry::GeometryProvider>>,
     /// Optional shared screenshot analysis state for inv14 empty-UI detection.
     pub frontend_visual_state: Option<crate::ui_driver::VisualState>,
-    /// Optional shared focused element ID for inv15 focus consistency check.
-    /// GPUI writes this on every focus change; inv15 reads it to verify the
-    /// actual GPUI focus matches the reference model's prediction.
-    pub frontend_focused_element_id: Option<crate::ui_driver::FocusedElementId>,
 }
 
 /// Result of a single PBT step.
@@ -100,9 +96,15 @@ pub fn create_runtime() -> Arc<tokio::runtime::Runtime> {
 }
 
 pub fn create_runner() -> anyhow::Result<TestRunner> {
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
+    let seed = match std::env::var("PROPTEST_SEED") {
+        Ok(v) => v
+            .parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("PROPTEST_SEED must be a u64: {e}"))?,
+        Err(_) => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    };
+    eprintln!("[pbt_seed] seed={seed} (set PROPTEST_SEED to reproduce)");
     let mut seed_bytes = [0u8; 32];
     seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
     let rng = TestRng::from_seed(RngAlgorithm::ChaCha, &seed_bytes);
@@ -221,7 +223,7 @@ fn run_driver_step(
     {
         sut.span_collector.reset();
         sut.last_transition_start = Some(std::time::Instant::now());
-        sut.last_transition = Some(transition.clone());
+        sut.last_transition = transition.clone();
         let rss_now = crate::test_tracing::current_rss_bytes();
         sut.rss_before = rss_now;
         if sut.rss_baseline == 0 {
@@ -229,12 +231,14 @@ fn run_driver_step(
         }
     }
 
+    crate::debug_pause::pause_before_step(current_step + 1, transition_name);
+
     let highlight_id: Option<String> = ui_op
         .as_ref()
         .and_then(|(_, _, p)| p.get("id"))
         .and_then(|v| v.as_string())
         .map(|s| s.to_string());
-    let action_banner = format_action_banner(&transition_name, ui_op.as_ref());
+    let action_banner = format_action_banner(transition_name, ui_op.as_ref());
     driver.screenshot_overlay(
         transition_name,
         crate::Phase::Pre,
@@ -267,6 +271,8 @@ fn run_driver_step(
         transition_name,
         suffix,
     );
+
+    crate::debug_pause::pause_after_step(current_step + 1, transition_name);
 
     Ok(true)
 }
@@ -317,7 +323,12 @@ fn run_step_body_with_post_overlay(
                     drv.synthetic_dispatch(&entity, &op, params.clone()).await?;
                 }
                 driver.settle().await;
-                let expected_count = ref_state.block_state.blocks.len();
+                let expected_count = ref_state
+                    .block_state
+                    .blocks
+                    .values()
+                    .filter(|b| !b.is_page())
+                    .count();
                 let timeout = std::time::Duration::from_millis(10000);
                 let rows = sut.wait_for_block_count(expected_count, timeout).await;
                 if rows.len() != expected_count {
@@ -581,10 +592,11 @@ async fn pbt_setup_with_runtime(
     // through the same dispatch path GPUI uses. Falls back to
     // DirectUserDriver only when ReactiveEngine isn't available (legacy
     // tests that don't wire the reactive runtime).
-    sut.driver = Some(match sut.ctx.reactive_engine.as_ref() {
-        Some(reactive) => Box::new(crate::ReactiveEngineDriver::new(reactive.clone())),
-        None => Box::new(DirectUserDriver::new(sut.ctx.engine().clone())),
-    });
+    if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
+        sut.driver = Some(Box::new(crate::ReactiveEngineDriver::new(reactive.clone())));
+    } else {
+        sut.driver = Some(Box::new(DirectUserDriver::new(sut.ctx.engine().clone())));
+    }
 
     let summary = format!("setup complete: {actual_steps} pre-startup steps");
 
@@ -703,7 +715,13 @@ async fn pbt_step_inner(state: &mut PbtPhaseState) -> anyhow::Result<PbtStepResu
 pub async fn pbt_step_confirm() -> anyhow::Result<()> {
     let mut state = take_phase_state()?;
 
-    let expected_count = state.ref_state.block_state.blocks.len();
+    let expected_count = state
+        .ref_state
+        .block_state
+        .blocks
+        .values()
+        .filter(|b| !b.is_page())
+        .count();
     let timeout = std::time::Duration::from_millis(10000);
     let rows = state
         .sut
@@ -881,35 +899,29 @@ pub fn run_pbt_with_driver_sync_callback(
         runtime_handle: runtime.handle().clone(),
     };
     let ready_result = on_ready(&ctx);
-    let (
-        custom_driver,
-        frontend_engine,
-        frontend_geometry,
-        frontend_visual_state,
-        frontend_focused_element_id,
-    ) = match ready_result {
-        Some(r) => (
-            r.driver,
-            r.frontend_engine,
-            r.frontend_geometry,
-            r.frontend_visual_state,
-            r.frontend_focused_element_id,
-        ),
-        None => (None, None, None, None, None),
-    };
+    let (custom_driver, frontend_engine, frontend_geometry, frontend_visual_state) =
+        match ready_result {
+            Some(r) => (
+                r.driver,
+                r.frontend_engine,
+                r.frontend_geometry,
+                r.frontend_visual_state,
+            ),
+            None => (None, None, None, None),
+        };
 
     // F_direct: prefer ReactiveEngineDriver over DirectUserDriver unless the
     // caller supplied a custom driver (e.g. GpuiUserDriver).
-    sut.driver = Some(
-        custom_driver.unwrap_or_else(|| match sut.ctx.reactive_engine.as_ref() {
-            Some(reactive) => Box::new(crate::ReactiveEngineDriver::new(reactive.clone())),
-            None => Box::new(DirectUserDriver::new(sut.ctx.engine().clone())),
-        }),
-    );
+    if custom_driver.is_some() {
+        sut.driver = custom_driver;
+    } else if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
+        sut.driver = Some(Box::new(crate::ReactiveEngineDriver::new(reactive.clone())));
+    } else {
+        sut.driver = Some(Box::new(DirectUserDriver::new(sut.ctx.engine().clone())));
+    }
     sut.frontend_engine = frontend_engine;
     sut.frontend_geometry = frontend_geometry;
     sut.frontend_visual_state = frontend_visual_state;
-    sut.frontend_focused_element_id = frontend_focused_element_id;
 
     eprintln!(
         "[run_pbt_with_driver_sync_callback] setup complete: {actual_steps} pre-startup steps"
@@ -955,10 +967,11 @@ pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
 
     // F_direct: prefer ReactiveEngineDriver so post-startup transitions use
     // the reactive dispatch pipeline. Falls back when no ReactiveEngine.
-    sut.driver = Some(match sut.ctx.reactive_engine.as_ref() {
-        Some(reactive) => Box::new(crate::ReactiveEngineDriver::new(reactive.clone())),
-        None => Box::new(DirectUserDriver::new(sut.ctx.engine().clone())),
-    });
+    if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
+        sut.driver = Some(Box::new(crate::ReactiveEngineDriver::new(reactive.clone())));
+    } else {
+        sut.driver = Some(Box::new(DirectUserDriver::new(sut.ctx.engine().clone())));
+    }
 
     eprintln!("[run_phased_pbt_sync] setup complete: {actual_steps} pre-startup steps");
 
@@ -975,16 +988,19 @@ pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
         ref_state =
             <VariantRef<Full> as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
 
+        let transition_label = format!("{:?}", std::mem::discriminant(&transition));
+        crate::debug_pause::pause_before_step(current_step + 1, &transition_label);
+
         runtime.block_on(sut.apply_transition_async(&ref_state, &transition));
         runtime.block_on(sut.check_invariants_async(&ref_state));
         actual_steps += 1;
         current_step += 1;
         eprintln!(
-            "[pbt_step] Step {}/{}: {:?} ✓",
-            current_step,
-            num_steps,
-            std::mem::discriminant(&transition)
+            "[pbt_step] Step {}/{}: {} ✓",
+            current_step, num_steps, transition_label,
         );
+
+        crate::debug_pause::pause_after_step(current_step, &transition_label);
     }
 
     let summary = format!("passed: {actual_steps}/{num_steps} PBT transitions");

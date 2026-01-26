@@ -80,7 +80,7 @@ The project uses three complementary testing strategies:
 
 1. **Unit & integration tests** — standard `#[test]` and `#[tokio::test]` in each crate, plus integration tests in `crates/holon-integration-tests/`.
 2. **Property-based tests (PBTs)** — via `proptest` and `proptest-state-machine`. PBT suites live in `tests/*_pbt.rs` files and are run with `just pbt <name>`.
-3. **BDD / acceptance tests** — via `cucumber`. See `CUCUMBER_SETUP.md` for setup details.
+3. **BDD / acceptance tests** — via `cucumber`. See `docs/Testing/CucumberSetup.md` for setup details.
 
 **Conventions:**
 - Name test functions descriptively: `test_<behaviour>_when_<condition>`.
@@ -107,7 +107,7 @@ test:     adding or updating tests
 **Pull requests:**
 - Keep PRs focused — one logical change per PR.
 - Run `just lint` locally before pushing; CI will reject PRs that fail any check.
-- Reference related issues or design documents (e.g. `ARCHITECTURE.md`, `VISION.md`) in the PR description where applicable.
+- Reference related issues or design documents (e.g. `docs/Architecture.md`, `docs/Vision.md`) in the PR description where applicable.
 - New public API surface should include doc comments (`///`).
 
 ## Security & Dependency Management
@@ -118,7 +118,7 @@ test:     adding or updating tests
 
 ## Agent-Specific Instructions
 
-- Read `ARCHITECTURE.md` and `ARCHITECTURE_PRINCIPLES.md` before making structural changes.
+- Read `docs/Architecture.md` and `docs/Architecture/Principles.md` before making structural changes.
 - The `experiments/` directory is intentionally unstable — do not depend on it from production crates.
 - `workspace-hack` is managed by `cargo hakari`; do not edit it manually.
 - When adding a new crate, register it in the root `Cargo.toml` `[workspace]` members list and add an entry under `[workspace.dependencies]` for any new external dependency it introduces.

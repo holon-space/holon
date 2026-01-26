@@ -180,12 +180,6 @@ pub trait UiDriver: Send + Sync {
 
     /// Send an arrow key for cross-block navigation.
     async fn send_arrow(&mut self, _direction: NavDirection) {}
-
-    /// Read the currently focused element ID. Returns None if no UI driver
-    /// or if no element is focused.
-    fn focused_element(&self) -> Option<String> {
-        None
-    }
 }
 
 // ──── FFI-only driver ────
@@ -218,14 +212,10 @@ pub type VisualState = std::sync::Arc<std::sync::Mutex<Option<ScreenshotEmptines
 /// For supported operations (e.g. clicking on an element, typing text),
 /// uses the `GeometryProvider` to find the element's position and simulates
 /// mouse/keyboard input. Falls back to FFI for unsupported operations.
-/// Shared focused element ID — written by GPUI on focus changes, read by PBT.
-pub type FocusedElementId = std::sync::Arc<std::sync::RwLock<Option<String>>>;
-
 pub struct GeometryDriver {
     geometry: Box<dyn GeometryProvider>,
     screenshots: Option<ScreenshotConfig>,
     visual_state: Option<VisualState>,
-    focused_element_id: Option<FocusedElementId>,
 }
 
 struct ScreenshotConfig {
@@ -253,14 +243,7 @@ impl GeometryDriver {
             geometry,
             screenshots: None,
             visual_state: None,
-            focused_element_id: None,
         }
-    }
-
-    /// Share a `FocusedElementId` so PBT can read the focused element after enigo actions.
-    pub fn with_focused_element_id(mut self, id: FocusedElementId) -> Self {
-        self.focused_element_id = Some(id);
-        self
     }
 
     /// Enable screenshot capture using the given backend and output directory.
@@ -359,10 +342,10 @@ impl GeometryDriver {
         // bounds memory (each `CapturedScreenshot` is ~30 MB) without
         // serialising the common case.
         const MAX_INFLIGHT_SAVES: usize = 4;
-        if config.pending_saves.len() >= MAX_INFLIGHT_SAVES {
-            if let Some(oldest) = config.pending_saves.drain(..1).next() {
-                let _ = oldest.join();
-            }
+        if config.pending_saves.len() >= MAX_INFLIGHT_SAVES
+            && let Some(oldest) = config.pending_saves.drain(..1).next()
+        {
+            let _ = oldest.join();
         }
         // Drop completed jobs so the vec doesn't grow unbounded.
         config.pending_saves.retain(|h| !h.is_finished());
@@ -636,55 +619,6 @@ impl GeometryDriver {
         enigo.key(key, Dir::Click).expect("enigo arrow key failed");
     }
 
-    /// Poll `focused_element_id` with exponential backoff until it changes or timeout.
-    /// Returns the focused element ID. Panics on timeout.
-    pub fn poll_focused_element(&self, timeout: std::time::Duration) -> String {
-        let feid = self
-            .focused_element_id
-            .as_ref()
-            .expect("focused_element_id not configured on GeometryDriver");
-        let start = std::time::Instant::now();
-        let mut delay_ms = 10u64;
-        loop {
-            if let Some(id) = feid.read().unwrap().clone() {
-                return id;
-            }
-            if start.elapsed() >= timeout {
-                panic!(
-                    "[GeometryDriver] timed out ({timeout:?}) waiting for focused element — \
-                     GPUI never reported a focus change"
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            delay_ms = (delay_ms * 2).min(160);
-        }
-    }
-
-    /// Poll until `focused_element_id` changes to `expected`, or timeout.
-    /// Panics on timeout or mismatch.
-    pub fn assert_focused_element(&self, expected: &str, timeout: std::time::Duration) {
-        let feid = self
-            .focused_element_id
-            .as_ref()
-            .expect("focused_element_id not configured on GeometryDriver");
-        let start = std::time::Instant::now();
-        let mut delay_ms = 10u64;
-        loop {
-            let current = feid.read().unwrap().clone();
-            if current.as_deref() == Some(expected) {
-                return;
-            }
-            if start.elapsed() >= timeout {
-                panic!(
-                    "[GeometryDriver] timed out ({timeout:?}) waiting for focus on {expected:?} — \
-                     actual focused element: {current:?}"
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            delay_ms = (delay_ms * 2).min(160);
-        }
-    }
-
     fn simulate_set_content(&self, id: &str, new_value: &str) -> bool {
         let info = match self.geometry.element_info(id) {
             Some(i) => i,
@@ -762,7 +696,7 @@ impl UiDriver for GeometryDriver {
 
                 #[cfg(not(feature = "enigo"))]
                 {
-                    match self.geometry.element_info(&element_id) {
+                    match self.geometry.element_info(element_id) {
                         Some(info) => {
                             let (cx, cy) = info.center();
                             eprintln!(
@@ -815,11 +749,5 @@ impl UiDriver for GeometryDriver {
     #[cfg(feature = "enigo")]
     async fn send_arrow(&mut self, direction: NavDirection) {
         self.enigo_send_arrow(direction);
-    }
-
-    fn focused_element(&self) -> Option<String> {
-        self.focused_element_id
-            .as_ref()
-            .and_then(|feid| feid.read().unwrap().clone())
     }
 }

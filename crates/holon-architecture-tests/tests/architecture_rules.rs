@@ -434,3 +434,198 @@ fn no_block_on_in_async_context() {
         format_violations(&violations)
     );
 }
+
+/// Forbids reintroducing the global GPUI/Loro `FocusRegistry`-style cell
+/// (`Arc<RwLock<HashMap<String, Entity<_>>>>`) at app/model level. The
+/// per-block reactive primitives (`UiState.focused_block`,
+/// `services.watch_editor_cursor`, `LocalEntityScope::get_or_create`)
+/// replace it; see the FocusRegistry-removal handoff in MEMORY.md.
+///
+/// Suppress with `// ALLOW(global_registry): <reason>`.
+#[test]
+fn no_global_entity_registries() {
+    let needle = "Arc<RwLock<HashMap<String, Entity<";
+    let alt = "Arc<std::sync::RwLock<HashMap<String, Entity<";
+
+    let violations = scan_rs_files(&["crates", "frontends"], &[], |_file, _source, lines| {
+        let mut hits = Vec::new();
+        for (i, raw) in lines.iter().enumerate() {
+            let line = i + 1;
+            if (raw.contains(needle) || raw.contains(alt))
+                && !has_allow(lines, line, "global_registry")
+            {
+                hits.push((line, raw.trim().to_string()));
+            }
+        }
+        hits
+    });
+
+    assert!(
+        violations.is_empty(),
+        "\nFound global mutable entity registry — exactly the `FocusRegistry`-style \
+         pattern that was removed.\n\
+         Decentralize via per-row reactive primitives instead \
+         (`UiState.focused_block`, `LocalEntityScope::get_or_create`, ...).\n\
+         To suppress: `// ALLOW(global_registry): <reason>`\n\n{}",
+        format_violations(&violations)
+    );
+}
+
+/// Forbids `as_string()` / `as_string_owned()` on values pulled from columns
+/// declared `#[jsonb]`. CDC delivers jsonb columns as `Value::Array` /
+/// `Value::Json` / `Value::Null`, never `Value::String`, so the call always
+/// returns `None` and silently misclassifies rows. This is the bug class that
+/// caused the BulkExternalAdd page-overcount race (May 2026).
+///
+/// Suppress with `// ALLOW(jsonb_as_string): <reason>` — only legitimate when
+/// the field name collides with a non-jsonb column on a different entity.
+#[test]
+fn no_as_string_on_jsonb_columns() {
+    use ast_grep_core::tree_sitter::LanguageExt;
+    use ast_grep_language::SupportLang;
+
+    let lang: SupportLang = "rs".parse().unwrap();
+
+    // Harvest jsonb field names by scanning for `#[jsonb]\n    pub <name>:`.
+    let mut jsonb_fields: std::collections::BTreeSet<String> = Default::default();
+    for entry in glob::glob("../../crates/**/*.rs").expect("valid glob") {
+        let path = entry.expect("readable entry");
+        let path_str = path.display().to_string();
+        if path_str.contains("architecture-tests") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let lines: Vec<&str> = source.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("#[jsonb]") {
+                continue;
+            }
+            // Next non-attribute line should be `pub <name>: <type>,`
+            let mut j = i + 1;
+            while j < lines.len() && lines[j].trim_start().starts_with("#[") {
+                j += 1;
+            }
+            let Some(decl) = lines.get(j) else { continue };
+            let decl = decl.trim_start();
+            let body = decl.strip_prefix("pub ").unwrap_or(decl);
+            if let Some(colon) = body.find(':') {
+                let name = body[..colon].trim().to_string();
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    jsonb_fields.insert(name);
+                }
+            }
+        }
+    }
+
+    assert!(
+        !jsonb_fields.is_empty(),
+        "Expected to discover at least one #[jsonb] field; harvest is broken"
+    );
+
+    let violations = scan_rs_files(&["crates", "frontends"], &[], |_file, source, lines| {
+        let root = lang.ast_grep(source);
+        let mut hits = Vec::new();
+        // Patterns like `.get("KEY").and_then(|...| ...as_string())` and
+        // chained `.get("KEY").something.as_string()`.
+        let patterns = [
+            "$ROW.get($KEY).and_then($CB)",
+            "$ROW.get($KEY).map($CB)",
+            "$ROW.get($KEY).map_or($DEFAULT, $CB)",
+            "$ROW.get($KEY).and_then(|v| v.as_string())",
+            "$ROW.get($KEY).and_then(|v| v.as_string_owned())",
+        ];
+        for pattern in patterns {
+            for m in root.root().find_all(pattern) {
+                let text = m.text();
+                // Must reference as_string in the same expression
+                if !text.contains("as_string") {
+                    continue;
+                }
+                let key_node = match m.get_env().get_match("KEY") {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let key_text = key_node.text();
+                let stripped = key_text.trim_matches('"');
+                if !jsonb_fields.contains(stripped) {
+                    continue;
+                }
+                let line = m.start_pos().line() + 1;
+                if has_allow(lines, line, "jsonb_as_string") {
+                    continue;
+                }
+                hits.push((line, format!("get({}) + as_string", key_text)));
+            }
+        }
+        hits
+    });
+
+    assert!(
+        violations.is_empty(),
+        "\nFound `as_string()`/`as_string_owned()` on a `#[jsonb]` column.\n\
+         CDC delivers jsonb values as Value::Array / Value::Json / Value::Null —\n\
+         never Value::String — so the call always returns None and silently\n\
+         misclassifies rows. Parse the JSON shape explicitly instead.\n\
+         jsonb fields detected: {:?}\n\
+         To suppress: `// ALLOW(jsonb_as_string): <reason>`\n\n{}",
+        jsonb_fields,
+        format_violations(&violations)
+    );
+}
+
+/// Forbids `HANDOFF_*.md` files at the holon repo root.
+///
+/// Root-level HANDOFF docs rot: they go stale, lose context, and duplicate
+/// project memory. Per AC-7 (MVP Definition.org), handoff knowledge belongs
+/// as topic-anchored sub-blocks in holon-pkm, tagged `:handoff:active:`, e.g.
+///   holon-pkm/Projects/Holon/Engine Foundations.org
+///   holon-pkm/Projects/Holon/Frontends/GPUI.org
+///   holon-pkm/Projects/Holon/Frontends/TUI.org
+///
+/// Topic-anchored blocks are queryable, taggable, and live alongside the work
+/// they describe — root HANDOFF files are none of those things.
+#[test]
+fn no_handoff_md_at_repo_root() {
+    // CARGO_MANIFEST_DIR is crates/holon-architecture-tests — two levels up is the repo root.
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .ancestors()
+        .nth(2)
+        .expect("CARGO_MANIFEST_DIR must have at least two ancestor directories");
+
+    let offenders: Vec<String> = std::fs::read_dir(repo_root)
+        .expect("failed to read repo root directory")
+        .filter_map(|entry| {
+            let entry = entry.expect("failed to read directory entry");
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy().to_string();
+            if name_str.starts_with("HANDOFF_") && name_str.ends_with(".md") {
+                Some(name_str)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "\nFound HANDOFF_*.md files at the repo root — these are forbidden (AC-7).\n\
+         \n\
+         Offending files:\n{}\n\
+         \n\
+         Where they belong: add a sub-block under the relevant topic doc in\n\
+         holon-pkm/Projects/Holon/ (e.g. Engine Foundations.org, Frontends/GPUI.org,\n\
+         Frontends/TUI.org, ...) tagged :handoff:active:.\n\
+         \n\
+         Rationale: HANDOFF docs at the repo root rot — they get stale, lose context,\n\
+         and duplicate project memory. Topic-anchored sub-blocks are queryable,\n\
+         taggable, and live alongside the work they describe.",
+        offenders
+            .iter()
+            .map(|f| format!("  - {}", f))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

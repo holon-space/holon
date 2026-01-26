@@ -103,8 +103,10 @@ pub fn parse_org_file(
     root: &Path,
 ) -> Result<ParseResult> {
     let file_id = generate_file_id(path, root);
+    // Use the file stem (no extension) as the page title fallback. The
+    // reference model and PBT downstream consumers all normalize on stem.
     let file_name = path
-        .file_name()
+        .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
@@ -126,9 +128,11 @@ pub fn parse_org_file(
         states
     });
 
-    // Create document block
-    let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), "");
-    document.name = Some(file_name);
+    // Create document block. The first line of content is the title; the
+    // `Page` tag marks it as a page (formerly the `name`-bearing variant).
+    let title_line = title.clone().unwrap_or(file_name);
+    let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title_line);
+    document.set_page(true);
 
     // Set org-specific properties using extension trait
     document.set_file_title(title);

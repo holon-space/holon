@@ -50,13 +50,17 @@ impl OrgRenderer {
         let block_map: HashMap<&str, &Block> = blocks.iter().map(|b| (b.id.as_str(), b)).collect();
 
         // Find content root blocks - blocks whose parent is the document block (file_id).
-        // Sort by sequence to produce deterministic output regardless of input order
-        // (blocks may arrive in arbitrary order from Loro's HashMap).
+        // Order by sort_key — the fractional-index source of truth that
+        // `BlockOperations::{indent,outdent,move_block,split_block}` write.
+        // `sequence` is a parser-assigned ordinal that goes stale after any
+        // structural mutation (split_block doesn't touch it, so the new block
+        // would tie at sequence=0 with its anchor and the id tie-breaker would
+        // place a UUID-named block before a literally-named one).
         let mut root_blocks: Vec<&Block> =
             blocks.iter().filter(|b| b.parent_id == *file_id).collect();
         root_blocks.sort_by(|a, b| {
-            a.sequence()
-                .cmp(&b.sequence())
+            a.sort_key
+                .cmp(&b.sort_key)
                 .then_with(|| a.id.as_str().cmp(b.id.as_str()))
         });
 
@@ -86,8 +90,9 @@ impl OrgRenderer {
         // Source blocks must come BEFORE text children (sub-headings) so that
         // when the org file is re-parsed, the source block is assigned to this
         // parent heading, not to the first sub-heading that follows it.
-        // Within each group, sort by sequence for deterministic output regardless
-        // of input order (blocks arrive in arbitrary order from Loro's HashMap).
+        // Within each content-type group, order by `sort_key` (the fractional
+        // index that BlockOperations writes); `sequence` is parser-assigned
+        // and goes stale after structural mutations like split_block.
         let mut child_blocks: Vec<_> = block_map
             .values()
             .filter(|b| b.parent_id == block.id)
@@ -105,7 +110,7 @@ impl OrgRenderer {
             let b_type = sort_group(b.content_type);
             a_type
                 .cmp(&b_type)
-                .then_with(|| a.sequence().cmp(&b.sequence()))
+                .then_with(|| a.sort_key.cmp(&b.sort_key))
                 .then_with(|| a.id.as_str().cmp(b.id.as_str()))
         });
         for child_block in child_blocks {
@@ -217,7 +222,7 @@ mod tests {
         let mut b = Block {
             id: EntityUri::block(id),
             parent_id: EntityUri::block(parent_id),
-            name: None,
+            tags: Vec::new(),
             content: content.to_string(),
             content_type: ContentType::Source,
             source_language: Some(lang.parse::<SourceLanguage>().unwrap()),
@@ -226,7 +231,7 @@ mod tests {
             marks: None,
             created_at: 0,
             updated_at: 0,
-            sort_key: "a0".to_string(),
+            sort_key: "A0".to_string(),
         };
         b.set_sequence(seq);
         b

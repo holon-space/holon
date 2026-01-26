@@ -22,6 +22,8 @@ use crate::core::SqlOperationProvider;
 use crate::core::datasource::OperationProvider;
 use crate::core::queryable_cache::QueryableCache;
 use crate::storage::DbHandle;
+use crate::storage::schema_module::SchemaModule;
+use crate::storage::schema_modules::BlockSchemaModule;
 use crate::sync::event_bus::EventBus;
 use crate::sync::{
     LoroBlockOperations, LoroBlocksDataSource, LoroDocumentStore, LoroSyncController,
@@ -89,44 +91,45 @@ impl Module for LoroModule {
         // root factory to defer execution until DI resolution. The handle
         // owns the Loro subscription and the background task; keeping this
         // value in DI keeps both alive.
-        eprintln!(
+        tracing::info!(
             "[LoroModule] STAGE 1: registering LoroSyncControllerHandle provider (pre-provide call)"
         );
         injector.provide::<LoroSyncControllerHandle>(Provider::root_async(|resolver| async move {
-            eprintln!(
+             tracing::info!(
                 "[LoroModule] STAGE 2: LoroSyncControllerHandle factory body started (inside async closure)"
             );
             info!("[LoroModule] LoroSyncControllerHandle factory: entering");
             let config = resolver.resolve::<LoroConfig>();
             let doc_store = resolver.resolve::<LoroDocumentStore>();
             let event_bus = resolver.resolve::<TursoEventBus>();
-            eprintln!("[LoroModule] STAGE 3: upstream deps resolved");
+             tracing::info!("[LoroModule] STAGE 3: upstream deps resolved");
             info!("[LoroModule] LoroSyncControllerHandle factory: upstream deps resolved");
             let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
-            eprintln!("[LoroModule] STAGE 3a: event_bus_arc built");
+             tracing::info!("[LoroModule] STAGE 3a: event_bus_arc built");
 
             // The Loro controller writes to the persistent block store
             // through an `OperationProvider`. We construct a dedicated
             // `SqlOperationProvider` instance for it — equivalent to the
             // one OrgMode uses, but independent so the two directions
             // can run in parallel without coupling.
-            eprintln!("[LoroModule] STAGE 3b: resolving DbHandleProvider");
+             tracing::info!("[LoroModule] STAGE 3b: resolving DbHandleProvider");
             let db_handle_provider = resolver.resolve::<dyn crate::di::DbHandleProvider>();
-            eprintln!("[LoroModule] STAGE 3c: DbHandleProvider resolved");
+             tracing::info!("[LoroModule] STAGE 3c: DbHandleProvider resolved");
             let db_handle = db_handle_provider.handle();
-            eprintln!("[LoroModule] STAGE 3d: db_handle obtained");
-            let sql_ops = Arc::new(SqlOperationProvider::with_event_bus(
+             tracing::info!("[LoroModule] STAGE 3d: db_handle obtained");
+            let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
                 db_handle.clone(),
                 "block".to_string(),
                 "block".to_string(),
                 "block".to_string(),
                 event_bus_arc.clone(),
+                BlockSchemaModule.edge_fields(),
             ));
             let command_bus: Arc<dyn OperationProvider> = sql_ops as Arc<dyn OperationProvider>;
-            eprintln!("[LoroModule] STAGE 3e: sql_ops built");
+             tracing::info!("[LoroModule] STAGE 3e: sql_ops built");
 
             let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
-            eprintln!("[LoroModule] STAGE 3f: doc_store_arc built; about to call seed");
+             tracing::info!("[LoroModule] STAGE 3f: doc_store_arc built; about to call seed");
 
             // Seed Loro from the persistent block store BEFORE starting
             // the controller. Some blocks enter SQL via raw writes that
@@ -156,7 +159,7 @@ impl Module for LoroModule {
                     .get_global_doc()
                     .await
                     .expect("[LoroModule] get_global_doc for sidecar pre-seed");
-                let frontiers = collab.doc().read().await.oplog_frontiers();
+                let frontiers = collab.doc().oplog_frontiers();
                 let sidecar_path = config
                     .storage_dir
                     .join(super::loro_sync_controller::SIDECAR_FILENAME);
@@ -188,7 +191,7 @@ impl Module for LoroModule {
                     .await
                     .expect("[LoroModule] get_global_doc for share rehydration");
                 let doc_arc = collab.doc();
-                let doc = doc_arc.read().await;
+                let doc = &*doc_arc;
                 match rehydrate_shared_trees(&backend, &doc).await {
                     Ok(n) if n > 0 => info!("[LoroModule] rehydrated {n} shared subtree(s)"),
                     Ok(_) => {}
@@ -340,20 +343,20 @@ pub async fn seed_loro_from_persistent_store(
     doc_store: &Arc<RwLock<LoroDocumentStore>>,
     db_handle: &DbHandle,
 ) -> anyhow::Result<()> {
-    eprintln!("[LoroModule] SEED-STAGE 1: function entry");
+    tracing::info!("[LoroModule] SEED-STAGE 1: function entry");
     info!("[LoroModule] seed: querying block table");
-    eprintln!("[LoroModule] SEED-STAGE 2: about to query block table");
+    tracing::info!("[LoroModule] SEED-STAGE 2: about to query block table");
     let rows = db_handle
         .query(
             "SELECT id, parent_id, content, content_type, source_language, \
-                    properties, name \
+                    properties \
              FROM block ORDER BY created_at ASC",
             std::collections::HashMap::new(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("query block table: {}", e))?;
 
-    eprintln!(
+    tracing::info!(
         "[LoroModule] SEED-STAGE 3: query returned {} rows",
         rows.len()
     );
@@ -467,49 +470,119 @@ async fn apply_seed_row(
         .await
         .map_err(|e| anyhow::anyhow!("create_block for {}: {}", id, e))?;
 
-    // Set document name if present (makes it a document block).
-    let name = row.get("name").and_then(|v| v.as_string());
-    if name.is_some() {
+    // Hydrate tags onto the freshly-created block. The literal `"Page"` tag
+    // marks the block as a page (formerly the `name`-bearing variant). The
+    // `tags` column is `#[jsonb]` and CDC seeds deliver it as Value::Array
+    // when Turso parses the column, or Value::Json/Value::String when the
+    // raw TEXT is passed through. Any other shape is a programming error.
+    let tags = parse_seed_row_tags(row)?;
+    if !tags.is_empty() {
         backend
-            .set_document_metadata(created.id.as_str(), name)
+            .set_block_tags(created.id.as_str(), &tags)
             .await
-            .map_err(|e| anyhow::anyhow!("set_document_metadata: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("set_block_tags: {}", e))?;
     }
 
-    // Properties: stored as JSON string in the `properties` column.
-    if let Some(props_str) = row.get("properties").and_then(|v| v.as_string()) {
-        if let Ok(map) =
-            serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(props_str)
-        {
-            if !map.is_empty() {
-                let props: std::collections::HashMap<String, Value> = map
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let val = match v {
-                            serde_json::Value::String(s) => Value::String(s),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    Value::Integer(i)
-                                } else {
-                                    Value::Float(n.as_f64().unwrap_or(0.0))
-                                }
+    // Properties: stored as JSON in the `properties` jsonb column. Same
+    // shape variance as `tags`: parse the JSON list explicitly instead of
+    // assuming Value::String.
+    if let Some(map) = parse_seed_row_properties(row)? {
+        if !map.is_empty() {
+            let props: std::collections::HashMap<String, Value> = map
+                .into_iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        serde_json::Value::String(s) => Value::String(s),
+                        serde_json::Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                Value::Integer(i)
+                            } else {
+                                Value::Float(n.as_f64().unwrap_or(0.0))
                             }
-                            serde_json::Value::Bool(b) => Value::Boolean(b),
-                            serde_json::Value::Null => Value::Null,
-                            _ => Value::String(v.to_string()),
-                        };
-                        (k, val)
-                    })
-                    .collect();
-                backend
-                    .update_block_properties(created.id.as_str(), &props)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("update_block_properties: {}", e))?;
-            }
+                        }
+                        serde_json::Value::Bool(b) => Value::Boolean(b),
+                        serde_json::Value::Null => Value::Null,
+                        _ => Value::String(v.to_string()),
+                    };
+                    (k, val)
+                })
+                .collect();
+            backend
+                .update_block_properties(created.id.as_str(), &props)
+                .await
+                .map_err(|e| anyhow::anyhow!("update_block_properties: {}", e))?;
         }
     }
 
     // Unused-import shim (ContentType is re-exported for parity with other seeders).
     let _ = ContentType::Text;
     Ok(true)
+}
+
+/// Parse the `tags` field of a CDC seed row into a typed `Vec<String>`.
+/// Accepts `Value::Array<String>`, `Value::Json` / `Value::String` containing a
+/// JSON list, or `Value::Null`/absent (treated as empty). Any other shape —
+/// non-string array elements, malformed JSON, unexpected variant — fails
+/// loudly so a malformed peer payload can't silently drop tag data.
+fn parse_seed_row_tags(
+    row: &std::collections::HashMap<String, Value>,
+) -> anyhow::Result<Vec<String>> {
+    match row.get("tags") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .map(|elem| match elem {
+                Value::String(s) => Ok(s.clone()),
+                other => Err(anyhow::anyhow!(
+                    "[apply_seed_row] tag entry is not a string: {:?}",
+                    other
+                )),
+            })
+            .collect(),
+        Some(Value::Json(s)) | Some(Value::String(s)) => serde_json::from_str::<Vec<String>>(s)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "[apply_seed_row] tags string is not a JSON list: {} (raw: {:?})",
+                    e,
+                    s
+                )
+            }),
+        Some(other) => Err(anyhow::anyhow!(
+            "[apply_seed_row] tags has unexpected shape: {:?}",
+            other
+        )),
+    }
+}
+
+/// Parse the `properties` field of a CDC seed row into a JSON object.
+/// Returns `Ok(None)` if the column is absent / Null. Fails loudly on
+/// unexpected shapes so a malformed peer payload can't silently drop
+/// properties.
+fn parse_seed_row_properties(
+    row: &std::collections::HashMap<String, Value>,
+) -> anyhow::Result<Option<std::collections::HashMap<String, serde_json::Value>>> {
+    let raw = match row.get("properties") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(v) => v,
+    };
+    let parsed: std::collections::HashMap<String, serde_json::Value> = match raw {
+        Value::Json(s) | Value::String(s) => serde_json::from_str(s).map_err(|e| {
+            anyhow::anyhow!(
+                "[apply_seed_row] properties string is not a JSON object: {} (raw: {:?})",
+                e,
+                s
+            )
+        })?,
+        Value::Object(m) => m
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone().into()))
+            .collect(),
+        other => {
+            return Err(anyhow::anyhow!(
+                "[apply_seed_row] properties has unexpected shape: {:?}",
+                other
+            ));
+        }
+    };
+    Ok(Some(parsed))
 }

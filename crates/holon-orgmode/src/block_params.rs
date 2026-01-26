@@ -50,8 +50,13 @@ pub fn build_block_params(
     params.insert("created_at".to_string(), Value::Integer(created));
     params.insert("updated_at".to_string(), Value::Integer(now));
 
-    if let Some(ref name) = block.name {
-        params.insert("name".to_string(), Value::String(name.clone()));
+    if !block.tags.is_empty() {
+        let arr: Vec<Value> = block
+            .tags
+            .iter()
+            .map(|t| Value::String(t.clone()))
+            .collect();
+        params.insert("tags".to_string(), Value::Array(arr));
     }
 
     if block.content_type == ContentType::Source {
@@ -84,10 +89,10 @@ pub fn build_block_params(
             Value::Integer(priority.to_int() as i64),
         );
     }
-    let tags = block.tags();
-    if !tags.is_empty() {
-        params.insert("tags".to_string(), Value::String(tags.to_csv()));
-    }
+    // Tags are already serialized into the `tags` JSON-array param above
+    // (lines 53-57); the legacy CSV-via-properties shape is gone. Skip the
+    // OrgBlockExt::tags() shim here so we don't overwrite the JSON list with
+    // a comma-separated string.
     if let Some(scheduled) = block.scheduled() {
         params.insert(
             "scheduled".to_string(),

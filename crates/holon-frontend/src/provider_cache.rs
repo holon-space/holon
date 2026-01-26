@@ -104,7 +104,7 @@ fn fingerprint(args: &ResolvedArgs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_signals::signal_vec::{MutableVec, SignalVec, SignalVecExt};
+    use futures_signals::signal_vec::{MutableVec, SignalVec};
     use holon_api::widget_spec::DataRow;
     use holon_api::Value;
     use std::pin::Pin;

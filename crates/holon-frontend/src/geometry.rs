@@ -25,6 +25,14 @@ pub struct ElementInfo {
     /// via a thread-local render-path stack, used by fast-UI layout
     /// invariants to rebuild the tree without a parallel view-model walk.
     pub parent_id: Option<String>,
+    /// The text the widget actually puts on screen at the moment it was
+    /// recorded. For `editable_text` this is the live `InputState` value;
+    /// for plain `text` builders it's the resolved prop. `None` for
+    /// containers and other widgets that don't carry textual content.
+    /// Used by PBT invariants to detect UI staleness — e.g. the on-screen
+    /// text of an `editable_text` failing to follow the SQL `block.content`
+    /// after `split_block` / `join_block`.
+    pub displayed_text: Option<String>,
 }
 
 impl ElementInfo {

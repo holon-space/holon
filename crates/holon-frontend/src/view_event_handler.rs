@@ -194,21 +194,23 @@ impl ViewEventHandler {
     }
 }
 
-/// Parse a virtual entity ID: `virtual:{parent_id}`.
+/// Parse a virtual entity ID of the form `<entity>:__virtual:<parent_local>`.
 ///
-/// The entity type is derived from the parent_id's URI scheme
-/// (e.g. `virtual:block:abc123` → entity type "block", parent "block:abc123").
+/// The marker lives in the **local** part of the URI (not the scheme), so
+/// `EntityUri::scheme()` returns the real entity type and the profile resolver
+/// finds the right profile. We detect "this is a creation slot" by looking
+/// for the `:__virtual:` infix.
+///
+/// Example: `block:__virtual:default-main-panel`
+/// → entity_type = `"block"`, parent_id = `"block:default-main-panel"`.
 ///
 /// Returns `(entity_type, parent_id)` or `None` if the ID isn't virtual.
 fn parse_virtual_id(id: &str) -> Option<(String, String)> {
-    let parent_id = id.strip_prefix("virtual:")?;
-    if parent_id.is_empty() {
+    let (scheme, parent_local) = id.split_once(":__virtual:")?;
+    if scheme.is_empty() || parent_local.is_empty() {
         return None;
     }
-    let entity_type = holon_api::EntityUri::from_raw(parent_id)
-        .scheme()
-        .to_string();
-    Some((entity_type, parent_id.to_string()))
+    Some((scheme.to_string(), format!("{scheme}:{parent_local}")))
 }
 
 /// Result of handling a ViewEvent.

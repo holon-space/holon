@@ -24,6 +24,7 @@ use holon_api::streaming::UiEvent;
 use holon_api::widget_spec::{DataRow, EnrichedRow};
 use holon_api::{ptr_identity, EntityUri, QueryLanguage, ReactiveRowProvider};
 
+use crate::editable_text_provider::EditableTextProvider;
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
@@ -53,6 +54,20 @@ pub trait BuilderServices: Send + Sync {
     /// Resolve the entity profile for a data row. Returns `None` when no entity type
     /// could be inferred.
     fn resolve_profile(&self, row: &DataRow) -> Option<holon::entity_profile::RowProfile>;
+
+    /// Mutable holding the current profile registry snapshot.
+    ///
+    /// Each rebuild swaps in a fresh `Arc<ProfileCache>`, firing the signal.
+    /// `render_entity` reads the current profile inside `interpret`, but
+    /// `interpret_row` only re-runs on per-row data changes — so a
+    /// profile-only edit otherwise leaves already-rendered items frozen at
+    /// the pre-mutation profile. Collection drivers subscribe to this
+    /// signal and trigger a full re-interpret when it fires.
+    ///
+    /// Default: an empty cache that never changes (for stub/headless services).
+    fn profile_signal(&self) -> Mutable<Arc<holon::entity_profile::ProfileCache>> {
+        Mutable::new(Arc::new(holon::entity_profile::ProfileCache::empty()))
+    }
 
     /// Get the virtual child config for an entity type, if declared in its profile.
     fn virtual_child_config(
@@ -176,6 +191,19 @@ pub trait BuilderServices: Send + Sync {
     /// Set the currently focused block. Pass `None` to clear focus.
     fn set_focus(&self, _block_id: Option<EntityUri>) {}
 
+    /// Get a `MutableText` handle for collaborative editing of a block field.
+    ///
+    /// Returns `Err` for headless/stub services that don't have a LoroDoc.
+    fn editable_text(
+        &self,
+        _block_id: &str,
+        _field: &str,
+    ) -> anyhow::Result<holon::sync::mutable_text::MutableText> {
+        Err(anyhow::anyhow!(
+            "editable_text not supported by this BuilderServices implementation"
+        ))
+    }
+
     /// Fully-resolved static snapshot of a block's UI tree.
     ///
     /// Interprets the block's render expression against its current data rows,
@@ -245,6 +273,21 @@ pub trait BuilderServices: Send + Sync {
         Box<dyn futures_signals::signal::Signal<Item = crate::ReactiveViewModel> + Send>,
     > {
         panic!("watch_query_signal not supported by this BuilderServices implementation")
+    }
+
+    /// Reactive signal that fires when the focused editor's cursor moves
+    /// (driven by the `current_editor_focus` matview). Each `EditorView`
+    /// subscribes and acts only on emissions whose `block_id` matches its
+    /// own `row_id`. Returns `None` for sync/test services that don't run
+    /// a CDC watcher.
+    fn watch_editor_cursor(
+        &self,
+    ) -> Option<
+        std::pin::Pin<
+            Box<dyn futures_signals::signal::Signal<Item = Option<(String, i64)>> + Send>,
+        >,
+    > {
+        None
     }
 
     /// Tokio runtime handle for spawning subscriptions (editor/popup providers,
@@ -922,6 +965,14 @@ pub struct ReactiveEngine {
     /// across render passes so identical `(name, args)` calls share an
     /// Arc instead of each building a fresh provider.
     provider_cache: Arc<crate::provider_cache::ProviderCache>,
+    /// Shared editor-cursor signal source. Lazily spawned on the first
+    /// `watch_editor_cursor()` call so we have at most one CDC stream on
+    /// `current_editor_focus` regardless of how many editors subscribe.
+    editor_cursor: Mutex<Option<Mutable<Option<(String, i64)>>>>,
+    /// Optional MutableText provider. When `Some`, `BuilderServices::editable_text()`
+    /// delegates to it. Set by test harnesses that want CRDT-backed editors.
+    pub editable_text_provider:
+        Mutex<Option<Arc<crate::editable_text_provider::LoroEditableTextProvider>>>,
 }
 
 impl ReactiveEngine {
@@ -943,6 +994,10 @@ impl ReactiveEngine {
             bindings.insert_cloned(
                 "split_block".into(),
                 holon_api::KeyChord::new(&[Key::Enter]),
+            );
+            bindings.insert_cloned(
+                "join_block".into(),
+                holon_api::KeyChord::new(&[Key::Backspace]),
             );
             bindings.insert_cloned("indent".into(), holon_api::KeyChord::new(&[Key::Tab]));
             bindings.insert_cloned(
@@ -969,6 +1024,8 @@ impl ReactiveEngine {
             ui_state: UiState::new(),
             key_bindings,
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
+            editor_cursor: Mutex::new(None),
+            editable_text_provider: Mutex::new(None),
         }
     }
 
@@ -1191,7 +1248,93 @@ impl ReactiveEngine {
                     });
 
                     while let Some(event) = event_rx.recv().await {
+                        // Diagnostic: log every UiEvent for default-main-panel so we can
+                        // see whether Data events arrive after focus changes.
+                        if bid.as_str() == "block:default-main-panel" {
+                            match &event {
+                                UiEvent::Structure {
+                                    render_expr,
+                                    generation,
+                                    ..
+                                } => {
+                                    let name = match render_expr {
+                                        RenderExpr::FunctionCall { name, .. } => name.as_str(),
+                                        _ => "non-fn",
+                                    };
+                                    tracing::trace!(
+                                        "[mp_event] Structure gen={generation} expr={name}"
+                                    );
+                                }
+                                UiEvent::Data { batch, generation } => {
+                                    let cur_gen = reactive.rows.generation();
+                                    let n = batch.inner.items.len();
+                                    let dropped = *generation != cur_gen;
+                                    tracing::trace!(
+                                        "[mp_event] Data gen={generation} (current={cur_gen}) items={n}{}",
+                                        if dropped { " DROPPED-stale-gen" } else { "" }
+                                    );
+                                    // Per-change detail. Lets the next debugging session
+                                    // confirm whether the matview CDC layer surfaces an
+                                    // `Updated` for the modified block after split_block /
+                                    // set_field — see HANDOFF_TUI_RENDER.md "third pass".
+                                    for (i, change) in batch.inner.items.iter().enumerate() {
+                                        let snippet = |row: &holon_api::widget_spec::DataRow| -> String {
+                                            row.get("content")
+                                                .and_then(|v| v.as_string())
+                                                .map(|s| {
+                                                    let s = s.replace('\n', "\\n");
+                                                    if s.len() > 40 {
+                                                        format!("{}…", &s[..40])
+                                                    } else {
+                                                        s
+                                                    }
+                                                })
+                                                .unwrap_or_else(|| "<no content>".into())
+                                        };
+                                        match change {
+                                            holon_api::Change::Created { data, .. } => {
+                                                let id = data
+                                                    .get("id")
+                                                    .and_then(|v| v.as_string())
+                                                    .unwrap_or("<no id>");
+                                                tracing::trace!(
+                                                    "[mp_event]   change[{i}]: Created id={id} content={:?}",
+                                                    snippet(data)
+                                                );
+                                            }
+                                            holon_api::Change::Updated { id, data, .. } => {
+                                                tracing::trace!(
+                                                    "[mp_event]   change[{i}]: Updated id={id} content={:?}",
+                                                    snippet(data)
+                                                );
+                                            }
+                                            holon_api::Change::Deleted { id, .. } => {
+                                                tracing::trace!(
+                                                    "[mp_event]   change[{i}]: Deleted id={id}"
+                                                );
+                                            }
+                                            holon_api::Change::FieldsChanged {
+                                                entity_id,
+                                                fields,
+                                                ..
+                                            } => {
+                                                let names: Vec<&str> =
+                                                    fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                                                tracing::trace!(
+                                                    "[mp_event]   change[{i}]: FieldsChanged id={entity_id} fields={:?}",
+                                                    names
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         reactive.apply_event(event);
+                        if bid.as_str() == "block:default-main-panel" {
+                            let rows_n = reactive.rows.snapshot_rows().len();
+                            tracing::trace!("[mp_event] post-apply rows.len={rows_n}");
+                        }
                     }
                 }
                 Err(e) => {
@@ -1315,6 +1458,13 @@ impl ReactiveEngine {
         use futures_signals::signal::SignalExt;
         use holon_api::streaming::Change;
 
+        // Reuse the shared Mutable across all subscribers so we keep at
+        // most one CDC stream on `current_editor_focus` regardless of how
+        // many editors subscribe (one per visible row).
+        let mut guard = self.editor_cursor.lock().unwrap();
+        if let Some(ref cursor) = *guard {
+            return cursor.signal_cloned().boxed();
+        }
         let cursor: Mutable<Option<(String, i64)>> = Mutable::new(None);
         let writer = cursor.clone();
 
@@ -1372,7 +1522,9 @@ impl ReactiveEngine {
             }
         });
 
-        cursor.signal_cloned().boxed()
+        let signal = cursor.signal_cloned().boxed();
+        *guard = Some(cursor);
+        signal
     }
 
     /// Decrement the refcount for a block's watcher. When the last consumer
@@ -1455,6 +1607,10 @@ impl BuilderServices for ReactiveEngine {
     #[tracing::instrument(level = "trace", skip_all)]
     fn resolve_profile(&self, row: &DataRow) -> Option<holon::entity_profile::RowProfile> {
         self.session.resolve_row_profile(row)
+    }
+
+    fn profile_signal(&self) -> Mutable<Arc<holon::entity_profile::ProfileCache>> {
+        self.session.engine().profile_resolver().profile_signal()
     }
 
     fn virtual_child_config(
@@ -1657,6 +1813,16 @@ impl BuilderServices for ReactiveEngine {
         ReactiveEngine::watch_query_signal(self, sql, render_expr, query_context)
     }
 
+    fn watch_editor_cursor(
+        &self,
+    ) -> Option<
+        std::pin::Pin<
+            Box<dyn futures_signals::signal::Signal<Item = Option<(String, i64)>> + Send>,
+        >,
+    > {
+        Some(ReactiveEngine::watch_editor_cursor(self))
+    }
+
     fn unwatch(&self, block_id: &EntityUri) {
         ReactiveEngine::unwatch(self, block_id);
     }
@@ -1672,6 +1838,20 @@ impl BuilderServices for ReactiveEngine {
     {
         let session = self.session.clone();
         Box::pin(async move { session.execute_query(sql, HashMap::new(), None).await })
+    }
+
+    fn editable_text(
+        &self,
+        block_id: &str,
+        field: &str,
+    ) -> anyhow::Result<holon::sync::mutable_text::MutableText> {
+        let guard = self.editable_text_provider.lock().unwrap();
+        match &*guard {
+            Some(p) => p.editable_text(block_id, field),
+            None => Err(anyhow::anyhow!(
+                "editable_text not configured for this ReactiveEngine"
+            )),
+        }
     }
 }
 
@@ -1713,6 +1893,10 @@ impl BuilderServices for HeadlessBuilderServices {
     fn resolve_profile(&self, row: &DataRow) -> Option<holon::entity_profile::RowProfile> {
         let (profile, _computed) = self.engine.profile_resolver().resolve_with_variants(row);
         Some(profile.as_ref().clone())
+    }
+
+    fn profile_signal(&self) -> Mutable<Arc<holon::entity_profile::ProfileCache>> {
+        self.engine.profile_resolver().profile_signal()
     }
 
     fn compile_to_sql(&self, query: &str, lang: QueryLanguage) -> Result<String> {
@@ -1948,7 +2132,15 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
         return;
     }
     match intent.op_name.as_str() {
-        "focus" => {
+        // `focus` and `editor_focus` both move focus; the latter is what
+        // a click dispatches (the GPUI click handler in
+        // `frontends/gpui/src/render/builders/render_entity.rs:47-62`
+        // calls `services.set_focus(Some(id))` *and* dispatches
+        // `editor_focus`). Headless drivers (TUI, Flutter) skip the
+        // direct `set_focus` call and rely solely on the dispatch,
+        // so mirroring `editor_focus` here keeps `focused_block` in
+        // sync across all frontends.
+        "focus" | "editor_focus" => {
             let block_id = intent
                 .params
                 .get("block_id")

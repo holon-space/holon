@@ -25,6 +25,9 @@ mod turso_ivm_union_all_insert_repro;
 #[cfg(test)]
 mod turso_ivm_navigation_cursor_repro;
 
+#[cfg(test)]
+mod turso_ivm_split_block_cdc_drop_repro;
+
 /// Split a semicolon-delimited SQL file into individual statements.
 pub fn sql_statements(content: &str) -> impl Iterator<Item = &str> {
     content.split(';').map(str::trim).filter(|s| !s.is_empty())
@@ -33,10 +36,10 @@ pub fn sql_statements(content: &str) -> impl Iterator<Item = &str> {
 pub use backend::*;
 pub use holon_core::fractional_index::*;
 pub use resource::Resource;
-pub use schema_module::SchemaModule;
+pub use schema_module::{EdgeFieldDescriptor, SchemaModule};
 pub use schema_modules::{
-    BlockHierarchySchemaModule, CoreSchemaModule, LinkSchemaModule, NavigationSchemaModule,
-    OperationsSchemaModule, SyncStateSchemaModule,
+    BlockHierarchySchemaModule, BlockSchemaModule, CoreSchemaModule, IdentitySchemaModule,
+    LinkSchemaModule, NavigationSchemaModule, OperationsSchemaModule, SyncStateSchemaModule,
 };
 pub use sql_parser::{
     ChangeOriginInjector, JsonAggregationSqlTransformer, SqlTransformer, apply_sql_transforms,

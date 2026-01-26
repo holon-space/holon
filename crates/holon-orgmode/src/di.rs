@@ -30,10 +30,12 @@ use crate::OrgModeSyncProvider;
 use holon::core::datasource::{OperationProvider, SyncTokenStore, SyncableProvider};
 use holon::core::operation_wrapper::OperationWrapper;
 use holon::core::queryable_cache::QueryableCache;
+use holon::storage::schema_module::SchemaModule;
+use holon::storage::schema_modules::BlockSchemaModule;
 use holon::sync::event_bus::{EventBus, PublishErrorTracker};
 use holon::sync::{LoroBlockOperations, LoroDocumentStore, TursoEventBus};
 use holon::type_registry::TypeRegistry;
-use holon_api::block::Block;
+use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
 
 /// Signal that indicates the FileWatcher is ready to receive file change events.
@@ -232,7 +234,7 @@ impl BlockReader for CacheBlockReader {
                 if frontier.contains(block.parent_id.as_str())
                     && !result.iter().any(|b: &Block| b.id == block.id)
                 {
-                    if block.is_document() {
+                    if block.is_page() {
                         continue;
                     }
                     next_frontier.insert(block.id.as_str());
@@ -251,7 +253,6 @@ impl BlockReader for CacheBlockReader {
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         use holon::core::datasource::DataSource;
-        use std::collections::HashMap;
 
         let all_blocks = self
             .cache
@@ -259,54 +260,26 @@ impl BlockReader for CacheBlockReader {
             .await
             .map_err(|e| anyhow::anyhow!("[CacheBlockReader] Failed to load blocks: {e}"))?;
 
-        let mut children_of: HashMap<EntityUri, Vec<&Block>> = HashMap::new();
-        for block in &all_blocks {
-            children_of
-                .entry(block.parent_id.clone())
-                .or_default()
-                .push(block);
-        }
-
-        let doc_uris: Vec<EntityUri> = children_of
-            .keys()
-            .filter(|pid| pid.is_no_parent() || pid.is_sentinel())
-            .cloned()
-            .collect();
-
-        let mut result = Vec::new();
-        for doc_uri in doc_uris {
-            let mut blocks = Vec::new();
-            let mut queue: Vec<EntityUri> = vec![doc_uri.clone()];
-            while let Some(pid) = queue.pop() {
-                if let Some(children) = children_of.get(&pid) {
-                    for block in children {
-                        if block.is_document() {
-                            continue;
-                        }
-                        queue.push(block.id.clone());
-                        blocks.push((*block).clone());
-                    }
-                }
-            }
-            if !blocks.is_empty() {
-                result.push((doc_uri, blocks));
-            }
-        }
-
-        Ok(result)
+        Ok(blocks_by_document(&all_blocks))
     }
 }
 
-/// DocumentManager backed by CDC-driven LiveData over document blocks.
+/// DocumentManager backed by CDC-driven LiveData over page blocks.
 ///
 /// All reads (`find_by_parent_and_name`, `get_by_id`) are in-memory lookups
 /// against a `LiveData<Block>` that stays current via a Turso materialized
-/// view CDC stream over blocks where `name IS NOT NULL`.
+/// view CDC stream over blocks whose `tags` JSON list contains `"Page"`.
 /// Writes go through `SqlOperationProvider` (SQL); the matview
 /// CDC automatically propagates them into the LiveData.
 pub struct LiveDocumentManager {
     live: Arc<holon::sync::LiveData<Block>>,
     command_bus: Arc<dyn OperationProvider>,
+    /// Serializes find-then-create against itself so two concurrent
+    /// `get_or_create_by_name_chain` calls for the same `(parent_id, title)`
+    /// can't both miss the LiveData lookup and INSERT distinct UUIDs. The
+    /// previous safeguard was `idx_block_document_unique` (UNIQUE on
+    /// `(parent_id, name)`), which was dropped when `name` became a tag.
+    create_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LiveDocumentManager {
@@ -322,8 +295,9 @@ impl LiveDocumentManager {
         let matview_mgr =
             holon::sync::MatviewManager::new(db_handle, Arc::new(tokio::sync::Mutex::new(())));
 
+        // Match any block that has the "Page" tag in the block_tags junction table.
         let result = matview_mgr
-            .watch("SELECT * FROM block WHERE name IS NOT NULL")
+            .watch(r#"SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page'"#)
             .await?;
 
         let live = holon::sync::LiveData::new(
@@ -343,7 +317,11 @@ impl LiveDocumentManager {
             live.read().len()
         );
 
-        Ok(Self { live, command_bus })
+        Ok(Self {
+            live,
+            command_bus,
+            create_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 }
 
@@ -352,23 +330,43 @@ impl DocumentManager for LiveDocumentManager {
     async fn find_by_parent_and_name(
         &self,
         parent_id: &EntityUri,
-        name: &str,
+        title: &str,
     ) -> anyhow::Result<Option<Block>> {
         let docs = self.live.read();
         Ok(docs
             .values()
-            .find(|d| d.parent_id == *parent_id && d.name.as_deref() == Some(name))
+            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
             .cloned())
     }
 
     async fn create(&self, doc: Block) -> anyhow::Result<Block> {
         use crate::block_params::build_block_params;
+
+        // Serialize against concurrent creates so two callers asking for the
+        // same `(parent_id, title)` page can't both observe LiveData empty
+        // and both INSERT distinct UUIDs. Inside the lock, re-check LiveData;
+        // if the page now exists (CDC may have caught up while we were
+        // waiting), return the existing entry.
+        let _guard = self.create_lock.lock().await;
+        if let Some(existing) = self
+            .find_by_parent_and_name(&doc.parent_id, &doc.title())
+            .await?
+        {
+            tracing::debug!(
+                "[LiveDocumentManager] Page {:?} already exists as {} (skipping create)",
+                doc.title(),
+                existing.id,
+            );
+            return Ok(existing);
+        }
+
         // Route document creation events to the document's own ID.
         // _routing_doc_uri is only event routing metadata (not stored in DB) —
         // it tells OrgSyncController which file to re-render.
         let params = build_block_params(&doc, &doc.parent_id, &doc.id);
-        // INSERT OR IGNORE: if a document with the same (parent_id, name) already
-        // exists (UNIQUE index), the INSERT is silently skipped.
+        // INSERT OR IGNORE: only triggers on PK collision now that the
+        // partial unique index on `(parent_id, name)` is gone. The
+        // `create_lock` above is what prevents same-title duplicates.
         let result = self
             .command_bus
             .execute_operation(&EntityName::new("block"), "create", params)
@@ -376,12 +374,12 @@ impl DocumentManager for LiveDocumentManager {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // If the response carries an existing id, the INSERT was ignored —
-        // a document with the same (parent_id, name) already exists in the DB.
-        // Return that existing document instead of the one we tried to insert.
+        // a page with the same (parent_id, title) already exists in the DB.
+        // Return that existing page instead of the one we tried to insert.
         if let Some(holon_api::Value::String(existing_id)) = result.response {
             tracing::debug!(
-                "[LiveDocumentManager] Document {:?} already exists as {} (attempted id={})",
-                doc.name,
+                "[LiveDocumentManager] Page {:?} already exists as {} (attempted id={})",
+                doc.title(),
                 existing_id,
                 doc.id,
             );
@@ -609,12 +607,13 @@ impl Module for OrgModeModule {
 
             // OrgSyncController writes through SQL ops; CacheBlockReader reads from QueryableCache
             // which is also backed by the same Turso database, ensuring consistency.
-            let sql_ops = Arc::new(holon::core::SqlOperationProvider::with_event_bus(
+            let sql_ops = Arc::new(holon::core::SqlOperationProvider::with_event_bus_and_edge_fields(
                 db_handle.clone(),
                 "block".to_string(),
                 "block".to_string(),
                 "block".to_string(),
                 event_bus_arc.clone(),
+                BlockSchemaModule.edge_fields(),
             ));
 
             let command_bus: Arc<dyn OperationProvider> =
@@ -794,9 +793,9 @@ impl Module for OrgModeModule {
                             loop {
                                 tokio::select! {
                                     Some(file_path) = file_rx.recv() => {
-                                        eprintln!("[ORGSYNC_TRACE] file_rx -> on_file_changed({})", file_path.display());
+                                        tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_changed({})", file_path.display());
                                         if let Err(e) = controller.on_file_changed(&file_path).await {
-                                            eprintln!(
+                                            tracing::debug!(
                                                 "[ORGSYNC_TRACE] on_file_changed ERROR for {}: {}",
                                                 file_path.display(), e
                                             );
@@ -805,19 +804,19 @@ impl Module for OrgModeModule {
                                                 file_path.display(), e
                                             );
                                         } else {
-                                            eprintln!("[ORGSYNC_TRACE] on_file_changed OK for {}", file_path.display());
+                                            tracing::debug!("[ORGSYNC_TRACE] on_file_changed OK for {}", file_path.display());
                                         }
                                         idle_signal_for_task.mark_progress();
                                     }
                                     _ = poll_tick.tick() => {
                                         match controller.poll_external_changes().await {
                                             Ok(n) if n > 0 => {
-                                                eprintln!("[ORGSYNC_TRACE] poll ingested {} file(s)", n);
+                                                tracing::debug!("[ORGSYNC_TRACE] poll ingested {} file(s)", n);
                                                 idle_signal_for_task.mark_progress();
                                             }
                                             Ok(_) => {}
                                             Err(e) => {
-                                                eprintln!("[ORGSYNC_TRACE] poll ERROR: {}", e);
+                                                tracing::debug!("[ORGSYNC_TRACE] poll ERROR: {}", e);
                                                 error!("[OrgMode] poll_external_changes error: {}", e);
                                             }
                                         }

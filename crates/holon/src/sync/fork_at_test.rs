@@ -186,7 +186,6 @@ mod tests {
     fn subscribe_root_fires_after_rwlock_wrapped_sync() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::RwLock;
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -194,9 +193,9 @@ mod tests {
             .unwrap();
 
         rt.block_on(async {
-            let primary = Arc::new(RwLock::new(LoroDoc::new()));
+            let primary = Arc::new(LoroDoc::new());
             {
-                let doc = primary.write().await;
+                let doc = &*primary;
                 doc.set_peer_id(1).unwrap();
                 let tree = doc.get_tree(TREE_NAME);
                 tree.enable_fractional_index(0);
@@ -205,7 +204,7 @@ mod tests {
             let callback_count = Arc::new(AtomicUsize::new(0));
             let count_clone = callback_count.clone();
             let _sub = {
-                let doc = primary.read().await;
+                let doc = &*primary;
                 doc.subscribe_root(Arc::new(move |_| {
                     count_clone.fetch_add(1, Ordering::SeqCst);
                 }))
@@ -221,7 +220,7 @@ mod tests {
 
             // Sync under write lock (same as StubSut)
             {
-                let doc = primary.write().await;
+                let doc = &*primary;
                 crate::sync::multi_peer::sync_docs_direct(&doc, &peer);
             }
 
@@ -240,7 +239,7 @@ mod tests {
             peer2.commit();
 
             {
-                let doc = primary.read().await;
+                let doc = &*primary;
                 crate::sync::multi_peer::sync_docs_direct(&doc, &peer2);
             }
 

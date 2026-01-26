@@ -356,7 +356,7 @@ mod adapter {
             let alpn = self.alpn(doc_id);
             let conn = self.endpoint.connect(peer_addr, &alpn).await?;
 
-            let snapshot = doc.export_snapshot().await?;
+            let snapshot = doc.export_snapshot()?;
             let mut send_stream = conn.open_uni().await?;
             send_stream.write_all(&snapshot).await?;
             send_stream.finish()?;
@@ -364,7 +364,7 @@ mod adapter {
             let mut recv_stream = conn.accept_uni().await?;
             let buffer = recv_stream.read_to_end(MAX_MSG_SIZE).await?;
             if !buffer.is_empty() {
-                doc.apply_update(&buffer).await?;
+                doc.apply_update(&buffer)?;
             }
 
             Ok(())
@@ -393,10 +393,10 @@ mod adapter {
             let mut recv_stream = conn.accept_uni().await?;
             let buffer = recv_stream.read_to_end(MAX_MSG_SIZE).await?;
             if !buffer.is_empty() {
-                doc.apply_update(&buffer).await?;
+                doc.apply_update(&buffer)?;
             }
 
-            let snapshot = doc.export_snapshot().await?;
+            let snapshot = doc.export_snapshot()?;
             let mut send_stream = conn.open_uni().await?;
             send_stream.write_all(&snapshot).await?;
             send_stream.finish()?;

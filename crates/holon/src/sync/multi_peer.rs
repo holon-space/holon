@@ -14,7 +14,7 @@ pub use crate::api::loro_backend::{CONTENT_RAW, CONTENT_TYPE, SOURCE_CODE, STABL
 /// Return the metadata field that stores a node's primary text content,
 /// based on its `content_type` (`source` blocks live in `source_code`,
 /// everything else lives in `content_raw`).
-fn content_field_for(meta: &loro::LoroMap) -> &'static str {
+pub fn content_field_for(meta: &loro::LoroMap) -> &'static str {
     let is_source = matches!(
         meta.get(CONTENT_TYPE),
         Some(ValueOrContainer::Value(ref v)) if v.as_string().map(|s| s.as_str()) == Some("source")

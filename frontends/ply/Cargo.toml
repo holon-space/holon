@@ -1,0 +1,38 @@
+[package]
+name = "holon-ply"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+chrome-trace = ["holon-frontend/chrome-trace"]
+
+[dependencies]
+# Ply UI framework
+ply-engine = { git = "https://github.com/TheRedDeveloper/ply-engine" }
+macroquad-ply = "0.4.14"
+
+# Holon workspace crates
+holon.workspace = true
+holon-frontend.workspace = true
+holon-api.workspace = true
+holon-macros.workspace = true
+holon-mcp = { path = "../mcp" }
+
+# DI
+fluxdi.workspace = true
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+
+# Serialization
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

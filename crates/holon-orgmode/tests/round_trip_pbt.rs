@@ -178,8 +178,8 @@ fn document_strategy() -> impl Strategy<Value = Block> {
     )
         .prop_map(|(title, todo_keywords)| {
             let id = EntityUri::block(&format!("test-{}", Uuid::new_v4()));
-            let mut doc = Block::new_text(id, EntityUri::no_parent(), "");
-            doc.name = Some("test.org".to_string());
+            let mut doc = Block::new_text(id, EntityUri::no_parent(), "test.org");
+            doc.set_page(true);
             doc.set_file_title(title);
             doc.set_todo_keywords(todo_keywords);
             doc

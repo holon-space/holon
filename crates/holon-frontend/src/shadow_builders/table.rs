@@ -7,7 +7,7 @@ holon_macros::widget_builder! {
         match children {
             CollectionData::Streaming { item_template, data_source, sort_key } => {
                 let virtual_child = virtual_child_slot_from_arg(&ba);
-                ViewModel::streaming_collection("table", item_template, data_source, 4.0, sort_key, __parent_space, None, virtual_child)
+                ViewModel::streaming_collection("table", item_template, data_source, 4.0, sort_key, __parent_space, None, virtual_child, None)
             }
             CollectionData::Static { mut items } => {
                 if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {

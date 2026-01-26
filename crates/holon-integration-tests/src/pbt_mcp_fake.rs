@@ -19,7 +19,7 @@ use holon::storage::DbHandle;
 use holon_api::DynamicEntity;
 use holon_api::entity::FieldSchema;
 use rmcp::model::*;
-use rmcp::service::{Peer, RequestContext, RunningService};
+use rmcp::service::{Peer, RequestContext};
 use rmcp::{RoleClient, RoleServer, ServerHandler, ServiceExt};
 use tokio::sync::RwLock;
 

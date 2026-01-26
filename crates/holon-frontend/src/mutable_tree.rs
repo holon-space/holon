@@ -14,35 +14,28 @@ use std::sync::Arc;
 use futures_signals::signal_vec::MutableVec;
 
 use crate::reactive_view_model::ReactiveViewModel;
-use holon_api::render_eval::sort_value;
 use holon_api::Value;
 
 /// A node in the sort order. `Ord` sorts by (sort_key, id) so siblings
-/// appear in the right order.
+/// appear in the right order. `sort_key` is a string whose lexicographic
+/// byte order matches the desired sort order (FractionalIndex hex strings
+/// or zero-padded numeric values from [`holon_api::render_eval::sort_value`]).
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct SortedChild {
-    sort_key_bits: u64,
+    sort_key: String,
     id: String,
 }
 
 impl SortedChild {
-    fn new(sort_key: f64, id: String) -> Self {
-        Self {
-            sort_key_bits: sort_key.to_bits(),
-            id,
-        }
-    }
-
-    fn sort_key(&self) -> f64 {
-        f64::from_bits(self.sort_key_bits)
+    fn new(sort_key: String, id: String) -> Self {
+        Self { sort_key, id }
     }
 }
 
 impl Ord for SortedChild {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.sort_key()
-            .partial_cmp(&other.sort_key())
-            .unwrap_or(std::cmp::Ordering::Equal)
+        self.sort_key
+            .cmp(&other.sort_key)
             .then_with(|| self.id.cmp(&other.id))
     }
 }
@@ -55,7 +48,7 @@ impl PartialOrd for SortedChild {
 
 struct TreeNode {
     parent_id: Option<String>,
-    sort_key: f64,
+    sort_key: String,
     depth: usize,
     /// The raw widget (before TreeItem wrapping).
     widget: Arc<ReactiveViewModel>,
@@ -66,8 +59,8 @@ struct TreeNode {
 /// # Usage
 /// ```ignore
 /// let tree = MutableTree::new(collection_items.clone());
-/// tree.insert("a", None, 0.0, widget_a);
-/// tree.insert("b", Some("a"), 0.0, widget_b);
+/// tree.insert("a", None, "0.0".into(), widget_a);
+/// tree.insert("b", Some("a"), "0.0".into(), widget_b);
 /// // collection_items now has [TreeItem(a, depth=0), TreeItem(b, depth=1)]
 /// ```
 pub struct MutableTree {
@@ -119,7 +112,7 @@ impl MutableTree {
         &mut self,
         id: String,
         parent_id: Option<String>,
-        sort_key: f64,
+        sort_key: String,
         widget: Arc<ReactiveViewModel>,
     ) {
         // Treat as root if parent doesn't exist in the tree.
@@ -133,7 +126,7 @@ impl MutableTree {
             id.clone(),
             TreeNode {
                 parent_id: effective_parent.clone(),
-                sort_key,
+                sort_key: sort_key.clone(),
                 depth,
                 widget: widget.clone(),
             },
@@ -173,7 +166,7 @@ impl MutableTree {
         &mut self,
         id: &str,
         parent_id: Option<String>,
-        sort_key: f64,
+        sort_key: String,
         widget: Arc<ReactiveViewModel>,
     ) {
         let Some(old) = self.nodes.get(id) else {
@@ -245,7 +238,10 @@ impl MutableTree {
     }
 
     /// Rebuild from scratch. Emits a single `VecDiff::Replace`.
-    pub fn rebuild(&mut self, entries: Vec<(String, Option<String>, f64, Arc<ReactiveViewModel>)>) {
+    pub fn rebuild(
+        &mut self,
+        entries: Vec<(String, Option<String>, String, Arc<ReactiveViewModel>)>,
+    ) {
         self.nodes.clear();
         self.children.clear();
         self.flat_order.clear();
@@ -264,13 +260,13 @@ impl MutableTree {
                 id.clone(),
                 TreeNode {
                     parent_id: effective_parent.clone(),
-                    sort_key: *sort_key,
+                    sort_key: sort_key.clone(),
                     depth: 0,
                     widget: widget.clone(),
                 },
             );
 
-            let sorted = SortedChild::new(*sort_key, id.clone());
+            let sorted = SortedChild::new(sort_key.clone(), id.clone());
             self.children
                 .entry(effective_parent)
                 .or_default()
@@ -458,9 +454,9 @@ pub fn extract_parent_id(row: &HashMap<String, Value>) -> Option<String> {
 }
 
 /// Extract sort_key from a DataRow as f64.
-pub fn extract_sort_key(row: &HashMap<String, Value>) -> f64 {
+pub fn extract_sort_key(row: &HashMap<String, Value>) -> String {
     let v = row.get("sequence").or_else(|| row.get("sort_key"));
-    sort_value(v)
+    holon_api::render_eval::sort_value(v)
 }
 
 #[cfg(test)]
@@ -481,8 +477,8 @@ mod tests {
     #[test]
     fn insert_root_nodes() {
         let (mut tree, flat) = make_tree();
-        tree.insert("a".into(), None, 0.0, widget("A"));
-        tree.insert("b".into(), None, 1.0, widget("B"));
+        tree.insert("a".into(), None, "0.0".into(), widget("A"));
+        tree.insert("b".into(), None, "1.0".into(), widget("B"));
 
         assert_eq!(tree.flat_ids(), vec!["a", "b"]);
         assert_eq!(flat.lock_ref().len(), 2);
@@ -491,8 +487,13 @@ mod tests {
     #[test]
     fn insert_child_computes_depth() {
         let (mut tree, _) = make_tree();
-        tree.insert("root".into(), None, 0.0, widget("Root"));
-        tree.insert("child".into(), Some("root".into()), 0.0, widget("Child"));
+        tree.insert("root".into(), None, "0.0".into(), widget("Root"));
+        tree.insert(
+            "child".into(),
+            Some("root".into()),
+            "0.0".into(),
+            widget("Child"),
+        );
 
         let snap = tree.flat_snapshot();
         assert_eq!(snap[0], ("root".into(), 0, true));
@@ -502,9 +503,9 @@ mod tests {
     #[test]
     fn insert_grandchild() {
         let (mut tree, _) = make_tree();
-        tree.insert("a".into(), None, 0.0, widget("A"));
-        tree.insert("b".into(), Some("a".into()), 0.0, widget("B"));
-        tree.insert("c".into(), Some("b".into()), 0.0, widget("C"));
+        tree.insert("a".into(), None, "0.0".into(), widget("A"));
+        tree.insert("b".into(), Some("a".into()), "0.0".into(), widget("B"));
+        tree.insert("c".into(), Some("b".into()), "0.0".into(), widget("C"));
 
         let snap = tree.flat_snapshot();
         assert_eq!(snap.len(), 3);
@@ -516,10 +517,10 @@ mod tests {
     #[test]
     fn siblings_sorted_by_sort_key() {
         let (mut tree, _) = make_tree();
-        tree.insert("root".into(), None, 0.0, widget("Root"));
-        tree.insert("c".into(), Some("root".into()), 2.0, widget("C"));
-        tree.insert("a".into(), Some("root".into()), 0.0, widget("A"));
-        tree.insert("b".into(), Some("root".into()), 1.0, widget("B"));
+        tree.insert("root".into(), None, "0.0".into(), widget("Root"));
+        tree.insert("c".into(), Some("root".into()), "2.0".into(), widget("C"));
+        tree.insert("a".into(), Some("root".into()), "0.0".into(), widget("A"));
+        tree.insert("b".into(), Some("root".into()), "1.0".into(), widget("B"));
 
         assert_eq!(tree.flat_ids(), vec!["root", "a", "b", "c"]);
     }
@@ -527,12 +528,17 @@ mod tests {
     #[test]
     fn insert_between_siblings_with_children() {
         let (mut tree, _) = make_tree();
-        tree.insert("root".into(), None, 0.0, widget("Root"));
-        tree.insert("s1".into(), Some("root".into()), 0.0, widget("S1"));
-        tree.insert("s1c".into(), Some("s1".into()), 0.0, widget("S1-child"));
-        tree.insert("s3".into(), Some("root".into()), 2.0, widget("S3"));
+        tree.insert("root".into(), None, "0.0".into(), widget("Root"));
+        tree.insert("s1".into(), Some("root".into()), "0.0".into(), widget("S1"));
+        tree.insert(
+            "s1c".into(),
+            Some("s1".into()),
+            "0.0".into(),
+            widget("S1-child"),
+        );
+        tree.insert("s3".into(), Some("root".into()), "2.0".into(), widget("S3"));
         // Insert s2 between s1 and s3
-        tree.insert("s2".into(), Some("root".into()), 1.0, widget("S2"));
+        tree.insert("s2".into(), Some("root".into()), "1.0".into(), widget("S2"));
 
         assert_eq!(tree.flat_ids(), vec!["root", "s1", "s1c", "s2", "s3"]);
     }
@@ -540,9 +546,9 @@ mod tests {
     #[test]
     fn update_data_only() {
         let (mut tree, flat) = make_tree();
-        tree.insert("a".into(), None, 0.0, widget("old"));
+        tree.insert("a".into(), None, "0.0".into(), widget("old"));
 
-        tree.update("a", None, 0.0, widget("new"));
+        tree.update("a", None, "0.0".into(), widget("new"));
 
         assert_eq!(tree.flat_ids(), vec!["a"]);
         assert_eq!(flat.lock_ref().len(), 1);
@@ -551,12 +557,12 @@ mod tests {
     #[test]
     fn update_reparent() {
         let (mut tree, _) = make_tree();
-        tree.insert("a".into(), None, 0.0, widget("A"));
-        tree.insert("b".into(), None, 1.0, widget("B"));
-        tree.insert("c".into(), Some("a".into()), 0.0, widget("C"));
+        tree.insert("a".into(), None, "0.0".into(), widget("A"));
+        tree.insert("b".into(), None, "1.0".into(), widget("B"));
+        tree.insert("c".into(), Some("a".into()), "0.0".into(), widget("C"));
 
         // Move c from under a to under b
-        tree.update("c", Some("b".into()), 0.0, widget("C"));
+        tree.update("c", Some("b".into()), "0.0".into(), widget("C"));
 
         let snap = tree.flat_snapshot();
         assert_eq!(snap[0], ("a".into(), 0, false)); // a lost its child
@@ -567,8 +573,8 @@ mod tests {
     #[test]
     fn remove_leaf() {
         let (mut tree, flat) = make_tree();
-        tree.insert("a".into(), None, 0.0, widget("A"));
-        tree.insert("b".into(), None, 1.0, widget("B"));
+        tree.insert("a".into(), None, "0.0".into(), widget("A"));
+        tree.insert("b".into(), None, "1.0".into(), widget("B"));
 
         tree.remove("a");
 
@@ -579,10 +585,20 @@ mod tests {
     #[test]
     fn remove_subtree() {
         let (mut tree, _) = make_tree();
-        tree.insert("root".into(), None, 0.0, widget("Root"));
-        tree.insert("child".into(), Some("root".into()), 0.0, widget("Child"));
-        tree.insert("grandchild".into(), Some("child".into()), 0.0, widget("GC"));
-        tree.insert("other".into(), None, 1.0, widget("Other"));
+        tree.insert("root".into(), None, "0.0".into(), widget("Root"));
+        tree.insert(
+            "child".into(),
+            Some("root".into()),
+            "0.0".into(),
+            widget("Child"),
+        );
+        tree.insert(
+            "grandchild".into(),
+            Some("child".into()),
+            "0.0".into(),
+            widget("GC"),
+        );
+        tree.insert("other".into(), None, "1.0".into(), widget("Other"));
 
         tree.remove("root");
 
@@ -592,8 +608,13 @@ mod tests {
     #[test]
     fn remove_updates_parent_has_children() {
         let (mut tree, _) = make_tree();
-        tree.insert("parent".into(), None, 0.0, widget("Parent"));
-        tree.insert("child".into(), Some("parent".into()), 0.0, widget("Child"));
+        tree.insert("parent".into(), None, "0.0".into(), widget("Parent"));
+        tree.insert(
+            "child".into(),
+            Some("parent".into()),
+            "0.0".into(),
+            widget("Child"),
+        );
 
         assert!(tree.flat_snapshot()[0].2); // has_children = true
 
@@ -605,12 +626,12 @@ mod tests {
     #[test]
     fn rebuild_from_scratch() {
         let (mut tree, flat) = make_tree();
-        tree.insert("old".into(), None, 0.0, widget("Old"));
+        tree.insert("old".into(), None, "0.0".into(), widget("Old"));
 
         tree.rebuild(vec![
-            ("a".into(), None, 0.0, widget("A")),
-            ("b".into(), Some("a".into()), 0.0, widget("B")),
-            ("c".into(), None, 1.0, widget("C")),
+            ("a".into(), None, "0.0".into(), widget("A")),
+            ("b".into(), Some("a".into()), "0.0".into(), widget("B")),
+            ("c".into(), None, "1.0".into(), widget("C")),
         ]);
 
         assert_eq!(tree.flat_ids(), vec!["a", "b", "c"]);
@@ -626,8 +647,13 @@ mod tests {
     fn rebuild_ignores_missing_parents() {
         let (mut tree, _) = make_tree();
         tree.rebuild(vec![
-            ("a".into(), Some("nonexistent".into()), 0.0, widget("A")),
-            ("b".into(), Some("a".into()), 0.0, widget("B")),
+            (
+                "a".into(),
+                Some("nonexistent".into()),
+                "0.0".into(),
+                widget("A"),
+            ),
+            ("b".into(), Some("a".into()), "0.0".into(), widget("B")),
         ]);
 
         let snap = tree.flat_snapshot();

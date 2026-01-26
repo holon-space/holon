@@ -26,16 +26,16 @@ pub fn apply_cdc_event_to_vec(rows: &mut Vec<HashMap<String, Value>>, event: &Ro
             rows.push(data.clone());
         }
         ChangeData::Updated { data, .. } => {
-            if let Some(entity_id) = data.get("id").and_then(|v| v.as_string()) {
-                if let Some(row) = rows.iter_mut().find(|r| {
+            if let Some(entity_id) = data.get("id").and_then(|v| v.as_string())
+                && let Some(row) = rows.iter_mut().find(|r| {
                     r.get("id")
                         .and_then(|v| v.as_string())
                         .map(|s| s == entity_id)
                         .unwrap_or(false)
-                }) {
-                    for (k, v) in data {
-                        row.insert(k.clone(), v.clone());
-                    }
+                })
+            {
+                for (k, v) in data {
+                    row.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -89,10 +89,10 @@ impl WidgetLocator {
         if s == "all" {
             return WidgetLocator::All;
         }
-        if let Some(n_str) = s.strip_prefix("column ") {
-            if let Ok(n) = n_str.parse::<usize>() {
-                return WidgetLocator::Column(n);
-            }
+        if let Some(n_str) = s.strip_prefix("column ")
+            && let Ok(n) = n_str.parse::<usize>()
+        {
+            return WidgetLocator::Column(n);
         }
         WidgetLocator::ViewId(s.to_string())
     }

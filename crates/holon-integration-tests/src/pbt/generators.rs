@@ -252,6 +252,21 @@ pub fn generate_org_file_content_with_keywords(
         ("index.org".to_string(), content)
     });
 
+    // Tree view with virtual child — exercises the trailing-slot creation
+    // path. `creation_slot: true` triggers `build_trailing_slot`;
+    // `virtual_parent` is deliberately omitted — the builder falls back to
+    // `ba.ctx.row().get("id")` (the focused block's id).
+    let index_file_tree = ("[A-Z][a-zA-Z0-9 ]{0,15}", "[a-z0-9-]+").prop_map(|(headline, id)| {
+        let content = index_org_content(
+            &headline,
+            &id,
+            QueryLanguage::HolonPrql,
+            "from children\n",
+            "tree(#{parent_id: col(\"parent_id\"), sortkey: col(\"sequence\"), item_template: render_entity(), creation_slot: true})",
+        );
+        ("index.org".to_string(), content)
+    });
+
     let file_with_profile = (
         "[a-z_]+_[0-9]+\\.org",
         "[A-Z][a-zA-Z0-9 ]{0,15}",
@@ -289,6 +304,7 @@ pub fn generate_org_file_content_with_keywords(
             1 => index_file_gql,
             1 => index_file_gql_varlen,
             1 => index_file_sql,
+            1 => index_file_tree,
             1 => file_with_profile,
         ]
         .boxed()

@@ -43,17 +43,14 @@ pub async fn wait_for_block_count(
     let mut last_result = Vec::new();
 
     while start.elapsed() < timeout {
-        match ctx
+        if let Ok(rows) = ctx
             .query(prql.to_string(), QueryLanguage::HolonPrql, HashMap::new())
             .await
         {
-            Ok(rows) => {
-                if rows.len() == expected_count {
-                    return rows;
-                }
-                last_result = rows;
+            if rows.len() == expected_count {
+                return rows;
             }
-            Err(_) => {}
+            last_result = rows;
         }
         tokio::time::sleep(poll_interval).await;
     }
@@ -87,10 +84,10 @@ where
     let start = Instant::now();
 
     while start.elapsed() < timeout {
-        if let Ok(content) = tokio::fs::read_to_string(file_path).await {
-            if condition(&content) {
-                return true;
-            }
+        if let Ok(content) = tokio::fs::read_to_string(file_path).await
+            && condition(&content)
+        {
+            return true;
         }
         tokio::time::sleep(poll_interval).await;
     }

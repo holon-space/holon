@@ -85,8 +85,8 @@ impl holon::core::datasource::BlockEntity for Directory {
     fn content(&self) -> &str {
         &self.name
     }
-    fn name(&self) -> Option<&str> {
-        Some(&self.name)
+    fn tags(&self) -> &[String] {
+        &[]
     }
 }
 

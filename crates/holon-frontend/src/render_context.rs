@@ -99,7 +99,7 @@ pub struct RenderContext {
     /// `ReactiveView::new_collection()` with a live streaming pipeline instead of
     /// static snapshots. Set by `watch_live()` before calling `interpret_fn`.
     /// `None` for headless/snapshot consumers (MCP, PBT, TUI).
-    pub data_source: Option<Arc<crate::reactive::ReactiveQueryResults>>,
+    pub data_source: Option<Arc<dyn holon_api::ReactiveRowProvider>>,
     /// Container-query allocation: how much space THIS subtree was allotted by
     /// its parent. Refined by layout containers via `with_available_space` before
     /// recursing into children. `None` outside a partitioning container; the

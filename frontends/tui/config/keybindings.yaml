@@ -1,0 +1,74 @@
+bindings:
+  # ── Navigation mode ──────────────────────────────────────────────
+  #
+  # Space acts as a leader key — press Space, then the second key.
+  # The status bar shows available sub-commands while leader is active.
+
+  # Direct (no leader needed)
+  - key: "Up"
+    context: "navigation"
+    action: "move_up"
+
+  - key: "Down"
+    context: "navigation"
+    action: "move_down"
+
+  - key: "Enter"
+    context: "navigation"
+    action: "start_editing"
+
+  - key: "Tab"
+    context: "navigation"
+    action: "switch_region"
+
+  # Leader chords (Space + key)
+  - key: "Up"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "move_up"
+
+  - key: "Down"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "move_down"
+
+  - key: "Right"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "indent"
+
+  - key: "Left"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "outdent"
+
+  - key: "Enter"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "start_editing"
+
+  - key: "x"
+    modifiers: ["leader"]
+    context: "navigation"
+    action: "cycle_task_state"
+
+  # ── Editing mode ─────────────────────────────────────────────────
+  #
+  # Space does NOT act as leader during editing — keystrokes go to text.
+
+  - key: "Esc"
+    context: "editing"
+    action: "exit_editing"
+
+  - key: "Enter"
+    context: "editing"
+    action: "exit_editing"
+
+  - key: "x"
+    modifiers: ["ctrl"]
+    context: "editing"
+    action: "split_block"
+
+  - key: "Backspace"
+    context: "editing"
+    action: "join_block"              # when cursor at position 0

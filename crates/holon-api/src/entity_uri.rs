@@ -74,7 +74,18 @@ impl EntityUri {
     // They are transient identifiers used during parsing and resolved to `doc:<uuid>` at startup.
 
     pub fn file(path: &str) -> Self {
-        Self::new("file", path)
+        use fluent_uri::encoding::{
+            encoder::{Data, Path},
+            EString,
+        };
+        let mut buf = EString::<Path>::new();
+        for (i, segment) in path.split('/').enumerate() {
+            if i > 0 {
+                buf.push('/');
+            }
+            buf.encode::<Data>(segment);
+        }
+        Self::new("file", &buf.into_string())
     }
 
     // -- Sentinel --
@@ -341,5 +352,40 @@ mod tests {
         set.insert(a.clone());
         assert!(set.contains(&b));
         assert!(!set.contains(&c));
+    }
+
+    #[test]
+    fn file_uri_with_spaces_is_percent_encoded() {
+        let uri = EntityUri::file("Projects/Holon/Entity Identity.org");
+        assert_eq!(uri.as_str(), "file:Projects/Holon/Entity%20Identity.org");
+        assert!(uri.is_file());
+        assert_eq!(uri.id(), "Projects/Holon/Entity%20Identity.org");
+    }
+
+    #[test]
+    fn file_uri_with_special_chars_is_percent_encoded() {
+        let uri = EntityUri::file("path/to/file#1.org");
+        assert_eq!(uri.as_str(), "file:path/to/file%231.org");
+    }
+
+    #[test]
+    fn file_uri_absolute_path() {
+        let uri = EntityUri::file("/absolute/path/file.org");
+        assert_eq!(uri.as_str(), "file:/absolute/path/file.org");
+    }
+
+    #[test]
+    fn file_uri_preserves_hyphens_and_dots() {
+        let uri = EntityUri::file("my-dir/sub_dir/file.name-v1.org");
+        assert_eq!(uri.as_str(), "file:my-dir/sub_dir/file.name-v1.org");
+    }
+
+    #[test]
+    fn file_uri_round_trips_through_parse() {
+        let uri = EntityUri::file("Projects/Holon/Entity Identity.org");
+        let s = uri.to_string();
+        let parsed = EntityUri::parse(&s).unwrap();
+        assert_eq!(uri, parsed);
+        assert!(parsed.is_file());
     }
 }

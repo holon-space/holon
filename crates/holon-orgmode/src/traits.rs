@@ -53,29 +53,31 @@ pub trait BlockReader: Send + Sync {
     }
 }
 
-/// CRUD operations on document blocks (blocks with a `name`).
+/// CRUD operations on page blocks (blocks tagged `"Page"`).
 ///
-/// Convenience methods (`name_chain`, `find_by_name_chain`, `get_or_create_by_name_chain`)
-/// are file-format agnostic — reusable by org, markdown, or any file-based adapter.
+/// Convenience methods (`name_chain`, `find_by_name_chain`,
+/// `get_or_create_by_name_chain`) are file-format agnostic — reusable by org,
+/// markdown, or any file-based adapter. The "name" of a page is now its title:
+/// the first line of `content`.
 #[async_trait]
 pub trait DocumentManager: Send + Sync {
-    /// Find a document block by parent_id and name.
+    /// Find a page block by parent_id and title (first line of content).
     async fn find_by_parent_and_name(
         &self,
         parent_id: &EntityUri,
-        name: &str,
+        title: &str,
     ) -> Result<Option<Block>>;
 
-    /// Create a new document block.
+    /// Create a new page block.
     async fn create(&self, doc: Block) -> Result<Block>;
 
-    /// Get a document block by its ID.
+    /// Get a page block by its ID.
     async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>>;
 
-    /// Update document metadata (e.g. todo_keywords) on the document block.
+    /// Update page metadata (e.g. todo_keywords) on the page block.
     async fn update_metadata(&self, doc: &Block) -> Result<()>;
 
-    /// Walk parent chain to root, return name segments: ["projects", "todo"]
+    /// Walk parent chain to root, return title segments: ["projects", "todo"]
     async fn name_chain(&self, doc_id: &EntityUri) -> Result<Vec<String>> {
         let mut chain = Vec::new();
         let mut current_id = doc_id.clone();
@@ -86,11 +88,11 @@ pub trait DocumentManager: Send + Sync {
             }
 
             let doc = self.get_by_id(&current_id).await?.ok_or_else(|| {
-                anyhow::anyhow!("Document block '{}' not found in name_chain", current_id)
+                anyhow::anyhow!("Page block '{}' not found in name_chain", current_id)
             })?;
 
-            if let Some(ref name) = doc.name {
-                chain.push(name.clone());
+            if doc.is_page() {
+                chain.push(doc.title());
             }
             current_id = doc.parent_id.clone();
         }
@@ -99,7 +101,7 @@ pub trait DocumentManager: Send + Sync {
         Ok(chain)
     }
 
-    /// Resolve a name chain to a document Block: ["projects", "todo"] → Block
+    /// Resolve a title chain to a page Block: ["projects", "todo"] → Block
     async fn find_by_name_chain(&self, chain: &[&str]) -> Result<Option<Block>> {
         let mut current_parent_id = EntityUri::no_parent();
         let mut current_doc: Option<Block> = None;
@@ -120,7 +122,7 @@ pub trait DocumentManager: Send + Sync {
         Ok(current_doc)
     }
 
-    /// Get or create the full chain, creating intermediate document blocks as needed.
+    /// Get or create the full chain, creating intermediate page blocks as needed.
     async fn get_or_create_by_name_chain(&self, chain: &[&str]) -> Result<Block> {
         assert!(!chain.is_empty(), "name chain must not be empty");
 
@@ -137,9 +139,12 @@ pub trait DocumentManager: Send + Sync {
                     current_doc = Some(existing);
                 }
                 None => {
-                    let mut new_doc =
-                        Block::new_text(EntityUri::block_random(), current_parent_id.clone(), "");
-                    new_doc.name = Some(segment.to_string());
+                    let mut new_doc = Block::new_text(
+                        EntityUri::block_random(),
+                        current_parent_id.clone(),
+                        segment.to_string(),
+                    );
+                    new_doc.set_page(true);
                     let created = self.create(new_doc).await?;
                     current_parent_id = created.id.clone();
                     current_doc = Some(created);

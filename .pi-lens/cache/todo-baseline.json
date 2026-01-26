@@ -1,0 +1,774 @@
+{
+  "items": [
+    {
+      "type": "TODO",
+      "message": "in that file). `editor_focus` performs a",
+      "file": "crates/holon/examples/turso_ivm_focus_roots_churn.rs",
+      "line": 580,
+      "column": 23
+    },
+    {
+      "type": "TODO",
+      "message": "Trigger full resync",
+      "file": "crates/holon/src/core/queryable_cache.rs",
+      "line": 363,
+      "column": 27
+    },
+    {
+      "type": "TODO",
+      "message": "Implement partial field update",
+      "file": "crates/holon/src/core/queryable_cache.rs",
+      "line": 775,
+      "column": 23
+    },
+    {
+      "type": "TODO",
+      "message": "Option A - Each QueryableCache filters by table name",
+      "file": "crates/holon/src/core/queryable_cache.rs",
+      "line": 916,
+      "column": 3
+    },
+    {
+      "type": "TODO",
+      "message": "Option A - Filter stream for this table and convert RowChange to Change<StorageEntity>",
+      "file": "crates/holon/src/core/queryable_cache.rs",
+      "line": 958,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "For deletes, we need the entity ID, not ROWID",
+      "file": "crates/holon/src/core/queryable_cache.rs",
+      "line": 1050,
+      "column": 31
+    },
+    {
+      "type": "TODO",
+      "message": "Implement partial field update",
+      "file": "crates/holon/src/core/stream_cache.rs",
+      "line": 111,
+      "column": 43
+    },
+    {
+      "type": "TODO",
+      "message": "Implement partial field update",
+      "file": "crates/holon/src/core/stream_cache.rs",
+      "line": 174,
+      "column": 39
+    },
+    {
+      "type": "TODO",
+      "message": "Trigger full resync",
+      "file": "crates/holon/src/core/stream_cache.rs",
+      "line": 186,
+      "column": 27
+    },
+    {
+      "type": "TODO",
+      "message": "Implement partial field update for efficiency",
+      "file": "crates/holon/src/core/stream_cache.rs",
+      "line": 333,
+      "column": 43
+    },
+    {
+      "type": "BUG",
+      "message": "TRIGGER ZONE)",
+      "file": "crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "line": 691,
+      "column": 39
+    },
+    {
+      "type": "BUG",
+      "message": "!",
+      "file": "crates/holon/src/storage/turso_ivm_join_test.rs",
+      "line": 812,
+      "column": 50
+    },
+    {
+      "type": "TODO",
+      "message": "wire CDC connection — EnableCDC currently does not set",
+      "file": "crates/holon/src/storage/turso_pbt_tests.rs",
+      "line": 1956,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "`crates/holon/src/sync/loro_sync_controller.rs:179-184` has a",
+      "file": "crates/holon/src/sync/debounced_commit_worker.rs",
+      "line": 24,
+      "column": 4
+    },
+    {
+      "type": "TODO",
+      "message": ", PRIORITY, TAGS, dates, etc.)",
+      "file": "crates/holon-api/src/block.rs",
+      "line": 299,
+      "column": 30
+    },
+    {
+      "type": "TODO",
+      "message": "` config).",
+      "file": "crates/holon-api/src/types.rs",
+      "line": 355,
+      "column": 61
+    },
+    {
+      "type": "TODO",
+      "message": "\", \"DOING\", \"DONE\") paired with",
+      "file": "crates/holon-api/src/types.rs",
+      "line": 358,
+      "column": 43
+    },
+    {
+      "type": "TODO",
+      "message": "` config, provider mapping, or default lists.",
+      "file": "crates/holon-api/src/types.rs",
+      "line": 360,
+      "column": 27
+    },
+    {
+      "type": "TODO",
+      "message": "` config or provider mapping).",
+      "file": "crates/holon-api/src/types.rs",
+      "line": 397,
+      "column": 21
+    },
+    {
+      "type": "TODO",
+      "message": "\", \"DOING\", \"DONE\")",
+      "file": "crates/holon-core/src/traits.rs",
+      "line": 25,
+      "column": 31
+    },
+    {
+      "type": "TODO",
+      "message": "Do we need this? self.set_field(id, \"updated_at\", Value::Integer(now))",
+      "file": "crates/holon-core/src/traits.rs",
+      "line": 781,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "Do we need this?     .await?;",
+      "file": "crates/holon-core/src/traits.rs",
+      "line": 782,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "Return inverse operation (combine set_field inverses + delete for new block)",
+      "file": "crates/holon-core/src/traits.rs",
+      "line": 799,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "\", progress: 0.0, ...}, {state: \"DOING\", progress: 50.0, ...}, ...]`",
+      "file": "crates/holon-core/src/traits.rs",
+      "line": 1240,
+      "column": 31
+    },
+    {
+      "type": "TODO",
+      "message": "\", \"DOING\", \"DONE\", \"WAITING\")",
+      "file": "crates/holon-core/src/traits.rs",
+      "line": 1243,
+      "column": 44
+    },
+    {
+      "type": "TODO",
+      "message": "→ DOING → DONE → \"\".",
+      "file": "crates/holon-core/src/traits.rs",
+      "line": 1249,
+      "column": 43
+    },
+    {
+      "type": "TODO",
+      "message": "Change BuilderServices::start_query return type to EnrichedChangeStream.",
+      "file": "crates/holon-frontend/src/reactive.rs",
+      "line": 1617,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "store in props as serialized",
+      "file": "crates/holon-frontend/src/reactive_view_model.rs",
+      "line": 885,
+      "column": 38
+    },
+    {
+      "type": "TODO",
+      "message": "simulate-real-input): the headless default impl below short-circuits",
+      "file": "crates/holon-frontend/src/user_driver.rs",
+      "line": 122,
+      "column": 8
+    },
+    {
+      "type": "TODO",
+      "message": "` / `OPEN` / unknown                        | `#5A5A55`| neutral / pending|",
+      "file": "crates/holon-frontend/src/value_fns/state_accent.rs",
+      "line": 14,
+      "column": 15
+    },
+    {
+      "type": "TODO",
+      "message": "fix the root cause.",
+      "file": "crates/holon-integration-tests/src/assertions.rs",
+      "line": 110,
+      "column": 49
+    },
+    {
+      "type": "TODO",
+      "message": ") from the document block. Without the header, non-default",
+      "file": "crates/holon-integration-tests/src/org_utils.rs",
+      "line": 40,
+      "column": 16
+    },
+    {
+      "type": "TODO",
+      "message": "keywords generated per test case.",
+      "file": "crates/holon-integration-tests/src/pbt/generators.rs",
+      "line": 20,
+      "column": 13
+    },
+    {
+      "type": "TODO",
+      "message": "` org header and the task_state mutation generator.",
+      "file": "crates/holon-integration-tests/src/pbt/generators.rs",
+      "line": 21,
+      "column": 23
+    },
+    {
+      "type": "TODO",
+      "message": "TODO DOING | DONE CANCELLED`",
+      "file": "crates/holon-integration-tests/src/pbt/generators.rs",
+      "line": 26,
+      "column": 43
+    },
+    {
+      "type": "TODO",
+      "message": "keyword (TODO,",
+      "file": "crates/holon-integration-tests/src/pbt/generators.rs",
+      "line": 160,
+      "column": 56
+    },
+    {
+      "type": "TODO",
+      "message": "Foo` collides with the",
+      "file": "crates/holon-integration-tests/src/pbt/generators.rs",
+      "line": 162,
+      "column": 49
+    },
+    {
+      "type": "TODO",
+      "message": "` set (so `TODO` may stay as content), while the",
+      "file": "crates/holon-integration-tests/src/pbt/generators.rs",
+      "line": 164,
+      "column": 16
+    },
+    {
+      "type": "TODO",
+      "message": "simulate-real-input): this entire function bypasses the user-input",
+      "file": "crates/holon-integration-tests/src/pbt/phased.rs",
+      "line": 1014,
+      "column": 4
+    },
+    {
+      "type": "TODO",
+      "message": "keyword set for task_state mutations (generated once per test case)",
+      "file": "crates/holon-integration-tests/src/pbt/reference_state.rs",
+      "line": 378,
+      "column": 8
+    },
+    {
+      "type": "TODO",
+      "message": "` set, the",
+      "file": "crates/holon-integration-tests/src/pbt/state_machine.rs",
+      "line": 994,
+      "column": 60
+    },
+    {
+      "type": "TODO",
+      "message": "header. Without this, non-default keywords like",
+      "file": "crates/holon-integration-tests/src/pbt/state_machine.rs",
+      "line": 2260,
+      "column": 33
+    },
+    {
+      "type": "TODO",
+      "message": "/DOING/DONE (or custom keywords)",
+      "file": "crates/holon-integration-tests/src/pbt/state_machine.rs",
+      "line": 2300,
+      "column": 53
+    },
+    {
+      "type": "TODO",
+      "message": "headers — keywords only",
+      "file": "crates/holon-integration-tests/src/pbt/state_machine.rs",
+      "line": 2620,
+      "column": 52
+    },
+    {
+      "type": "TODO",
+      "message": "keyword set into production.",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 834,
+      "column": 46
+    },
+    {
+      "type": "TODO",
+      "message": "` header,",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 835,
+      "column": 77
+    },
+    {
+      "type": "TODO",
+      "message": "/DONE keywords. The reference",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 836,
+      "column": 57
+    },
+    {
+      "type": "TODO",
+      "message": "header)",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 1252,
+      "column": 75
+    },
+    {
+      "type": "BUG",
+      "message": "REPRODUCTION:",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 1281,
+      "column": 35
+    },
+    {
+      "type": "FIXME",
+      "message": "display_tree must be obtained from",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 4107,
+      "column": 27
+    },
+    {
+      "type": "TODO",
+      "message": "Re-enable once inv10i compares region-specific data",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 4215,
+      "column": 23
+    },
+    {
+      "type": "TODO",
+      "message": "simulate-real-input): this fallback bypasses the user-input",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 5512,
+      "column": 23
+    },
+    {
+      "type": "FIXME",
+      "message": "external mutation should be applied from pre-merge state for true concurrency testing.",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 5732,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "simulate-real-input): even concurrent-mutations should ultimately",
+      "file": "crates/holon-integration-tests/src/pbt/sut.rs",
+      "line": 5763,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "STARTED | DONE CANCELLED\"`),",
+      "file": "crates/holon-integration-tests/src/test_environment.rs",
+      "line": 1382,
+      "column": 47
+    },
+    {
+      "type": "TODO",
+      "message": "` header.",
+      "file": "crates/holon-integration-tests/src/test_environment.rs",
+      "line": 1778,
+      "column": 65
+    },
+    {
+      "type": "TODO",
+      "message": "...` header from actual content before",
+      "file": "crates/holon-integration-tests/src/test_environment.rs",
+      "line": 1797,
+      "column": 34
+    },
+    {
+      "type": "TODO",
+      "message": "render spec was removed; always returns 1 now",
+      "file": "crates/holon-integration-tests/src/widget_state.rs",
+      "line": 165,
+      "column": 8
+    },
+    {
+      "type": "TODO",
+      "message": "render spec was removed; always empty now",
+      "file": "crates/holon-integration-tests/src/widget_state.rs",
+      "line": 171,
+      "column": 8
+    },
+    {
+      "type": "TODO",
+      "message": "render spec was removed; column/view filtering is no longer available",
+      "file": "crates/holon-integration-tests/src/widget_state.rs",
+      "line": 186,
+      "column": 7
+    },
+    {
+      "type": "TODO",
+      "message": "keyword sets**: Test with `#+TODO: TODO REVIEW | DONE CANCELLED`.",
+      "file": "crates/holon-integration-tests/tests/general_e2e_pbt.rs",
+      "line": 68,
+      "column": 19
+    },
+    {
+      "type": "TODO",
+      "message": "Extract from doc comments",
+      "file": "crates/holon-macros/src/operations_trait.rs",
+      "line": 151,
+      "column": 63
+    },
+    {
+      "type": "TODO",
+      "message": "config",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 116,
+      "column": 61
+    },
+    {
+      "type": "TODO",
+      "message": "config",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 119,
+      "column": 59
+    },
+    {
+      "type": "TODO",
+      "message": "keyword configuration",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 251,
+      "column": 28
+    },
+    {
+      "type": "TODO",
+      "message": "keywords as TaskState objects.",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 259,
+      "column": 16
+    },
+    {
+      "type": "TODO",
+      "message": "keywords from TaskState objects.",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 262,
+      "column": 16
+    },
+    {
+      "type": "TODO",
+      "message": "keywords configuration into (active, done) keyword lists.",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 265,
+      "column": 14
+    },
+    {
+      "type": "TODO",
+      "message": ",DOING|DONE,CANCELLED\"",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 293,
+      "column": 27
+    },
+    {
+      "type": "TODO",
+      "message": ") from a document block's properties.",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 363,
+      "column": 50
+    },
+    {
+      "type": "TODO",
+      "message": "keywords configuration",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 372,
+      "column": 7
+    },
+    {
+      "type": "TODO",
+      "message": "keyword",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 413,
+      "column": 18
+    },
+    {
+      "type": "TODO",
+      "message": "keyword)",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 440,
+      "column": 28
+    },
+    {
+      "type": "TODO",
+      "message": ", etc.",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 775,
+      "column": 54
+    },
+    {
+      "type": "TODO",
+      "message": "keyword",
+      "file": "crates/holon-org-format/src/models.rs",
+      "line": 782,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": ") + blocks.",
+      "file": "crates/holon-org-format/src/org_renderer.rs",
+      "line": 19,
+      "column": 59
+    },
+    {
+      "type": "TODO",
+      "message": "to task_state if not already set",
+      "file": "crates/holon-org-format/src/org_renderer.rs",
+      "line": 128,
+      "column": 20
+    },
+    {
+      "type": "TODO",
+      "message": "keywords from file content (#+TODO: or #+SEQ_TODO: lines)",
+      "file": "crates/holon-org-format/src/parser.rs",
+      "line": 68,
+      "column": 10
+    },
+    {
+      "type": "TODO",
+      "message": ",INPROGRESS|DONE,CANCELLED\" into (Vec<String>, Vec<String>)",
+      "file": "crates/holon-org-format/src/parser.rs",
+      "line": 228,
+      "column": 34
+    },
+    {
+      "type": "TODO",
+      "message": "keyword first, parsed into TaskState with category",
+      "file": "crates/holon-org-format/src/parser.rs",
+      "line": 266,
+      "column": 19
+    },
+    {
+      "type": "TODO",
+      "message": "keyword if present",
+      "file": "crates/holon-org-format/src/parser.rs",
+      "line": 271,
+      "column": 54
+    },
+    {
+      "type": "TODO",
+      "message": "should still recognize DOING from DEFAULT_ACTIVE_KEYWORDS",
+      "file": "crates/holon-org-format/src/parser.rs",
+      "line": 800,
+      "column": 27
+    },
+    {
+      "type": "TODO",
+      "message": "keywords from the parsed file to the document block.",
+      "file": "crates/holon-orgmode/src/org_sync_controller.rs",
+      "line": 295,
+      "column": 18
+    },
+    {
+      "type": "TODO",
+      "message": "header.",
+      "file": "crates/holon-orgmode/src/org_sync_controller.rs",
+      "line": 298,
+      "column": 44
+    },
+    {
+      "type": "TODO",
+      "message": "` keywords)",
+      "file": "crates/holon-orgmode/src/org_sync_controller.rs",
+      "line": 744,
+      "column": 70
+    },
+    {
+      "type": "TODO",
+      "message": "in OperationWrapper).",
+      "file": "crates/holon-orgmode/src/orgmode_sync_provider.rs",
+      "line": 353,
+      "column": 89
+    },
+    {
+      "type": "TODO",
+      "message": "Once operations return OperationResult with FieldDeltas, extract file paths from changes",
+      "file": "crates/holon-orgmode/src/orgmode_sync_provider.rs",
+      "line": 365,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "Once operations return FieldDeltas, extract file paths and update sync state",
+      "file": "crates/holon-orgmode/src/orgmode_sync_provider.rs",
+      "line": 374,
+      "column": 15
+    },
+    {
+      "type": "TODO",
+      "message": "if any keyword falls outside the parser defaults.",
+      "file": "crates/holon-orgmode/tests/round_trip_pbt.rs",
+      "line": 515,
+      "column": 23
+    },
+    {
+      "type": "TODO",
+      "message": "keyword",
+      "file": "crates/holon-orgmode/tests/round_trip_pbt.rs",
+      "line": 1443,
+      "column": 47
+    },
+    {
+      "type": "TODO",
+      "message": "keyword if present",
+      "file": "crates/holon-orgmode/tests/round_trip_pbt.rs",
+      "line": 1510,
+      "column": 16
+    },
+    {
+      "type": "TODO",
+      "message": "keyword",
+      "file": "crates/holon-orgmode/tests/round_trip_pbt.rs",
+      "line": 1514,
+      "column": 17
+    },
+    {
+      "type": "TODO",
+      "message": "keyword",
+      "file": "crates/holon-orgmode/tests/round_trip_pbt.rs",
+      "line": 1598,
+      "column": 13
+    },
+    {
+      "type": "TODO",
+      "message": "keyword",
+      "file": "crates/holon-orgmode/tests/sync_controller_mutation_pbt.rs",
+      "line": 709,
+      "column": 37
+    },
+    {
+      "type": "TODO",
+      "message": "keyword",
+      "file": "crates/holon-orgmode/tests/sync_controller_mutation_pbt.rs",
+      "line": 799,
+      "column": 16
+    },
+    {
+      "type": "TODO",
+      "message": "+priority+tags",
+      "file": "crates/holon-orgmode/tests/sync_controller_mutation_pbt.rs",
+      "line": 935,
+      "column": 45
+    },
+    {
+      "type": "TODO",
+      "message": "Use order field or compute from parent_id + created_at",
+      "file": "crates/holon-todoist/src/models.rs",
+      "line": 106,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "Compute depth by traversing parent_id chain",
+      "file": "crates/holon-todoist/src/models.rs",
+      "line": 112,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "Update test to consume from streams instead",
+      "file": "crates/holon-todoist/src/pbt_test.rs",
+      "line": 354,
+      "column": 15
+    },
+    {
+      "type": "TODO",
+      "message": "Update test to consume from streams instead",
+      "file": "crates/holon-todoist/src/pbt_test.rs",
+      "line": 367,
+      "column": 15
+    },
+    {
+      "type": "TODO",
+      "message": "Get sync token from OperationDispatcher or database",
+      "file": "crates/holon-todoist/src/todoist_datasource.rs",
+      "line": 296,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "Get sync token from OperationDispatcher or database",
+      "file": "crates/holon-todoist/src/todoist_datasource.rs",
+      "line": 567,
+      "column": 11
+    },
+    {
+      "type": "TODO",
+      "message": "— should propagate, not silently drop",
+      "file": "crates/holon-todoist/src/todoist_datasource.rs",
+      "line": 587,
+      "column": 37
+    },
+    {
+      "type": "TODO",
+      "message": "— should propagate, not silently drop",
+      "file": "crates/holon-todoist/src/todoist_datasource.rs",
+      "line": 590,
+      "column": 40
+    },
+    {
+      "type": "TODO",
+      "message": "Implement project_update command in client",
+      "file": "crates/holon-todoist/src/todoist_datasource.rs",
+      "line": 623,
+      "column": 23
+    },
+    {
+      "type": "TODO",
+      "message": "Render sibling lookup was removed with PRQL render directive removal.",
+      "file": "frontends/flutter/rust/src/api/ffi_bridge.rs",
+      "line": 776,
+      "column": 4
+    },
+    {
+      "type": "TODO",
+      "message": "Wire to FrontendSession once provider registry tracks OAuth providers.",
+      "file": "frontends/flutter/rust/src/api/ffi_bridge.rs",
+      "line": 832,
+      "column": 7
+    },
+    {
+      "type": "TODO",
+      "message": "Wire to FrontendSession's PendingOAuthFlows.complete_oauth().",
+      "file": "frontends/flutter/rust/src/api/ffi_bridge.rs",
+      "line": 853,
+      "column": 7
+    },
+    {
+      "type": "TODO",
+      "message": "derive region from the render context (e.g. RenderContext.region)",
+      "file": "frontends/gpui/src/render/builders/render_entity.rs",
+      "line": 64,
+      "column": 15
+    },
+    {
+      "type": "TODO",
+      "message": "→ DOING → DONE → unset, etc.). r3bl",
+      "file": "frontends/tui/src/app_main.rs",
+      "line": 201,
+      "column": 33
+    }
+  ]
+}

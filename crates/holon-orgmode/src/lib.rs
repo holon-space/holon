@@ -26,6 +26,7 @@ pub use holon_org_format::parser;
 pub mod block_params;
 #[cfg(feature = "di")]
 pub mod di;
+pub mod file_format;
 pub mod file_io;
 pub mod file_utils;
 pub mod file_watcher;
@@ -58,6 +59,7 @@ pub use traits::{BlockReader, DocumentManager};
 
 // Sync providers and adapters
 pub use block_diff::{blocks_to_map, diff_blocks, BlockDiff};
+pub use file_format::OrgFormatAdapter;
 pub use file_watcher::OrgFileWatcher;
 pub use holon_filesystem::directory::DirectoryDataSource;
 pub use org_renderer::OrgRenderer;

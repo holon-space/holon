@@ -933,6 +933,104 @@ pub fn flow_mode_expr() -> RenderExpr {
     )
 }
 
+/// Board mode: kanban-style lanes rendered through `card(...)`.
+///
+/// Demonstrates the `board(item_template: card(...), lane_field: ..., rows: [...])`
+/// shape end-to-end. The shadow `board` builder groups the inline rows by
+/// `lane_field` into `board_lane(...)` view models whose children are
+/// interpreted via `item_template` — i.e. through the regular `card` builder.
+pub fn board_mode_expr() -> RenderExpr {
+    fn card_row(title: &str, status: &str, accent: &str, summary: &str) -> Value {
+        Value::Object(HashMap::from([
+            ("title".to_string(), Value::String(title.into())),
+            ("status".to_string(), Value::String(status.into())),
+            ("accent".to_string(), Value::String(accent.into())),
+            ("summary".to_string(), Value::String(summary.into())),
+        ]))
+    }
+
+    let rows = Value::Array(vec![
+        card_row(
+            "Design review",
+            "To Do",
+            "#5DBDBD",
+            "Walk through the new VISION_UI palette.",
+        ),
+        card_row(
+            "Write tests",
+            "To Do",
+            "#7D9D7D",
+            "Cover the board grouping path.",
+        ),
+        card_row(
+            "Fix CI pipeline",
+            "To Do",
+            "#C97064",
+            "Flaky lint job blocks merges.",
+        ),
+        card_row(
+            "Update docs",
+            "To Do",
+            "#D4A373",
+            "Refresh the design gallery section.",
+        ),
+        card_row(
+            "Sortable widget",
+            "In Progress",
+            "#9D7DBD",
+            "Drag-and-drop polish.",
+        ),
+        card_row(
+            "Board demo",
+            "In Progress",
+            "#5DBDBD",
+            "End-to-end card composition.",
+        ),
+        card_row("Ship v2.0", "Done", "#7D9D7D", "Tagged and announced."),
+        card_row(
+            "Customer demo",
+            "Done",
+            "#D4A373",
+            "Recorded walkthrough shipped.",
+        ),
+    ]);
+
+    let card_template = call(
+        "card",
+        vec![
+            named("accent", col_ref("accent")),
+            pos(call(
+                "text",
+                vec![pos(col_ref("title")), named("bold", lit_bool(true))],
+            )),
+            pos(call(
+                "text",
+                vec![
+                    pos(col_ref("summary")),
+                    named("size", lit_f64(13.0)),
+                    named("color", lit_str("muted")),
+                ],
+            )),
+        ],
+    );
+
+    let lane_order = Value::Array(vec![
+        Value::String("To Do".into()),
+        Value::String("In Progress".into()),
+        Value::String("Done".into()),
+    ]);
+
+    call(
+        "board",
+        vec![
+            named("item_template", card_template),
+            named("lane_field", lit_str("status")),
+            named("lane_order", RenderExpr::Literal { value: lane_order }),
+            named("rows", RenderExpr::Literal { value: rows }),
+        ],
+    )
+}
+
 /// Capture mode: quick capture input.
 pub fn capture_mode_expr() -> RenderExpr {
     column(vec![
@@ -1249,5 +1347,387 @@ mod tests {
         assert!(rows.len() >= 3);
         assert!(rows[0].contains_key("name"));
         assert!(rows[0].contains_key("task_state"));
+    }
+
+    #[test]
+    fn board_mode_groups_cards_into_lanes() {
+        let expr = board_mode_expr();
+        let vm = mode_view_model(&expr);
+
+        assert_eq!(vm.widget_name().as_deref(), Some("board"));
+        assert_eq!(vm.prop_str("lane_field").as_deref(), Some("status"));
+
+        let lane_titles: Vec<String> = vm
+            .children
+            .iter()
+            .map(|lane| {
+                assert_eq!(lane.widget_name().as_deref(), Some("board_lane"));
+                assert!(
+                    lane.children
+                        .iter()
+                        .all(|c| c.widget_name().as_deref() == Some("card")),
+                    "every lane child should be a card"
+                );
+                lane.prop_str("title").unwrap_or_default()
+            })
+            .collect();
+
+        assert_eq!(lane_titles, vec!["To Do", "In Progress", "Done"]);
+    }
+
+    #[test]
+    fn board_lane_order_default_is_lexicographic() {
+        // Without `lane_order`, lanes should sort lexicographically — gives
+        // determinism across reloads even when no explicit order is set.
+        let row = |status: &str, title: &str| {
+            Value::Object(HashMap::from([
+                ("title".to_string(), Value::String(title.into())),
+                ("status".to_string(), Value::String(status.into())),
+            ]))
+        };
+        let rows = Value::Array(vec![
+            row("Bravo", "b1"),
+            row("Charlie", "c1"),
+            row("Alpha", "a1"),
+        ]);
+        let card_template = call("card", vec![pos(call("text", vec![pos(col_ref("title"))]))]);
+        let expr = call(
+            "board",
+            vec![
+                named("item_template", card_template),
+                named("lane_field", lit_str("status")),
+                named("rows", RenderExpr::Literal { value: rows }),
+            ],
+        );
+        let vm = mode_view_model(&expr);
+        let titles: Vec<String> = vm
+            .children
+            .iter()
+            .map(|l| l.prop_str("title").unwrap_or_default())
+            .collect();
+        assert_eq!(titles, vec!["Alpha", "Bravo", "Charlie"]);
+    }
+
+    #[test]
+    fn board_empty_lane_value_uses_default_label() {
+        let row = |status: &str, title: &str| {
+            Value::Object(HashMap::from([
+                ("title".to_string(), Value::String(title.into())),
+                ("status".to_string(), Value::String(status.into())),
+            ]))
+        };
+        let rows = Value::Array(vec![row("", "untriaged"), row("Done", "shipped")]);
+        let card_template = call("card", vec![pos(call("text", vec![pos(col_ref("title"))]))]);
+        let expr = call(
+            "board",
+            vec![
+                named("item_template", card_template),
+                named("lane_field", lit_str("status")),
+                named("rows", RenderExpr::Literal { value: rows }),
+            ],
+        );
+        let vm = mode_view_model(&expr);
+        let titles: Vec<String> = vm
+            .children
+            .iter()
+            .map(|l| l.prop_str("title").unwrap_or_default())
+            .collect();
+        // Default label "No status" sorts before "Done" lexicographically.
+        assert_eq!(titles, vec!["Done", "No status"]);
+    }
+
+    #[test]
+    fn board_card_carries_row_id_when_present() {
+        let row = |id: &str, status: &str| {
+            Value::Object(HashMap::from([
+                ("id".to_string(), Value::String(id.into())),
+                ("status".to_string(), Value::String(status.into())),
+                ("title".to_string(), Value::String(format!("t-{id}"))),
+            ]))
+        };
+        let rows = Value::Array(vec![row("row-1", "Done"), row("row-2", "Done")]);
+        let card_template = call("card", vec![pos(call("text", vec![pos(col_ref("title"))]))]);
+        let expr = call(
+            "board",
+            vec![
+                named("item_template", card_template),
+                named("lane_field", lit_str("status")),
+                named("rows", RenderExpr::Literal { value: rows }),
+            ],
+        );
+        let vm = mode_view_model(&expr);
+        let lane = vm.children.first().expect("one lane");
+        let row_ids: Vec<String> = lane
+            .children
+            .iter()
+            .map(|c| c.prop_str("row_id").unwrap_or_default())
+            .collect();
+        assert_eq!(row_ids, vec!["row-1", "row-2"]);
+    }
+
+    #[test]
+    fn board_lane_width_arg_lands_as_board_prop() {
+        // `lane_width` accepts a literal number and surfaces as a top-level
+        // board prop so the GPUI renderer can read it. (Computed values
+        // arrive pre-resolved through the same code path.)
+        let row = || {
+            Value::Object(HashMap::from([(
+                "status".to_string(),
+                Value::String("Done".into()),
+            )]))
+        };
+        let rows = Value::Array(vec![row()]);
+        let card_template = call("card", vec![pos(call("text", vec![pos(lit_str("hi"))]))]);
+        let expr = call(
+            "board",
+            vec![
+                named("item_template", card_template),
+                named("lane_field", lit_str("status")),
+                named("lane_width", lit_f64(320.0)),
+                named("rows", RenderExpr::Literal { value: rows }),
+            ],
+        );
+        let vm = mode_view_model(&expr);
+        assert_eq!(vm.prop_f64("lane_width"), Some(320.0));
+    }
+
+    #[test]
+    fn board_lane_width_absent_when_arg_omitted() {
+        // No arg → no prop on the VM → GPUI falls through to its default.
+        let row = || {
+            Value::Object(HashMap::from([(
+                "status".to_string(),
+                Value::String("Done".into()),
+            )]))
+        };
+        let rows = Value::Array(vec![row()]);
+        let card_template = call("card", vec![pos(call("text", vec![pos(lit_str("hi"))]))]);
+        let expr = call(
+            "board",
+            vec![
+                named("item_template", card_template),
+                named("lane_field", lit_str("status")),
+                named("rows", RenderExpr::Literal { value: rows }),
+            ],
+        );
+        let vm = mode_view_model(&expr);
+        assert_eq!(vm.prop_f64("lane_width"), None);
+    }
+
+    #[test]
+    fn board_card_carries_sort_key_when_present() {
+        let row = |id: &str, sort_key: &str| {
+            Value::Object(HashMap::from([
+                ("id".to_string(), Value::String(id.into())),
+                ("status".to_string(), Value::String("Done".into())),
+                ("title".to_string(), Value::String(format!("t-{id}"))),
+                ("sort_key".to_string(), Value::String(sort_key.into())),
+            ]))
+        };
+        let rows = Value::Array(vec![row("row-1", "A0"), row("row-2", "B0")]);
+        let card_template = call("card", vec![pos(call("text", vec![pos(col_ref("title"))]))]);
+        let expr = call(
+            "board",
+            vec![
+                named("item_template", card_template),
+                named("lane_field", lit_str("status")),
+                named("rows", RenderExpr::Literal { value: rows }),
+            ],
+        );
+        let vm = mode_view_model(&expr);
+        let lane = vm.children.first().expect("one lane");
+        let sort_keys: Vec<String> = lane
+            .children
+            .iter()
+            .map(|c| c.prop_str("sort_key").unwrap_or_default())
+            .collect();
+        assert_eq!(sort_keys, vec!["A0", "B0"]);
+    }
+
+    #[test]
+    fn board_state_accent_drives_card_accent_per_row() {
+        // Proves the end-to-end flow:
+        //   board(item_template: card(accent: state_accent(col("status")), ...))
+        // The state_accent value-fn runs during card-template arg evaluation
+        // for each row, so each card gets the palette color matching its lane.
+        let row = |status: &str| {
+            Value::Object(HashMap::from([
+                ("status".to_string(), Value::String(status.into())),
+                ("title".to_string(), Value::String(format!("t-{status}"))),
+            ]))
+        };
+        let rows = Value::Array(vec![row("Done"), row("In Progress"), row("Blocked")]);
+        let card_template = call(
+            "card",
+            vec![
+                named("accent", call("state_accent", vec![pos(col_ref("status"))])),
+                pos(call("text", vec![pos(col_ref("title"))])),
+            ],
+        );
+        let expr = call(
+            "board",
+            vec![
+                named("item_template", card_template),
+                named("lane_field", lit_str("status")),
+                named("rows", RenderExpr::Literal { value: rows }),
+            ],
+        );
+        let vm = mode_view_model(&expr);
+
+        let mut accent_by_status: HashMap<String, String> = HashMap::new();
+        for lane in vm.children.iter() {
+            let title = lane.prop_str("title").unwrap_or_default();
+            let card = lane.children.first().expect("one card per lane");
+            let accent = card.prop_str("accent").unwrap_or_default();
+            accent_by_status.insert(title, accent);
+        }
+        assert_eq!(
+            accent_by_status.get("Done").map(String::as_str),
+            Some("#7D9D7D")
+        );
+        assert_eq!(
+            accent_by_status.get("In Progress").map(String::as_str),
+            Some("#D4A373"),
+        );
+        assert_eq!(
+            accent_by_status.get("Blocked").map(String::as_str),
+            Some("#C97064"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod board_yaml_parse_tests {
+    use crate::reactive;
+    use crate::reactive::BuilderServices;
+    use holon_api::widget_spec::DataRow;
+    use holon_api::Value;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn collection_profile_board_render_parses_and_interprets() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+        let src = r#"board(#{lane_field: col("lane_field"), item_template: card(#{accent: state_accent(col("task_state"))}, text(col("content"), #{bold: true}))})"#;
+        let expr = holon::render_dsl::parse_render_dsl(src).expect("YAML render parses");
+        let services = reactive::StubBuilderServices::new();
+        let vm = reactive::interpret_pure(&expr, &[], &services);
+        assert_eq!(vm.widget_name().as_deref(), Some("board"));
+    }
+
+    #[test]
+    fn board_handles_real_block_rows_without_panicking() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+        let src = r#"board(#{lane_field: col("lane_field"), item_template: card(#{accent: state_accent(col("task_state"))}, text(col("content"), #{bold: true}))})"#;
+        let expr = holon::render_dsl::parse_render_dsl(src).expect("YAML render parses");
+        let services = reactive::StubBuilderServices::new();
+
+        let make_row = |id: &str, task_state: Option<&str>, content: &str| -> Arc<DataRow> {
+            let mut m: HashMap<String, Value> = HashMap::new();
+            m.insert("id".into(), Value::String(id.into()));
+            m.insert("content".into(), Value::String(content.into()));
+            m.insert(
+                "task_state".into(),
+                match task_state {
+                    Some(s) => Value::String(s.into()),
+                    None => Value::Null,
+                },
+            );
+            m.insert("sort_key".into(), Value::String("A0".into()));
+            m.insert("lane_field".into(), Value::String("task_state".into()));
+            Arc::new(m)
+        };
+
+        let rows = vec![
+            make_row("block:r1", None, "Sync status indicators"),
+            make_row("block:r2", Some(""), "Empty state row"),
+            make_row("block:r3", Some("DOING"), "Drag persistence wiring"),
+            make_row("block:r4", Some("DONE"), "State accent value-fn"),
+            make_row("block:r5", Some("BLOCKED"), "Within-lane reorder"),
+        ];
+
+        let vm = reactive::interpret_pure(&expr, &rows, &services);
+        assert_eq!(vm.widget_name().as_deref(), Some("board"));
+        let titles: Vec<String> = vm
+            .children
+            .iter()
+            .map(|l| l.prop_str("title").unwrap_or_default())
+            .collect();
+        assert_eq!(titles, vec!["BLOCKED", "DOING", "DONE", "No status"]);
+        for lane in vm.children.iter() {
+            assert!(
+                !lane.children.is_empty(),
+                "lane {:?} has no cards",
+                lane.prop_str("title")
+            );
+            for card in lane.children.iter() {
+                assert_eq!(card.widget_name().as_deref(), Some("card"));
+            }
+        }
+    }
+
+    #[test]
+    fn board_streaming_path_creates_one_lane_per_distinct_value() {
+        // Build a board over a `data_source` (streaming) instead of inline
+        // rows. Each lane should be a `board_lane` VM with a `slot` whose
+        // content is a `streaming_collection` of cards filtered to that
+        // lane via `LaneFilteredProvider`.
+        use crate::value_fns::synthetic::SyntheticRows;
+        use holon_api::ReactiveRowProvider;
+
+        crate::shadow_builders::register_render_dsl_widget_names();
+        let src =
+            r#"board(#{lane_field: "task_state", item_template: card(text(col("content")))})"#;
+        let expr = holon::render_dsl::parse_render_dsl(src).expect("YAML render parses");
+
+        let make_row = |id: &str, ts: Option<&str>, content: &str| -> Arc<DataRow> {
+            let mut m: HashMap<String, Value> = HashMap::new();
+            m.insert("id".into(), Value::String(id.into()));
+            m.insert("content".into(), Value::String(content.into()));
+            m.insert(
+                "task_state".into(),
+                match ts {
+                    Some(s) => Value::String(s.into()),
+                    None => Value::Null,
+                },
+            );
+            m.insert("sort_key".into(), Value::String("A0".into()));
+            Arc::new(m)
+        };
+        let rows: Vec<Arc<DataRow>> = vec![
+            make_row("block:r1", Some("DOING"), "first doing"),
+            make_row("block:r2", Some("DONE"), "first done"),
+            make_row("block:r3", Some("DOING"), "second doing"),
+        ];
+        let provider: Arc<dyn ReactiveRowProvider> = Arc::new(SyntheticRows::from_rows(rows));
+
+        let services = reactive::StubBuilderServices::new();
+        let ctx = crate::RenderContext {
+            data_source: Some(provider),
+            ..Default::default()
+        };
+        let vm = services.interpret(&expr, &ctx);
+
+        assert_eq!(vm.widget_name().as_deref(), Some("board"));
+        // Streaming path: the board carries a `Grouped` collection view —
+        // ONE driver subscribes to upstream and atomically rebuilds the
+        // lane list per event. Verify the wiring is in place; actual lane
+        // population requires a running tokio runtime to poll the driver
+        // (covered end-to-end by the GPUI integration tests, not here).
+        let view = vm
+            .collection
+            .as_ref()
+            .expect("streaming board carries a Grouped collection view");
+        assert_eq!(
+            view.layout().as_ref().map(|l| l.name().to_string()),
+            Some("board".to_string()),
+            "view layout should be `board`"
+        );
+        // The board's `children` Vec is empty — children come from the
+        // grouped driver writing into `view.items`.
+        assert!(
+            vm.children.is_empty(),
+            "streaming board doesn't use static children"
+        );
     }
 }

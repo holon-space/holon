@@ -14,7 +14,7 @@ async fn test_empty_update_handling() -> Result<()> {
     let doc = LoroDocument::new("empty-update".to_string())?;
 
     let empty_update = vec![];
-    let result = doc.apply_update(&empty_update).await;
+    let result = doc.apply_update(&empty_update);
 
     assert!(result.is_ok() || result.is_err());
 
@@ -26,7 +26,7 @@ async fn test_corrupted_update_rejection() -> Result<()> {
     let doc = LoroDocument::new("corrupted".to_string())?;
 
     let corrupted_update = vec![0xFF; 100];
-    let result = doc.apply_update(&corrupted_update).await;
+    let result = doc.apply_update(&corrupted_update);
 
     assert!(result.is_err(), "Should reject corrupted update data");
 
@@ -38,11 +38,11 @@ async fn test_partial_update_handling() -> Result<()> {
     let doc1 = LoroDocument::new("partial".to_string())?;
     let doc2 = LoroDocument::new("partial".to_string())?;
 
-    let full_update = doc1.insert_text("editor", 0, "Full content here").await?;
+    let full_update = doc1.insert_text("editor", 0, "Full content here")?;
 
     if full_update.len() > 10 {
         let partial = &full_update[..full_update.len() / 2];
-        let result = doc2.apply_update(partial).await;
+        let result = doc2.apply_update(partial);
 
         assert!(result.is_err(), "Should reject partial/truncated updates");
     }
@@ -55,16 +55,16 @@ async fn test_out_of_order_updates() -> Result<()> {
     let doc1 = LoroDocument::new("out-of-order".to_string())?;
     let doc2 = LoroDocument::new("out-of-order".to_string())?;
 
-    let update1 = doc1.insert_text("editor", 0, "First").await?;
-    let update2 = doc1.insert_text("editor", 5, " Second").await?;
-    let update3 = doc1.insert_text("editor", 12, " Third").await?;
+    let update1 = doc1.insert_text("editor", 0, "First")?;
+    let update2 = doc1.insert_text("editor", 5, " Second")?;
+    let update3 = doc1.insert_text("editor", 12, " Third")?;
 
-    doc2.apply_update(&update3).await?;
-    doc2.apply_update(&update1).await?;
-    doc2.apply_update(&update2).await?;
+    doc2.apply_update(&update3)?;
+    doc2.apply_update(&update1)?;
+    doc2.apply_update(&update2)?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1, text2);
 
@@ -75,13 +75,13 @@ async fn test_out_of_order_updates() -> Result<()> {
 async fn test_duplicate_update_filtering() -> Result<()> {
     let doc = LoroDocument::new("duplicate".to_string())?;
 
-    let update = doc.insert_text("editor", 0, "Content").await?;
+    let update = doc.insert_text("editor", 0, "Content")?;
 
-    doc.apply_update(&update).await?;
-    doc.apply_update(&update).await?;
-    doc.apply_update(&update).await?;
+    doc.apply_update(&update)?;
+    doc.apply_update(&update)?;
+    doc.apply_update(&update)?;
 
-    let text = doc.get_text("editor").await?;
+    let text = doc.get_text("editor")?;
     assert_eq!(
         text, "Content",
         "Duplicate updates should not duplicate content"
@@ -95,16 +95,16 @@ async fn test_snapshot_after_many_updates() -> Result<()> {
     let doc = LoroDocument::new("snapshot-integrity".to_string())?;
 
     for i in 0..100 {
-        doc.insert_text("editor", i, "x").await?;
+        doc.insert_text("editor", i, "x")?;
     }
 
-    let snapshot = doc.export_snapshot().await?;
+    let snapshot = doc.export_snapshot()?;
 
     let doc2 = LoroDocument::new("snapshot-integrity".to_string())?;
-    doc2.apply_update(&snapshot).await?;
+    doc2.apply_update(&snapshot)?;
 
-    let text1 = doc.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1, text2);
     assert_eq!(text1.len(), 100);
@@ -119,7 +119,7 @@ async fn test_connection_without_accept() -> Result<()> {
     let doc1 = LoroDocument::new("no-accept".to_string())?;
     let doc2 = LoroDocument::new("no-accept".to_string())?;
 
-    doc1.insert_text("editor", 0, "Test").await?;
+    doc1.insert_text("editor", 0, "Test")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -168,9 +168,9 @@ async fn test_multiple_sequential_accepts() -> Result<()> {
     let doc2 = LoroDocument::new("multi-accept".to_string())?;
     let doc3 = LoroDocument::new("multi-accept".to_string())?;
 
-    doc1.insert_text("editor", 0, "Hub").await?;
-    doc2.insert_text("editor", 0, "Client2").await?;
-    doc3.insert_text("editor", 0, "Client3").await?;
+    doc1.insert_text("editor", 0, "Hub")?;
+    doc2.insert_text("editor", 0, "Client2")?;
+    doc3.insert_text("editor", 0, "Client3")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let peer1_addr = adapter1.addr();
@@ -196,7 +196,7 @@ async fn test_multiple_sequential_accepts() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
     let _ = accept2.await?;
 
-    let text1 = doc1.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
     assert!(text1.contains("Client2") || text1.contains("Client3"));
 
     Ok(())
@@ -209,7 +209,7 @@ async fn test_update_after_sync() -> Result<()> {
     let doc1 = LoroDocument::new("update-post-sync".to_string())?;
     let doc2 = LoroDocument::new("update-post-sync".to_string())?;
 
-    doc1.insert_text("editor", 0, "Initial").await?;
+    doc1.insert_text("editor", 0, "Initial")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -225,8 +225,8 @@ async fn test_update_after_sync() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
     let _ = accept_handle.await?;
 
-    doc1.insert_text("editor", 7, " after sync").await?;
-    let text = doc1.get_text("editor").await?;
+    doc1.insert_text("editor", 7, " after sync")?;
+    let text = doc1.get_text("editor")?;
     assert_eq!(text, "Initial after sync");
 
     Ok(())
@@ -238,10 +238,10 @@ async fn test_peer_id_stability_across_operations() -> Result<()> {
 
     let peer_id_before = doc.peer_id();
 
-    doc.insert_text("editor", 0, "Test").await?;
+    doc.insert_text("editor", 0, "Test")?;
     let peer_id_after_insert = doc.peer_id();
 
-    let _snapshot = doc.export_snapshot().await?;
+    let _snapshot = doc.export_snapshot()?;
     let peer_id_after_snapshot = doc.peer_id();
 
     assert_eq!(peer_id_before, peer_id_after_insert);
@@ -256,7 +256,7 @@ async fn test_doc_id_immutability() -> Result<()> {
 
     let doc_id_before = doc.doc_id().to_string();
 
-    doc.insert_text("editor", 0, "Test").await?;
+    doc.insert_text("editor", 0, "Test")?;
     let doc_id_after = doc.doc_id().to_string();
 
     assert_eq!(doc_id_before, doc_id_after);
@@ -269,21 +269,21 @@ async fn test_doc_id_immutability() -> Result<()> {
 async fn test_concurrent_read_write() -> Result<()> {
     let doc = Arc::new(LoroDocument::new("concurrent-rw".to_string())?);
 
-    doc.insert_text("editor", 0, "Initial").await?;
+    doc.insert_text("editor", 0, "Initial")?;
 
     let doc_read = doc.clone();
     let doc_write = doc.clone();
 
     let read_handle = tokio::spawn(async move {
         for _ in 0..50 {
-            let _text = doc_read.get_text("editor").await.ok();
+            let _text = doc_read.get_text("editor").ok();
             sleep(Duration::from_millis(10)).await;
         }
     });
 
     let write_handle = tokio::spawn(async move {
         for i in 0..50 {
-            doc_write.insert_text("editor", i + 7, "x").await.ok();
+            doc_write.insert_text("editor", i + 7, "x").ok();
             sleep(Duration::from_millis(10)).await;
         }
     });
@@ -291,7 +291,7 @@ async fn test_concurrent_read_write() -> Result<()> {
     read_handle.await?;
     write_handle.await?;
 
-    let final_text = doc.get_text("editor").await?;
+    let final_text = doc.get_text("editor")?;
     assert!(final_text.len() > 7);
 
     Ok(())
@@ -301,11 +301,11 @@ async fn test_concurrent_read_write() -> Result<()> {
 async fn test_export_stability() -> Result<()> {
     let doc = LoroDocument::new("export-stable".to_string())?;
 
-    doc.insert_text("editor", 0, "Content").await?;
+    doc.insert_text("editor", 0, "Content")?;
 
-    let snapshot1 = doc.export_snapshot().await?;
+    let snapshot1 = doc.export_snapshot()?;
     sleep(Duration::from_millis(100)).await;
-    let snapshot2 = doc.export_snapshot().await?;
+    let snapshot2 = doc.export_snapshot()?;
 
     assert_eq!(snapshot1, snapshot2, "Snapshots should be deterministic");
 
@@ -317,12 +317,12 @@ async fn test_very_large_single_insert() -> Result<()> {
     let doc = LoroDocument::new("huge-insert".to_string())?;
 
     let huge_text = "x".repeat(1_000_000);
-    let result = doc.insert_text("editor", 0, &huge_text).await;
+    let result = doc.insert_text("editor", 0, &huge_text);
 
     assert!(result.is_ok(), "Should handle very large inserts");
 
     if result.is_ok() {
-        let text = doc.get_text("editor").await?;
+        let text = doc.get_text("editor")?;
         assert_eq!(text.len(), 1_000_000);
     }
 
@@ -333,14 +333,14 @@ async fn test_very_large_single_insert() -> Result<()> {
 async fn test_boundary_insert_positions() -> Result<()> {
     let doc = LoroDocument::new("boundary".to_string())?;
 
-    doc.insert_text("editor", 0, "Hello").await?;
+    doc.insert_text("editor", 0, "Hello")?;
 
-    doc.insert_text("editor", 0, "A").await?;
-    let text = doc.get_text("editor").await?;
+    doc.insert_text("editor", 0, "A")?;
+    let text = doc.get_text("editor")?;
     assert!(text.starts_with("A"));
 
-    doc.insert_text("editor", text.len(), "Z").await?;
-    let text = doc.get_text("editor").await?;
+    doc.insert_text("editor", text.len(), "Z")?;
+    let text = doc.get_text("editor")?;
     assert!(text.ends_with("Z"));
 
     Ok(())
@@ -350,9 +350,9 @@ async fn test_boundary_insert_positions() -> Result<()> {
 async fn test_invalid_insert_position() -> Result<()> {
     let doc = LoroDocument::new("invalid-pos".to_string())?;
 
-    doc.insert_text("editor", 0, "Test").await?;
+    doc.insert_text("editor", 0, "Test")?;
 
-    let result = doc.insert_text("editor", 1000, "X").await;
+    let result = doc.insert_text("editor", 1000, "X");
 
     assert!(result.is_err(), "Should reject insert at invalid position");
 
@@ -363,13 +363,13 @@ async fn test_invalid_insert_position() -> Result<()> {
 async fn test_state_consistency_after_errors() -> Result<()> {
     let doc = LoroDocument::new("error-recovery".to_string())?;
 
-    doc.insert_text("editor", 0, "Valid").await?;
+    doc.insert_text("editor", 0, "Valid")?;
 
     let corrupted = vec![0xFF; 50];
-    let _ = doc.apply_update(&corrupted).await;
+    let _ = doc.apply_update(&corrupted);
 
-    doc.insert_text("editor", 5, " Still Works").await?;
-    let text = doc.get_text("editor").await?;
+    doc.insert_text("editor", 5, " Still Works")?;
+    let text = doc.get_text("editor")?;
 
     assert!(text.contains("Valid") && text.contains("Still Works"));
 
@@ -381,11 +381,11 @@ async fn test_multiple_documents_isolated() -> Result<()> {
     let doc1 = LoroDocument::new("doc1".to_string())?;
     let doc2 = LoroDocument::new("doc2".to_string())?;
 
-    doc1.insert_text("editor", 0, "Doc1").await?;
-    doc2.insert_text("editor", 0, "Doc2").await?;
+    doc1.insert_text("editor", 0, "Doc1")?;
+    doc2.insert_text("editor", 0, "Doc2")?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1, "Doc1");
     assert_eq!(text2, "Doc2");
@@ -401,7 +401,7 @@ async fn test_sync_with_empty_peer() -> Result<()> {
     let doc1 = LoroDocument::new("empty-peer-test".to_string())?;
     let doc2 = LoroDocument::new("empty-peer-test".to_string())?;
 
-    doc1.insert_text("editor", 0, "Non-empty").await?;
+    doc1.insert_text("editor", 0, "Non-empty")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -417,7 +417,7 @@ async fn test_sync_with_empty_peer() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
     let _ = accept_handle.await?;
 
-    let text2 = doc2.get_text("editor").await?;
+    let text2 = doc2.get_text("editor")?;
     assert_eq!(text2, "");
 
     Ok(())

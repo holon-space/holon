@@ -890,7 +890,7 @@ mod custom_properties_round_trip {
 
         let collab = backend.collab_for_test();
         let doc_arc = collab.doc();
-        let doc = doc_arc.read().await;
+        let doc = &*doc_arc;
         let snapshot = snapshot_blocks_from_doc(&doc);
 
         let snap_block = snapshot
@@ -932,7 +932,7 @@ mod custom_properties_round_trip {
         // Capture the watermark — this is what `LoroSyncController`
         // persists to its sidecar as `last_synced`.
         let watermark = {
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             doc.oplog_frontiers()
         };
 
@@ -943,7 +943,7 @@ mod custom_properties_round_trip {
             .unwrap();
 
         let (before, after) = {
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             let fork = doc.fork_at(&watermark).expect("fork_at must succeed");
             (
                 snapshot_blocks_from_doc(&fork),
@@ -1006,7 +1006,7 @@ mod custom_properties_round_trip {
         let bytes = {
             let collab = a.collab_for_test();
             let doc_arc = collab.doc();
-            let doc = doc_arc.read().await;
+            let doc = &*doc_arc;
             doc.export(loro::ExportMode::Snapshot).unwrap()
         };
 
@@ -1015,7 +1015,7 @@ mod custom_properties_round_trip {
         {
             let collab = b.collab_for_test();
             let doc_arc = collab.doc();
-            let doc = doc_arc.write().await;
+            let doc = &*doc_arc;
             doc.import(&bytes).unwrap();
         }
 

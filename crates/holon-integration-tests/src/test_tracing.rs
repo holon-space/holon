@@ -190,7 +190,7 @@ impl SpanCollector {
     pub fn max_duration_of(&self, name: &str) -> Duration {
         self.spans_named(name)
             .iter()
-            .map(|s| span_duration(s))
+            .map(span_duration)
             .max()
             .unwrap_or(Duration::ZERO)
     }

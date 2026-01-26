@@ -4,6 +4,7 @@
 //! and Cucumber BDD tests.
 
 pub mod assertions;
+pub mod debug_pause;
 /// `display_assertions` moved to `holon-layout-testing`. Re-exported here
 /// so call sites inside this crate can keep using `crate::display_assertions::*`.
 /// Only available with the `pbt` feature because that's the only feature
@@ -44,7 +45,7 @@ pub use test_environment::{
     LoroCorruptionType, TestContext, TestContextBuilder, TestEnvironment, TestEnvironmentBuilder,
 };
 pub use ui_driver::{
-    CapturedScreenshot, FfiDriver, FocusedElementId, GeometryDriver, ScreenshotBackend,
-    SignalScreenshotWatcher, UiDriver, XcapBackend,
+    CapturedScreenshot, FfiDriver, GeometryDriver, ScreenshotBackend, SignalScreenshotWatcher,
+    UiDriver, XcapBackend,
 };
 pub use widget_state::{WidgetLocator, WidgetStateModel, apply_cdc_event_to_vec};

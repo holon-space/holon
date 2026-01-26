@@ -389,14 +389,22 @@ fn read_block_from_tree(
         .get_typed("updated_at", |val| val.as_i64().copied())
         .unwrap_or(0);
 
-    let block_name = meta.get_typed("name", |val| val.as_string().map(|s| s.to_string()));
+    let tags = read_tags_from_meta(&meta);
 
     let mut block = Block::from_block_content(id, parent_id, content);
     block.set_properties_map(properties);
-    block.name = block_name;
+    block.tags = tags;
     block.created_at = created_at;
     block.updated_at = updated_at;
     block
+}
+
+/// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty
+/// `Vec` when the key is absent or malformed (treated as "no tags").
+fn read_tags_from_meta(meta: &loro::LoroMap) -> Vec<String> {
+    meta.get_typed("tags", |val| val.as_string().map(|s| s.to_string()))
+        .map(|s| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default())
+        .unwrap_or_default()
 }
 
 /// Check if two blocks differ in content, structure, or properties.
@@ -476,7 +484,11 @@ fn resolve_parent_tree_id(
     if parent_uri.is_no_parent() || parent_uri.is_sentinel() {
         return Ok(None);
     }
-    // Try TreeID format first, then stable ID cache
+    // Try TreeID format first, then stable ID cache, then walk the tree.
+    // The tree walk is a fallback for the seed phase: when blocks are
+    // created in the same batch with dependency chains >1 level deep,
+    // a parent node may already exist in the tree but hasn't been added
+    // to the id_cache yet (cache is populated lazily by create_block).
     let tree_id = uri_to_tree_id(parent_uri)
         .or_else(|| {
             if parent_uri.is_block() {
@@ -484,6 +496,35 @@ fn resolve_parent_tree_id(
             } else {
                 None
             }
+        })
+        .or_else(|| {
+            // Fallback: walk the Loro tree looking for the stable ID.
+            if parent_uri.is_block() {
+                for node in tree.get_nodes(false) {
+                    if matches!(
+                        node.parent,
+                        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                    ) {
+                        continue;
+                    }
+                    if let Ok(meta) = tree.get_meta(node.id) {
+                        if let Some(loro::ValueOrContainer::Value(v)) = meta.get(STABLE_ID) {
+                            if v.as_string()
+                                .map(|s| s.as_ref() == parent_uri.id())
+                                .unwrap_or(false)
+                            {
+                                // Found it — also populate the cache for next time
+                                id_cache
+                                    .lock()
+                                    .unwrap()
+                                    .insert(parent_uri.id().to_string(), node.id);
+                                return Some(node.id);
+                            }
+                        }
+                    }
+                }
+            }
+            None
         })
         .ok_or_else(|| anyhow::anyhow!("Cannot resolve parent URI to TreeID: {}", parent_uri))?;
     tree.get_meta(tree_id)
@@ -670,7 +711,6 @@ impl LoroBackend {
 
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to initialize schema: {}", e),
             })
@@ -699,7 +739,6 @@ impl LoroBackend {
                 }
                 Ok(None)
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to find block by UUID: {}", e),
             })
@@ -729,7 +768,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to update block text: {}", e),
             })?;
@@ -809,7 +847,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to update block marked: {}", e),
             })?;
@@ -871,7 +908,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to apply inline mark: {}", e),
             })?;
@@ -916,7 +952,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to remove inline mark: {}", e),
             })?;
@@ -955,7 +990,6 @@ impl LoroBackend {
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 Ok(text.get_cursor(pos, side))
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to get text cursor: {}", e),
             })
@@ -977,7 +1011,6 @@ impl LoroBackend {
                     .map_err(|e| anyhow::anyhow!("get_cursor_pos: {:?}", e))?;
                 Ok(result.current.pos)
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to resolve cursor position: {}", e),
             })
@@ -1021,7 +1054,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to insert text: {}", e),
             })?;
@@ -1069,7 +1101,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to delete text: {}", e),
             })?;
@@ -1104,7 +1135,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to update block properties: {}", e),
             })?;
@@ -1145,7 +1175,6 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to update block fields: {}", e),
             })?;
@@ -1178,38 +1207,36 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to update parent_id: {}", e),
             })?;
         Ok(())
     }
 
-    // -- Document metadata --
+    // -- Tags (page marker + user tags) --
 
-    /// Set document name on a tree node. A block with a name is a document.
-    pub async fn set_document_metadata(
-        &self,
-        tree_id_str: &str,
-        name: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let tree_id = self.resolve_to_tree_id(tree_id_str).await.ok_or_else(|| {
-            anyhow::anyhow!("set_document_metadata: block not found: {}", tree_id_str)
-        })?;
-
-        self.collab_doc
-            .with_write(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let meta = tree.get_meta(tree_id)?;
-                if let Some(n) = name {
-                    meta.insert("name", loro::LoroValue::from(n))?;
-                } else {
-                    meta.delete("name")?;
-                }
-                doc.commit();
-                Ok(())
-            })
+    /// Replace the `tags` list on a tree node. The literal `"Page"` tag in
+    /// the list marks the block as a page (formerly `is_document`).
+    /// An empty `tags` list deletes the meta key entirely.
+    pub async fn set_block_tags(&self, tree_id_str: &str, tags: &[String]) -> anyhow::Result<()> {
+        let tree_id = self
+            .resolve_to_tree_id(tree_id_str)
             .await
+            .ok_or_else(|| anyhow::anyhow!("set_block_tags: block not found: {}", tree_id_str))?;
+
+        let serialized = serde_json::to_string(tags)?;
+
+        self.collab_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(tree_id)?;
+            if tags.is_empty() {
+                meta.delete("tags")?;
+            } else {
+                meta.insert("tags", loro::LoroValue::from(serialized.as_str()))?;
+            }
+            doc.commit();
+            Ok(())
+        })
     }
 
     // -- Stable ID (block business identity) --
@@ -1237,28 +1264,25 @@ impl LoroBackend {
     /// Call after `doc.import(delta)` to ensure newly imported nodes are resolvable.
     pub async fn warm_stable_id_cache(&self) {
         let id_cache = self.id_cache.clone();
-        let _ = self
-            .collab_doc
-            .with_read(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let mut cache = id_cache.lock().unwrap();
-                cache.clear();
-                for node in tree.get_nodes(false) {
-                    if matches!(
-                        node.parent,
-                        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-                    ) {
-                        continue;
-                    }
-                    if let Ok(meta) = tree.get_meta(node.id) {
-                        if let Some(sid) = read_stable_id(&meta) {
-                            cache.insert(sid, node.id);
-                        }
+        let _ = self.collab_doc.with_read(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let mut cache = id_cache.lock().unwrap();
+            cache.clear();
+            for node in tree.get_nodes(false) {
+                if matches!(
+                    node.parent,
+                    loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                ) {
+                    continue;
+                }
+                if let Ok(meta) = tree.get_meta(node.id) {
+                    if let Some(sid) = read_stable_id(&meta) {
+                        cache.insert(sid, node.id);
                     }
                 }
-                Ok(())
-            })
-            .await;
+            }
+            Ok(())
+        });
     }
 
     // -- Diff-based CDC after remote sync --
@@ -1267,7 +1291,6 @@ impl LoroBackend {
     pub async fn snapshot_blocks(&self) -> HashMap<String, Block> {
         self.collab_doc
             .with_read(|doc| Ok(snapshot_blocks_from_doc(doc)))
-            .await
             .unwrap_or_default()
     }
 
@@ -1361,7 +1384,6 @@ impl LoroBackend {
                 }
                 Ok(None)
             })
-            .await
             .ok()
             .flatten()
     }
@@ -1409,16 +1431,14 @@ impl LoroBackend {
             .strip_prefix("block:")
             .unwrap_or(external_id)
             .to_string();
-        self.collab_doc
-            .with_write(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let meta = tree.get_meta(tree_id)?;
-                meta.insert(STABLE_ID, loro::LoroValue::from(raw_id.as_str()))?;
-                meta.insert(EXTERNAL_ID, loro::LoroValue::from(ext_id.as_str()))?;
-                doc.commit();
-                Ok(())
-            })
-            .await
+        self.collab_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(tree_id)?;
+            meta.insert(STABLE_ID, loro::LoroValue::from(raw_id.as_str()))?;
+            meta.insert(EXTERNAL_ID, loro::LoroValue::from(ext_id.as_str()))?;
+            doc.commit();
+            Ok(())
+        })
     }
 
     /// Create a root-level placeholder node without emitting events.
@@ -1427,17 +1447,15 @@ impl LoroBackend {
     pub async fn create_placeholder_root(&self, stable_id: &str) -> anyhow::Result<String> {
         let sid = stable_id.to_string();
         let id_cache = self.id_cache.clone();
-        self.collab_doc
-            .with_write(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let node = tree.create(None)?;
-                let meta = tree.get_meta(node)?;
-                meta.insert(STABLE_ID, loro::LoroValue::from(sid.as_str()))?;
-                doc.commit();
-                id_cache.lock().unwrap().insert(sid.clone(), node);
-                Ok(EntityUri::block(&sid).to_string())
-            })
-            .await
+        self.collab_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let node = tree.create(None)?;
+            let meta = tree.get_meta(node)?;
+            meta.insert(STABLE_ID, loro::LoroValue::from(sid.as_str()))?;
+            doc.commit();
+            id_cache.lock().unwrap().insert(sid.clone(), node);
+            Ok(EntityUri::block(&sid).to_string())
+        })
     }
 
     /// Find a tree node's ID string by its external (SQL) ID.
@@ -1464,7 +1482,6 @@ impl LoroBackend {
                 }
                 Ok(None)
             })
-            .await
             .ok() // ALLOW(ok): deleted/moved tree node
             .flatten()
     }
@@ -1482,7 +1499,6 @@ impl LoroBackend {
                     meta.get_typed(EXTERNAL_ID, |val| val.as_string().map(|s| s.to_string()));
                 Ok(ext_id)
             })
-            .await
             .ok() // ALLOW(ok): deleted/moved tree node
             .flatten()
     }
@@ -1554,7 +1570,6 @@ impl ChangeNotifications<Block> for LoroBackend {
                     }
                     anyhow::Ok(blocks)
                 })
-                .await
                 .map_err(|e| ApiError::InternalError {
                     message: format!("Failed to get current blocks: {}", e),
                 }) {
@@ -1601,7 +1616,6 @@ impl ChangeNotifications<Block> for LoroBackend {
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
         self.collab_doc
             .with_read(|doc| Ok(doc.export(loro::ExportMode::Snapshot)?))
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to get current version: {}", e),
             })
@@ -1626,7 +1640,6 @@ impl CoreOperations for LoroBackend {
                 }
                 Ok(None)
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to get block: {}", e),
             })?;
@@ -1701,7 +1714,6 @@ impl CoreOperations for LoroBackend {
 
                 Ok((blocks, mount_infos))
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to get all blocks: {}", e),
             })?;
@@ -1773,7 +1785,6 @@ impl CoreOperations for LoroBackend {
                 }
                 Ok(result)
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to list children: {}", e),
             })
@@ -1820,7 +1831,6 @@ impl CoreOperations for LoroBackend {
                 block.updated_at = now;
                 Ok((block, node))
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to create block: {}", e),
             })?;
@@ -1852,7 +1862,6 @@ impl CoreOperations for LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to update block: {}", e),
             })?;
@@ -1881,7 +1890,6 @@ impl CoreOperations for LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to delete block: {}", e),
             })?;
@@ -1931,7 +1939,6 @@ impl CoreOperations for LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to move block: {}", e),
             })?;
@@ -1969,7 +1976,6 @@ impl CoreOperations for LoroBackend {
                 }
                 Ok(blocks)
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to get blocks: {}", e),
             })
@@ -2038,7 +2044,6 @@ impl CoreOperations for LoroBackend {
                 }
                 Ok(created)
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to create blocks: {}", e),
             })?;
@@ -2077,7 +2082,6 @@ impl CoreOperations for LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .await
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to delete blocks: {}", e),
             })?;
@@ -3002,10 +3006,9 @@ mod tests {
                 .with_write(|doc| {
                     let tree = doc.get_tree(TREE_NAME);
                     let meta = tree.get_meta(doc_root_tid)?;
-                    meta.insert("name", "test_doc")?;
+                    meta.insert("tags", "[\"Page\"]")?;
                     Ok(())
                 })
-                .await
                 .unwrap();
 
             let _kept = backend
@@ -3047,7 +3050,6 @@ mod tests {
                         HistoryRetention::Full,
                     )
                 })
-                .await
                 .unwrap();
 
             // Register shared doc in store and attach to backend

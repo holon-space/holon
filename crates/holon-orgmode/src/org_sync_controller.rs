@@ -17,15 +17,16 @@ use holon::core::datasource::OperationProvider;
 use holon::sync::CanonicalPath;
 use holon_api::block::Block;
 use holon_api::{EntityName, EntityUri, Value};
+use holon_core::file_format::FileFormatAdapter;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::block_params::build_block_params;
+use crate::file_format::OrgFormatAdapter;
 use crate::models::{OrgBlockExt, OrgDocumentExt};
-use crate::org_renderer::OrgRenderer;
-use crate::parser::{generate_file_id, parse_org_file};
+use crate::parser::generate_file_id;
 use crate::traits::{BlockReader, DocumentManager, ImageDataProvider};
 
 pub struct OrgSyncController {
@@ -56,6 +57,12 @@ pub struct OrgSyncController {
     /// Binary image data provider (Loro-backed). Used to materialize image
     /// files to disk on render and ingest them from disk on parse.
     image_data: Option<Arc<dyn ImageDataProvider>>,
+
+    /// File format adapter — delegates parse/render so the controller works
+    /// across formats. Defaults to `OrgFormatAdapter`; future markdown /
+    /// notion / logseq adapters plug in here without changing the
+    /// controller's logic.
+    format: Arc<dyn FileFormatAdapter>,
 }
 
 /// Callback for registering doc_id → path aliases in the storage layer.
@@ -73,6 +80,25 @@ impl OrgSyncController {
         doc_manager: Arc<dyn DocumentManager>,
         root_dir: PathBuf,
     ) -> Self {
+        Self::with_format(
+            block_reader,
+            command_bus,
+            doc_manager,
+            root_dir,
+            Arc::new(OrgFormatAdapter::new()),
+        )
+    }
+
+    /// Construct a controller with an explicit `FileFormatAdapter`. The
+    /// `new` constructor uses `OrgFormatAdapter`; tests and future markdown /
+    /// notion / logseq wirings call this directly.
+    pub fn with_format(
+        block_reader: Arc<dyn BlockReader>,
+        command_bus: Arc<dyn OperationProvider>,
+        doc_manager: Arc<dyn DocumentManager>,
+        root_dir: PathBuf,
+        format: Arc<dyn FileFormatAdapter>,
+    ) -> Self {
         // Canonicalize root_dir so strip_prefix works with canonical file paths
         // (macOS: /var → /private/var symlink resolution).
         let root_dir = CanonicalPath::new(&root_dir).into_path_buf();
@@ -85,6 +111,7 @@ impl OrgSyncController {
             alias_registrar: None,
             post_org_write_hook: None,
             image_data: None,
+            format,
         }
     }
 
@@ -122,8 +149,10 @@ impl OrgSyncController {
                 }
             };
             let rendered = match self.doc_manager.get_by_id(&doc_id).await {
-                Ok(Some(doc)) => OrgRenderer::render_document(&doc, &blocks, &file_path, &doc_id),
-                _ => OrgRenderer::render_entitys(&blocks, &file_path, &doc_id),
+                Ok(Some(doc)) => self
+                    .format
+                    .render_document(&doc, &blocks, &file_path, &doc_id),
+                _ => self.format.render_blocks(&blocks, &file_path, &doc_id),
             };
             self.last_projection
                 .insert(CanonicalPath::new(&file_path), rendered);
@@ -179,7 +208,7 @@ impl OrgSyncController {
             .map(|s| s.as_str())
             .unwrap_or("");
 
-        eprintln!(
+        tracing::debug!(
             "[ORGSYNC_ENTER] {} disk_len={} last_len={} has_key={} equal={}",
             path.display(),
             disk_content.len(),
@@ -187,6 +216,17 @@ impl OrgSyncController {
             self.last_projection.contains_key(&canonical),
             disk_content == last,
         );
+
+        // Skip 0-byte files that are not yet tracked. Empty files have no
+        // blocks to sync; registering them only causes re_render_all_tracked
+        // to fail with "No document found" on every subsequent block event.
+        if disk_content.is_empty() && !self.last_projection.contains_key(&canonical) {
+            debug!(
+                "[OrgSyncController] Skipping empty file (not tracked): {}",
+                path.display()
+            );
+            return Ok(());
+        }
 
         // Echo suppression: skip if we have a prior projection and content matches.
         // An absent entry means "first time seeing this file" — always process it
@@ -246,7 +286,10 @@ impl OrgSyncController {
                 .map(|b| (b.id.clone(), b))
                 .collect()
         } else {
-            match parse_org_file(path, last, &EntityUri::no_parent(), &self.root_dir) {
+            match self
+                .format
+                .parse(path, last, &EntityUri::no_parent(), &self.root_dir)
+            {
                 Ok(result) => result
                     .blocks
                     .into_iter()
@@ -257,7 +300,8 @@ impl OrgSyncController {
         };
 
         let new_parse =
-            parse_org_file(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
+            self.format
+                .parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
 
         // Sync #+TODO: keywords from the parsed file to the document block.
         // The parser extracts these from the file header, but the document entity
@@ -331,7 +375,7 @@ impl OrgSyncController {
                 operations.push((op.to_string(), params));
             }
         }
-        eprintln!(
+        tracing::debug!(
             "[ORGSYNC_DIFF] {} old={} new={} creates={} conflict_updates={} creates_ids={:?}",
             path.display(),
             old_blocks.len(),
@@ -442,7 +486,7 @@ impl OrgSyncController {
             // we reconciled so the next diff sees the true external delta.
             match tokio::fs::read_to_string(path).await {
                 Ok(now) if now != disk_content => {
-                    eprintln!(
+                    tracing::debug!(
                         "[ORGSYNC_TOCTOU] {} disk changed during processing \
                          (parsed_len={} disk_now_len={}); skipping write-back, \
                          stamping last_projection with parsed content so next \
@@ -501,13 +545,20 @@ impl OrgSyncController {
         // If disk content differs from last_projection, there's a pending external
         // change that the file watcher hasn't delivered yet. Ingest it first so
         // the re-render below includes both the block event and the external edit.
+        //
+        // Only treat this as a pending external change when we have a baseline
+        // (`last_projection` already holds the file). Without a baseline,
+        // `last == ""` would always differ from any non-empty disk content and
+        // we'd incorrectly re-ingest the on-disk file — which can revert the
+        // user's just-issued UPDATE if the file watcher hasn't yet delivered the
+        // initial WriteOrgFile event. The watcher will catch up on its own.
         let disk_content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
         let last = self
             .last_projection
             .get(&canonical)
             .map(|s| s.as_str())
             .unwrap_or("");
-        if disk_content != last {
+        if self.last_projection.contains_key(&canonical) && disk_content != last {
             info!(
                 "[OrgSyncController] Processing pending external change for {} before re-render",
                 path.display()
@@ -533,7 +584,7 @@ impl OrgSyncController {
         // would wipe the external write. Re-read and bail if changed.
         let disk_at_write = tokio::fs::read_to_string(&path).await.unwrap_or_default();
         if disk_at_write != disk_content {
-            eprintln!(
+            tracing::debug!(
                 "[ORGSYNC_TOCTOU on_block_changed] {} disk changed during processing \
                  (initial_len={} disk_now_len={}); skipping write-back.",
                 path.display(),
@@ -646,23 +697,28 @@ impl OrgSyncController {
             })?;
             let segments = path_to_name_chain(rel_path);
             let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
-            let doc = self
-                .doc_manager
-                .find_by_name_chain(&segment_refs)
-                .await
-                .with_context(|| {
-                    format!(
-                        "[re_render_all_tracked] Doc lookup failed for {}",
-                        path.display()
-                    )
-                })?
-                .with_context(|| {
-                    format!(
-                        "[re_render_all_tracked] No document found for path {} (segments: {:?})",
+            let doc = match self.doc_manager.find_by_name_chain(&segment_refs).await {
+                Ok(Some(doc)) => doc,
+                Ok(None) => {
+                    // Path was tracked but no document entity exists (e.g.
+                    // empty file was registered before the skip-empty guard).
+                    // Log once at warn and continue — don't fail the batch.
+                    warn!(
+                        "[re_render_all_tracked] No document found for path {} (segments: {:?}) — skipping",
                         path.display(),
                         segment_refs
-                    )
-                })?;
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        "[re_render_all_tracked] Doc lookup error for {}: {} — skipping",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
 
             let rendered = self.render_file_by_doc_id(&doc.id, &path).await?;
 
@@ -683,7 +739,7 @@ impl OrgSyncController {
             // on_file_changed will pick up the external delta.
             let disk_at_write = tokio::fs::read_to_string(&path).await.unwrap_or_default();
             if disk_at_write != disk_content {
-                eprintln!(
+                tracing::debug!(
                     "[ORGSYNC_TOCTOU re_render_all_tracked] {} disk changed during processing \
                      (initial_len={} disk_now_len={}); skipping write-back.",
                     path.display(),
@@ -717,8 +773,8 @@ impl OrgSyncController {
             // Use the document block's actual ID as the root parent reference,
             // since blocks have parent_id = doc.id (may differ from the doc_id
             // used for lookup, e.g. file: vs block: URI schemes).
-            Some(doc) => OrgRenderer::render_document(&doc, &blocks, path, &doc.id),
-            None => OrgRenderer::render_entitys(&blocks, path, doc_id),
+            Some(doc) => self.format.render_document(&doc, &blocks, path, &doc.id),
+            None => self.format.render_blocks(&blocks, path, doc_id),
         };
         assert!(
             blocks.is_empty() || !rendered.trim().is_empty(),

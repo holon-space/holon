@@ -19,6 +19,8 @@
 pub mod cdc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
+pub mod collection_layout;
+pub mod lane_filtered_provider;
 
 /// A default org file bundled with the app, seeded on first launch.
 pub struct DefaultAsset {
@@ -38,6 +40,7 @@ pub const DEFAULT_ASSETS: &[DefaultAsset] = &[DefaultAsset {
 }];
 pub mod command_provider;
 pub mod config;
+pub mod editable_text_provider;
 pub mod editor_controller;
 pub mod focus_path;
 pub mod frontend_module;
@@ -421,14 +424,24 @@ impl<T> FrontendSession<T> {
                 .as_millis() as i64;
             for asset in crate::DEFAULT_ASSETS {
                 if let Some(doc_id) = asset.fixed_doc_id {
-                    let name = asset
+                    let title = asset
                         .filename
                         .strip_suffix(".org")
                         .unwrap_or(asset.filename);
                     db.execute(
                         &format!(
-                            "INSERT OR IGNORE INTO block (id, parent_id, name, content, content_type, sort_key, properties, created_at, updated_at) \
-                             VALUES ('{doc_id}', 'sentinel:no_parent', '{name}', '', 'text', 'a0', '{{}}', {now}, {now})"
+                            "INSERT OR IGNORE INTO block (id, parent_id, content, content_type, sort_key, properties, created_at, updated_at) \
+                             VALUES ('{doc_id}', 'sentinel:no_parent', '{title}', 'text', 'A0', '{{}}', {now}, {now})"
+                        ),
+                        vec![],
+                    )
+                    .await?;
+                    // Ensure the Page tag is present in the junction table
+                    // (INSERT OR IGNORE skips the insert when the id collides,
+                    // so any previously-seeded row would keep its prior tags).
+                    db.execute(
+                        &format!(
+                            "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{doc_id}', 'Page')"
                         ),
                         vec![],
                     )
@@ -468,12 +481,21 @@ impl<T> FrontendSession<T> {
             .expect("system clock before epoch")
             .as_millis() as i64;
 
-        // Create the seeded document as a block with a name (making it a document)
+        // Create the seeded page block (tags ⊇ ["Page"]). The first content
+        // line is the title; we use `__default__` to match the existing fixture.
         db.execute(
             &format!(
-                "INSERT OR IGNORE INTO block (id, parent_id, name, sort_key, content, properties, created_at, updated_at) \
-                 VALUES ('{}', 'sentinel:no_parent', '__default__', 'a0', '', '{{}}', {}, {})",
+                "INSERT OR IGNORE INTO block (id, parent_id, sort_key, content, properties, created_at, updated_at) \
+                 VALUES ('{}', 'sentinel:no_parent', 'A0', '__default__', '{{}}', {}, {})",
                 default_doc_uri, now, now
+            ),
+            vec![],
+        )
+        .await?;
+        db.execute(
+            &format!(
+                "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{}', 'Page')",
+                default_doc_uri
             ),
             vec![],
         )
@@ -512,6 +534,7 @@ impl<T> FrontendSession<T> {
             let mut columns = Vec::new();
             let mut values = Vec::new();
             let mut extra_props = HashMap::new();
+            let mut block_tags: Vec<String> = Vec::new();
 
             for (key, value) in &params {
                 if key == "properties" {
@@ -522,6 +545,14 @@ impl<T> FrontendSession<T> {
                         {
                             for (k, v) in map {
                                 extra_props.insert(k, serde_json::Value::from(v));
+                            }
+                        }
+                    }
+                } else if key == "tags" {
+                    if let Value::Array(arr) = value {
+                        for tag_val in arr {
+                            if let Some(tag) = tag_val.as_string() {
+                                block_tags.push(tag.to_string());
                             }
                         }
                     }
@@ -553,6 +584,15 @@ impl<T> FrontendSession<T> {
                 values.join(", ")
             );
             db.execute(&sql, vec![]).await?;
+
+            for tag in &block_tags {
+                let tag_sql = format!(
+                    "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{}', '{}')",
+                    block.id.as_str().replace('\'', "''"),
+                    tag.replace('\'', "''")
+                );
+                db.execute(&tag_sql, vec![]).await?;
+            }
         }
 
         tracing::info!(

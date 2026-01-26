@@ -17,8 +17,10 @@
 pub mod chain_ops;
 pub mod focus_chain;
 pub mod ops_of;
+pub mod state_accent;
 pub mod synthetic;
 
 pub use chain_ops::register_chain_ops;
 pub use focus_chain::register_focus_chain;
 pub use ops_of::register_ops_of;
+pub use state_accent::register_state_accent;

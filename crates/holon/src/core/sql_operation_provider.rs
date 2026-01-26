@@ -11,6 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::datasource::{OperationProvider, OperationResult, Result};
+use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
 use crate::storage::types::StorageEntity;
@@ -26,7 +27,13 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         Value::Boolean(b) => serde_json::Value::Bool(*b),
         Value::Null => serde_json::Value::Null,
-        Value::DateTime(s) | Value::Json(s) => serde_json::Value::String(s.clone()),
+        Value::DateTime(s) => serde_json::Value::String(s.clone()),
+        Value::Json(s) => serde_json::from_str(s).unwrap_or_else(|e| {
+            panic!(
+                "[value_to_json] Value::Json contains invalid JSON {:?}: {}",
+                s, e
+            )
+        }),
         Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_json).collect()),
         Value::Object(map) => serde_json::Value::Object(
             map.iter()
@@ -42,7 +49,6 @@ fn value_to_json(v: &Value) -> serde_json::Value {
 const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
     "id",
     "parent_id",
-    "name",
     "depth",
     "sort_key",
     "content",
@@ -76,6 +82,9 @@ pub struct SqlOperationProvider {
     entity_name: String,
     entity_short_name: String,
     known_columns: HashSet<String>,
+    /// Edge-typed fields (multi-valued, projected to a junction table).
+    /// Indexed by field name for O(1) partition-time lookup.
+    edge_fields: HashMap<String, EdgeFieldDescriptor>,
     event_bus: Option<Arc<dyn EventBus>>,
 }
 
@@ -86,13 +95,37 @@ impl SqlOperationProvider {
         entity_name: String,
         entity_short_name: String,
     ) -> Self {
+        Self::with_edge_fields(
+            db_handle,
+            table_name,
+            entity_name,
+            entity_short_name,
+            Vec::new(),
+        )
+    }
+
+    /// Construct with an explicit edge-field registry (filtered to this entity).
+    /// Descriptors whose `entity` doesn't match `entity_name` are dropped.
+    pub fn with_edge_fields(
+        db_handle: DbHandle,
+        table_name: String,
+        entity_name: String,
+        entity_short_name: String,
+        edge_fields: Vec<EdgeFieldDescriptor>,
+    ) -> Self {
         let known_columns = BLOCKS_KNOWN_COLUMNS.iter().map(|s| s.to_string()).collect();
+        let edge_fields = edge_fields
+            .into_iter()
+            .filter(|d| d.entity == entity_name)
+            .map(|d| (d.field.clone(), d))
+            .collect();
         Self {
             db_handle,
             table_name,
             entity_name,
             entity_short_name,
             known_columns,
+            edge_fields,
             event_bus: None,
         }
     }
@@ -104,13 +137,38 @@ impl SqlOperationProvider {
         entity_short_name: String,
         event_bus: Arc<dyn EventBus>,
     ) -> Self {
+        Self::with_event_bus_and_edge_fields(
+            db_handle,
+            table_name,
+            entity_name,
+            entity_short_name,
+            event_bus,
+            Vec::new(),
+        )
+    }
+
+    /// Same as `with_event_bus` plus an edge-field registry.
+    pub fn with_event_bus_and_edge_fields(
+        db_handle: DbHandle,
+        table_name: String,
+        entity_name: String,
+        entity_short_name: String,
+        event_bus: Arc<dyn EventBus>,
+        edge_fields: Vec<EdgeFieldDescriptor>,
+    ) -> Self {
         let known_columns = BLOCKS_KNOWN_COLUMNS.iter().map(|s| s.to_string()).collect();
+        let edge_fields = edge_fields
+            .into_iter()
+            .filter(|d| d.entity == entity_name)
+            .map(|d| (d.field.clone(), d))
+            .collect();
         Self {
             db_handle,
             table_name,
             entity_name,
             entity_short_name,
             known_columns,
+            edge_fields,
             event_bus: Some(event_bus),
         }
     }
@@ -149,15 +207,26 @@ impl SqlOperationProvider {
     /// (document blocks have names, content blocks don't). This replaces the
     /// previous O(depth) parent chain walk that fired one SELECT per ancestor.
     async fn find_document_uri(&self, block_id: &str) -> Option<String> {
+        // A page is a block that has a 'Page' tag in the block_tags junction table.
+        // Walk up the parent chain until one matches.
         let sql = format!(
-            "WITH RECURSIVE chain(id, parent_id, name, depth) AS ( \
-                SELECT id, parent_id, name, 0 FROM {table} WHERE id = '{block_id}' \
+            "WITH RECURSIVE chain(id, parent_id, is_page, depth) AS ( \
+                SELECT b.id, b.parent_id, \
+                    CASE WHEN bt.block_id IS NOT NULL THEN 1 ELSE 0 END as is_page, \
+                    0 \
+                FROM {table} b \
+                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
+                WHERE b.id = '{block_id}' \
                 UNION ALL \
-                SELECT b.id, b.parent_id, b.name, c.depth + 1 \
-                FROM {table} b JOIN chain c ON b.id = c.parent_id \
-                WHERE c.name IS NULL AND c.depth < 50 \
+                SELECT b.id, b.parent_id, \
+                    CASE WHEN bt.block_id IS NOT NULL THEN 1 ELSE 0 END as is_page, \
+                    c.depth + 1 \
+                FROM {table} b \
+                JOIN chain c ON b.id = c.parent_id \
+                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
+                WHERE c.is_page = 0 AND c.depth < 50 \
             ) \
-            SELECT id FROM chain WHERE name IS NOT NULL LIMIT 1",
+            SELECT id FROM chain WHERE is_page = 1 LIMIT 1",
             table = self.table_name,
             block_id = block_id.replace('\'', "''"),
         );
@@ -183,11 +252,11 @@ impl SqlOperationProvider {
     /// Normalize a content value for org round-trip stability.
     ///
     /// For text blocks the first line becomes the org headline, which the
-    /// parser `.trim()`s on re-parse, so trailing whitespace on the first
-    /// line is stripped on re-ingest. Trailing whitespace on the whole
-    /// string is also stripped. Source blocks preserve content verbatim
-    /// (aside from overall trailing-whitespace trim) because their body is
-    /// not remodeled as a headline.
+    /// parser `.trim()`s (both ends) on re-parse, so leading *and* trailing
+    /// whitespace on the first line is stripped on re-ingest. Trailing
+    /// whitespace on the whole string is also stripped. Source blocks
+    /// preserve content verbatim (aside from overall trailing-whitespace
+    /// trim) because their body is not remodeled as a headline.
     ///
     /// `is_source` selects between the two modes. Callers that don't know
     /// the type pass `false` — matches the common-case text path and
@@ -200,27 +269,35 @@ impl SqlOperationProvider {
                     return Value::String(trimmed_end.to_string());
                 }
                 Value::String(match trimmed_end.split_once('\n') {
-                    Some((first, rest)) => format!("{}\n{}", first.trim_end(), rest),
-                    None => trimmed_end.to_string(),
+                    Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
+                    None => trimmed_end.trim_start().to_string(),
                 })
             }
             other => other.clone(),
         }
     }
 
-    /// Separate params into known SQL columns and extra properties.
-    /// Extra properties get merged into the `properties` JSON column.
+    /// Separate params into three buckets:
+    /// 1. known SQL columns (folded directly into the row)
+    /// 2. edge-typed fields (multi-valued, projected to a junction table —
+    ///    their `Value::Array` payload is captured raw and routed through
+    ///    DELETE+INSERT by the caller)
+    /// 3. extra properties (merged into the `properties` JSON column)
+    ///
     /// If params already contains a `properties` field, its JSON content is
-    /// merged with the extra properties.
+    /// merged with the extra properties bucket.
+    #[allow(clippy::type_complexity)]
     fn partition_params(
         &self,
         params: &StorageEntity,
     ) -> (
         Vec<(String, String)>,
         std::collections::HashMap<String, Value>,
+        Vec<(EdgeFieldDescriptor, Vec<String>)>,
     ) {
         let mut sql_fields = Vec::new();
         let mut extra_props = std::collections::HashMap::new();
+        let mut edge_field_params: Vec<(EdgeFieldDescriptor, Vec<String>)> = Vec::new();
         let mut existing_properties_json: Option<String> = None;
 
         // First-line headline trimming only applies to text blocks; source
@@ -240,6 +317,28 @@ impl SqlOperationProvider {
                 }
             } else if key.starts_with('_') {
                 // Routing metadata (e.g., _routing_doc_uri) — skip for SQL
+            } else if let Some(descriptor) = self.edge_fields.get(key.as_str()) {
+                // Edge-typed field: must carry a Value::Array. Fail loud if
+                // a caller mis-types this — silently flowing to JSON would
+                // be the *exact* H5 bug we're closing.
+                let arr = match value {
+                    Value::Array(items) => items,
+                    other => panic!(
+                        "SqlOperationProvider: edge field '{}' on '{}' must be Value::Array, got {:?}",
+                        key, self.entity_name, other
+                    ),
+                };
+                let ids: Vec<String> = arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        other => panic!(
+                            "SqlOperationProvider: edge field '{}' items must be Value::String, got {:?}",
+                            key, other
+                        ),
+                    })
+                    .collect();
+                edge_field_params.push((descriptor.clone(), ids));
             } else if self.known_columns.contains(key.as_str()) {
                 // Trim trailing whitespace from content — org files don't
                 // preserve it, so storing untrimmed content would cause
@@ -281,7 +380,36 @@ impl SqlOperationProvider {
             }
         }
 
-        (sql_fields, extra_props)
+        (sql_fields, extra_props, edge_field_params)
+    }
+
+    /// Build SQL statements that replace the edge-field rows for `id`.
+    /// Always DELETE all current rows for the source then INSERT the new set
+    /// — coarse but correct, and the H5 sizing showed this is acceptable for
+    /// G1 (≤ ~10 blockers/tags per block).
+    fn edge_field_replace_sql(
+        id: &str,
+        descriptor: &EdgeFieldDescriptor,
+        targets: &[String],
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        out.push(format!(
+            "DELETE FROM {jt} WHERE {sc} = '{id}'",
+            jt = descriptor.join_table,
+            sc = Self::quote_identifier(&descriptor.source_col),
+            id = id.replace('\'', "''"),
+        ));
+        for target in targets {
+            out.push(format!(
+                "INSERT INTO {jt} ({sc}, {tc}) VALUES ('{id}', '{tg}')",
+                jt = descriptor.join_table,
+                sc = Self::quote_identifier(&descriptor.source_col),
+                tc = Self::quote_identifier(&descriptor.target_col),
+                id = id.replace('\'', "''"),
+                tg = target.replace('\'', "''"),
+            ));
+        }
+        out
     }
 
     /// Execute a prepared operation: run SQL statements and publish events.
@@ -330,23 +458,14 @@ impl SqlOperationProvider {
             .entry("updated_at".to_string())
             .or_insert_with(|| Value::Integer(now_ms));
 
-        let (mut sql_fields, extra_props) = self.partition_params(&params);
+        let (mut sql_fields, extra_props, edge_field_params) = self.partition_params(&params);
 
         if !extra_props.is_empty() {
             // BTreeMap for canonical key ordering (matches prepare_update).
             let props_json = serde_json::to_string(
                 &extra_props
                     .into_iter()
-                    .map(|(k, v)| {
-                        let json_val: serde_json::Value = match v {
-                            Value::String(s) => serde_json::Value::String(s),
-                            Value::Integer(i) => serde_json::json!(i),
-                            Value::Float(f) => serde_json::json!(f),
-                            Value::Boolean(b) => serde_json::json!(b),
-                            _ => serde_json::Value::String(format!("{:?}", v)),
-                        };
-                        (k, json_val)
-                    })
+                    .map(|(k, v)| (k, value_to_json(&v)))
                     .collect::<std::collections::BTreeMap<String, serde_json::Value>>(),
             )
             .unwrap_or_else(|_| "{}".to_string());
@@ -362,22 +481,33 @@ impl SqlOperationProvider {
             .collect();
         let values: Vec<_> = sql_fields.iter().map(|(_, v)| v.clone()).collect();
 
-        let sql = format!(
+        let mut sql_statements = vec![format!(
             "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
             self.table_name,
             columns.join(", "),
             values.join(", ")
-        );
+        )];
 
         let aggregate_id = params
             .get("id")
             .and_then(|v| v.as_string())
             .unwrap_or_default();
+
+        // Edge-field rows: clear and reinsert per descriptor (no-op when no
+        // edge fields are declared on this entity).
+        for (descriptor, targets) in &edge_field_params {
+            sql_statements.extend(Self::edge_field_replace_sql(
+                aggregate_id,
+                descriptor,
+                targets,
+            ));
+        }
+
         let payload = self.build_event_payload(&params);
         let event = self.make_event(EventKind::Created, &aggregate_id, payload);
 
         PreparedOp {
-            sql_statements: vec![sql],
+            sql_statements,
             events: vec![event],
         }
     }
@@ -421,7 +551,7 @@ impl SqlOperationProvider {
             .and_then(|v| v.as_string())
             .map(String::from);
 
-        let (sql_fields, extra_props) = self.partition_params(params);
+        let (sql_fields, extra_props, edge_field_params) = self.partition_params(params);
 
         // TRACE: any non-standard custom property being written via update path
         const STANDARD_PROP_KEYS: &[&str] = &[
@@ -440,7 +570,7 @@ impl SqlOperationProvider {
             .filter(|k| !STANDARD_PROP_KEYS.contains(&k.as_str()) && !k.starts_with('_'))
             .collect();
         if !custom_keys.is_empty() {
-            eprintln!(
+            tracing::trace!(
                 "[CUSTOMPROP-TRACE prepare_update] id={id} custom_keys={:?} extra_props={:?} sql_fields_keys={:?}",
                 custom_keys,
                 extra_props,
@@ -513,7 +643,7 @@ impl SqlOperationProvider {
             update_pairs.push(("properties".to_string(), props_sql));
         }
 
-        if update_pairs.is_empty() {
+        if update_pairs.is_empty() && edge_field_params.is_empty() {
             return Ok(None);
         }
 
@@ -557,14 +687,20 @@ impl SqlOperationProvider {
             where_parts.push(format!("({})", diff_conditions.join(" OR ")));
         }
 
-        let sql = format!(
-            "UPDATE {} SET {} WHERE {}",
-            self.table_name,
-            set_clauses.join(", "),
-            where_parts.join(" AND ")
-        );
+        let mut sql_statements = Vec::new();
+        if !update_pairs.is_empty() {
+            sql_statements.push(format!(
+                "UPDATE {} SET {} WHERE {}",
+                self.table_name,
+                set_clauses.join(", "),
+                where_parts.join(" AND ")
+            ));
+        }
+        for (descriptor, targets) in &edge_field_params {
+            sql_statements.extend(Self::edge_field_replace_sql(&id, descriptor, targets));
+        }
         Ok(Some(PreparedOp {
-            sql_statements: vec![sql],
+            sql_statements,
             events: vec![],
         }))
     }
@@ -661,24 +797,30 @@ impl SqlOperationProvider {
             .map_or(false, |s| s == "source");
 
         for (key, value) in params.iter() {
+            // Edge-typed fields live in junction tables, not in the row's
+            // event payload. Skip so a Value::Array doesn't fall into the
+            // debug-formatted fallback below.
+            if self.edge_fields.contains_key(key.as_str()) {
+                continue;
+            }
             let value = if key == "content" {
                 &Self::trimmed_content(value, is_source)
             } else {
                 value
             };
-            let json_val = match value {
-                Value::String(s) => serde_json::Value::String(s.clone()),
-                Value::Integer(i) => serde_json::json!(i),
-                Value::Float(f) => serde_json::json!(f),
-                Value::Boolean(b) => serde_json::json!(b),
-                Value::Null => serde_json::Value::Null,
-                other => serde_json::Value::String(format!("{:?}", other)),
-            };
+            let json_val = value_to_json(value);
+
+            // Skip NULL columns: serde's `#[serde(default)]` on Block fields
+            // (tags, properties, marks, …) only fires for ABSENT keys, not
+            // present-but-null. Routing metadata still propagates as null.
+            let is_null = matches!(json_val, serde_json::Value::Null);
 
             // Keys starting with `_` are routing metadata — placed at the
             // top level of the event payload, not in the `data` object.
             if key.starts_with('_') {
                 payload.insert(key.clone(), json_val);
+            } else if is_null {
+                continue;
             } else if key == "properties" {
                 // Existing properties — merge into props_map.
                 // Handles both String (raw JSON from SQL) and Object (parsed by Turso).
@@ -715,7 +857,7 @@ impl SqlOperationProvider {
         }
 
         if let Some(id_val) = params.get("id").and_then(|v| v.as_string()) {
-            eprintln!(
+            tracing::trace!(
                 "[BUILD_EVENT_TRACE] id={} data_keys={:?} properties={:?}",
                 id_val,
                 data_map.keys().collect::<Vec<_>>(),
@@ -865,6 +1007,41 @@ impl OperationProvider for SqlOperationProvider {
 
                 let sql_value = Self::value_to_sql(&value);
 
+                // Edge-typed field: DELETE all current rows then INSERT new
+                // ones (route through prepare-style helper so set_field
+                // honours the same junction-table contract as create/update).
+                if let Some(descriptor) = self.edge_fields.get(field) {
+                    let empty: Vec<Value> = Vec::new();
+                    let arr: &Vec<Value> = match &value {
+                        Value::Array(items) => items,
+                        Value::Null => &empty,
+                        other => {
+                            return Err(format!(
+                                "set_field for edge '{}' must be Value::Array, got {:?}",
+                                field, other
+                            )
+                            .into());
+                        }
+                    };
+                    let targets: Vec<String> = arr
+                        .iter()
+                        .map(|v| match v {
+                            Value::String(s) => Ok(s.clone()),
+                            other => Err(format!(
+                                "set_field for edge '{}' items must be Value::String, got {:?}",
+                                field, other
+                            )),
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    for stmt in Self::edge_field_replace_sql(&id, descriptor, &targets) {
+                        self.db_handle
+                            .execute(&stmt, vec![])
+                            .await
+                            .map_err(|e| format!("Failed to execute edge-field SQL: {}", e))?;
+                    }
+                    return Ok(OperationResult::irreversible(Vec::new()));
+                }
+
                 let sql = if self.known_columns.contains(&*field) {
                     format!(
                         "UPDATE {} SET {} = {} WHERE id = '{}'",
@@ -913,7 +1090,7 @@ impl OperationProvider for SqlOperationProvider {
                         .and_then(|v| v.as_string())
                         .unwrap_or("")
                         .to_string();
-                    eprintln!(
+                    tracing::trace!(
                         "[SET_FIELD_TRACE] id={} post-UPDATE content={:?} (wrote={:?})",
                         id,
                         after_content,
@@ -1000,23 +1177,22 @@ impl OperationProvider for SqlOperationProvider {
                 };
 
                 let response = if !inserted {
-                    // Our id doesn't exist → INSERT was ignored because a row
-                    // with the same (parent_id, name) already exists. Find it.
-                    let name = params.get("name").and_then(|v| v.as_string());
-                    let parent_id = params.get("parent_id").and_then(|v| v.as_string());
-                    match (parent_id, name) {
-                        (Some(pid), Some(n)) => {
+                    // Our id doesn't exist → INSERT was ignored. With the unique
+                    // (parent_id, name) index gone, this branch only triggers on
+                    // primary-key collision; resolve by id alone.
+                    let block_id = params.get("id").and_then(|v| v.as_string());
+                    match block_id {
+                        Some(bid) => {
                             let find_sql = format!(
-                                "SELECT id FROM {} WHERE parent_id = '{}' AND name = '{}'",
+                                "SELECT id FROM {} WHERE id = '{}'",
                                 self.table_name,
-                                pid.replace('\'', "''"),
-                                n.replace('\'', "''")
+                                bid.replace('\'', "''"),
                             );
                             let existing_id = self
                                 .db_handle
                                 .query(&find_sql, HashMap::new())
                                 .await
-                                .ok() // ALLOW(ok): find_document_uri fallback
+                                .ok() // ALLOW(ok): id-collision fallback
                                 .and_then(|rows| rows.into_iter().next())
                                 .and_then(|row| row.get("id").cloned());
                             existing_id.map(|v| match v {

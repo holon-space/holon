@@ -1,8 +1,14 @@
 //! Turso-based EventBus implementation
 //!
 //! Uses Turso CDC (Change Data Capture) for event subscription.
+//!
+//! Watermark and consumer_position are backed by a materialized view
+//! (`mv_events_watermark`) so CDC delivers push-based updates; the
+//! trait methods read from in-process signals (no SQL round-trip).
 
 use async_trait::async_trait;
+use futures_signals::signal::Mutable;
+use futures_signals::signal_map::MutableBTreeMap;
 use serde_json;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -16,24 +22,163 @@ use crate::sync::event_bus::{
 };
 use holon_api::Value;
 
+const WATERMARK_VIEW: &str = "mv_events_watermark";
+
+/// Watermark state backed by CDC on `mv_events_watermark`.
+#[derive(Clone)]
+pub struct WatermarkState {
+    pub global: Mutable<i64>,
+    pub by_consumer: MutableBTreeMap<String, i64>,
+}
+
+impl WatermarkState {
+    /// Start the CDC listener and bootstrap current values from SQL.
+    ///
+    /// Call after `TursoEventBus::init_schema()` so the matview exists.
+    pub async fn start(db_handle: &DbHandle) -> Result<Self> {
+        let state = Self {
+            global: Mutable::new(0),
+            by_consumer: MutableBTreeMap::new(),
+        };
+
+        // Subscribe to CDC _before_ bootstrap so nothing is missed.
+        let mut cdc_stream = db_handle.row_changes();
+
+        // Bootstrap: single query to seed current values.
+        let bootstrap_sql = "SELECT \
+            MAX(created_at) AS global_ts, \
+            MAX(CASE WHEN processed_by_loro = 1 THEN created_at END) AS loro_ts, \
+            MAX(CASE WHEN processed_by_org  = 1 THEN created_at END) AS org_ts, \
+            MAX(CASE WHEN processed_by_cache = 1 THEN created_at END) AS cache_ts \
+            FROM events";
+        if let Ok(rows) = db_handle.query(bootstrap_sql, HashMap::new()).await {
+            if let Some(row) = rows.into_iter().next() {
+                let read_i64 = |key: &str| -> i64 {
+                    row.get(key)
+                        .and_then(|v| match v {
+                            Value::Integer(i) => Some(*i),
+                            _ => None,
+                        })
+                        .unwrap_or(0)
+                };
+                *state.global.lock_mut() = read_i64("global_ts");
+                let mut by_consumer = state.by_consumer.lock_mut();
+                for (consumer, col) in [
+                    ("loro", "loro_ts"),
+                    ("org", "org_ts"),
+                    ("cache", "cache_ts"),
+                ] {
+                    let ts = read_i64(col);
+                    if ts > 0 {
+                        by_consumer.insert_cloned(consumer.to_string(), ts);
+                    }
+                }
+            }
+        }
+
+        // Spawn background task that applies CDC increments.
+        let state_clone = state.clone();
+        crate::util::spawn_actor(async move {
+            while let Some(batch) = cdc_stream.next().await {
+                for rc in &batch.inner.items {
+                    if rc.relation_name != WATERMARK_VIEW {
+                        continue;
+                    }
+                    state_clone.apply_cdc(&rc.change);
+                }
+            }
+            tracing::debug!("[WatermarkState] CDC stream closed");
+        });
+
+        Ok(state)
+    }
+
+    fn bump_global(&self, ts: i64) {
+        let mut g = self.global.lock_mut();
+        if ts > *g {
+            *g = ts;
+        }
+    }
+
+    fn bump_consumer(&self, consumer: &str, ts: i64) {
+        let mut map = self.by_consumer.lock_mut();
+        let cur = map.get(consumer).copied().unwrap_or(0);
+        if ts > cur {
+            map.insert_cloned(consumer.to_string(), ts);
+        }
+    }
+
+    fn apply_cdc(&self, change: &crate::storage::turso::ChangeData) {
+        use crate::storage::turso::ChangeData;
+        match change {
+            ChangeData::Created { data, .. } | ChangeData::Updated { data, .. } => {
+                let ts = data
+                    .get("created_at")
+                    .and_then(|v| match v {
+                        Value::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                if ts > 0 {
+                    self.bump_global(ts);
+                }
+                for (consumer, col) in [
+                    ("loro", "processed_by_loro"),
+                    ("org", "processed_by_org"),
+                    ("cache", "processed_by_cache"),
+                ] {
+                    let is_processed = data
+                        .get(col)
+                        .and_then(|v| match v {
+                            Value::Integer(i) => Some(*i == 1),
+                            _ => None,
+                        })
+                        .unwrap_or(false);
+                    if is_processed {
+                        self.bump_consumer(consumer, ts);
+                    }
+                }
+            }
+            ChangeData::Deleted { .. } | ChangeData::FieldsChanged { .. } => {}
+        }
+    }
+}
+
 /// Turso-based EventBus implementation
 pub struct TursoEventBus {
     db_handle: DbHandle,
+    watermark_state: WatermarkState,
 }
 
 impl TursoEventBus {
-    /// Create a new TursoEventBus
-    pub fn new(db_handle: DbHandle) -> Self {
-        Self { db_handle }
+    pub fn new(db_handle: DbHandle, watermark_state: WatermarkState) -> Self {
+        Self {
+            db_handle,
+            watermark_state,
+        }
     }
 
-    /// Initialize the events table schema
-    pub async fn init_schema(&self) -> Result<()> {
+    /// Reactive signal of the global watermark (max `created_at`).
+    pub fn watermark_signal(&self) -> impl futures_signals::signal::Signal<Item = i64> {
+        self.watermark_state.global.signal()
+    }
+
+    /// Run DDL to create events table, indexes, and watermark matview.
+    ///
+    /// Call once before constructing `TursoEventBus` and starting `WatermarkState`.
+    pub async fn init_schema(db_handle: &DbHandle) -> Result<()> {
         for stmt in crate::storage::sql_statements(include_str!("../../sql/schema/events.sql")) {
-            self.db_handle.execute_ddl(stmt).await.map_err(|e| {
+            db_handle.execute_ddl(stmt).await.map_err(|e| {
                 StorageError::DatabaseError(format!("Failed to execute events schema DDL: {}", e))
             })?;
         }
+
+        db_handle
+            .execute_ddl(include_str!("../../sql/schema/mv_events_watermark.sql"))
+            .await
+            .map_err(|e| {
+                StorageError::DatabaseError(format!("Failed to create {WATERMARK_VIEW}: {e}"))
+            })?;
 
         tracing::info!("[TursoEventBus] Schema initialized");
         Ok(())
@@ -534,52 +679,16 @@ impl EventBus for TursoEventBus {
     }
 
     async fn watermark(&self) -> Result<i64> {
-        let rows = self
-            .db_handle
-            .query("SELECT MAX(created_at) AS ts FROM events", HashMap::new())
-            .await
-            .map_err(|e| {
-                StorageError::DatabaseError(format!("Failed to read events watermark: {}", e))
-            })?;
-        Ok(rows
-            .into_iter()
-            .next()
-            .and_then(|r| match r.get("ts") {
-                Some(Value::Integer(t)) => Some(*t),
-                _ => None,
-            })
-            .unwrap_or(0))
+        Ok(self.watermark_state.global.get())
     }
 
     async fn consumer_position(&self, consumer: &str) -> Result<i64> {
-        let column = match consumer {
-            "loro" => "processed_by_loro",
-            "org" => "processed_by_org",
-            "cache" => "processed_by_cache",
-            other => {
-                return Err(StorageError::DatabaseError(format!(
-                    "Unknown consumer for watermark query: {other}"
-                ))
-                .into());
-            }
-        };
-        let sql = format!("SELECT MAX(created_at) AS ts FROM events WHERE {column} = 1");
-        let rows = self
-            .db_handle
-            .query(&sql, HashMap::new())
-            .await
-            .map_err(|e| {
-                StorageError::DatabaseError(format!(
-                    "Failed to read consumer '{consumer}' watermark: {e}"
-                ))
-            })?;
-        Ok(rows
-            .into_iter()
-            .next()
-            .and_then(|r| match r.get("ts") {
-                Some(Value::Integer(t)) => Some(*t),
-                _ => None,
-            })
+        Ok(self
+            .watermark_state
+            .by_consumer
+            .lock_ref()
+            .get(consumer)
+            .copied()
             .unwrap_or(0))
     }
 

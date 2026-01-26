@@ -53,14 +53,13 @@ pub enum Mutation {
 /// When `is_create` is true, task_state is always set from fields (no clear-to-None path).
 /// The caller handles update-specific task_state clearing separately.
 fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_create: bool) {
-    if is_create {
-        if let Some(task_state) = fields
+    if is_create
+        && let Some(task_state) = fields
             .get("task_state")
             .or_else(|| fields.get("TODO"))
             .and_then(|v| v.as_string())
-        {
-            block.set_task_state(Some(holon_api::TaskState::from_keyword(&task_state)));
-        }
+    {
+        block.set_task_state(Some(holon_api::TaskState::from_keyword(task_state)));
     }
     if let Some(priority) = fields
         .get("priority")
@@ -83,19 +82,17 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
         .get("scheduled")
         .or_else(|| fields.get("SCHEDULED"))
         .and_then(|v| v.as_string())
+        && let Ok(ts) = holon_api::types::Timestamp::parse(scheduled)
     {
-        if let Ok(ts) = holon_api::types::Timestamp::parse(&scheduled) {
-            block.set_scheduled(Some(ts));
-        }
+        block.set_scheduled(Some(ts));
     }
     if let Some(deadline) = fields
         .get("deadline")
         .or_else(|| fields.get("DEADLINE"))
         .and_then(|v| v.as_string())
+        && let Ok(ts) = holon_api::types::Timestamp::parse(deadline)
     {
-        if let Ok(ts) = holon_api::types::Timestamp::parse(&deadline) {
-            block.set_deadline(Some(ts));
-        }
+        block.set_deadline(Some(ts));
     }
 
     let extra_keys: &[&str] = if is_create {
@@ -141,19 +138,20 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
 /// Normalize content to match what an org round-trip will produce.
 ///
 /// For Text blocks the first line becomes the org headline, which the parser
-/// `.trim()`s on re-parse, so any trailing whitespace on the first line is
-/// stripped. Trailing whitespace on the entire string is also stripped. Source
-/// blocks preserve content verbatim and are returned unchanged (aside from
-/// overall trailing-whitespace trim, which the renderer's `push_str(content);
-/// push('\n')` path doesn't reintroduce differently).
+/// `.trim()`s (both ends) on re-parse, so leading *and* trailing whitespace
+/// on the first line is stripped. Trailing whitespace on the entire string
+/// is also stripped. Source blocks preserve content verbatim and are returned
+/// unchanged (aside from overall trailing-whitespace trim, which the
+/// renderer's `push_str(content); push('\n')` path doesn't reintroduce
+/// differently).
 pub fn normalize_content_for_org_roundtrip(content: &str, content_type: ContentType) -> String {
     let trimmed_end = content.trim_end();
     if content_type == ContentType::Source {
         return trimmed_end.to_string();
     }
     match trimmed_end.split_once('\n') {
-        Some((first, rest)) => format!("{}\n{}", first.trim_end(), rest),
-        None => trimmed_end.to_string(),
+        Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
+        None => trimmed_end.trim_start().to_string(),
     }
 }
 
@@ -292,13 +290,30 @@ impl Mutation {
 
                 apply_org_properties(&mut block, fields, true);
 
+                // Mirror production: a Create without an explicit sort_key
+                // lands on `block.sort_key='a0'` (SQL column default), which
+                // sorts *after* every gen_n_keys-assigned sibling (lowercase
+                // 'a' > uppercase hex digits used by FractionalIndex). The
+                // canonicalizer in `assign_reference_sequences_canonical`
+                // sorts siblings by `sequence` then id; if the new block
+                // inherits the default `sequence=0`, the id tie-break decides
+                // the slot, which is arbitrary. Push it past every existing
+                // sibling instead so canonicalization places it last.
+                let max_sibling_seq = blocks
+                    .iter()
+                    .filter(|b| b.parent_id == *parent_id)
+                    .map(|b| b.sequence())
+                    .max()
+                    .unwrap_or(-1);
+                block.set_sequence(max_sibling_seq + 1);
+
                 blocks.push(block);
             }
             Mutation::Update { id, fields, .. } => {
                 if let Some(block) = blocks.iter_mut().find(|b| b.id == *id) {
                     if let Some(content) = fields.get("content").and_then(|v| v.as_string()) {
                         block.content =
-                            normalize_content_for_org_roundtrip(&content, block.content_type);
+                            normalize_content_for_org_roundtrip(content, block.content_type);
                     }
 
                     if fields.contains_key("task_state") || fields.contains_key("TODO") {
@@ -308,7 +323,7 @@ impl Mutation {
                             .and_then(|v| v.as_string())
                         {
                             Some(kw) => {
-                                block.set_task_state(Some(holon_api::TaskState::from_keyword(&kw)))
+                                block.set_task_state(Some(holon_api::TaskState::from_keyword(kw)))
                             }
                             None => block.set_task_state(None),
                         }

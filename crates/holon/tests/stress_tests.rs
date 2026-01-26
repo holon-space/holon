@@ -16,13 +16,13 @@ async fn test_high_frequency_updates() -> Result<()> {
 
     let mut updates = Vec::new();
     for i in 0..1000 {
-        let update = doc1.insert_text("editor", i, "x").await?;
+        let update = doc1.insert_text("editor", i, "x")?;
         updates.push(update);
     }
 
     let start = Instant::now();
     for update in updates {
-        doc2.apply_update(&update).await?;
+        doc2.apply_update(&update)?;
     }
     let duration = start.elapsed();
 
@@ -32,8 +32,8 @@ async fn test_high_frequency_updates() -> Result<()> {
         "Should apply 1000 updates in under 10 seconds"
     );
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
     assert_eq!(text1, text2);
     assert_eq!(text1.len(), 1000);
 
@@ -50,7 +50,7 @@ async fn test_large_batch_sync() -> Result<()> {
     let start = Instant::now();
     let chunk = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(100);
     for i in 0..100 {
-        doc1.insert_text("editor", i * chunk.len(), &chunk).await?;
+        doc1.insert_text("editor", i * chunk.len(), &chunk)?;
     }
     let creation_time = start.elapsed();
     println!("Created large document in {:?}", creation_time);
@@ -79,7 +79,7 @@ async fn test_large_batch_sync() -> Result<()> {
         "Large sync should complete in under 30 seconds"
     );
 
-    let text2 = doc2.get_text("editor").await?;
+    let text2 = doc2.get_text("editor")?;
     assert!(text2.len() > 100000);
 
     Ok(())
@@ -94,8 +94,7 @@ async fn test_many_small_containers() -> Result<()> {
 
     for i in 0..100 {
         let container_name = format!("container_{}", i);
-        doc1.insert_text(&container_name, 0, &format!("Content {}", i))
-            .await?;
+        doc1.insert_text(&container_name, 0, &format!("Content {}", i))?;
     }
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
@@ -114,7 +113,7 @@ async fn test_many_small_containers() -> Result<()> {
 
     for i in 0..100 {
         let container_name = format!("container_{}", i);
-        let text = doc2.get_text(&container_name).await?;
+        let text = doc2.get_text(&container_name)?;
         assert_eq!(text, format!("Content {}", i));
     }
 
@@ -132,7 +131,7 @@ async fn test_sustained_concurrent_operations() -> Result<()> {
     let doc1_clone = doc1.clone();
     let writer1 = tokio::spawn(async move {
         for i in 0..50 {
-            doc1_clone.insert_text("editor", i, "A").await.ok();
+            doc1_clone.insert_text("editor", i, "A").ok();
             sleep(Duration::from_millis(10)).await;
         }
     });
@@ -140,7 +139,7 @@ async fn test_sustained_concurrent_operations() -> Result<()> {
     let doc2_clone = doc2.clone();
     let writer2 = tokio::spawn(async move {
         for i in 0..50 {
-            doc2_clone.insert_text("editor", i, "B").await.ok();
+            doc2_clone.insert_text("editor", i, "B").ok();
             sleep(Duration::from_millis(10)).await;
         }
     });
@@ -148,14 +147,14 @@ async fn test_sustained_concurrent_operations() -> Result<()> {
     writer1.await?;
     writer2.await?;
 
-    let update1 = doc1.export_snapshot().await?;
-    let update2 = doc2.export_snapshot().await?;
+    let update1 = doc1.export_snapshot()?;
+    let update2 = doc2.export_snapshot()?;
 
-    doc1.apply_update(&update2).await?;
-    doc2.apply_update(&update1).await?;
+    doc1.apply_update(&update2)?;
+    doc2.apply_update(&update1)?;
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1, text2);
 
@@ -168,17 +167,17 @@ async fn test_memory_efficiency_large_doc() -> Result<()> {
 
     let iterations = 10000;
     for i in 0..iterations {
-        doc.insert_text("editor", i, "x").await?;
+        doc.insert_text("editor", i, "x")?;
     }
 
-    let snapshot = doc.export_snapshot().await?;
+    let snapshot = doc.export_snapshot()?;
 
     assert!(
         snapshot.len() < 1_000_000,
         "Snapshot should be reasonably compressed"
     );
 
-    let text = doc.get_text("editor").await?;
+    let text = doc.get_text("editor")?;
     assert_eq!(text.len(), iterations);
 
     Ok(())
@@ -188,7 +187,7 @@ async fn test_memory_efficiency_large_doc() -> Result<()> {
 #[tokio::test]
 async fn test_parallel_sync_operations() -> Result<()> {
     let hub = Arc::new(LoroDocument::new("parallel-hub".to_string())?);
-    hub.insert_text("editor", 0, "Hub content").await?;
+    hub.insert_text("editor", 0, "Hub content")?;
 
     let hub_adapter = IrohSyncAdapter::new("loro-sync").await?;
     let peer_addr = hub_adapter.addr();
@@ -210,7 +209,6 @@ async fn test_parallel_sync_operations() -> Result<()> {
         let connect_handle = tokio::spawn(async move {
             let doc = LoroDocument::new("parallel-hub".to_string()).ok()?;
             doc.insert_text("editor", 0, &format!("Client {}", i))
-                .await
                 .ok()?;
             let adapter = IrohSyncAdapter::new("loro-sync").await.ok()?;
             sleep(Duration::from_millis(100)).await;
@@ -230,7 +228,7 @@ async fn test_parallel_sync_operations() -> Result<()> {
         let _ = handle.await;
     }
 
-    let hub_text = hub.get_text("editor").await?;
+    let hub_text = hub.get_text("editor")?;
     assert!(!hub_text.is_empty());
 
     Ok(())
@@ -243,7 +241,7 @@ async fn test_sync_latency_measurement() -> Result<()> {
     let doc1 = LoroDocument::new("latency-test".to_string())?;
     let doc2 = LoroDocument::new("latency-test".to_string())?;
 
-    doc1.insert_text("editor", 0, "Initial").await?;
+    doc1.insert_text("editor", 0, "Initial")?;
 
     let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
     let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
@@ -276,11 +274,11 @@ async fn test_sync_latency_measurement() -> Result<()> {
 async fn test_update_size_efficiency() -> Result<()> {
     let doc = LoroDocument::new("update-size".to_string())?;
 
-    let update1 = doc.insert_text("editor", 0, "Small").await?;
+    let update1 = doc.insert_text("editor", 0, "Small")?;
     assert!(update1.len() < 1000, "Small update should be compact");
 
     let large_text = "x".repeat(100000);
-    let update2 = doc.insert_text("editor", 5, &large_text).await?;
+    let update2 = doc.insert_text("editor", 5, &large_text)?;
 
     assert!(
         update2.len() < large_text.len() * 2,
@@ -294,7 +292,7 @@ async fn test_update_size_efficiency() -> Result<()> {
 #[tokio::test]
 async fn test_rapid_peer_connections() -> Result<()> {
     let hub = Arc::new(LoroDocument::new("rapid-conn".to_string())?);
-    hub.insert_text("editor", 0, "Hub").await?;
+    hub.insert_text("editor", 0, "Hub")?;
 
     for _ in 0..10 {
         let hub_clone = hub.clone();
@@ -306,7 +304,7 @@ async fn test_rapid_peer_connections() -> Result<()> {
         sleep(Duration::from_millis(100)).await;
 
         let doc = LoroDocument::new("rapid-conn".to_string())?;
-        doc.insert_text("editor", 0, "Client").await?;
+        doc.insert_text("editor", 0, "Client")?;
         let client_adapter = IrohSyncAdapter::new("loro-sync").await?;
         let _ = client_adapter.sync_with_peer(&doc, addr).await;
 
@@ -323,17 +321,17 @@ async fn test_long_running_stability() -> Result<()> {
 
     for round in 0..20 {
         for i in 0..10 {
-            doc1.insert_text("editor", round * 10 + i, "x").await?;
+            doc1.insert_text("editor", round * 10 + i, "x")?;
         }
 
-        let update = doc1.export_snapshot().await?;
-        doc2.apply_update(&update).await?;
+        let update = doc1.export_snapshot()?;
+        doc2.apply_update(&update)?;
 
         sleep(Duration::from_millis(50)).await;
     }
 
-    let text1 = doc1.get_text("editor").await?;
-    let text2 = doc2.get_text("editor").await?;
+    let text1 = doc1.get_text("editor")?;
+    let text2 = doc2.get_text("editor")?;
 
     assert_eq!(text1, text2);
     assert_eq!(text1.len(), 200);

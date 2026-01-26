@@ -50,6 +50,7 @@ serde_yaml.workspace = true
 holon-engine = { path = "../holon-engine" }
 fluxdi.workspace = true
 futures.workspace = true
+futures-signals.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

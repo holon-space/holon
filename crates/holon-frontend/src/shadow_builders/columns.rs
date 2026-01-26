@@ -124,7 +124,8 @@ holon_macros::widget_builder! {
                         children_config,
                         gap,
                         Some(parent),
-                        CollectionVariant::Columns { gap },
+                        CollectionVariant::from_name("columns", gap)
+                            .expect("`columns` layout is registered as a builtin"),
                     );
                     return ViewModel {
                         collection: Some(std::sync::Arc::new(view)),
@@ -179,6 +180,7 @@ holon_macros::widget_builder! {
                     sort_key,
                     parent_space,
                     child_space_fn,
+                    None,
                     None,
                 )
             }

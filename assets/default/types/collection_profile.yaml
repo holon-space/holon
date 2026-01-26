@@ -7,10 +7,24 @@ entity_name: collection
 computed: {}
 
 variants:
+  - name: tree_view
+    priority: 0
+    # `creation_slot: true` opts this collection into a trailing-slot
+    # placeholder rendered after the real children. `virtual_parent: true`
+    # is the sentinel resolved into the surrounding entity's id by
+    # `render_interpreter::resolve_virtual_parent` (live_query path) and by
+    # `block_domain::collection_render_from_profile` (live_block path). The
+    # tree builder reads the resolved string to construct the slot's
+    # synthetic data row id (`<scheme>:__virtual:<parent_local>`).
+    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sequence"), item_template: render_entity(), creation_slot: true, virtual_parent: true})'
   - name: table_view
     priority: 1
     condition: 'view_mode == "table"'
     render: 'table(#{sortkey: col("sequence"), item_template: render_entity()})'
-  - name: tree_view
-    priority: 0
-    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sequence"), item_template: render_entity()})'
+  - name: board_view
+    priority: 1
+    condition: 'view_mode == "board"'
+    # Kanban: lane by task_state (TODO/DOING/DONE/...). The board(...) widget
+    # handles streaming data via its grouped-driver path; row(...) does NOT
+    # (calls into_static_items on its children, panics on live queries).
+    render: 'board(#{item_template: render_entity(), lane_field: "task_state"})'

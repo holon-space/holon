@@ -25,12 +25,28 @@ pub fn sort_key_column<'a>(args: &'a ResolvedArgs) -> Option<&'a str> {
     }
 }
 
-pub fn sort_value(v: Option<&Value>) -> f64 {
+/// Convert a sort key value to a string whose lexicographic ordering
+/// matches the desired sort order.
+///
+/// FractionalIndex hex strings (e.g. `"80"`, `"7F80"`, `"A0"`) are passed
+/// through as-is — their lexicographic byte order is the correct sort order.
+/// Integers are zero-padded to 20 digits, floats are converted via their
+/// IEEE 754 bits (with sign-bit flipping for negative values).
+pub fn sort_value(v: Option<&Value>) -> String {
     match v {
-        Some(Value::Integer(i)) => *i as f64,
-        Some(Value::Float(f)) => *f,
-        Some(Value::String(s)) => s.parse().unwrap_or(f64::MAX),
-        _ => f64::MAX,
+        Some(Value::Integer(i)) => format!("{:020}", *i as i128),
+        Some(Value::Float(f)) => {
+            let bits = f.to_bits();
+            // Flip sign bit so IEEE 754 bit order matches numeric order.
+            let adjusted = if bits & (1 << 63) != 0 {
+                !bits
+            } else {
+                bits | (1 << 63)
+            };
+            format!("{:020}", adjusted)
+        }
+        Some(Value::String(s)) => s.clone(),
+        _ => "\u{10FFFF}".to_string(),
     }
 }
 
@@ -140,7 +156,7 @@ impl OutlineTree {
         sorted_rows.sort_by(|a, b| {
             let ka = sort_value(a.get(sort_col));
             let kb = sort_value(b.get(sort_col));
-            ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+            ka.cmp(&kb)
         });
 
         let mut roots: Vec<usize> = Vec::new();

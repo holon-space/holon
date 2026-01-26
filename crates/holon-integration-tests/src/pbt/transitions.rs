@@ -39,12 +39,18 @@ pub fn deterministic_peer_block_id(
 
 #[derive(Debug, Clone)]
 pub enum E2ETransition {
+    Nothing,
     // === Pre-startup transitions ===
     /// Write an org file to temp directory (before app starts)
-    WriteOrgFile { filename: String, content: String },
+    WriteOrgFile {
+        filename: String,
+        content: String,
+    },
 
     /// Create a directory (possibly nested) before app starts
-    CreateDirectory { path: String },
+    CreateDirectory {
+        path: String,
+    },
 
     /// Initialize git repository (runs `git init`)
     GitInit,
@@ -71,7 +77,9 @@ pub enum E2ETransition {
 
     // === Post-startup transitions ===
     /// Create a new document (Org file)
-    CreateDocument { file_name: String },
+    CreateDocument {
+        file_name: String,
+    },
 
     /// Apply a mutation from any source (UI, external file, Loro sync)
     ApplyMutation(MutationEvent),
@@ -84,22 +92,35 @@ pub enum E2ETransition {
     },
 
     /// Remove a watch
-    RemoveWatch { query_id: String },
+    RemoveWatch {
+        query_id: String,
+    },
 
     /// Switch the active view filter
-    SwitchView { view_name: String },
+    SwitchView {
+        view_name: String,
+    },
 
     /// Navigate to focus on a specific block in a region
-    NavigateFocus { region: Region, block_id: EntityUri },
+    NavigateFocus {
+        region: Region,
+        block_id: EntityUri,
+    },
 
     /// Navigate back in history for a region
-    NavigateBack { region: Region },
+    NavigateBack {
+        region: Region,
+    },
 
     /// Navigate forward in history for a region
-    NavigateForward { region: Region },
+    NavigateForward {
+        region: Region,
+    },
 
     /// Navigate to home (root view) for a region
-    NavigateHome { region: Region },
+    NavigateHome {
+        region: Region,
+    },
 
     /// Simulate app restart: clears OrgSyncController's last_projection.
     SimulateRestart,
@@ -152,7 +173,9 @@ pub enum E2ETransition {
     ///
     /// This validates that EditorController correctly routes triggers to the
     /// popup menu and that operations dispatched through the menu path execute.
-    TriggerSlashCommand { block_id: EntityUri },
+    TriggerSlashCommand {
+        block_id: EntityUri,
+    },
 
     /// Simulate the `[[` doc link trigger → EditorController → InsertText pipeline.
     /// Tests trigger detection (on_text_changed with `[[` mid-line) and the
@@ -179,16 +202,24 @@ pub enum E2ETransition {
 
     /// Indent block via Tab keybinding — make child of previous sibling.
     /// Exercises: keybinding registry → shadow index → bubble_input → indent operation.
-    Indent { block_id: EntityUri },
+    Indent {
+        block_id: EntityUri,
+    },
 
     /// Outdent block via Shift+Tab keybinding — move to grandparent level.
-    Outdent { block_id: EntityUri },
+    Outdent {
+        block_id: EntityUri,
+    },
 
     /// Move block up via Alt+Up keybinding — swap with previous sibling.
-    MoveUp { block_id: EntityUri },
+    MoveUp {
+        block_id: EntityUri,
+    },
 
     /// Move block down via Alt+Down keybinding — swap with next sibling.
-    MoveDown { block_id: EntityUri },
+    MoveDown {
+        block_id: EntityUri,
+    },
 
     /// Drag `source` and drop it onto `target` so that `source` becomes a
     /// child of `target`. Headless: walks the shadow tree to assert that a
@@ -210,10 +241,73 @@ pub enum E2ETransition {
         position: usize,
     },
 
+    /// Join block into its previous sibling via Backspace at position 0.
+    /// Symmetric inverse of `SplitBlock`: appends `block_id`'s content to the
+    /// end of the previous sibling, re-parents `block_id`'s children under
+    /// the previous sibling, then deletes `block_id`. The cursor lands at
+    /// the join boundary (= old previous-sibling content length).
+    ///
+    /// Precondition: `block_id` must have a previous sibling at the same
+    /// level — otherwise there is no block to merge into. (Backspace at
+    /// position 0 in a first-child is a no-op and is not generated.)
+    JoinBlock {
+        block_id: EntityUri,
+    },
+
     /// Click on a block to focus it. The only way to get initial editor focus.
     /// GPUI: enigo click at element center. Headless: navigate_focus teleport.
     /// Hard-asserts that the correct element receives focus.
-    ClickBlock { region: Region, block_id: EntityUri },
+    ClickBlock {
+        region: Region,
+        block_id: EntityUri,
+    },
+
+    // === Atomic editor primitives (GPUI-only — gated by PBT_ATOMIC_EDITOR=1) ===
+    //
+    // Decompose the bundled `SplitBlock`/`JoinBlock`/`EditViaViewModel`
+    // transitions into orthogonal pieces so the generator can compose
+    // sequences like `Focus → Type → DeleteBackward → PressKey(Enter)`.
+    // The reference model maintains an `ActiveEditor` mirror of GPUI's
+    // `InputState`, which exposes the in-memory-vs-DB divergence that
+    // surfaces split-with-pending-edit and similar contract violations.
+    /// Click an EditableText to take editor focus. Reference seeds
+    /// `ActiveEditor.in_memory_content` from the block's saved content
+    /// and lands the cursor at the end of line.
+    FocusEditableText {
+        block_id: EntityUri,
+    },
+
+    /// Move the caret to a byte offset within `ActiveEditor.in_memory_content`.
+    /// SUT: `Home` + N×`Right` keystrokes through `PlatformInput`.
+    MoveCursor {
+        byte_position: usize,
+    },
+
+    /// Type ASCII characters at the current cursor offset. Modifies
+    /// `InputState.text()` only — does NOT commit to DB.
+    TypeChars {
+        text: String,
+    },
+
+    /// Press Backspace `count` times. Modifies `InputState.text()` only.
+    /// (Cursor at zero with the editor focused is the join_block path —
+    /// dispatch via `PressKey` for that, not here.)
+    DeleteBackward {
+        count: usize,
+    },
+
+    /// Dispatch a chord while an editor is focused. Reference model encodes
+    /// the *intended* contract: any structural chord (Enter/Backspace at 0/
+    /// Tab/Shift+Tab/Alt+Up/Alt+Down) must commit `in_memory_content` to
+    /// the block first, then mutate structure. Production today bypasses
+    /// the commit — `assert_blocks_equivalent` catches the divergence.
+    PressKey {
+        chord: holon_api::KeyChord,
+    },
+
+    /// Click outside the editor or otherwise drop focus, committing any
+    /// pending in-memory edit via `set_field`. Clears `ActiveEditor`.
+    Blur,
 
     /// Arrow-key navigation from the currently focused block.
     /// Only valid when a block is focused (must ClickBlock first).
@@ -242,13 +336,41 @@ pub enum E2ETransition {
     AddPeer,
 
     /// Edit a block on a peer's LoroDoc directly (no SQL, no BackendEngine).
-    PeerEdit { peer_idx: usize, op: PeerEditOp },
+    PeerEdit {
+        peer_idx: usize,
+        op: PeerEditOp,
+    },
 
     /// Bidirectional sync between primary's LoroDoc and a peer via DirectSync.
-    SyncWithPeer { peer_idx: usize },
+    SyncWithPeer {
+        peer_idx: usize,
+    },
 
     /// One-directional merge: peer's changes → primary.
-    MergeFromPeer { peer_idx: usize },
+    MergeFromPeer {
+        peer_idx: usize,
+    },
+
+    // === MutableText transitions (Phase 3) ===
+    /// Edit a block's LoroText container on a peer at the character level.
+    PeerCharEdit {
+        peer_idx: usize,
+        block_id: String,
+        op: TextOp,
+    },
+}
+
+/// Character-level text operations on a peer's LoroText container.
+#[derive(Debug, Clone)]
+pub enum TextOp {
+    Insert {
+        pos_codepoint: usize,
+        text: String,
+    },
+    Delete {
+        pos_codepoint: usize,
+        len_codepoint: usize,
+    },
 }
 
 /// Operations that can be performed on a peer's Loro tree.
@@ -273,6 +395,7 @@ pub enum PeerEditOp {
 impl E2ETransition {
     pub fn variant_name(&self) -> &'static str {
         match self {
+            Self::Nothing => "Nothing",
             Self::WriteOrgFile { .. } => "WriteOrgFile",
             Self::CreateDirectory { .. } => "CreateDirectory",
             Self::GitInit => "GitInit",
@@ -303,7 +426,14 @@ impl E2ETransition {
             Self::MoveDown { .. } => "MoveDown",
             Self::DragDropBlock { .. } => "DragDropBlock",
             Self::SplitBlock { .. } => "SplitBlock",
+            Self::JoinBlock { .. } => "JoinBlock",
             Self::ClickBlock { .. } => "ClickBlock",
+            Self::FocusEditableText { .. } => "FocusEditableText",
+            Self::MoveCursor { .. } => "MoveCursor",
+            Self::TypeChars { .. } => "TypeChars",
+            Self::DeleteBackward { .. } => "DeleteBackward",
+            Self::PressKey { .. } => "PressKey",
+            Self::Blur => "Blur",
             Self::ArrowNavigate { .. } => "ArrowNavigate",
             Self::UndoLastMutation => "UndoLastMutation",
             Self::Redo => "Redo",
@@ -312,6 +442,7 @@ impl E2ETransition {
             Self::PeerEdit { .. } => "PeerEdit",
             Self::SyncWithPeer { .. } => "SyncWithPeer",
             Self::MergeFromPeer { .. } => "MergeFromPeer",
+            Self::PeerCharEdit { .. } => "PeerCharEdit",
         }
     }
 }

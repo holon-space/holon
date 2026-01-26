@@ -1,0 +1,3408 @@
+{
+  "success": true,
+  "clones": [
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/mod.rs",
+      "startA": 67,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/tree.rs",
+      "startB": 10,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/list.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/tree.rs",
+      "startB": 1,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/table.rs",
+      "startA": 28,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/tree.rs",
+      "startB": 30,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/source_block.rs",
+      "startA": 10,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/source_editor.rs",
+      "startB": 5,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/section.rs",
+      "startA": 14,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/tree.rs",
+      "startB": 9,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/render_block.rs",
+      "startA": 48,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/source_editor.rs",
+      "startB": 12,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/pie_menu.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/selectable.rs",
+      "startB": 1,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/outline.rs",
+      "startA": 39,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/table.rs",
+      "startB": 28,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/live_query.rs",
+      "startA": 40,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/live_query.rs",
+      "startB": 25,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/live_block.rs",
+      "startA": 9,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/render_block.rs",
+      "startB": 32,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/list.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/tree.rs",
+      "startB": 1,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/list.rs",
+      "startA": 8,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/tree.rs",
+      "startB": 9,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/list.rs",
+      "startA": 33,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/source_editor.rs",
+      "startB": 5,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/editable_text.rs",
+      "startA": 9,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/text.rs",
+      "startB": 13,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/draggable.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/focusable.rs",
+      "startB": 1,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/columns.rs",
+      "startA": 80,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/columns.rs",
+      "startB": 75,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/columns.rs",
+      "startA": 131,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/columns.rs",
+      "startB": 92,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/tree_item.rs",
+      "startA": 130,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/tree_item.rs",
+      "startB": 107,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/state_toggle.rs",
+      "startA": 55,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/state_toggle.rs",
+      "startB": 28,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/source_block.rs",
+      "startA": 2,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/source_editor.rs",
+      "startB": 2,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/pref_field.rs",
+      "startA": 223,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/pref_field.rs",
+      "startB": 104,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/expand_toggle.rs",
+      "startA": 39,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/tree_item.rs",
+      "startB": 75,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/columns.rs",
+      "startA": 121,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/drawer.rs",
+      "startB": 14,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/columns.rs",
+      "startA": 171,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/columns.rs",
+      "startB": 72,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/chat_bubble.rs",
+      "startA": 78,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/chat_bubble.rs",
+      "startB": 39,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/block_operations.rs",
+      "startA": 29,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/source_block.rs",
+      "startB": 38,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/flutter/rust/src/api/shared_pbt.rs",
+      "startA": 134,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/flutter/rust/src/api/shared_pbt.rs",
+      "startB": 73,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus-web/src/render/builders/query_result.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus-web/src/render/builders/tree.rs",
+      "startB": 1,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus-web/src/render/builders/outline.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus-web/src/render/builders/tree.rs",
+      "startB": 1,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus-web/src/render/builders/col.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus-web/src/render/builders/list.rs",
+      "startB": 1,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/tree.rs",
+      "startA": 9,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/tree.rs",
+      "startB": 9,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/text.rs",
+      "startA": 4,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/text.rs",
+      "startB": 5,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/stub.rs",
+      "startA": 9,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/mod.rs",
+      "startB": 67,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/state_toggle.rs",
+      "startA": 42,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/state_toggle.rs",
+      "startB": 59,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/source_block.rs",
+      "startA": 3,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/source_block.rs",
+      "startB": 3,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/selectable.rs",
+      "startA": 3,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/selectable.rs",
+      "startB": 3,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/selectable.rs",
+      "startA": 14,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/selectable.rs",
+      "startB": 14,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/section.rs",
+      "startA": 11,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/section.rs",
+      "startB": 11,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/row.rs",
+      "startA": 4,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/row.rs",
+      "startB": 4,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/outline.rs",
+      "startA": 4,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/outline.rs",
+      "startB": 5,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/outline.rs",
+      "startA": 23,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/outline.rs",
+      "startB": 28,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/list.rs",
+      "startA": 1,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/tree.rs",
+      "startB": 1,
+      "lines": 24,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/editable_text.rs",
+      "startA": 5,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/editable_text.rs",
+      "startB": 8,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/editable_text.rs",
+      "startA": 20,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/editable_text.rs",
+      "startB": 29,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/columns.rs",
+      "startA": 12,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/columns.rs",
+      "startB": 17,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/render/builders/columns.rs",
+      "startA": 44,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/columns.rs",
+      "startB": 43,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",
+      "startA": 166,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",
+      "startB": 116,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",
+      "startA": 183,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",
+      "startB": 150,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 62,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/text.rs",
+      "startB": 3,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 76,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/text.rs",
+      "startB": 21,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 97,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/row.rs",
+      "startB": 14,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 112,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startB": 34,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 163,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/section.rs",
+      "startB": 7,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 244,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/table.rs",
+      "startB": 34,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 262,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/table.rs",
+      "startB": 53,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 285,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startB": 106,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 296,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/tree.rs",
+      "startB": 16,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 306,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/live_query.rs",
+      "startB": 9,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 333,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/live_query.rs",
+      "startB": 52,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 346,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/render_block.rs",
+      "startB": 3,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 400,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startB": 368,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 414,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/interpreter.rs",
+      "startB": 218,
+      "lines": 29,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders.rs",
+      "startA": 465,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/live_query.rs",
+      "startB": 62,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/interpreter.rs",
+      "startA": 46,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/col.rs",
+      "startB": 7,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/interpreter.rs",
+      "startA": 60,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/builders/col.rs",
+      "startB": 7,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startA": 586,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startB": 231,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/render_entity_view.rs",
+      "startA": 101,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/render_entity.rs",
+      "startB": 40,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/reactive_shell.rs",
+      "startA": 501,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/reactive_shell.rs",
+      "startB": 486,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/reactive_shell.rs",
+      "startA": 592,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/render_entity_view.rs",
+      "startB": 79,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/reactive_shell.rs",
+      "startA": 649,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/reactive_shell.rs",
+      "startB": 594,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startA": 444,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startB": 434,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startA": 593,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startB": 460,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startA": 607,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startB": 593,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startA": 612,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startB": 598,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startA": 695,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startB": 678,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startA": 757,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/editor_view.rs",
+      "startB": 151,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/rich_text_runs.rs",
+      "startA": 86,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/render/builders/text.rs",
+      "startB": 144,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/types.rs",
+      "startA": 458,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/types.rs",
+      "startB": 411,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/peer_ops.rs",
+      "startA": 124,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/pbt/peer_ops.rs",
+      "startB": 105,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/value_fns/focus_chain.rs",
+      "startA": 34,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/value_fns/ops_of.rs",
+      "startB": 25,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/outline.rs",
+      "startA": 7,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/tree.rs",
+      "startB": 67,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/outline.rs",
+      "startA": 24,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/tree.rs",
+      "startB": 98,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/list.rs",
+      "startA": 10,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/table.rs",
+      "startB": 10,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/focusable.rs",
+      "startA": 4,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/selectable.rs",
+      "startB": 9,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/editable_text.rs",
+      "startA": 26,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/text.rs",
+      "startB": 49,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/editable_text.rs",
+      "startA": 36,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/state_toggle.rs",
+      "startB": 70,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/draggable.rs",
+      "startA": 4,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/selectable.rs",
+      "startB": 9,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/chat_bubble.rs",
+      "startA": 11,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/collapsible.rs",
+      "startB": 10,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/card.rs",
+      "startA": 9,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/chat_bubble.rs",
+      "startB": 10,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/board_lane.rs",
+      "startA": 8,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/section.rs",
+      "startB": 4,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-engine/src/yaml/net.rs",
+      "startA": 92,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-engine/src/yaml/net.rs",
+      "startB": 64,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/testing/e2e_test_helpers.rs",
+      "startA": 335,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/testing/e2e_test_helpers.rs",
+      "startB": 233,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_event_bus.rs",
+      "startA": 574,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_event_bus.rs",
+      "startB": 542,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_command_log.rs",
+      "startA": 325,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_command_log.rs",
+      "startB": 284,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_command_log.rs",
+      "startA": 367,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_command_log.rs",
+      "startB": 340,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_command_log.rs",
+      "startA": 382,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_command_log.rs",
+      "startB": 355,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startA": 665,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 545,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startA": 699,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 629,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startA": 800,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 629,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startA": 848,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 755,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startA": 119,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startB": 85,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startA": 249,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startB": 212,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startA": 281,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startB": 249,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startA": 372,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_snapshot_store.rs",
+      "startB": 341,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/multi_peer.rs",
+      "startA": 297,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 498,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/multi_peer.rs",
+      "startA": 316,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/multi_peer.rs",
+      "startB": 297,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/multi_peer.rs",
+      "startA": 786,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/multi_peer.rs",
+      "startB": 749,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document_store.rs",
+      "startA": 101,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document_store.rs",
+      "startB": 89,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document_store.rs",
+      "startA": 112,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document_store.rs",
+      "startB": 89,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document.rs",
+      "startA": 277,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document.rs",
+      "startB": 236,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document.rs",
+      "startA": 298,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document.rs",
+      "startB": 232,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document.rs",
+      "startA": 311,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_document.rs",
+      "startB": 245,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_blocks_datasource.rs",
+      "startA": 127,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_blocks_datasource.rs",
+      "startB": 48,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_block_operations.rs",
+      "startA": 672,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_block_operations.rs",
+      "startB": 660,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_block_operations.rs",
+      "startA": 684,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_block_operations.rs",
+      "startB": 660,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/live_data.rs",
+      "startA": 159,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/live_data.rs",
+      "startB": 144,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/live_data.rs",
+      "startA": 186,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/live_data.rs",
+      "startB": 159,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/live_data.rs",
+      "startA": 209,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/live_data.rs",
+      "startB": 157,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/iroh_sync_adapter.rs",
+      "startA": 421,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/multi_peer.rs",
+      "startB": 36,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/iroh_sync_adapter.rs",
+      "startA": 524,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 497,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/iroh_sync_adapter.rs",
+      "startA": 532,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 505,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/iroh_sync_adapter.rs",
+      "startA": 551,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/shared_tree.rs",
+      "startB": 629,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/iroh_sync_adapter.rs",
+      "startA": 641,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/iroh_sync_adapter.rs",
+      "startB": 619,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/fork_at_test.rs",
+      "startA": 33,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/mutable_text.rs",
+      "startB": 201,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/fork_at_test.rs",
+      "startA": 72,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/fork_at_test.rs",
+      "startB": 33,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/fork_at_test.rs",
+      "startA": 214,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/fork_at_test.rs",
+      "startB": 163,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/event_infra_module.rs",
+      "startA": 115,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/event_infra_module.rs",
+      "startB": 67,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/event_bus.rs",
+      "startA": 411,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/event_bus.rs",
+      "startB": 392,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/debounced_commit_worker.rs",
+      "startA": 183,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/debounced_commit_worker.rs",
+      "startB": 140,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/command_log.rs",
+      "startA": 112,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/turso_command_log.rs",
+      "startB": 214,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/cache_event_subscriber.rs",
+      "startA": 180,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/cache_event_subscriber.rs",
+      "startB": 72,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/cache_event_subscriber.rs",
+      "startA": 283,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/cache_event_subscriber.rs",
+      "startB": 271,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startA": 269,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startB": 211,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startA": 285,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startB": 260,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startA": 315,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startB": 177,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startA": 347,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startB": 267,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startA": 408,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startB": 267,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startA": 468,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startB": 267,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startA": 589,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_tests.rs",
+      "startB": 267,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 63,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 25,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 103,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 53,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 118,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 62,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 152,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 53,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 182,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 159,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 206,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 53,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 213,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 159,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 293,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 176,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 321,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 53,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 329,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 163,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 386,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 53,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 396,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 328,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startA": 414,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 368,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_join_panic_repro.rs",
+      "startA": 208,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_join_panic_repro.rs",
+      "startB": 149,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_join_panic_repro.rs",
+      "startA": 223,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_join_panic_repro.rs",
+      "startB": 166,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_join_panic_repro.rs",
+      "startA": 242,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_join_panic_repro.rs",
+      "startB": 187,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 103,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 258,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 206,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 289,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 296,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 110,
+      "lines": 32,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 328,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 144,
+      "lines": 23,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 351,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 169,
+      "lines": 24,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 382,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 189,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startA": 448,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 399,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 66,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 221,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 204,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 238,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 244,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 92,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 261,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 113,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 301,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 36,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 364,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 32,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 394,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 269,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 396,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 132,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 408,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 284,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 426,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 35,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 469,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 284,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 491,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 501,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 257,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 517,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 132,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startA": 532,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_split_block_cdc_drop_repro.rs",
+      "startB": 288,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 20,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 81,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 139,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 176,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 53,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 237,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 306,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 360,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 406,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 414,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startB": 28,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 428,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startB": 34,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 501,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 585,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 607,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startB": 266,
+      "lines": 22,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 651,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startB": 546,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 681,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 824,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 832,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startB": 509,
+      "lines": 22,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 896,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 20,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 904,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startB": 711,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startA": 923,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_join_test.rs",
+      "startB": 263,
+      "lines": 32,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_cdc_zero_changes_repro.rs",
+      "startA": 24,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_cdc_zero_changes_repro.rs",
+      "startA": 140,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 21,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startA": 104,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 87,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startA": 432,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 417,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startA": 442,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 417,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startA": 454,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 417,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startA": 488,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 472,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startA": 528,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 497,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/schema_modules.rs",
+      "startA": 312,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/schema_modules.rs",
+      "startB": 84,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/graph_schema.rs",
+      "startA": 191,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/graph_schema.rs",
+      "startB": 178,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/navigation/provider.rs",
+      "startA": 299,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/navigation/provider.rs",
+      "startB": 287,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/navigation/provider.rs",
+      "startA": 310,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/navigation/provider.rs",
+      "startB": 298,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/identity/provider.rs",
+      "startA": 342,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/identity/provider.rs",
+      "startB": 251,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/identity/provider.rs",
+      "startA": 349,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/identity/provider.rs",
+      "startB": 257,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/di/registration.rs",
+      "startA": 526,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/di/registration.rs",
+      "startB": 285,
+      "lines": 23,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/di/registration.rs",
+      "startA": 548,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/di/registration.rs",
+      "startB": 305,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/di/lifecycle.rs",
+      "startA": 139,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/di/test_helpers.rs",
+      "startB": 86,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/traits.rs",
+      "startA": 79,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/traits.rs",
+      "startB": 65,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/traits.rs",
+      "startA": 226,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/traits.rs",
+      "startB": 195,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/traits.rs",
+      "startA": 233,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/traits.rs",
+      "startB": 202,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/test_macro.rs",
+      "startA": 90,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/test_macro.rs",
+      "startB": 72,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startA": 156,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 92,
+      "lines": 21,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startA": 258,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 206,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startA": 374,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 258,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startA": 386,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 206,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startA": 392,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 206,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startA": 405,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 258,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startA": 411,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 384,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/sql_block_operations.rs",
+      "startA": 51,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/loro_block_operations.rs",
+      "startB": 83,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/operation_log.rs",
+      "startA": 190,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/operation_log.rs",
+      "startB": 172,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/operation_log.rs",
+      "startA": 354,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/operation_log.rs",
+      "startB": 340,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/operation_log.rs",
+      "startA": 566,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/operation_log.rs",
+      "startB": 464,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/api/pbt_infrastructure.rs",
+      "startA": 491,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/api/pbt_infrastructure.rs",
+      "startB": 444,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/api/memory_backend.rs",
+      "startA": 354,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/api/memory_backend.rs",
+      "startB": 180,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/api/memory_backend.rs",
+      "startA": 462,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/api/memory_backend.rs",
+      "startB": 335,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/di.rs",
+      "startA": 37,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/lib.rs",
+      "startB": 32,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/app_main.rs",
+      "startA": 829,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/app_main.rs",
+      "startB": 767,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/app_main.rs",
+      "startA": 844,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/app_main.rs",
+      "startB": 782,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/main.rs",
+      "startA": 38,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/lib.rs",
+      "startB": 32,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/main.rs",
+      "startA": 58,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/di.rs",
+      "startB": 62,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/main.rs",
+      "startA": 67,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/di.rs",
+      "startB": 77,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/resources.rs",
+      "startA": 108,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/resources.rs",
+      "startB": 70,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startA": 258,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startB": 242,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startA": 273,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startB": 257,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startA": 294,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startB": 226,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startA": 390,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/lib.rs",
+      "startB": 33,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/user_driver.rs",
+      "startA": 28,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/user_driver.rs",
+      "startB": 29,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/user_driver.rs",
+      "startA": 165,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/user_driver.rs",
+      "startB": 148,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/user_driver.rs",
+      "startA": 214,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/user_driver.rs",
+      "startB": 148,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/reactive_vm_poc.rs",
+      "startA": 451,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/reactive_vm_poc.rs",
+      "startB": 221,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/main.rs",
+      "startA": 96,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/mcp/src/main.rs",
+      "startB": 469,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/main.rs",
+      "startA": 160,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/main.rs",
+      "startB": 78,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startA": 113,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startB": 96,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startA": 326,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startB": 253,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startA": 359,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startB": 280,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startA": 375,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/geometry.rs",
+      "startB": 296,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/di.rs",
+      "startA": 24,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/di.rs",
+      "startB": 22,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/di.rs",
+      "startA": 63,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/di.rs",
+      "startB": 54,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/di.rs",
+      "startA": 83,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/di.rs",
+      "startB": 71,
+      "lines": 21,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/rich_input_spike.rs",
+      "startA": 131,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startB": 268,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/rich_input_spike.rs",
+      "startA": 150,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startB": 288,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/rich_input_spike.rs",
+      "startA": 189,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startB": 340,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/rich_input_spike.rs",
+      "startA": 250,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startB": 390,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/rich_input_spike.rs",
+      "startA": 272,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startB": 413,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/rich_input_spike.rs",
+      "startA": 296,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/src/views/rich_text_editor.rs",
+      "startB": 439,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/refresh_cascade.rs",
+      "startA": 283,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/refresh_cascade.rs",
+      "startB": 258,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/refresh_cascade.rs",
+      "startA": 319,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/refresh_cascade.rs",
+      "startB": 151,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/reactive_vm_demo.rs",
+      "startA": 552,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/gpui/examples/refresh_cascade.rs",
+      "startB": 328,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/main.rs",
+      "startA": 75,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/lib.rs",
+      "startB": 32,
+      "lines": 21,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/frontends/dioxus/src/main.rs",
+      "startA": 87,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/lib.rs",
+      "startB": 44,
+      "lines": 21,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/examples/rhai-row-bench/src/main.rs",
+      "startA": 137,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/examples/rhai-row-bench/src/main.rs",
+      "startB": 125,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startA": 172,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 131,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startA": 213,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 131,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startA": 263,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 132,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startA": 339,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 131,
+      "lines": 21,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startA": 386,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 131,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/provider_wrapper.rs",
+      "startA": 147,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/provider_wrapper.rs",
+      "startB": 118,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/pbt_test.rs",
+      "startA": 130,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/pbt_test.rs",
+      "startB": 116,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/pbt_test.rs",
+      "startA": 637,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 748,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/pbt_test.rs",
+      "startA": 698,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/pbt_test.rs",
+      "startB": 675,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/inverse_operation_test.rs",
+      "startA": 6,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 9,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/inverse_operation_test.rs",
+      "startA": 23,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 28,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/inverse_operation_test.rs",
+      "startA": 34,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 40,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/inverse_operation_test.rs",
+      "startA": 43,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 48,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/inverse_operation_test.rs",
+      "startA": 61,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 68,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/inverse_operation_test.rs",
+      "startA": 67,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 75,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startA": 40,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startB": 20,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startA": 65,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startB": 20,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startA": 148,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startB": 94,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startA": 161,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/integration_test.rs",
+      "startB": 107,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake_wrapper.rs",
+      "startA": 8,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/provider_wrapper.rs",
+      "startB": 8,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake_wrapper.rs",
+      "startA": 111,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake_wrapper.rs",
+      "startB": 91,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 130,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 102,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 160,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 102,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 180,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 102,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 447,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 275,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 489,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 444,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 528,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 444,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 558,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 25,
+      "lines": 25,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 604,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 72,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 625,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/stream_integration_test.rs",
+      "startB": 95,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 653,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 624,
+      "lines": 17,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startA": 686,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/fake.rs",
+      "startB": 624,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startA": 692,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startB": 678,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startA": 753,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startB": 678,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startA": 783,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startB": 768,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startA": 798,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/client.rs",
+      "startB": 768,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/orgmode_sync_provider.rs",
+      "startA": 161,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/orgmode_sync_provider.rs",
+      "startB": 104,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/orgmode_sync_provider.rs",
+      "startA": 439,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-todoist/src/todoist_sync_provider.rs",
+      "startB": 258,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/orgmode_event_adapter.rs",
+      "startA": 152,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/orgmode_event_adapter.rs",
+      "startB": 98,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/orgmode_event_adapter.rs",
+      "startA": 170,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/orgmode_event_adapter.rs",
+      "startB": 117,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/file_io.rs",
+      "startA": 35,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/interpreter.rs",
+      "startB": 246,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/file_format.rs",
+      "startA": 90,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/file_format.rs",
+      "startB": 71,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-org-format/src/inline_marks.rs",
+      "startA": 296,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-org-format/src/inline_marks.rs",
+      "startB": 276,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_sync_strategy.rs",
+      "startA": 132,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_sync_strategy.rs",
+      "startB": 123,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_sync_engine.rs",
+      "startA": 271,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_sync_engine.rs",
+      "startB": 184,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_schema_mapping.rs",
+      "startA": 90,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_schema_mapping.rs",
+      "startB": 38,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_schema_mapping.rs",
+      "startA": 95,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_schema_mapping.rs",
+      "startB": 43,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_provider.rs",
+      "startA": 448,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_sync_strategy.rs",
+      "startB": 120,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_provider.rs",
+      "startA": 461,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_sync_strategy.rs",
+      "startB": 123,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-markdown/src/file_format.rs",
+      "startA": 87,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-orgmode/src/file_format.rs",
+      "startB": 79,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-markdown/src/file_format.rs",
+      "startA": 139,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-markdown/src/file_format.rs",
+      "startB": 118,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-macros/src/widget_builder.rs",
+      "startA": 345,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-macros/src/widget_builder.rs",
+      "startB": 160,
+      "lines": 69,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/scenario.rs",
+      "startA": 81,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/scenario.rs",
+      "startB": 57,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/invariants.rs",
+      "startA": 126,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/invariants.rs",
+      "startB": 50,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/invariants.rs",
+      "startA": 170,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/invariants.rs",
+      "startB": 107,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/invariants.rs",
+      "startA": 229,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/invariants.rs",
+      "startB": 107,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/display_assertions.rs",
+      "startA": 86,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/display_assertions.rs",
+      "startB": 64,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/display_assertions.rs",
+      "startA": 107,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/display_assertions.rs",
+      "startB": 22,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/display_assertions.rs",
+      "startA": 304,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-layout-testing/src/display_assertions.rs",
+      "startB": 285,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/widget_state.rs",
+      "startA": 130,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/widget_state.rs",
+      "startB": 125,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/widget_state.rs",
+      "startA": 222,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/sync/live_data.rs",
+      "startB": 133,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startA": 105,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/interpreter.rs",
+      "startB": 247,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startA": 177,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startB": 105,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startA": 205,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startB": 50,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startA": 269,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startB": 228,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startA": 294,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/org_utils.rs",
+      "startB": 252,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/assertions.rs",
+      "startA": 99,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-integration-tests/src/assertions.rs",
+      "startB": 82,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/view_event_handler.rs",
+      "startA": 277,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/view_event_handler.rs",
+      "startB": 259,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/user_driver.rs",
+      "startA": 319,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/tui/src/user_driver.rs",
+      "startB": 71,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/user_driver.rs",
+      "startA": 411,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/user_driver.rs",
+      "startB": 142,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/user_driver.rs",
+      "startA": 457,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/user_driver.rs",
+      "startB": 170,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/render_interpreter.rs",
+      "startA": 247,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/ply/src/render/interpreter.rs",
+      "startB": 35,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/render_interpreter.rs",
+      "startA": 422,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/builders/outline.rs",
+      "startB": 11,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/render_interpreter.rs",
+      "startA": 453,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/shadow_builders/drawer.rs",
+      "startB": 27,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/preferences.rs",
+      "startA": 489,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/preferences.rs",
+      "startB": 465,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/popup_menu.rs",
+      "startA": 358,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/popup_menu.rs",
+      "startB": 346,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/popup_menu.rs",
+      "startA": 370,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/popup_menu.rs",
+      "startB": 346,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/operation_matcher.rs",
+      "startA": 334,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/operation_matcher.rs",
+      "startB": 277,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/operation_matcher.rs",
+      "startA": 360,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/operation_matcher.rs",
+      "startB": 313,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/navigation.rs",
+      "startA": 203,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/navigation.rs",
+      "startB": 95,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/navigation.rs",
+      "startA": 652,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/navigation.rs",
+      "startB": 486,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startA": 293,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startB": 104,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startA": 312,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startB": 283,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startA": 427,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startB": 194,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startA": 568,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/mutable_tree.rs",
+      "startB": 482,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/lane_filtered_provider.rs",
+      "startA": 163,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/lane_filtered_provider.rs",
+      "startB": 144,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/frontend_module.rs",
+      "startA": 401,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/lib.rs",
+      "startB": 52,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/editor_controller.rs",
+      "startA": 243,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/editor_controller.rs",
+      "startB": 221,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/editor_controller.rs",
+      "startA": 322,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/operation_matcher.rs",
+      "startB": 216,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/config.rs",
+      "startA": 485,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/config.rs",
+      "startB": 369,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/config.rs",
+      "startA": 602,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/config.rs",
+      "startB": 584,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/command_provider.rs",
+      "startA": 221,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/editor_controller.rs",
+      "startB": 322,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/command_provider.rs",
+      "startA": 229,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/operation_matcher.rs",
+      "startB": 225,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-filesystem/src/directory.rs",
+      "startA": 364,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-filesystem/src/directory.rs",
+      "startB": 350,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-engine/src/guard.rs",
+      "startA": 274,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-engine/src/guard.rs",
+      "startB": 91,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 219,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 200,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 268,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 200,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 294,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 200,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 344,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 320,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 366,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 320,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 385,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 320,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 438,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 393,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 481,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 425,
+      "lines": 22,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 517,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 454,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 551,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 200,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startA": 565,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-core/src/block_operations_tests.rs",
+      "startB": 200,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/widget_spec.rs",
+      "startA": 202,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/widget_spec.rs",
+      "startB": 189,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/reactive.rs",
+      "startA": 259,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/reactive.rs",
+      "startB": 248,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startA": 156,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/core/stream_cache.rs",
+      "startB": 216,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startA": 158,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-mcp-client/src/mcp_sync_strategy.rs",
+      "startB": 19,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startA": 288,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/waterui/src/render/interpreter.rs",
+      "startB": 247,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startA": 415,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startB": 404,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startA": 460,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startB": 445,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/lib.rs",
+      "startA": 662,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/frontends/flutter/rust/src/api/types.rs",
+      "startB": 67,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/hashmap_value_conversions.rs",
+      "startA": 45,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/hashmap_value_conversions.rs",
+      "startB": 23,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon-api/src/entity_uri.rs",
+      "startA": 206,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon-frontend/src/preferences.rs",
+      "startB": 39,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/type_registry.rs",
+      "startA": 572,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/type_registry.rs",
+      "startB": 545,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/computed.rs",
+      "startA": 59,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/computed.rs",
+      "startB": 37,
+      "lines": 11,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startA": 174,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_union_all_insert_repro.rs",
+      "startB": 181,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startA": 198,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 284,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startA": 327,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startB": 299,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_existing_db_repro.rs",
+      "startA": 17,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startB": 20,
+      "lines": 28,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_existing_db_repro.rs",
+      "startA": 184,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_existing_db_repro.rs",
+      "startB": 158,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_existing_db_repro.rs",
+      "startA": 211,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_existing_db_repro.rs",
+      "startB": 184,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_recursive_cte_join_repro.rs",
+      "startA": 20,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_update_parent_id_repro.rs",
+      "startB": 42,
+      "lines": 10,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_recursive_cte_join_repro.rs",
+      "startA": 39,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startB": 64,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_recursive_cte_join_repro.rs",
+      "startA": 70,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startB": 100,
+      "lines": 21,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_recursive_cte_join_repro.rs",
+      "startA": 135,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 270,
+      "lines": 22,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_restart_repro.rs",
+      "startA": 18,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startB": 25,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_restart_repro.rs",
+      "startA": 153,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_restart_repro.rs",
+      "startB": 126,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_restart_repro.rs",
+      "startA": 190,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_restart_repro.rs",
+      "startB": 124,
+      "lines": 16,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_repro.rs",
+      "startA": 17,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_register_mismatch_repro.rs",
+      "startB": 21,
+      "lines": 27,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_repro.rs",
+      "startA": 61,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_restart_repro.rs",
+      "startB": 127,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_repro.rs",
+      "startA": 108,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_negative_weight_repro.rs",
+      "startB": 78,
+      "lines": 15,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_dirty_pages_repro.rs",
+      "startA": 72,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_focus_roots_churn.rs",
+      "startB": 73,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_dirty_pages_repro.rs",
+      "startA": 175,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_dirty_pages_repro.rs",
+      "startB": 152,
+      "lines": 14,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_chained_matview_stale_rows.rs",
+      "startA": 69,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_focus_roots_churn.rs",
+      "startB": 78,
+      "lines": 21,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_chained_matview_stale_rows.rs",
+      "startA": 301,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_chained_matview_stale_rows.rs",
+      "startB": 129,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_3level_chain_cdc.rs",
+      "startA": 48,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_chained_matview_stale_rows.rs",
+      "startB": 51,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_3level_chain_cdc.rs",
+      "startA": 60,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_focus_roots_churn.rs",
+      "startB": 78,
+      "lines": 22,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_3level_chain_cdc.rs",
+      "startA": 366,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_chained_matview_stale_rows.rs",
+      "startB": 325,
+      "lines": 24,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/test_loro_subscription.rs",
+      "startA": 65,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/test_loro_subscription.rs",
+      "startB": 12,
+      "lines": 6,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/test_loro_multiple_locks.rs",
+      "startA": 68,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/test_loro_multiple_locks.rs",
+      "startB": 48,
+      "lines": 12,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startA": 142,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startB": 112,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startA": 164,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startB": 112,
+      "lines": 13,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startA": 179,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startB": 128,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startA": 210,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startB": 112,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startA": 274,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startB": 112,
+      "lines": 8,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startA": 281,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/loro_marks_spike.rs",
+      "startB": 149,
+      "lines": 7,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-recursive-cte-join-repro.rs",
+      "startA": 11,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_recursive_cte_join_repro.rs",
+      "startB": 12,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-recursive-cte-join-repro.rs",
+      "startA": 34,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/examples/turso_ivm_recursive_cte_join_repro.rs",
+      "startB": 115,
+      "lines": 18,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-recursive-cte-join-repro.rs",
+      "startA": 76,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_ivm_bug_proptest.rs",
+      "startB": 289,
+      "lines": 20,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-joinoperator-invalid-reproducer.rs",
+      "startA": 22,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-minimal-reproducer.rs",
+      "startB": 14,
+      "lines": 9,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-joinoperator-invalid-reproducer.rs",
+      "startA": 40,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/crates/holon/src/storage/turso_matview_test.rs",
+      "startB": 221,
+      "lines": 19,
+      "tokens": 0
+    },
+    {
+      "fileA": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-joinoperator-invalid-reproducer.rs",
+      "startA": 122,
+      "fileB": "/Users/martin/Workspaces/pkm/holon/examples/turso-ivm-minimal-reproducer.rs",
+      "startB": 26,
+      "lines": 15,
+      "tokens": 0
+    }
+  ],
+  "duplicatedLines": 4551,
+  "totalLines": 104624,
+  "percentage": 4.35
+}

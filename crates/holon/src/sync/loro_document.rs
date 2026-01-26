@@ -2,11 +2,10 @@ use anyhow::Result;
 use loro::{LoroDoc, PeerID};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 pub struct LoroDocument {
-    doc: Arc<RwLock<LoroDoc>>,
+    doc: Arc<LoroDoc>,
     peer_id: PeerID,
     doc_id: String,
 }
@@ -27,7 +26,7 @@ impl LoroDocument {
         );
 
         Ok(Self {
-            doc: Arc::new(RwLock::new(doc)),
+            doc: Arc::new(doc),
             peer_id,
             doc_id,
         })
@@ -44,62 +43,61 @@ impl LoroDocument {
     /// Override the peer_id (used by IrohSyncAdapter to set Iroh-derived ID).
     pub fn set_peer_id(&mut self, peer_id: PeerID) -> Result<()> {
         self.peer_id = peer_id;
-        // We need write access to set peer_id on the inner doc, but this is
-        // a sync method. Use try_write since this should only be called before
-        // any concurrent access.
-        let doc = self
-            .doc
-            .try_write()
-            .map_err(|_| anyhow::anyhow!("Cannot set_peer_id while document is in use"))?;
-        doc.set_peer_id(peer_id)?;
+        self.doc.set_peer_id(peer_id)?;
         Ok(())
     }
 
-    pub async fn insert_text(&self, container: &str, index: usize, text: &str) -> Result<Vec<u8>> {
-        let doc = self.doc.write().await;
-        let text_obj = doc.get_text(container);
+    pub fn insert_text(&self, container: &str, index: usize, text: &str) -> Result<Vec<u8>> {
+        let text_obj = self.doc.get_text(container);
         text_obj.insert(index, text)?;
-
-        Ok(doc.export(loro::ExportMode::updates_owned(Default::default()))?)
+        Ok(self
+            .doc
+            .export(loro::ExportMode::updates_owned(Default::default()))?)
     }
 
-    pub async fn get_text(&self, container: &str) -> Result<String> {
-        let doc = self.doc.read().await;
-        let text_obj = doc.get_text(container);
+    pub fn get_text(&self, container: &str) -> Result<String> {
+        let text_obj = self.doc.get_text(container);
         Ok(text_obj.to_string())
     }
 
-    pub async fn apply_update(&self, update: &[u8]) -> Result<()> {
-        let doc = self.doc.write().await;
-        doc.import(update)?;
+    pub fn apply_update(&self, update: &[u8]) -> Result<()> {
+        self.apply_update_with_origin("reconcile", update)
+    }
+
+    pub fn apply_update_with_origin(&self, origin: &str, update: &[u8]) -> Result<()> {
+        self.doc.import_with(update, origin)?;
         debug!("Applied update of {} bytes", update.len());
         Ok(())
     }
 
-    pub async fn export_snapshot(&self) -> Result<Vec<u8>> {
-        let doc = self.doc.read().await;
-        Ok(doc.export(loro::ExportMode::Snapshot)?)
+    pub fn export_snapshot(&self) -> Result<Vec<u8>> {
+        Ok(self.doc.export(loro::ExportMode::Snapshot)?)
     }
 
-    pub async fn with_read<F, R>(&self, f: F) -> Result<R>
+    pub fn with_read<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&LoroDoc) -> Result<R>,
     {
-        let doc = self.doc.read().await;
-        f(&doc)
+        f(&self.doc)
     }
 
-    pub async fn with_write<F, R>(&self, f: F) -> Result<R>
+    pub fn with_write<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&LoroDoc) -> Result<R>,
     {
-        let doc = self.doc.write().await;
+        self.with_write_origin("ui_local", f)
+    }
 
-        let result = f(&doc)?;
+    pub fn with_write_origin<F, R>(&self, origin: &str, f: F) -> Result<R>
+    where
+        F: FnOnce(&LoroDoc) -> Result<R>,
+    {
+        self.doc.set_next_commit_origin(origin);
+        let result = f(&self.doc)?;
 
-        let updates = doc.export(loro::ExportMode::updates_owned(Default::default()))?;
-
-        drop(doc);
+        let updates = self
+            .doc
+            .export(loro::ExportMode::updates_owned(Default::default()))?;
 
         if !updates.is_empty() {
             debug!("Write committed, {} bytes to sync", updates.len());
@@ -108,20 +106,20 @@ impl LoroDocument {
         Ok(result)
     }
 
-    pub fn doc(&self) -> Arc<RwLock<LoroDoc>> {
+    pub fn doc(&self) -> Arc<LoroDoc> {
         self.doc.clone()
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    pub async fn save_to_file(&self, path: &Path) -> Result<()> {
-        let snapshot = self.export_snapshot().await?;
+    pub fn save_to_file(&self, path: &Path) -> Result<()> {
+        let snapshot = self.export_snapshot()?;
         std::fs::write(path, snapshot)?;
         debug!("Saved LoroDoc snapshot to {}", path.display());
         Ok(())
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    pub async fn load_from_file(path: &Path, doc_id: String) -> Result<Self> {
+    pub fn load_from_file(path: &Path, doc_id: String) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         let peer_id = rand::random::<u64>();
 
@@ -137,7 +135,7 @@ impl LoroDocument {
         );
 
         Ok(Self {
-            doc: Arc::new(RwLock::new(doc)),
+            doc: Arc::new(doc),
             peer_id,
             doc_id,
         })
@@ -148,40 +146,40 @@ impl LoroDocument {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_create_loro_document() -> Result<()> {
+    #[test]
+    fn test_create_loro_document() -> Result<()> {
         let doc = LoroDocument::new("test-doc".to_string())?;
         assert_ne!(doc.peer_id().to_string(), "");
         assert_eq!(doc.doc_id(), "test-doc");
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_text_operations() -> Result<()> {
+    #[test]
+    fn test_text_operations() -> Result<()> {
         let doc = LoroDocument::new("test-doc".to_string())?;
 
-        doc.insert_text("editor", 0, "Hello").await?;
-        let text = doc.get_text("editor").await?;
+        doc.insert_text("editor", 0, "Hello")?;
+        let text = doc.get_text("editor")?;
         assert_eq!(text, "Hello");
 
-        doc.insert_text("editor", 5, " World").await?;
-        let text = doc.get_text("editor").await?;
+        doc.insert_text("editor", 5, " World")?;
+        let text = doc.get_text("editor")?;
         assert_eq!(text, "Hello World");
 
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_update_export_and_apply() -> Result<()> {
+    #[test]
+    fn test_update_export_and_apply() -> Result<()> {
         let doc1 = LoroDocument::new("shared-doc".to_string())?;
         let doc2 = LoroDocument::new("shared-doc".to_string())?;
 
-        let update = doc1.insert_text("editor", 0, "Collaborative").await?;
+        let update = doc1.insert_text("editor", 0, "Collaborative")?;
 
-        doc2.apply_update(&update).await?;
+        doc2.apply_update(&update)?;
 
-        let text1 = doc1.get_text("editor").await?;
-        let text2 = doc2.get_text("editor").await?;
+        let text1 = doc1.get_text("editor")?;
+        let text2 = doc2.get_text("editor")?;
 
         assert_eq!(text1, text2);
         assert_eq!(text1, "Collaborative");
@@ -189,22 +187,22 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_concurrent_edits_merge() -> Result<()> {
+    #[test]
+    fn test_concurrent_edits_merge() -> Result<()> {
         let doc1 = LoroDocument::new("shared-doc".to_string())?;
         let doc2 = LoroDocument::new("shared-doc".to_string())?;
 
-        let update1 = doc1.insert_text("editor", 0, "Hello").await?;
-        doc2.apply_update(&update1).await?;
+        let update1 = doc1.insert_text("editor", 0, "Hello")?;
+        doc2.apply_update(&update1)?;
 
-        let update2a = doc1.insert_text("editor", 5, " from doc1").await?;
-        let update2b = doc2.insert_text("editor", 5, " from doc2").await?;
+        let update2a = doc1.insert_text("editor", 5, " from doc1")?;
+        let update2b = doc2.insert_text("editor", 5, " from doc2")?;
 
-        doc1.apply_update(&update2b).await?;
-        doc2.apply_update(&update2a).await?;
+        doc1.apply_update(&update2b)?;
+        doc2.apply_update(&update2a)?;
 
-        let text1 = doc1.get_text("editor").await?;
-        let text2 = doc2.get_text("editor").await?;
+        let text1 = doc1.get_text("editor")?;
+        let text2 = doc2.get_text("editor")?;
 
         assert_eq!(text1, text2);
         assert!(text1.contains("Hello"));
@@ -212,20 +210,116 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_different_documents_isolated() -> Result<()> {
+    #[test]
+    fn test_different_documents_isolated() -> Result<()> {
         let doc_a = LoroDocument::new("doc-a".to_string())?;
         let doc_b = LoroDocument::new("doc-b".to_string())?;
 
-        doc_a.insert_text("editor", 0, "Document A").await?;
-        doc_b.insert_text("editor", 0, "Document B").await?;
+        doc_a.insert_text("editor", 0, "Document A")?;
+        doc_b.insert_text("editor", 0, "Document B")?;
 
-        let text_a = doc_a.get_text("editor").await?;
-        let text_b = doc_b.get_text("editor").await?;
+        let text_a = doc_a.get_text("editor")?;
+        let text_b = doc_b.get_text("editor")?;
 
         assert_eq!(text_a, "Document A");
         assert_eq!(text_b, "Document B");
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_origin_tagging_ui_local_via_with_write() -> Result<()> {
+        let doc = LoroDocument::new("origin-test".to_string())?;
+        let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
+        let origin_seen_clone = origin_seen.clone();
+
+        let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
+            if let Ok(mut seen) = origin_seen_clone.lock() {
+                if seen.is_none() {
+                    *seen = Some(event.origin.to_string());
+                }
+            }
+        }));
+
+        doc.with_write(|d| {
+            let tree = d.get_tree("test_tree");
+            tree.enable_fractional_index(0);
+            let _node = tree.create(None)?;
+            Ok(())
+        })?;
+
+        let seen = origin_seen.lock().unwrap();
+        assert_eq!(
+            seen.as_deref(),
+            Some("ui_local"),
+            "with_write should tag origin as 'ui_local'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_origin_tagging_reconcile_via_apply_update() -> Result<()> {
+        let doc1 = LoroDocument::new("origin-test-1".to_string())?;
+        let doc2 = LoroDocument::new("origin-test-2".to_string())?;
+
+        // Create content in doc1
+        doc1.with_write(|d| {
+            let tree = d.get_tree("test_tree");
+            tree.enable_fractional_index(0);
+            let _node = tree.create(None)?;
+            Ok(())
+        })?;
+        let snapshot = doc1.export_snapshot()?;
+
+        let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
+        let origin_seen_clone = origin_seen.clone();
+
+        let _sub = doc2.doc().subscribe_root(Arc::new(move |event| {
+            if let Ok(mut seen) = origin_seen_clone.lock() {
+                if seen.is_none() {
+                    *seen = Some(event.origin.to_string());
+                }
+            }
+        }));
+
+        doc2.apply_update(&snapshot)?;
+
+        let seen = origin_seen.lock().unwrap();
+        assert_eq!(
+            seen.as_deref(),
+            Some("reconcile"),
+            "apply_update should tag origin as 'reconcile'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_origin_tagging_custom_via_with_write_origin() -> Result<()> {
+        let doc = LoroDocument::new("origin-test-custom".to_string())?;
+        let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
+        let origin_seen_clone = origin_seen.clone();
+
+        let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
+            if let Ok(mut seen) = origin_seen_clone.lock() {
+                if seen.is_none() {
+                    *seen = Some(event.origin.to_string());
+                }
+            }
+        }));
+
+        doc.with_write_origin("org_reload", |d| {
+            let tree = d.get_tree("test_tree_2");
+            tree.enable_fractional_index(0);
+            let _node = tree.create(None)?;
+            Ok(())
+        })?;
+
+        let seen = origin_seen.lock().unwrap();
+        assert_eq!(
+            seen.as_deref(),
+            Some("org_reload"),
+            "with_write_origin should pass through the custom origin"
+        );
         Ok(())
     }
 }

@@ -39,7 +39,13 @@ use crate::render_interpreter::{shared_col_build, RenderInterpreter};
 /// subsequent calls.
 pub fn register_render_dsl_widget_names() {
     let mut all_names: Vec<&str> = builder_names().to_vec();
-    all_names.extend_from_slice(&["ops_of", "focus_chain", "chain_ops", "column"]);
+    all_names.extend_from_slice(&[
+        "ops_of",
+        "focus_chain",
+        "chain_ops",
+        "state_accent",
+        "column",
+    ]);
     holon::render_dsl::register_widget_names(&all_names);
 }
 
@@ -62,6 +68,7 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
     crate::value_fns::register_ops_of(&mut interp);
     crate::value_fns::register_focus_chain(&mut interp);
     crate::value_fns::register_chain_ops(&mut interp);
+    crate::value_fns::register_state_accent(&mut interp);
     interp
 }
 

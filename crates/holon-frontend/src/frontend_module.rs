@@ -137,6 +137,27 @@ impl FrontendInjectorExt for Injector {
             LoroModule
                 .configure(self)
                 .map_err(|e| anyhow::anyhow!("Failed to register LoroModule: {}", e))?;
+
+            // Register MutableText provider — async factory that resolves
+            // LoroDocumentStore and gets the global doc. Frontends wire it
+            // into ReactiveEngine.editable_text_provider in on_start.
+            self.provide::<crate::editable_text_provider::LoroEditableTextProvider>(
+                Provider::root_async(|resolver| async move {
+                    let store =
+                        resolver.resolve::<holon::sync::loro_document_store::LoroDocumentStore>();
+                    let collab = store
+                        .get_global_doc()
+                        .await
+                        .expect("Failed to get global LoroDoc for MutableText");
+                    let doc = collab.doc();
+                    let resolver =
+                        Arc::new(crate::editable_text_provider::LoroDocTextResolver { doc });
+                    Shared::new(
+                        crate::editable_text_provider::LoroEditableTextProvider::new(resolver),
+                    )
+                }),
+            );
+
             Some(loro_dir)
         } else {
             None
@@ -204,21 +225,21 @@ impl FrontendInjectorExt for Injector {
         #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
         let wait_for_ready = session_config.wait_for_ready;
         self.provide::<FrontendSession>(Provider::root_async(move |resolver| async move {
-            eprintln!("[FrontendSession] factory: entering");
+             tracing::info!("[FrontendSession] factory: entering");
             let engine = resolver.resolve_async::<BackendEngine>().await;
-            eprintln!("[FrontendSession] factory: BackendEngine resolved");
+             tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
             // Trigger lazy background wiring
             let _ = resolver
                 .try_resolve_async::<CacheEventSubscriberHandle>()
                 .await;
-            eprintln!(
+             tracing::info!(
                 "[FrontendSession] factory: CacheEventSubscriberHandle try_resolve_async done"
             );
 
             // Subscribe dir/file caches (holon-filesystem types)
             subscribe_filesystem_caches(&resolver).await;
-            eprintln!("[FrontendSession] factory: subscribe_filesystem_caches done");
+             tracing::info!("[FrontendSession] factory: subscribe_filesystem_caches done");
 
             // Register FDW-backed tables and set the matview hook for auto-subscription
             #[cfg(not(target_arch = "wasm32"))]
@@ -285,18 +306,18 @@ impl FrontendInjectorExt for Injector {
             // those two phases complete, the mirror sees an incomplete table
             // and later share/accept ops fail with
             // "block X not found in Loro tree".
-            eprintln!(
+             tracing::info!(
                 "[FrontendSession] factory: about to try_resolve_async::<LoroSyncControllerHandle> (post-seed+orgmode)"
             );
             let lsch_result = resolver
                 .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
                 .await;
-            eprintln!(
+             tracing::info!(
                 "[FrontendSession] factory: try_resolve_async::<LoroSyncControllerHandle> returned: {}",
                 if lsch_result.is_ok() { "Ok" } else { "Err" }
             );
             if let Err(ref e) = lsch_result {
-                eprintln!("[FrontendSession] factory: LoroSyncControllerHandle error: {e}");
+                 tracing::info!("[FrontendSession] factory: LoroSyncControllerHandle error: {e}");
             }
             let _ = lsch_result;
 

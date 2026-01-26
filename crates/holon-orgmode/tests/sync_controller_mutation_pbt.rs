@@ -267,7 +267,7 @@ struct MockDocumentManager {
 impl MockDocumentManager {
     fn new() -> Self {
         let mut root = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "");
-        root.name = Some("".to_string());
+        root.set_page(true);
         Self {
             documents: RwLock::new(vec![root]),
         }
@@ -283,12 +283,12 @@ impl DocumentManager for MockDocumentManager {
     async fn find_by_parent_and_name(
         &self,
         parent_id: &EntityUri,
-        name: &str,
+        title: &str,
     ) -> Result<Option<Block>> {
         let docs = self.documents.read().unwrap();
         Ok(docs
             .iter()
-            .find(|d| d.parent_id == *parent_id && d.name.as_deref() == Some(name))
+            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
             .cloned())
     }
 
@@ -431,8 +431,8 @@ impl TestFixture {
         let doc_id = EntityUri::block_random();
         let doc_name = "test".to_string();
 
-        let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), "");
-        doc.name = Some(doc_name.clone());
+        let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), doc_name.clone());
+        doc.set_page(true);
         doc_manager.add_document(doc);
 
         TestFixture {
@@ -1181,7 +1181,8 @@ mod find_foreign_blocks_tests {
         let store = Arc::new(InMemoryBlockStore::new());
 
         let mut doc = make_block("block:doc-claude", "sentinel:no_parent");
-        doc.name = Some("ClaudeCode".to_string());
+        doc.content = "ClaudeCode".to_string();
+        doc.set_page(true);
         store.seed_blocks(
             "block:doc-claude",
             vec![

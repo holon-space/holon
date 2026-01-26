@@ -229,7 +229,7 @@ pub fn predicate_matches(pred: &Predicate, block: &Block) -> bool {
         Predicate::Gte { field, value } => compare_numeric(field, value, |l, r| l >= r),
         Predicate::Lte { field, value } => compare_numeric(field, value, |l, r| l <= r),
         Predicate::IsNotNull(field) => get_field(field).is_some(),
-        Predicate::Var(field) => get_field(field).map_or(false, |v| !v.is_null()),
+        Predicate::Var(field) => get_field(field).is_some_and(|v| !v.is_null()),
         Predicate::Not(inner) => !predicate_matches(inner, block),
         Predicate::And(preds) => preds.iter().all(|p| predicate_matches(p, block)),
         Predicate::Or(preds) => preds.iter().any(|p| predicate_matches(p, block)),

@@ -66,6 +66,7 @@ pub mod loro_sync_controller;
 pub mod matview_manager;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod multi_peer;
+pub mod mutable_text;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

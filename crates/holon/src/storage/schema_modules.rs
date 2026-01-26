@@ -4,17 +4,19 @@
 //! schema objects in Holon:
 //!
 //! - `CoreSchemaModule`: blocks, documents, directories tables
+//! - `BlockSchemaModule`: task_blockers, block_tags junction tables + task_blocking_edges matview
 //! - `BlockHierarchySchemaModule`: block_with_path materialized view
 //! - `NavigationSchemaModule`: navigation_history, navigation_cursor, current_focus
 //! - `SyncStateSchemaModule`: sync_states table
 //! - `OperationsSchemaModule`: operations table for undo/redo
+//! - `IdentitySchemaModule`: canonical_entity, entity_alias, proposal_queue tables
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 
 use super::resource::Resource;
-use super::schema_module::SchemaModule;
+use super::schema_module::{EdgeFieldDescriptor, SchemaModule};
 use super::sql_statements;
 use super::turso::DbHandle;
 use super::types::Result;
@@ -64,6 +66,86 @@ impl SchemaModule for CoreSchemaModule {
 
         tracing::info!("[CoreSchemaModule] Core tables created successfully");
         Ok(())
+    }
+}
+
+/// Block junction-table schema module.
+///
+/// Owns `task_blockers` and `block_tags` (the production junction tables) plus
+/// the `task_blocking_edges` H1 matview for CDC observability. Runs DROP TABLE
+/// IF EXISTS on both tables before CREATE so any dev DB carrying the old Phase 0
+/// scratch tables (which lacked PK/FK) picks up the correct schema.
+pub struct BlockSchemaModule;
+
+#[async_trait]
+impl SchemaModule for BlockSchemaModule {
+    fn name(&self) -> &str {
+        "block_junction"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![
+            Resource::schema("task_blockers"),
+            Resource::schema("block_tags"),
+            Resource::schema("task_blocking_edges"),
+        ]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![Resource::schema("block")]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        tracing::info!("[BlockSchemaModule] Migrating junction tables");
+
+        // Drop Phase 0 scratch tables (lacked composite PK + FK CASCADE).
+        db_handle
+            .execute_ddl("DROP TABLE IF EXISTS task_blockers")
+            .await?;
+        db_handle
+            .execute_ddl("DROP TABLE IF EXISTS block_tags")
+            .await?;
+
+        for stmt in sql_statements(include_str!("../../sql/schema/task_blockers.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        tracing::debug!("[BlockSchemaModule] task_blockers table created");
+
+        for stmt in sql_statements(include_str!("../../sql/schema/block_tags.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        tracing::debug!("[BlockSchemaModule] block_tags table created");
+
+        reconcile_named_view(
+            db_handle,
+            "task_blocking_edges",
+            include_str!("../../sql/schema/task_blocking_edges_matview.sql"),
+        )
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        tracing::debug!("[BlockSchemaModule] task_blocking_edges matview reconciled");
+
+        tracing::info!("[BlockSchemaModule] Junction tables ready");
+        Ok(())
+    }
+
+    fn edge_fields(&self) -> Vec<EdgeFieldDescriptor> {
+        vec![
+            EdgeFieldDescriptor {
+                entity: "block".to_string(),
+                field: "blocked_by".to_string(),
+                join_table: "task_blockers".to_string(),
+                source_col: "blocked_id".to_string(),
+                target_col: "blocker_id".to_string(),
+            },
+            EdgeFieldDescriptor {
+                entity: "block".to_string(),
+                field: "tags".to_string(),
+                join_table: "block_tags".to_string(),
+                source_col: "block_id".to_string(),
+                target_col: "tag".to_string(),
+            },
+        ]
     }
 }
 
@@ -346,6 +428,43 @@ impl SchemaModule for LinkSchemaModule {
     }
 }
 
+/// Identity schema module providing canonical_entity, entity_alias, and proposal_queue tables.
+///
+/// Tables are empty by default — they hold cross-system entity resolution state
+/// once the merge / propose-merge / accept-proposal operations land. Adding the
+/// schema seam now ensures every future integration plugs into the same identity
+/// layer instead of growing ad-hoc identity columns. See
+/// `docs/Architecture/Schema.md` §"Entity Identity".
+pub struct IdentitySchemaModule;
+
+#[async_trait]
+impl SchemaModule for IdentitySchemaModule {
+    fn name(&self) -> &str {
+        "identity"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![
+            Resource::schema("canonical_entity"),
+            Resource::schema("entity_alias"),
+            Resource::schema("proposal_queue"),
+        ]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        tracing::info!("[IdentitySchemaModule] Creating identity tables");
+        for stmt in sql_statements(include_str!("../../sql/schema/identity.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        tracing::info!("[IdentitySchemaModule] identity tables created");
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +485,16 @@ mod tests {
         let requires = module.requires();
 
         assert!(requires.contains(&Resource::schema("block")));
+    }
+
+    #[test]
+    fn test_identity_schema_module_provides() {
+        let module = IdentitySchemaModule;
+        let provides = module.provides();
+
+        assert!(provides.contains(&Resource::schema("canonical_entity")));
+        assert!(provides.contains(&Resource::schema("entity_alias")));
+        assert!(provides.contains(&Resource::schema("proposal_queue")));
+        assert!(module.requires().is_empty());
     }
 }

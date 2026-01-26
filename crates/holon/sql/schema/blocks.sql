@@ -2,12 +2,11 @@ CREATE TABLE IF NOT EXISTS block (
     id TEXT PRIMARY KEY,
     parent_id TEXT,
     depth INTEGER NOT NULL DEFAULT 0,
-    sort_key TEXT NOT NULL DEFAULT 'a0',
+    sort_key TEXT NOT NULL DEFAULT 'A0',
     content TEXT NOT NULL DEFAULT '',
     content_type TEXT NOT NULL DEFAULT 'text',
     source_language TEXT,
     source_name TEXT,
-    name TEXT,
     properties TEXT,
     marks TEXT,
     collapsed INTEGER NOT NULL DEFAULT 0,
@@ -19,8 +18,3 @@ CREATE TABLE IF NOT EXISTS block (
 );
 
 CREATE INDEX IF NOT EXISTS idx_block_parent_id ON block(parent_id);
-
--- Document blocks have unique (parent_id, name). Prevents duplicate document
--- creation when concurrent on_file_changed calls race through get_or_create.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_block_document_unique
-    ON block(parent_id, name) WHERE name IS NOT NULL;

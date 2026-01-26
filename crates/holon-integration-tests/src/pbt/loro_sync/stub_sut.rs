@@ -119,7 +119,7 @@ impl StubSut {
             .await
             .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
         let doc_arc = collab.doc();
-        let doc = doc_arc.write().await;
+        let doc = &*doc_arc;
         sync_docs_direct(&doc, ref_doc);
         Ok(())
     }
@@ -128,14 +128,8 @@ impl StubSut {
 #[async_trait]
 impl LoroSyncSut for StubSut {
     async fn apply(&mut self, state: &GroupState<()>, transition: &GroupTransition) -> Result<()> {
-        match transition {
-            // Transitions that mutate peer 0 directly, or that merge into
-            // peer 0, are the only ones the SUT needs to observe. For all
-            // others, peer 0's doc is unchanged and `sync_primary_from_ref`
-            // is a safe no-op.
-            _ => {
-                self.sync_primary_from_ref(state).await?;
-            }
+        {
+            self.sync_primary_from_ref(state).await?;
         }
 
         match transition {
@@ -175,7 +169,7 @@ impl LoroSyncSut for StubSut {
                         .await
                         .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
                     let doc_arc = collab.doc();
-                    let doc = doc_arc.write().await;
+                    let doc = &*doc_arc;
                     sync_docs_direct(&doc, &state.peers[*peer_idx].doc);
                     // The controller is down, so no subscribe_root fires.
                 }
@@ -244,7 +238,7 @@ impl LoroSyncSut for StubSut {
             return Frontiers::default();
         };
         let doc_arc = collab.doc();
-        let doc = doc_arc.read().await;
+        let doc = &*doc_arc;
         doc.oplog_frontiers()
     }
 
@@ -254,7 +248,7 @@ impl LoroSyncSut for StubSut {
             return BTreeMap::new();
         };
         let doc_arc = collab.doc();
-        let doc = doc_arc.read().await;
+        let doc = &*doc_arc;
         let blocks = holon::api::snapshot_blocks_from_doc(&doc);
         blocks
             .into_iter()
@@ -291,6 +285,12 @@ pub struct StubOperationProvider {
     blocks: Mutex<BTreeMap<String, BlockSnapshot>>,
     /// Number of batches received (for sanity asserts in tests).
     pub batches_received: Mutex<usize>,
+}
+
+impl Default for StubOperationProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StubOperationProvider {
@@ -393,6 +393,12 @@ pub struct StubEventBus {
     /// branch. v1 doesn't exercise that — the channel exists but is never
     /// sent into from outside.
     tx: Mutex<Option<tokio::sync::mpsc::Sender<Event>>>,
+}
+
+impl Default for StubEventBus {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StubEventBus {

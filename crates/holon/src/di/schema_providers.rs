@@ -17,8 +17,8 @@ use std::marker::PhantomData;
 use fluxdi::{Injector, Provider, Shared};
 
 use crate::storage::schema_modules::{
-    BlockHierarchySchemaModule, CoreSchemaModule, LinkSchemaModule, NavigationSchemaModule,
-    OperationsSchemaModule, SyncStateSchemaModule,
+    BlockHierarchySchemaModule, BlockSchemaModule, CoreSchemaModule, IdentitySchemaModule,
+    LinkSchemaModule, NavigationSchemaModule, OperationsSchemaModule, SyncStateSchemaModule,
 };
 use crate::storage::turso::DbHandle;
 
@@ -69,9 +69,17 @@ impl DbResource for SyncStateTables {}
 pub struct OperationTables;
 impl DbResource for OperationTables {}
 
+/// `task_blockers`, `block_tags`, `task_blocking_edges` (depend on `block`).
+pub struct BlockTables;
+impl DbResource for BlockTables {}
+
 /// `block_link` table (depends on `block`).
 pub struct LinkTables;
 impl DbResource for LinkTables {}
+
+/// `canonical_entity`, `entity_alias`, `proposal_queue` tables for cross-system identity.
+pub struct IdentityTables;
+impl DbResource for IdentityTables {}
 
 /// `graph_eav` schema.
 pub struct GraphEavSchema;
@@ -168,6 +176,19 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<OperationTables>::new())
     }));
 
+    // -- BlockTables (depends on CoreTables: FKs reference block.id) --
+    injector.provide::<DbReady<BlockTables>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&BlockSchemaModule, &db.handle())
+                .await
+                .expect("BlockTables schema init failed");
+            Shared::new(DbReady::<BlockTables>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>(),
+    );
+
     // -- LinkTables (depends on CoreTables) --
     injector.provide::<DbReady<LinkTables>>(
         Provider::root_async(|inj| async move {
@@ -180,6 +201,15 @@ pub fn register_schema_providers(injector: &Injector) {
         })
         .with_dependency::<DbReady<CoreTables>>(),
     );
+
+    // -- IdentityTables (no deps; tables are independent of block) --
+    injector.provide::<DbReady<IdentityTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&IdentitySchemaModule, &db.handle())
+            .await
+            .expect("IdentityTables schema init failed");
+        Shared::new(DbReady::<IdentityTables>::new())
+    }));
 
     // -- GraphEavSchema (depends on CoreTables) --
     injector.provide::<DbReady<GraphEavSchema>>(
@@ -208,6 +238,7 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
     use std::any::TypeId;
     vec![
         TypeId::of::<DbReady<CoreTables>>(),
+        TypeId::of::<DbReady<BlockTables>>(),
         TypeId::of::<DbReady<BlockHierarchyView>>(),
         TypeId::of::<DbReady<NavigationTables>>(),
         TypeId::of::<DbReady<SyncStateTables>>(),

@@ -62,14 +62,70 @@ impl CollectionData {
 
 // ── CollectionVariant ──────────────────────────────────────────────────
 
-/// Which layout to use when rendering collection items.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CollectionVariant {
-    Tree,
-    Outline,
-    Table,
-    List { gap: f32 },
-    Columns { gap: f32 },
+/// Layout descriptor for a collection-shaped widget.
+///
+/// Carries the registered `LayoutSpec` (driving the streaming runtime's
+/// flat/hierarchical decision and surfacing the layout's name) plus the
+/// resolved `gap` value from the call site. Replaces the previous closed
+/// `enum` so new layouts can register without touching shared infra; see
+/// `crate::collection_layout` for the registry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollectionVariant {
+    pub spec: crate::collection_layout::LayoutSpec,
+    pub gap: f32,
+}
+
+impl CollectionVariant {
+    pub fn new(spec: crate::collection_layout::LayoutSpec, gap: f32) -> Self {
+        Self { spec, gap }
+    }
+
+    /// Look up a registered layout by name and pair it with a gap. Panics
+    /// in tests / fixtures when the name isn't registered — production
+    /// callers that consume user-supplied names should use
+    /// `from_name_optional` instead.
+    pub fn from_name(name: &str, gap: f32) -> Option<Self> {
+        crate::collection_layout::lookup_layout(name).map(|spec| Self { spec, gap })
+    }
+
+    /// Builtin convenience constructors. Each one panics if the named
+    /// layout isn't registered — only callable for layouts the registry
+    /// is guaranteed to contain (e.g. `list`, `tree`, …) at startup.
+    fn builtin(name: &'static str, gap: f32) -> Self {
+        Self::from_name(name, gap)
+            .unwrap_or_else(|| panic!("`{name}` layout is registered as a builtin"))
+    }
+
+    pub fn tree() -> Self {
+        Self::builtin("tree", 0.0)
+    }
+    pub fn outline() -> Self {
+        Self::builtin("outline", 0.0)
+    }
+    pub fn table() -> Self {
+        Self::builtin("table", 0.0)
+    }
+    pub fn list(gap: f32) -> Self {
+        Self::builtin("list", gap)
+    }
+    pub fn columns(gap: f32) -> Self {
+        Self::builtin("columns", gap)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.spec.name
+    }
+
+    pub fn shape(&self) -> crate::collection_layout::LayoutShape {
+        self.spec.shape
+    }
+
+    pub fn is_hierarchical(&self) -> bool {
+        matches!(
+            self.spec.shape,
+            crate::collection_layout::LayoutShape::Hierarchical
+        )
+    }
 }
 
 /// Determine the `CollectionVariant` from a render expression's function name.
@@ -82,52 +138,37 @@ pub fn collection_variant_of(expr: &RenderExpr) -> Option<CollectionVariant> {
         _ => return None,
     };
 
-    let extract_gap = || -> f32 {
-        args.iter()
-            .find(|a| a.name.as_deref() == Some("gap"))
-            .and_then(|a| match &a.value {
-                RenderExpr::Literal {
-                    value: Value::Float(f),
-                } => Some(*f as f32),
-                RenderExpr::Literal {
-                    value: Value::Integer(i),
-                } => Some(*i as f32),
-                _ => None,
-            })
-            .unwrap_or(0.0)
-    };
+    let spec = crate::collection_layout::lookup_layout(name)?;
 
-    match name {
-        "table" => Some(CollectionVariant::Table),
-        "tree" => Some(CollectionVariant::Tree),
-        "outline" => Some(CollectionVariant::Outline),
-        "list" => Some(CollectionVariant::List { gap: extract_gap() }),
-        "columns" => Some(CollectionVariant::Columns { gap: extract_gap() }),
-        _ => None,
-    }
+    // Extract `gap:` named arg if the call site overrides it; fall back to
+    // the layout's declared default. Layouts that don't care about gap
+    // (tree, table, …) just see 0.0.
+    let gap = args
+        .iter()
+        .find(|a| a.name.as_deref() == Some("gap"))
+        .and_then(|a| match &a.value {
+            RenderExpr::Literal {
+                value: Value::Float(f),
+            } => Some(*f as f32),
+            RenderExpr::Literal {
+                value: Value::Integer(i),
+            } => Some(*i as f32),
+            _ => None,
+        })
+        .unwrap_or(spec.default_gap);
+
+    Some(CollectionVariant { spec, gap })
 }
 
-/// Returns true if both variants are the same type, ignoring gap values.
+/// Returns true if both variants are the same kind (same registered name).
+/// Used by `view_mode_switcher`'s fast-path to detect intra-variant switches
+/// (e.g. board → board with a different `item_template`) where the existing
+/// `ReactiveView` can be re-used vs. a full rebuild.
 pub fn variants_match(a: Option<CollectionVariant>, b: Option<CollectionVariant>) -> bool {
-    matches!(
-        (a, b),
-        (
-            Some(CollectionVariant::Table),
-            Some(CollectionVariant::Table)
-        ) | (Some(CollectionVariant::Tree), Some(CollectionVariant::Tree))
-            | (
-                Some(CollectionVariant::Outline),
-                Some(CollectionVariant::Outline)
-            )
-            | (
-                Some(CollectionVariant::List { .. }),
-                Some(CollectionVariant::List { .. })
-            )
-            | (
-                Some(CollectionVariant::Columns { .. }),
-                Some(CollectionVariant::Columns { .. })
-            )
-    )
+    match (a, b) {
+        (Some(av), Some(bv)) => av.spec.name == bv.spec.name,
+        _ => false,
+    }
 }
 
 /// Extract the `item_template` (or `item`) named arg from a collection expression.
@@ -641,22 +682,31 @@ impl ReactiveViewModel {
                 children: snap_children(),
             },
 
-            // Collections
-            "tree" | "outline" | "table" | "list" | "columns" => {
+            // Collections — the registered layout name selects which
+            // `ViewKind` variant we serialize to. Layouts whose name doesn't
+            // match a built-in `ViewKind` variant fall through to a generic
+            // `Column` snapshot; that's serialization-only fallback (the
+            // streaming runtime + platform renderers still see the real
+            // layout via `view.layout()`).
+            n if crate::collection_layout::is_layout(n) => {
                 if let Some(ref view) = self.collection {
                     let children = match resolve_block {
                         Some(rb) => view.snapshot_resolved(rb),
                         None => view.snapshot(),
                     };
-                    match view.layout() {
-                        Some(CollectionVariant::Tree) => ViewKind::Tree { children },
-                        Some(CollectionVariant::Outline) => ViewKind::Outline { children },
-                        Some(CollectionVariant::Table) => ViewKind::Table { children },
-                        Some(CollectionVariant::List { gap }) => ViewKind::List { gap, children },
-                        Some(CollectionVariant::Columns { gap }) => {
-                            ViewKind::Columns { gap, children }
-                        }
-                        None => ViewKind::Column { gap: 0.0, children },
+                    match view.layout().as_ref().map(|v| v.name()) {
+                        Some("tree") => ViewKind::Tree { children },
+                        Some("outline") => ViewKind::Outline { children },
+                        Some("table") => ViewKind::Table { children },
+                        Some("list") => ViewKind::List {
+                            gap: view.layout().as_ref().map(|v| v.gap).unwrap_or(0.0),
+                            children,
+                        },
+                        Some("columns") => ViewKind::Columns {
+                            gap: view.layout().as_ref().map(|v| v.gap).unwrap_or(0.0),
+                            children,
+                        },
+                        _ => ViewKind::Column { gap: 0.0, children },
                     }
                 } else {
                     ViewKind::Column {
@@ -1148,6 +1198,7 @@ impl ReactiveViewModel {
     }
 
     /// Create a streaming collection node.
+    #[allow(clippy::too_many_arguments)]
     pub fn streaming_collection(
         widget: &str,
         item_template: RenderExpr,
@@ -1157,12 +1208,13 @@ impl ReactiveViewModel {
         parent_space: Option<crate::render_context::AvailableSpace>,
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
         virtual_child: Option<crate::reactive_view::VirtualChildSlot>,
+        trailing_slot: Option<crate::reactive_view::TrailingSlot>,
     ) -> Self {
         if widget == "query_result" {
             return Self::from_widget("query_result", HashMap::new());
         }
         let layout = Self::widget_layout(widget, gap);
-        let view = crate::reactive_view::ReactiveView::new_collection(
+        let mut view = crate::reactive_view::ReactiveView::new_collection(
             crate::reactive_view::CollectionConfig {
                 layout,
                 item_template,
@@ -1173,6 +1225,9 @@ impl ReactiveViewModel {
             parent_space,
             child_space_fn,
         );
+        if let Some(slot) = trailing_slot {
+            view.set_trailing_slot(slot);
+        }
         Self {
             collection: Some(std::sync::Arc::new(view)),
             ..Self::from_widget(widget, HashMap::new())
@@ -1196,13 +1251,14 @@ impl ReactiveViewModel {
     }
 
     fn widget_layout(widget: &str, gap: f32) -> CollectionVariant {
-        match widget {
-            "tree" => CollectionVariant::Tree,
-            "outline" => CollectionVariant::Outline,
-            "table" => CollectionVariant::Table,
-            "columns" => CollectionVariant::Columns { gap },
-            "list" | _ => CollectionVariant::List { gap },
-        }
+        // Single source of truth: the `collection_layout` registry. Falls
+        // back to a `list`-shaped variant for unknown widgets so the
+        // streaming runtime stays well-typed even if a frontend forgets
+        // to register a custom layout.
+        CollectionVariant::from_name(widget, gap).unwrap_or_else(|| {
+            CollectionVariant::from_name("list", gap)
+                .expect("`list` layout is registered as a builtin")
+        })
     }
 
     /// Create a layout node from a widget name and children.

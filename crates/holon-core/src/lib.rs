@@ -6,11 +6,14 @@
 //! - `TaskOperations`: Task-specific operations (set_state, set_priority, set_due_date)
 
 pub mod core;
+pub mod file_format;
 pub mod fractional_index;
 pub mod operation_log;
 pub mod storage;
 pub mod traits;
 pub mod undo;
+
+pub use file_format::{FileFormatAdapter, FileFormatParseResult};
 
 #[cfg(test)]
 mod block_operations_tests;

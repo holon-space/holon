@@ -48,6 +48,35 @@ pub fn valid_render_expressions() -> Vec<RenderExpr> {
             "list",
             vec![named("item_template", fc("render_entity", vec![]))],
         ),
+        // tree(#{parent_id: col("parent_id"), sortkey: col("sequence"),
+        //        item_template: render_entity(), creation_slot: true})
+        // Exercises the virtual child / trailing slot path. `virtual_parent`
+        // is intentionally omitted — `virtual_child_slot_from_arg` falls
+        // back to the context row's `id` column (the focused block).
+        fc(
+            "tree",
+            vec![
+                named(
+                    "parent_id",
+                    RenderExpr::ColumnRef {
+                        name: "parent_id".into(),
+                    },
+                ),
+                named(
+                    "sortkey",
+                    RenderExpr::ColumnRef {
+                        name: "sequence".into(),
+                    },
+                ),
+                named("item_template", fc("render_entity", vec![])),
+                named(
+                    "creation_slot",
+                    RenderExpr::Literal {
+                        value: Value::Boolean(true),
+                    },
+                ),
+            ],
+        ),
         // columns(#{gap: 4, item_template: render_entity()})
         fc(
             "columns",
@@ -373,6 +402,19 @@ pub struct ReferenceState {
     /// Shadow interpreter resolved from FluxDI — source of truth for widget
     /// names and render DSL parsing.
     pub interpreter: Arc<ShadowInterpreter>,
+
+    /// Mirror of the GPUI editor's live `InputState` for the focused
+    /// EditableText. `Some` after `FocusEditableText` and until `Blur`
+    /// (or until focus moves to a different EditableText). Diverges from
+    /// `block.content` whenever the user has typed/deleted without
+    /// blurring — drives the commit-then-mutate contract for chord
+    /// transitions like Enter/Backspace/Tab.
+    pub active_editor: Option<ActiveEditor>,
+
+    /// Variant tag of the most recently applied transition. Drives Markov-
+    /// style adaptive weighting in `transitions()` — e.g. boost MoveCursor /
+    /// TypeChars / PressKey weights right after a FocusEditableText.
+    pub last_transition_kind: Option<&'static str>,
 }
 
 /// Reference state for a Loro-only peer.
@@ -424,6 +466,47 @@ impl CursorPosition {
     }
 }
 
+/// Mirror of the GPUI editor's live `InputState`: the in-memory text of the
+/// currently focused EditableText, plus the cursor offset within that text.
+/// Diverges from `block.content` whenever the user has typed/deleted without
+/// blurring — exactly the divergence that surfaces split-with-pending-edit
+/// (and similar) bugs.
+#[derive(Debug, Clone)]
+pub struct ActiveEditor {
+    pub block_id: EntityUri,
+    /// What the GPUI `InputState.text()` currently shows.
+    pub in_memory_content: String,
+    /// Byte offset of the caret within `in_memory_content`.
+    pub cursor_byte: usize,
+}
+
+impl ActiveEditor {
+    /// Insert ASCII text at the cursor and advance.
+    pub fn type_chars(&mut self, text: &str) {
+        debug_assert!(self.cursor_byte <= self.in_memory_content.len());
+        self.in_memory_content.insert_str(self.cursor_byte, text);
+        self.cursor_byte += text.len();
+    }
+
+    /// Delete `count` chars before the cursor (Backspace ×count). Stops at start.
+    pub fn delete_backward(&mut self, count: usize) {
+        for _ in 0..count {
+            if self.cursor_byte == 0 {
+                break;
+            }
+            // ASCII-only: byte == char in our generators, so safe to step by 1.
+            let new_cursor = self.cursor_byte - 1;
+            self.in_memory_content.remove(new_cursor);
+            self.cursor_byte = new_cursor;
+        }
+    }
+
+    /// Move the caret to a clamped byte position.
+    pub fn move_cursor(&mut self, position: usize) {
+        self.cursor_byte = position.min(self.in_memory_content.len());
+    }
+}
+
 /// Navigation history for a region (for back/forward navigation)
 #[derive(Debug, Clone)]
 pub struct NavigationHistory {
@@ -431,6 +514,12 @@ pub struct NavigationHistory {
     pub entries: Vec<Option<EntityUri>>,
     /// Current cursor position in history
     pub cursor: usize,
+}
+
+impl Default for NavigationHistory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NavigationHistory {
@@ -489,7 +578,54 @@ impl ReferenceState {
             block_operations: default_block_operations(),
             peers: Vec::new(),
             interpreter,
+            active_editor: None,
+            last_transition_kind: None,
         }
+    }
+
+    /// Whether atomic editor transitions (FocusEditableText, MoveCursor,
+    /// TypeChars, DeleteBackward, PressKey, Blur) are enabled. Gated to
+    /// the GPUI PBT — they need a real `InputState` to expose the
+    /// in-memory-vs-DB divergence the bug class lives in.
+    pub fn atomic_editor_enabled() -> bool {
+        std::env::var("PBT_ATOMIC_EDITOR")
+            .ok()
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn mutable_text_enabled() -> bool {
+        std::env::var("PBT_MUTABLE_TEXT")
+            .ok()
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Commit `active_editor.in_memory_content` to the underlying block if
+    /// it diverged from the DB. Called at the start of any chord transition
+    /// (Enter/Backspace/Tab/...) to encode the *intended* contract:
+    /// chord-on-active-editor commits pending edits before mutating
+    /// structure. Returns whether a commit was needed (for diagnostics).
+    pub fn commit_active_editor_if_changed(&mut self) -> bool {
+        let Some(editor) = self.active_editor.as_ref() else {
+            return false;
+        };
+        let block_id = editor.block_id.clone();
+        let in_memory = editor.in_memory_content.clone();
+        let Some(block) = self.block_state.blocks.get_mut(&block_id) else {
+            return false;
+        };
+        if block.content == in_memory {
+            return false;
+        }
+        block.content = in_memory.clone();
+        // Keep the editor mirror in sync — content_text may have normalized
+        // (e.g. trim) but we don't model that here; callers that mutate the
+        // block structurally afterwards will replace this value anyway.
+        if let Some(editor_mut) = self.active_editor.as_mut() {
+            editor_mut.in_memory_content = in_memory;
+        }
+        true
     }
 
     pub fn current_focus(&self, region: Region) -> Option<EntityUri> {
@@ -564,12 +700,12 @@ impl ReferenceState {
         uri
     }
 
-    /// Find a document block by its `name` field (the file stem, e.g. "index").
-    pub fn doc_uri_by_name(&self, name: &str) -> Option<EntityUri> {
+    /// Find a page block by its title (first line of content, e.g. "index").
+    pub fn doc_uri_by_name(&self, title: &str) -> Option<EntityUri> {
         self.block_state
             .blocks
             .values()
-            .find(|b| b.name.as_deref() == Some(name))
+            .find(|b| b.is_page() && b.title() == title)
             .map(|b| b.id.clone())
     }
 
@@ -644,6 +780,109 @@ impl ReferenceState {
                     .unwrap_or(false)
             })
             .and_then(|id| self.render_expressions.get(id))
+    }
+
+    /// Whether the active root layout actually renders the given region's
+    /// default panel block.
+    ///
+    /// User-supplied `index.org` files can override the root layout's render
+    /// expression to omit the sidebars (e.g. a Main-only layout). When that
+    /// happens, ClickBlock transitions targeting the omitted region time out
+    /// because the panel block isn't reachable in the rendered tree. This
+    /// predicate gates region-scoped click generation on the layout actually
+    /// rendering the region.
+    ///
+    /// Default behavior (no custom render expr): all three regions are
+    /// rendered — matches the default `block_profile.yaml` `root_layout`
+    /// variant which lays out left sidebar / main panel / right sidebar.
+    pub fn active_layout_renders_region(&self, region: Region) -> bool {
+        let panel_id = match region {
+            Region::LeftSidebar => "block:default-left-sidebar",
+            Region::Main => "block:default-main-panel",
+            Region::RightSidebar => "block:default-right-sidebar",
+        };
+        // Distinguish three cases:
+        //   1. No root layout headline → default layout (`assets/default/index.org`)
+        //      renders all three regions normally.
+        //   2. Root layout headline exists with a parsed render expression →
+        //      check `live_block_targets()` for the panel id.
+        //   3. Root layout headline exists but no parsed render expression →
+        //      the test wrote a custom layout we can't predict (e.g.
+        //      `index_file_gql_varlen` produces `list(item_template:
+        //      row(text("varlen")))`, which isn't in
+        //      `valid_render_expressions()`). The panel still mounts in
+        //      production but rows have no entity binding, so any
+        //      ClickBlock/ToggleState targeting an entity in this region will
+        //      time out at `wait_for_entity_in_resolved_view_model`.
+        //      Treat as not-rendering so generators skip it.
+        let Some(root_id) = self.root_layout_block_id() else {
+            return true; // case 1
+        };
+        match self.root_render_expr() {
+            Some(expr) => expr
+                .live_block_targets()
+                .iter()
+                .any(|t| t == panel_id || t == &panel_id[6..]),
+            None => {
+                // case 3: layout headline exists, but no parsed render expr.
+                // Conservatively predict the layout renders nothing we can
+                // act on. Suppress the unused binding warning until we add
+                // diagnostics that need it.
+                let _ = root_id;
+                false
+            }
+        }
+    }
+
+    /// Whether a region's panel has a customized render source (i.e. its
+    /// render-source child block was overwritten by a layout mutation).
+    ///
+    /// `focusable_rendered_block_ids(LeftSidebar)` hard-codes the default
+    /// sidebar PRQL ("any named text block"); when the render source is
+    /// customized, that hard-coded list no longer matches what the sidebar
+    /// actually renders, so a `ClickBlock(LeftSidebar, ref-doc-N)` may
+    /// dispatch focus to a different block than ref_state expects (Navigation
+    /// focus mismatch). Skip click generation for the affected region until
+    /// the test can predict the customized render's output set.
+    pub fn region_render_source_customized(&self, region: Region) -> bool {
+        let panel_id = match region {
+            Region::LeftSidebar => EntityUri::from_raw("block:default-left-sidebar"),
+            Region::Main => EntityUri::from_raw("block:default-main-panel"),
+            Region::RightSidebar => EntityUri::from_raw("block:default-right-sidebar"),
+        };
+        self.layout_blocks
+            .render_source_ids
+            .iter()
+            .filter(|id| {
+                self.block_state
+                    .blocks
+                    .get(*id)
+                    .is_some_and(|b| b.parent_id == panel_id)
+            })
+            .any(|id| self.render_expressions.contains_key(id))
+    }
+
+    /// Combined "can ref_state predict what production renders in this
+    /// region?" predicate. Both `active_layout_renders_region` and
+    /// `region_render_source_customized` cover distinct customization paths:
+    ///
+    /// - `active_layout_renders_region` is `false` when the root layout
+    ///   doesn't mount the region's panel at all — either the user wrote a
+    ///   fully-custom `index.org` whose render expr omits the panel's
+    ///   `live_block`, or the render expr is unparseable so we can't tell.
+    /// - `region_render_source_customized` is `true` when a layout mutation
+    ///   has overwritten the panel block's own render-source child. The
+    ///   panel still mounts but its contents are rendered by an expression
+    ///   the ref-state has tracked but whose output set we don't predict
+    ///   (the LeftSidebar PRQL is hard-coded, etc.).
+    ///
+    /// Either case means a transition that depends on per-entity rendering in
+    /// this region (ClickBlock, ToggleState, etc.) will time out at
+    /// `wait_for_entity_in_resolved_view_model` — there's no entity-bound
+    /// rendering for the ref-state to point at. Use this predicate as a
+    /// single source of truth at precondition / generator sites.
+    pub fn region_predictable(&self, region: Region) -> bool {
+        self.active_layout_renders_region(region) && !self.region_render_source_customized(region)
     }
 
     /// Build a `CollectionNavigator` for a region based on the active render expression.
@@ -740,25 +979,35 @@ impl ReferenceState {
     ///
     /// Used by ClickBlock transition generation to pick valid click targets.
     pub fn focusable_rendered_block_ids(&self, region: Region) -> Vec<EntityUri> {
+        // Skip the region entirely whenever ref_state can't predict what
+        // production will render there — either the root layout doesn't
+        // mount the panel (custom or unparseable layout), or the panel's
+        // own render source has been customized by a layout mutation. The
+        // hard-coded LeftSidebar prediction below only applies under the
+        // default layout, and the focus_roots path for Main / RightSidebar
+        // assumes default per-entity rendering.
+        if !self.region_predictable(region) {
+            return Vec::new();
+        }
+
         // LeftSidebar in the default index.org isn't focus-scoped — its PRQL
         // is `from block | filter name != null && name not in (...)`, listing
         // every named (document) block regardless of navigation. Mirror that
         // here so the generator can produce sidebar clicks even before any
         // navigation has set up `current_focus(LeftSidebar)`. This is a
-        // pragmatic shortcut tied to the default layout; once we re-enable
-        // layout overrides, this branch will need to inspect the actual
-        // sidebar query.
+        // pragmatic shortcut tied to the default layout; custom layouts are
+        // already filtered out above by `region_predictable`.
         if region == Region::LeftSidebar {
             return self
                 .block_state
                 .blocks
                 .values()
                 .filter(|b| {
-                    b.content_type == ContentType::Text
-                        && b.name
-                            .as_deref()
-                            .map(|n| !n.is_empty() && n != "index" && n != "__default__")
-                            .unwrap_or(false)
+                    if b.content_type != ContentType::Text || !b.is_page() {
+                        return false;
+                    }
+                    let t = b.title();
+                    !t.is_empty() && t != "index" && t != "__default__"
                 })
                 .map(|b| b.id.clone())
                 .collect();
@@ -857,9 +1106,81 @@ impl ReferenceState {
 
     // ── Block hierarchy mutation helpers ─────────────────────────────
 
-    /// Set a block's parent_id, re-canonicalize sequences, and rebuild profiles.
-    pub fn set_parent(&mut self, block_id: &EntityUri, new_parent: EntityUri) {
-        self.block_state.blocks.get_mut(block_id).unwrap().parent_id = new_parent;
+    /// Move `block_id` under `new_parent`, mirroring production's
+    /// `move_block(id, parent_id, after_block_id)`
+    /// (`crates/holon-core/src/traits.rs:542`).
+    ///
+    /// `after_block_id = None` inserts at the beginning of the new
+    /// parent's children. `Some(anchor)` inserts immediately after
+    /// `anchor` (which must already be a child of `new_parent`).
+    ///
+    /// Sequences for the new parent are reassigned to match the new
+    /// order — we deliberately do NOT call `recanon_and_rebuild`, since
+    /// the canonical "source content_type first" sort would override the
+    /// production sort_key this operation is modeling.
+    pub fn move_block(
+        &mut self,
+        block_id: &EntityUri,
+        new_parent: EntityUri,
+        after_block_id: Option<&EntityUri>,
+    ) {
+        use holon_orgmode::models::OrgBlockExt;
+
+        self.block_state.blocks.get_mut(block_id).unwrap().parent_id = new_parent.clone();
+
+        let mut siblings: Vec<EntityUri> = self
+            .sorted_children_of(&new_parent)
+            .into_iter()
+            .map(|b| b.id.clone())
+            .filter(|id| id != block_id)
+            .collect();
+        let insert_at = match after_block_id {
+            None => 0,
+            Some(anchor) => siblings
+                .iter()
+                .position(|id| id == anchor)
+                .map(|p| p + 1)
+                .unwrap_or(siblings.len()),
+        };
+        siblings.insert(insert_at, block_id.clone());
+
+        for (i, id) in siblings.iter().enumerate() {
+            if let Some(b) = self.block_state.blocks.get_mut(id) {
+                b.set_sequence(i as i64);
+            }
+        }
+        self.rebuild_profile_tracking();
+    }
+
+    /// Move `block_id` to the grandparent, placing it as the next sibling
+    /// **after** its old parent. Mirrors production `outdent`
+    /// (`crates/holon-core/src/traits.rs:693`) which calls
+    /// `move_block(id, grandparent_id, Some(parent_id))` — production's
+    /// `move_block` puts the block strictly between the predecessor (old
+    /// parent) and whatever follows it under grandparent, using a
+    /// fractional index. We mirror that by shifting later siblings up by
+    /// one and setting `sequence = old_parent_seq + 1`.
+    pub fn outdent_block(&mut self, block_id: &EntityUri) {
+        use holon_orgmode::models::OrgBlockExt;
+        let block = self.block_state.blocks.get(block_id).unwrap();
+        let old_parent_id = block.parent_id.clone();
+        let old_parent = self.block_state.blocks.get(&old_parent_id).unwrap();
+        let grandparent_id = old_parent.parent_id.clone();
+        let old_parent_seq = old_parent.sequence();
+
+        let target_seq = old_parent_seq + 1;
+        for sibling in self.block_state.blocks.values_mut() {
+            if sibling.id == *block_id {
+                continue;
+            }
+            if sibling.parent_id == grandparent_id && sibling.sequence() >= target_seq {
+                let s = sibling.sequence();
+                sibling.set_sequence(s + 1);
+            }
+        }
+        let block = self.block_state.blocks.get_mut(block_id).unwrap();
+        block.parent_id = grandparent_id;
+        block.set_sequence(target_seq);
         self.recanon_and_rebuild();
     }
 
@@ -941,6 +1262,119 @@ impl ReferenceState {
         new_id
     }
 
+    /// Join `block_id` into its merge target.
+    ///
+    /// Two cases, both triggered by Backspace at position 0:
+    ///   1. **Previous sibling exists** (target = prev sibling at same level):
+    ///      - prev.content = prev.content + block.content
+    ///      - re-parent block's children to prev, appended after prev's
+    ///        existing children
+    ///      - delete block
+    ///   2. **No previous sibling, parent is text** (target = parent;
+    ///      child→parent join):
+    ///      - parent.content = parent.content + block.content
+    ///      - re-parent block's children to parent, placed at block's old
+    ///        slot (before block's old siblings)
+    ///      - delete block
+    ///
+    /// Returns the byte offset in the target where the join happened (i.e.
+    /// the length of the target's old content) — the cursor lands here.
+    ///
+    /// Panics if neither case applies — call only after the precondition
+    /// has been validated.
+    pub fn join_block(&mut self, block_id: &EntityUri) -> usize {
+        use holon_orgmode::models::OrgBlockExt;
+
+        let block = self.block_state.blocks.get(block_id).unwrap().clone();
+        let prev_id = self.previous_sibling(block_id);
+        let target_id = match &prev_id {
+            Some(id) => id.clone(),
+            None => block.parent_id.clone(),
+        };
+        let into_parent = prev_id.is_none();
+
+        // Capture original contents.
+        let target = self.block_state.blocks.get(&target_id).unwrap();
+        let target_content = target.content.clone();
+        let join_offset = target_content.len();
+
+        // Append block's content to target's content.
+        self.block_state.blocks.get_mut(&target_id).unwrap().content =
+            format!("{}{}", target_content, block.content);
+
+        // Re-parent block's children to target.
+        let block_child_ids: Vec<EntityUri> = self
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *block_id)
+            .map(|b| b.id.clone())
+            .collect();
+        let mut sorted_children = block_child_ids;
+        sorted_children.sort_by_key(|id| {
+            self.block_state
+                .blocks
+                .get(id)
+                .map(|b| b.sequence())
+                .unwrap_or(0)
+        });
+
+        if into_parent {
+            // Child→parent: place block's children at block's old slot, then
+            // shift block's old siblings (those with sequence > block.seq) up
+            // by `len(children) - 1` so the canonical order under parent
+            // becomes [...children..., ...remaining-siblings...].
+            let block_seq = block.sequence();
+            let n = sorted_children.len();
+            if n >= 2 {
+                let shift = (n as i64) - 1;
+                let to_shift: Vec<EntityUri> = self
+                    .block_state
+                    .blocks
+                    .values()
+                    .filter(|b| {
+                        b.parent_id == target_id && b.id != *block_id && b.sequence() > block_seq
+                    })
+                    .map(|b| b.id.clone())
+                    .collect();
+                for sid in to_shift {
+                    let s = self.block_state.blocks.get_mut(&sid).unwrap();
+                    s.set_sequence(s.sequence() + shift);
+                }
+            }
+            for (i, child_id) in sorted_children.iter().enumerate() {
+                let child = self.block_state.blocks.get_mut(child_id).unwrap();
+                child.parent_id = target_id.clone();
+                child.set_sequence(block_seq + i as i64);
+            }
+        } else {
+            // Prev-sibling: append block's children after target's existing
+            // children, preserving relative order within block's children.
+            let max_target_child_seq = self
+                .block_state
+                .blocks
+                .values()
+                .filter(|b| b.parent_id == target_id)
+                .map(|b| b.sequence())
+                .max()
+                .unwrap_or(0);
+            let mut next_seq = max_target_child_seq + 1;
+            for child_id in sorted_children {
+                let child = self.block_state.blocks.get_mut(&child_id).unwrap();
+                child.parent_id = target_id.clone();
+                child.set_sequence(next_seq);
+                next_seq += 1;
+            }
+        }
+
+        // Delete block_id from blocks + block_documents.
+        self.block_state.blocks.remove(block_id);
+        self.block_state.block_documents.remove(block_id);
+
+        self.recanon_and_rebuild();
+        join_offset
+    }
+
     /// Apply a mutation to the block state, re-canonicalize, and rebuild profiles.
     pub fn apply_mutation(&mut self, event: &super::types::MutationEvent) {
         let mut blocks: Vec<Block> = self.block_state.blocks.values().cloned().collect();
@@ -950,7 +1384,7 @@ impl ReferenceState {
     }
 
     /// Re-canonicalize sequences and rebuild profile tracking.
-    fn recanon_and_rebuild(&mut self) {
+    pub fn recanon_and_rebuild(&mut self) {
         let mut blocks: Vec<Block> = self.block_state.blocks.values().cloned().collect();
         crate::assign_reference_sequences_canonical(&mut blocks);
         self.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
@@ -1029,7 +1463,7 @@ impl ReferenceState {
             _ => block
                 .properties
                 .get(tep.field_name)
-                .map_or(false, |v| !matches!(v, Value::Null)),
+                .is_some_and(|v| !matches!(v, Value::Null)),
         };
         Some(if has_field {
             tep.profile_name.to_string()
@@ -1050,7 +1484,7 @@ impl ReferenceState {
                 .block_state
                 .block_documents
                 .get(&block.id)
-                .map_or(false, |doc| doc.is_no_parent() || doc.is_sentinel())
+                .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel())
             {
                 continue;
             }
@@ -1065,18 +1499,16 @@ impl ReferenceState {
                 if let Some(yaml_idx) = VALID_PROFILE_YAMLS
                     .iter()
                     .position(|y| block.content.trim() == y.trim())
-                {
-                    if let Some(entity_name) = block
+                    && let Some(entity_name) = block
                         .content
                         .lines()
                         .next()
                         .and_then(|l| l.strip_prefix("entity_name: "))
-                    {
-                        self.active_profiles.insert(
-                            EntityName::new(entity_name.trim()),
-                            (block_key.clone(), yaml_idx),
-                        );
-                    }
+                {
+                    self.active_profiles.insert(
+                        EntityName::new(entity_name.trim()),
+                        (block_key.clone(), yaml_idx),
+                    );
                 }
             }
         }
@@ -1112,10 +1544,10 @@ impl ReferenceState {
         self.rebuild_profile_tracking();
         self.render_expressions.clear();
         for id in &self.layout_blocks.render_source_ids {
-            if let Some(block) = self.block_state.blocks.get(id) {
-                if let Some(expr) = render_expr_from_rhai(block.content.as_str()) {
-                    self.render_expressions.insert(id.clone(), expr);
-                }
+            if let Some(block) = self.block_state.blocks.get(id)
+                && let Some(expr) = render_expr_from_rhai(block.content.as_str())
+            {
+                self.render_expressions.insert(id.clone(), expr);
             }
         }
     }
@@ -1130,7 +1562,7 @@ impl ReferenceState {
                 self.block_state
                     .blocks
                     .get(*id)
-                    .map_or(false, |b| b.parent_id == main_panel_id)
+                    .is_some_and(|b| b.parent_id == main_panel_id)
             })
             .and_then(|id| self.render_expressions.get(id))
     }
@@ -1230,7 +1662,7 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
                 self.block_state
                     .blocks
                     .get(*rid)
-                    .map_or(false, |b| b.parent_id == *id)
+                    .is_some_and(|b| b.parent_id == *id)
             })
             .and_then(|rid| self.render_expressions.get(rid))
             .cloned()
@@ -1245,7 +1677,7 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
             .blocks
             .values()
             .filter(|b| b.parent_id == *id)
-            .map(|b| block_to_data_row(b))
+            .map(block_to_data_row)
             .collect();
 
         (render_expr, rows.into_iter().map(Arc::new).collect())

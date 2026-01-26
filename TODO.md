@@ -7,6 +7,32 @@
 - [ ] Improve error handling and logging
 - [ ] Refactor code to use more idiomatic Rust practices
 
+## Bugs Found (2026-04-11) — GPUI Startup
+
+### index.org Infinite Re-Processing Loop
+- **Status**: Open
+- **Symptom**: Every ~2s after startup: `[OrgSyncController] Duplicate block IDs across files! File index.org contains block IDs that already exist in other documents: 21 conflicts` followed by `[on_file_changed] CDC cache did not catch up within 2s for index.org (expected 23 blocks, cache has 2)`
+- **Impact**: Infinite loop of re-processing, wasted CPU, never converges
+- **Reproduction**: `rm -f ~/.config/holon/holon.db* && cargo run -p holon-gpui` — happens on every fresh DB startup
+- **Key observations**:
+  - First pass processes index.org fine (23 blocks inserted)
+  - Subsequent passes detect 21 "duplicate block IDs" — blocks from index.org that already exist in other documents (likely the child documents that were processed first)
+  - CDC cache reports only 2 blocks when 23 are expected — the QueryableCache subscription may be filtering to a subset
+  - The error triggers a retry, which sees the same duplicates, triggering another retry, forever
+- **Where to look**:
+  - `crates/holon-orgmode/src/org_sync_controller.rs` — `Processing external change` path and duplicate detection logic
+  - `crates/holon-orgmode/src/di.rs` — `on_file_changed` CDC wait logic, the "expected N blocks, cache has M" check
+  - The root issue is likely that index.org shares block IDs with child documents (by design — document identity aliasing), but the duplicate check doesn't account for this
+
+### shadow_index.rs Index Out of Bounds
+- **Status**: Open
+- **Symptom**: `index out of bounds: the len is 1377 but the index is 1379` at `crates/holon-frontend/src/shadow_index.rs:220`
+- **Trigger**: Happens during `bubble_input` when navigating — the `nodes` vec is being indexed by a stale idx that was valid before a structural rebuild removed/reindexed nodes
+- **Impact**: Panic on main thread, kills the app (double-panic because it's in a function that cannot unwind — likely a GPUI callback)
+- **Where to look**:
+  - `crates/holon-frontend/src/shadow_index.rs:220` — `let node = &self.nodes[idx]` in `bubble_input`
+  - The `entity_index` HashMap maps entity_id → node index, but these indices become stale when the `nodes` Vec is rebuilt. Either the index needs to be rebuilt atomically, or lookups need bounds-checking
+
 ## Bugs Found (2026-02-27) — Custom Property Stripping
 
 ### Source Block Custom Properties Lost in Org Round-Trip
@@ -65,4 +91,3 @@
   * Also allow wrapping another Fake in a mock as the SourceSystem
     * Allows running tests in case of rate limits
     * Does not test that the fake is implemented correctly, but that fake+cache behave the same way as fake alone
-* Implement OperationDispatcher

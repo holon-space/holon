@@ -241,56 +241,6 @@ async fn test_create_matview_full_init_schema_pattern() {
                 .await
                 .unwrap();
                 eprintln!("[test_full_init_schema] Created events table");
-
-                // Create indexes
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_events_loro_pending
-                     ON events(\"created_at\")
-                     WHERE processed_by_loro = 0 AND origin != 'loro' AND status = 'confirmed'",
-                    vec![],
-                )
-                .await
-                .unwrap();
-                eprintln!("[test_full_init_schema] Created loro pending index");
-
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_events_org_pending
-                     ON events(\"created_at\")
-                     WHERE processed_by_org = 0 AND origin != 'org' AND status = 'confirmed'",
-                    vec![],
-                )
-                .await
-                .unwrap();
-                eprintln!("[test_full_init_schema] Created org pending index");
-
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_events_cache_pending
-                     ON events(\"created_at\")
-                     WHERE processed_by_cache = 0 AND status = 'confirmed'",
-                    vec![],
-                )
-                .await
-                .unwrap();
-                eprintln!("[test_full_init_schema] Created cache pending index");
-
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_events_aggregate
-                     ON events(\"aggregate_type\", \"aggregate_id\", \"created_at\")",
-                    vec![],
-                )
-                .await
-                .unwrap();
-                eprintln!("[test_full_init_schema] Created aggregate index");
-
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_events_command
-                     ON events(\"command_id\")
-                     WHERE command_id IS NOT NULL",
-                    vec![],
-                )
-                .await
-                .unwrap();
-                eprintln!("[test_full_init_schema] Created command index");
             });
         });
     }

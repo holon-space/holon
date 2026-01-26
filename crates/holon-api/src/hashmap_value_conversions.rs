@@ -49,7 +49,31 @@ impl TryFrom<Value> for HashMap<String, Value> {
         match value {
             Value::Object(obj) => Ok(obj),
             Value::Null => Ok(HashMap::new()),
-            _ => Err("Value is not an object".into()),
+            Value::Json(s) | Value::String(s) => {
+                if s.is_empty() {
+                    return Ok(HashMap::new());
+                }
+                let json: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
+                    format!(
+                        "HashMap<String,Value>::try_from JSON parse failed for {:?}: {}",
+                        s, e
+                    )
+                })?;
+                match json {
+                    serde_json::Value::Object(obj) => Ok(obj
+                        .into_iter()
+                        .map(|(k, v)| (k, Value::from_json_value(v)))
+                        .collect()),
+                    other => Err(format!(
+                        "HashMap<String,Value>::try_from expected JSON object, got {:?}",
+                        other
+                    )
+                    .into()),
+                }
+            }
+            other => {
+                Err(format!("HashMap<String,Value>::try_from cannot convert {:?}", other).into())
+            }
         }
     }
 }
