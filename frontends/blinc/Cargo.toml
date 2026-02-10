@@ -1,0 +1,55 @@
+[package]
+name = "holon-blinc"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "holon_blinc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "holon-blinc"
+path = "src/main.rs"
+
+[features]
+hot-reload = ["subsecond"]
+chrome-trace = ["holon-frontend/chrome-trace"]
+
+[dependencies]
+subsecond = { version = "0.7", optional = true }
+# Blinc UI framework
+blinc_app = { git = "https://github.com/project-blinc/Blinc", package = "blinc_app" }
+blinc_layout = { git = "https://github.com/project-blinc/Blinc", package = "blinc_layout" }
+blinc_core = { git = "https://github.com/project-blinc/Blinc", package = "blinc_core" }
+blinc_theme = { git = "https://github.com/project-blinc/Blinc", package = "blinc_theme" }
+
+# Holon workspace crates
+holon.workspace = true
+holon-frontend = { workspace = true, features = ["blinc"] }
+holon-api.workspace = true
+holon-macros.workspace = true
+holon-mcp = { path = "../mcp" }
+
+# DI
+fluxdi.workspace = true
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+
+# Serialization
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+holon-integration-tests = { path = "../../crates/holon-integration-tests" }
+
+[build-dependencies]
+base64 = "0.22"
