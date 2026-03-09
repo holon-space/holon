@@ -1,0 +1,62 @@
+# Out-of-workspace crate: targets wasm32 only via `trunk build`.
+# Declares its own empty [workspace] to opt out of the holon root workspace —
+# web-sys/js-sys are not available on native targets so `cargo check --workspace`
+# (native) would fail. Same pattern as frontends/holon-worker.
+[workspace]
+
+[package]
+name = "holon-dioxus-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "holon-dioxus-web"
+path = "src/main.rs"
+
+[dependencies]
+# Dioxus web
+dioxus = { version = "0.7", default-features = false, features = ["web", "macro", "html", "hooks", "signals", "launch"] }
+
+# Async / logging.
+# dioxus-web is in the workspace `exclude` list (wasm32-only — web-sys
+# isn't available on native, so cargo check --workspace would fail). An
+# excluded package can't use `foo.workspace = true` inheritance, so we
+# pin versions directly here.
+tracing = "0.1"
+futures = "0.3"
+serde_json = "1"
+
+# Shared rendering types — holon-frontend already builds cleanly on
+# wasm32-unknown-unknown (the worker consumes it under wasm32-wasip1-threads
+# and we verified `cargo check -p holon-frontend --target wasm32-unknown-unknown`
+# is clean). Using it directly means the typed ViewModel tree crosses the
+# postMessage boundary into a typed Rust match — no string-probing in the
+# Dioxus renderer.
+holon-frontend = { path = "../../crates/holon-frontend", default-features = false }
+holon-api = { path = "../../crates/holon-api" }
+holon-macros = { path = "../../crates/holon-macros" }
+
+# wasm glue
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = [
+  "console", "Window", "Document", "Element", "HtmlElement", "EventTarget",
+  # Worker bridge
+  "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "ErrorEvent", "Event", "Performance",
+  # Editor cursor preservation
+  "Selection", "Range", "Node",
+  # Input events
+  "InputEvent", "KeyboardEvent",
+  # MCP relay WebSocket bridge
+  "WebSocket", "CloseEvent", "Location",
+] }
+js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "js"] }

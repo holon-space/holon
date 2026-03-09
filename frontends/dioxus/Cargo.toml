@@ -1,0 +1,39 @@
+[package]
+name = "holon-dioxus"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+heap-profile = ["holon-frontend/heap-profile"]
+
+[[bin]]
+name = "holon-dioxus"
+path = "src/main.rs"
+
+[dependencies]
+# Dioxus framework
+dioxus = { version = "0.7", features = ["desktop"] }
+
+# Holon workspace crates
+holon.workspace = true
+holon-frontend.workspace = true
+holon-api.workspace = true
+holon-macros.workspace = true
+
+# DI
+fluxdi.workspace = true
+
+# Serialization
+serde_json.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+
+# Error handling
+anyhow.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
