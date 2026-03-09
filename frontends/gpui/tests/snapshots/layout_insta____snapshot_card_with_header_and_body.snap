@@ -1,0 +1,10 @@
+---
+source: frontends/gpui/tests/layout_insta.rs
+expression: snap.structural_dump()
+---
+card 800x106
+  row 768x26
+    icon 20x16
+    text 42x26
+  text 768x26
+  text 768x26

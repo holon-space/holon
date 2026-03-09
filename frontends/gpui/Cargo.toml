@@ -1,0 +1,131 @@
+[package]
+name = "holon-gpui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "holon_gpui"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "holon-gpui"
+path = "src/main.rs"
+
+[[example]]
+name = "design_gallery"
+required-features = ["desktop"]
+
+[[example]]
+name = "refresh_cascade"
+required-features = ["desktop"]
+
+[[example]]
+name = "reactive_vm_demo"
+required-features = ["desktop"]
+
+[[example]]
+name = "rich_input_spike"
+required-features = ["desktop"]
+
+[[test]]
+name = "reactive_vm_test"
+harness = false
+
+[[test]]
+name = "gpui_ui_pbt"
+harness = false
+required-features = ["pbt"]
+
+[[test]]
+name = "reactive_vm_realwindow_test"
+harness = false
+
+[[test]]
+name = "executor_bridge_test"
+harness = false
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui_platform"]
+mobile = ["dep:gpui-mobile"]
+chrome-trace = [
+    "holon-frontend/chrome-trace",
+    "holon-integration-tests?/chrome-trace",
+]
+heap-profile = ["holon-frontend/heap-profile"]
+hot-reload = ["dep:subsecond", "dep:dioxus-devtools"]
+pbt = ["dep:holon-integration-tests", "dep:enigo"]
+
+[dependencies]
+# GPUI framework — pinned to same rev as gpui-mobile to ensure single gpui version
+gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121" }
+
+# Desktop-only: native platform (macOS/Linux/Windows)
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", optional = true, features = ["font-kit"] }
+
+# Mobile-only: platform implementations for iOS/Android
+gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", optional = true }
+
+# GPUI component library (buttons, inputs, modals, etc.)
+# Fork's holon branch is pinned to the same zed rev as gpui-mobile.
+gpui-component = { git = "https://github.com/holon-space/gpui-component", branch = "holon" }
+
+# Holon workspace crates
+holon.workspace = true
+holon-frontend = { workspace = true, features = ["otel"] }
+holon-api.workspace = true
+holon-macros.workspace = true
+holon-mcp = { path = "../mcp" }
+holon-integration-tests = { path = "../../crates/holon-integration-tests", optional = true }
+enigo = { version = "0.6", optional = true }
+
+# DI
+fluxdi.workspace = true
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+futures.workspace = true
+futures-signals.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde_json.workspace = true
+toml.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+subsecond = { version = "0.7", optional = true }
+dioxus-devtools = { version = "0.7", optional = true }
+
+# Force io-surface's default `link` feature on — core-video disables it,
+# and dx/subsecond doesn't honour gpui_macos's build.rs framework directives.
+[target.'cfg(target_os = "macos")'.dependencies]
+io-surface = "0.16"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
+android-activity = { version = "0.6", features = ["native-activity"] }
+log = "0.4"
+
+[dev-dependencies]
+holon-integration-tests = { path = "../../crates/holon-integration-tests" }
+holon-layout-testing = { path = "../../crates/holon-layout-testing" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = ["font-kit"] }
+# Fast-UI test layer (tests/support, tests/layout_*): pulls in TestAppContext,
+# VisualTestContext, add_window_view, run_until_parked, the TestPlatform, etc.
+# Test-support is the upstream feature flag that gates these; nothing in
+# release builds sees any of it. DO NOT remove — `tests/support/mod.rs` relies
+# on it via gpui::{TestAppContext, WindowOptions, WindowBounds, AppContext, …}.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = ["test-support"] }
+# Property-based tests over ReactiveViewModel trees (tests/layout_proptest).
+proptest = "1"
+# Structural layout snapshot tests (tests/layout_insta).
+insta = { version = "1", features = ["yaml"] }
