@@ -1,0 +1,19 @@
+@startuml c4-container
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Container Diagram
+
+System_Boundary(sys, "System") {
+    Container_Boundary(Services_layer, "Services") {
+        Container(holon_worker, "Holon-worker", "Worker", "Holon worker — Phase 1 spike.")
+        Container(mcp, "Mcp", "MCP Server", "MCP server frontend (stdio + HTTP).")
+    }
+    Container_Boundary(UI_layer, "UI") {
+        Container(gpui, "Gpui", "MVVM View", "GPUI desktop frontend (primary; mobile via gpui-mobile feature) — the MVVM **View** layer; its render functions build native GPUI widgets from holon-frontend's `ReactiveViewModel`.")
+        Container(tui, "Tui", "MVVM View", "Terminal UI frontend — the MVVM **View** layer; its render functions build ratatui widgets from holon-frontend's `ReactiveViewModel`.")
+    }
+}
+
+
+
+@enduml

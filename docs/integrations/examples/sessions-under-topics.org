@@ -1,0 +1,42 @@
+#+TITLE: Sessions under topics — example queries over the sidecar-declared views
+
+# Example consumers of the generic `views:` mechanism demonstrated in
+# docs/integrations/claude-history.yaml (cc_session_last_message +
+# cc_session_status). Drop these source blocks onto any vault page.
+#
+# NOTE: live queries are materialized by the engine too, so they must stay in
+# the same IVM dialect as sidecar views (iif not CASE, no correlated
+# subqueries). cc_session_status.session_id is already prefixed
+# ("cc-session:<id>"), so it equijoins directly against cc_session.id.
+
+* Composed PBT migration                    :topic:
+:PROPERTIES:
+:ID: topic-composed-pbt
+:END:
+
+Sessions belonging to this topic (matched on the first prompt), with live
+status from the sidecar-declared =cc_session_status= view:
+
+#+BEGIN_SRC holon_sql
+SELECT s.id, s.first_prompt, s.modified, st.last_role, st.status
+FROM cc_session s
+JOIN cc_session_status st ON st.session_id = s.id
+WHERE s.first_prompt LIKE '%composed%pbt%'
+ORDER BY s.modified DESC
+#+END_SRC
+
+* Agents needing me                          :dashboard:
+:PROPERTIES:
+:ID: dashboard-agents-needing-me
+:END:
+
+Every session where the assistant spoke last and recently — i.e. an agent is
+waiting on user input:
+
+#+BEGIN_SRC holon_sql
+SELECT s.id, s.first_prompt, st.last_ts
+FROM cc_session s
+JOIN cc_session_status st ON st.session_id = s.id
+WHERE st.status = 'waiting-on-user'
+ORDER BY st.last_ts DESC
+#+END_SRC

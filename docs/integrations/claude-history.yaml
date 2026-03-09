@@ -1,0 +1,219 @@
+transport:
+  child_process:
+    command: /Users/martin/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp
+    env:
+      CLAUDE_DATA_DIR: "/Users/martin/.claude"
+entity_prefix: "cc_"
+entities:
+  session:
+    profile_variants:
+      - name: default
+        render: >-
+          expand_toggle(#{
+            header: row(text(col("first_prompt")), spacer(8), text(col("message_count"))),
+            content: live_query(#{
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+            })
+          })
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: project_id
+        sql_type: TEXT
+      - name: first_prompt
+        sql_type: TEXT
+        nullable: true
+      - name: summary
+        sql_type: TEXT
+        nullable: true
+      - name: message_count
+        sql_type: INTEGER
+        nullable: true
+      - name: created
+        sql_type: TEXT
+        nullable: true
+      - name: modified
+        sql_type: TEXT
+        nullable: true
+      - name: git_branch
+        sql_type: TEXT
+        nullable: true
+      - name: project_path
+        sql_type: TEXT
+        nullable: true
+      - name: model
+        sql_type: TEXT
+        nullable: true
+      - name: is_sidechain
+        sql_type: INTEGER
+        nullable: true
+    sync:
+      list_resource: "claude-history://projects/{project_id}/sessions"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+    vtable:
+      list_resource: "claude-history://projects/{project_id}/sessions"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+      write_through: true
+
+  task:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("subject")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        nullable: true
+      - name: local_id
+        sql_type: TEXT
+        nullable: true
+      - name: subject
+        sql_type: TEXT
+        nullable: true
+      - name: description
+        sql_type: TEXT
+        nullable: true
+      - name: status
+        sql_type: TEXT
+        nullable: true
+      - name: created_at
+        sql_type: TEXT
+        nullable: true
+      - name: completed_at
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_resource: "claude-history://projects/{project_id}/tasks"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+    vtable:
+      list_resource: "claude-history://projects/{project_id}/tasks"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+      write_through: true
+
+  message:
+    # OPT-IN (commented out below, inside the vtable block): unpinned fan-out
+    # over locally cached sessions. Today cc_message_fdw requires a pinned
+    # session_id (uri_params: session_id: ""), so `SELECT ... WHERE
+    # session_id = X` costs exactly one resource read. Swapping the empty
+    # value for the enumerate_from block makes unpinned queries work by
+    # fanning out one resource read per matching cached session.
+    #
+    # Trade-off: every unpinned query pays fan-out cost at the MCP server.
+    # The knobs below keep it bounded and incremental:
+    #   - `where` watermark (pure local SQL, correlated subquery): only
+    #     sessions whose `modified` is newer than the newest message already
+    #     cached for them are re-fetched. substr(cc_session.id, 12) strips
+    #     the 'cc-session:' scheme prefix to match cc_message.session_id,
+    #     which stores raw ids.
+    #   - `order_by`/`limit`: most-recently-modified sessions first, capped.
+    #   - `max_fan_out`: FAILS LOUD (no silent truncation) if the enumeration
+    #     still produces more parents than the bound.
+    #
+    # vtable:
+    #   list_resource: "claude-history://sessions/{session_id}/messages"
+    #   uri_params:
+    #     session_id:
+    #       enumerate_from:
+    #         entity: session
+    #         field: id
+    #         where: >-
+    #           modified > COALESCE((SELECT MAX(m.timestamp) FROM cc_message m
+    #                                WHERE m.session_id = substr(cc_session.id, 12)), '')
+    #         order_by: modified DESC
+    #         limit: 20
+    #   write_through: true
+    #   max_fan_out: 50
+    profile_variants:
+      - name: default
+        render: 'row(text(col("content")))'
+    schema:
+      - name: uuid
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        nullable: true
+      - name: parent_uuid
+        sql_type: TEXT
+        nullable: true
+      - name: type
+        sql_type: TEXT
+        nullable: true
+      - name: timestamp
+        sql_type: TEXT
+        nullable: true
+      - name: role
+        sql_type: TEXT
+        nullable: true
+      - name: model
+        sql_type: TEXT
+        nullable: true
+      - name: content
+        sql_type: TEXT
+        nullable: true
+      - name: git_branch
+        sql_type: TEXT
+        nullable: true
+      - name: cwd
+        sql_type: TEXT
+        nullable: true
+    vtable:
+      list_resource: "claude-history://sessions/{session_id}/messages"
+      uri_params:
+        session_id: ""
+      write_through: true
+
+tools: {}
+
+# Sidecar-declared derived views (generic `views:` mechanism, Phase 2).
+# Each entry becomes `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}`
+# at integration startup, after the cache tables exist. DDL failure is a hard,
+# loud config error at connect.
+#
+# SQL must stay inside the Turso-IVM-supported dialect:
+#   - single-level GROUP BY aggregates, incl. the arg-max concat idiom
+#     substr(MAX(ts || '|' || col), N)
+#   - iif(cond, a, b) for conditionals (CASE ... END fails at CREATE)
+#   - NO correlated subqueries, NO self-joins back to the aggregated table,
+#     NO non-equijoin LEFT JOINs — these fail at CREATE.
+#
+# Both views below are verified by
+# crates/holon-turso/tests/sidecar_views.rs — keep the SQL in sync.
+views:
+  # Arg-max rollup: last message per session, read from the cc_message CACHE
+  # table (fed by vtable write-through; cc_message requires a pinned
+  # session_id today, so rows exist for sessions whose messages were viewed).
+  # substr(..., 26): message timestamps are 24-char ISO-8601
+  # ("2026-07-04T10:00:00.000Z") + 1 for the '|' separator.
+  # session_id is emitted pre-prefixed ("cc-session:<id>") so it equijoins
+  # directly against cc_session.id.
+  - name: session_last_message
+    sql: >-
+      SELECT 'cc-session:' || session_id AS session_id,
+             MAX(timestamp) AS last_ts,
+             substr(MAX(timestamp || '|' || role), 26) AS last_role
+      FROM cc_message GROUP BY session_id
+  # Status classification, chained on the rollup (IVM rejects conditionals
+  # over aggregate expressions in one view; matview-on-matview is supported).
+  #   user spoke last                       -> working (agent is chewing)
+  #   assistant spoke last, recent activity -> waiting-on-user
+  #   otherwise                             -> idle
+  # CAVEAT: strftime('now') is evaluated when IVM recomputes a row (i.e. when
+  # that session's data changes), not continuously — a session that stops
+  # changing keeps its last classification until its next write.
+  - name: session_status
+    sql: >-
+      SELECT session_id, last_ts, last_role,
+             iif(last_role = 'user', 'working',
+                 iif(last_role = 'assistant'
+                     AND last_ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-10 minutes'),
+                     'waiting-on-user', 'idle')) AS status
+      FROM cc_session_last_message
