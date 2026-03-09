@@ -17,6 +17,7 @@ members = [
     "crates/holon-macros",
     "crates/holon-macros-test",
     "frontends/mcp",
+    "frontends/gpui",
 ]
 exclude = [
 ]
@@ -183,3 +184,34 @@ debug = true
 #sqlparser = { version = "0.33", default-features = false, features = [] }
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
 pathfinder_simd = { git = "https://github.com/pbdeuchler/pathfinder.git", branch = "pbd/fix_simd_renames", package = "pathfinder_simd" }
+
+# Holon fork of zed — tracks the `holon` branch so we can add more ports
+# (currently: a one-line `std::mem::forget` of an extra strong Rc<AppCell>
+# inside `Application::run` on iOS so the context survives beyond the single
+# pass through UIApplicationMain's finish-launching callback). Without the
+# iOS patch, every Weak<AppCell> held by windows / async tasks dangles as
+# soon as the first run loop tick fires applicationDidBecomeActive.
+# Rebase the branch periodically onto the upstream rev used by gpui-mobile.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_wgpu = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_macos = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_linux = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_windows = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_web = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui_platform = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+
+# Holon fork of gpui-mobile — tracks the `holon` branch. Currently carries
+# a single patch: wire a real display handle into wgpu's `InstanceDescriptor`
+# on iOS so `Instance::create_surface_unsafe` actually produces a Metal
+# surface under wgpu v29. Without this the iOS `IosWindow.renderer` stays
+# `None`, every `draw()` hits the fallback, and the Metal layer shows only
+# its clear color (black screen).
+[patch."https://github.com/itsbalamurali/gpui-mobile"]
+gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch = "holon" }
+
+# Point at local clone while the `context_menu_extender` commit is
+# unpublished — once pushed to holon-space/gpui-component the `path`
+# can be replaced by the git+branch spec used in frontends/gpui/Cargo.toml.
+[patch."https://github.com/holon-space/gpui-component"]
+gpui-component = { path = "/Users/martin/Workspaces/rust/gpui-component/crates/ui" }
