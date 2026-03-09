@@ -1,0 +1,178 @@
+set dotenv-path := "android/.env"
+set dotenv-load
+set export
+
+project_root := `git rev-parse --show-toplevel`
+assets := project_root / "assets"
+sdk := env("ANDROID_SDK_HOME", env("HOME") / "Library/Android/sdk")
+bt := sdk / "build-tools/36.0.0"
+platform := sdk / "platforms/android-36/android.jar"
+ndk := env("ANDROID_NDK_HOME", sdk / "ndk/29.0.14206865")
+package := "space.holon.gpui"
+activity := package / "android.app.NativeActivity"
+build_dir := "android/build"
+manifest := "android/AndroidManifest.xml"
+
+# List available recipes
+default:
+    @just --list
+
+# Build the .so for Android (release by default)
+build profile="release":
+    cargo ndk -t arm64-v8a -P 33 build \
+        -p holon-gpui --no-default-features --features mobile \
+        --lib {{ if profile == "release" { "--release" } else { "" } }}
+
+# Package the .so into a signed APK
+apk profile="release":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BD="$(pwd)/{{ build_dir }}"
+    SO="{{ project_root }}/target/aarch64-linux-android/{{ profile }}/libholon_gpui.so"
+    if [ ! -f "$SO" ]; then
+        echo "ERROR: $SO not found. Run: just build {{ profile }}"
+        exit 1
+    fi
+    echo "Packaging APK from $SO ($(du -h "$SO" | cut -f1))"
+    rm -rf "$BD"
+    mkdir -p "$BD/lib/arm64-v8a"
+    cp "$SO" "$BD/lib/arm64-v8a/"
+    cp {{ ndk }}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so \
+       "$BD/lib/arm64-v8a/"
+    {{ bt }}/aapt2 link -o "$BD/holon-unaligned.apk" \
+        --manifest {{ manifest }} -I {{ platform }} \
+        --min-sdk-version 33 --target-sdk-version 36
+    cd "$BD" && zip -0 holon-unaligned.apk lib/arm64-v8a/libholon_gpui.so lib/arm64-v8a/libc++_shared.so
+    {{ bt }}/zipalign -f 4 "$BD/holon-unaligned.apk" "$BD/holon.apk"
+    {{ bt }}/apksigner sign --ks ~/.android/debug.keystore \
+        --ks-pass pass:android --ks-key-alias androiddebugkey \
+        "$BD/holon.apk"
+    echo "APK ready: $BD/holon.apk ($(du -h "$BD/holon.apk" | cut -f1))"
+
+# Install APK on connected device/emulator
+install:
+    adb install -r "$(pwd)/{{ build_dir }}/holon.apk"
+
+# Launch the app
+launch:
+    adb shell am start -n {{ activity }}
+
+# Stop the app
+stop:
+    adb shell am force-stop {{ package }}
+
+# Clear app data (DB + caches) and re-push org files
+clear:
+    adb shell am force-stop {{ package }}
+    adb shell pm clear {{ package }}
+
+# View logcat filtered to holon
+log *filter="":
+    adb logcat -v brief -s "holon-gpui:*" {{ filter }}
+
+# Push org files to emulator external storage
+sync-org src="$HOME/Workspaces/pkm/holon-pkm":
+    adb shell mkdir -p /sdcard/Android/data/{{ package }}/files/holon-pkm
+    adb push {{ src }}/. /sdcard/Android/data/{{ package }}/files/holon-pkm/
+
+# Build + package + install + launch (the full cycle)
+deploy profile="release": (build profile) (apk profile) install launch
+
+# Build desktop (default features)
+desktop *args="":
+    cargo run -p holon-gpui {{ args }}
+
+# Regenerate assets/images/holon.icns from assets/images/holon.png
+icns:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SRC="{{ assets }}/images/holon.png"
+    ICONSET="/tmp/holon.iconset"
+    rm -rf "$ICONSET"
+    mkdir -p "$ICONSET"
+    for sz in 16 32 128 256 512; do
+        sips -z $sz $sz "$SRC" --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+        dbl=$((sz * 2))
+        if [ $dbl -le 1024 ]; then
+            sips -z $dbl $dbl "$SRC" --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+        fi
+    done
+    iconutil -c icns "$ICONSET" -o "{{ assets }}/images/holon.icns"
+    rm -rf "$ICONSET"
+    echo "Created {{ assets }}/images/holon.icns"
+
+# Build macOS .app bundle (release)
+bundle profile="release":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p holon-gpui {{ if profile == "release" { "--release" } else { "" } }}
+    BIN="{{ project_root }}/target/{{ profile }}/holon-gpui"
+    APP="{{ project_root }}/target/{{ profile }}/Holon.app"
+    rm -rf "$APP"
+    mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+    cp macos/Info.plist "$APP/Contents/"
+    cp "$BIN" "$APP/Contents/MacOS/holon-gpui"
+    cp "{{ assets }}/images/holon.icns" "$APP/Contents/Resources/"
+    echo "Bundle ready: $APP"
+
+# Build + bundle + open
+run-app profile="release": (bundle profile)
+    open "{{ project_root }}/target/{{ profile }}/Holon.app"
+
+# ── iOS ──────────────────────────────────────────────────────────────────
+# Build holon-gpui as an iOS simulator staticlib (aarch64-apple-ios-sim).
+ios-build profile="debug":
+    rustup target add aarch64-apple-ios-sim 2>/dev/null || true
+    cargo build -p holon-gpui \
+        --target aarch64-apple-ios-sim \
+        --no-default-features --features mobile \
+        {{ if profile == "release" { "--release" } else { "" } }}
+
+# Generate the Xcode project via xcodegen. Requires: brew install xcodegen
+ios-xcodegen:
+    cd ios && xcodegen generate --spec project.yml
+
+# Build the iOS .app bundle for the simulator via xcodebuild.
+# Uses -target instead of -scheme because Xcode 26.2 refuses to enumerate
+# iOS Simulator destinations when the matching iOS (device) runtime isn't
+# installed — even when building for the simulator.
+ios-xcbuild profile="Debug": ios-xcodegen (ios-build (if profile == "Release" { "release" } else { "debug" }))
+    xcodebuild \
+        -project ios/Holon.xcodeproj \
+        -target Holon \
+        -configuration {{ profile }} \
+        -sdk iphonesimulator \
+        -arch arm64 \
+        SYMROOT="$PWD/ios/build" \
+        SDKROOT=iphonesimulator \
+        ONLY_ACTIVE_ARCH=YES \
+        CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+        build
+
+# Boot a simulator, install, and launch the Holon app.
+ios-sim profile="Debug": (ios-xcbuild profile)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APP=$(find ios/build -path "*{{ profile }}-iphonesimulator/Holon.app" -type d | head -1)
+    if [ -z "$APP" ]; then
+        echo "ERROR: Holon.app not found under ios/build"
+        exit 1
+    fi
+    echo "App bundle: $APP"
+    SIM_ID=$(xcrun simctl list devices available | grep -E "iPhone 1[5-9]|iPhone 2" | head -1 | sed -E 's/.*\(([A-F0-9-]+)\).*/\1/')
+    if [ -z "$SIM_ID" ]; then
+        echo "ERROR: no available iPhone simulator found"
+        exit 1
+    fi
+    echo "Booting simulator $SIM_ID..."
+    xcrun simctl boot "$SIM_ID" 2>/dev/null || true
+    open -a Simulator 2>/dev/null || true
+    echo "Installing Holon.app..."
+    xcrun simctl install "$SIM_ID" "$APP"
+    echo "Launching..."
+    xcrun simctl launch "$SIM_ID" space.holon.gpui
+    echo "Launched! 🚀"
+
+# Clean the iOS Xcode build artefacts.
+ios-clean:
+    rm -rf ios/build ios/Holon.xcodeproj
