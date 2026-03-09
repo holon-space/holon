@@ -1,0 +1,6 @@
+[application]
+name = "holon-dioxus"
+asset_dir = "assets"
+
+[desktop]
+enable_default_menu_bar = false
