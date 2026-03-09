@@ -1,0 +1,7 @@
+---
+source: frontends/gpui/tests/layout_insta.rs
+expression: snap.structural_dump()
+---
+col 42x56
+  text 42x26
+  text 42x26

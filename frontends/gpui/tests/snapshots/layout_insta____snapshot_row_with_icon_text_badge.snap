@@ -1,0 +1,8 @@
+---
+source: frontends/gpui/tests/layout_insta.rs
+expression: snap.structural_dump()
+---
+row 800x26
+  icon 20x16
+  text 59x26
+  badge 36x22

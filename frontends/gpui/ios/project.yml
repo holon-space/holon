@@ -1,0 +1,137 @@
+name: Holon
+options:
+  bundleIdPrefix: space.holon
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+  createIntermediateGroups: true
+  schemePathPrefix: "../"
+
+schemes:
+  Holon:
+    build:
+      targets:
+        Holon: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  Holon:
+    type: application
+    platform: iOS
+    sources:
+      - path: main.m
+        type: file
+        buildPhase: sources
+      - path: gpui_ios.h
+        type: file
+        buildPhase: headers
+      - path: Assets.xcassets
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: space.holon.gpui
+        PRODUCT_NAME: Holon
+        INFOPLIST_FILE: Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        SWIFT_VERSION: "5.0"
+        CLANG_ENABLE_MODULES: YES
+        CLANG_ENABLE_OBJC_ARC: YES
+        ENABLE_BITCODE: NO
+        ENABLE_DEBUG_DYLIB: NO
+        OTHER_LINK_BINARY_WITH_LIBRARIES_SECTION_TYPE: static
+        DEAD_CODE_STRIPPING: NO
+        # Simulator-only build: no codesigning required.
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        # Link the Rust static library — use explicit path to .a to avoid
+        # the linker picking up the .dylib that sits in the same directory.
+        OTHER_LDFLAGS:
+          - "-force_load"
+          - "$(HOLON_STATIC_LIB)"
+          - "-lc++"
+          - "-framework UIKit"
+          - "-framework Metal"
+          - "-framework MetalKit"
+          - "-framework QuartzCore"
+          - "-framework CoreGraphics"
+          - "-framework CoreText"
+          - "-framework CoreFoundation"
+          - "-framework Foundation"
+          - "-framework Security"
+          - "-framework SystemConfiguration"
+          - "-framework AudioToolbox"
+          - "-framework WebKit"
+          - "-framework CoreMedia"
+          - "-framework AVFoundation"
+          - "-framework LocalAuthentication"
+          - "-framework Contacts"
+          - "-framework EventKit"
+          - "-framework StoreKit"
+          - "-framework CoreMotion"
+          - "-framework Network"
+          - "-ObjC"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "USE_GPUI_RUST=1"
+          - "$(inherited)"
+        HEADER_SEARCH_PATHS:
+          - "$(PROJECT_DIR)"
+        VALID_ARCHS: "arm64"
+        ARCHS: "arm64"
+        ONLY_ACTIVE_ARCH: YES
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+      configs:
+        Debug:
+          "HOLON_STATIC_LIB[sdk=iphonesimulator*]": "$(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/debug/libholon_gpui.a"
+          "HOLON_STATIC_LIB[sdk=iphoneos*]": "$(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug/libholon_gpui.a"
+          GCC_OPTIMIZATION_LEVEL: "0"
+          DEBUG_INFORMATION_FORMAT: "dwarf-with-dsym"
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          "HOLON_STATIC_LIB[sdk=iphonesimulator*]": "$(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/release/libholon_gpui.a"
+          "HOLON_STATIC_LIB[sdk=iphoneos*]": "$(PROJECT_DIR)/../../../target/aarch64-apple-ios/release/libholon_gpui.a"
+          GCC_OPTIMIZATION_LEVEL: "s"
+          DEBUG_INFORMATION_FORMAT: "dwarf-with-dsym"
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+    preBuildScripts:
+      - name: "Build Rust Static Library"
+        script: |
+          set -euo pipefail
+
+          # PROJECT_DIR = frontends/gpui/ios → workspace root is ../../..
+          WORKSPACE_ROOT="${PROJECT_DIR}/../../.."
+          cd "${WORKSPACE_ROOT}"
+
+          if [ "${PLATFORM_NAME}" = "iphonesimulator" ]; then
+            RUST_TARGET="aarch64-apple-ios-sim"
+          else
+            RUST_TARGET="aarch64-apple-ios"
+          fi
+
+          if [ "${CONFIGURATION}" = "Release" ]; then
+            CARGO_FLAGS="--release"
+          else
+            CARGO_FLAGS=""
+          fi
+
+          echo "Building holon-gpui for ${RUST_TARGET} (${CONFIGURATION})..."
+          rustup target add "${RUST_TARGET}" 2>/dev/null || true
+          cargo build -p holon-gpui \
+            --target "${RUST_TARGET}" \
+            --no-default-features --features mobile \
+            ${CARGO_FLAGS} 2>&1
+
+          echo "Rust build complete for ${RUST_TARGET}"
+        shell: /bin/bash
+        basedOnDependencyAnalysis: false
