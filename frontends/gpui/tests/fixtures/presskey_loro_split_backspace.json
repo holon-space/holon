@@ -1,0 +1,35 @@
+{
+  "name": "presskey_loro_split_backspace (post-boot re-encode, PressKey tail E4-excluded)",
+  "description": "Locked regression recipe: chained splits (at 1, then 0, then 0) followed by PressKey backspace diverged SUT vs ref (the reference kept the split tail, the SUT lost it). Re-encoded POST-BOOT against the wide seed (increment 4c). DISCLOSED EXCLUSION: the PressKey backspace tail is precondition-gated off the composed base (full_headless wiring has no Actor::UI -> has_editor_buffer() is false; the E4 keystroke input family is a tracked Phase-3 blocker, C-3 rung audit). Revive the tail from VCS history (the pre-4c phased capture) once E4 lands. The split-chain portion replays windowed with the full composed catalog every tick.",
+  "environment": {
+    "wiring": null,
+    "env_flags": {}
+  },
+  "initial_state": null,
+  "transitions": [
+    {
+      "NavigateFocus": {
+        "region": "main",
+        "block_id": "block:structural-page"
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block:c1",
+        "position": 1
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block::split-0",
+        "position": 0
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block::split-1",
+        "position": 0
+      }
+    }
+  ]
+}
