@@ -9,10 +9,12 @@
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use regex::Regex;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -29,31 +31,37 @@ pub struct WriteOrgFile {
 }
 
 impl E2ETransitionFactory for WriteOrgFile {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if state.app_started {
-            return None;
-        }
-
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let pre_startup_file_count = state.documents.len();
         let file_weight = if pre_startup_file_count < 3 { 3 } else { 1 };
 
+        // Temporarily disable layout overrides to confirm the asymmetry-fix
+        // path on a vanilla seed layout. Restore to `true` after verification.
+        let state_for_preconditions = state.clone();
         let strat = crate::pbt::generators::generate_org_file_content_with_keywords(
             state.keyword_set.clone(),
-            true, // LAYOUT_MUTATIONS_ENABLED
+            std::env::var("HOLON_PBT_NO_LAYOUT_OVERRIDE").is_err(), // LAYOUT_MUTATIONS_ENABLED
         )
+        .prop_filter("WriteOrgFile preconditions", move |(filename, content)| {
+            WriteOrgFile {
+                filename: filename.clone(),
+                content: content.clone(),
+            }
+            .preconditions(&state_for_preconditions)
+            .is_good()
+        })
         .prop_map(|(filename, content)| WriteOrgFile { filename, content })
         .boxed();
 
-        Some((file_weight, strat))
+        Validated::Good((file_weight, strat))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for WriteOrgFile {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        if state.app_started {
-            return false;
-        }
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let mut checks: Vec<Validated<(), Reason>> = vec![];
+
         // Reject if any block IDs in this file already exist under a different document.
         let doc_name = std::path::Path::new(self.filename.as_str())
             .file_stem()
@@ -63,16 +71,23 @@ impl E2ETransitionImpl for WriteOrgFile {
             .doc_uri_by_name(doc_name)
             .unwrap_or_else(|| EntityUri::block("precondition-placeholder"));
         let id_re = Regex::new(r":ID:\s*(\S+)").unwrap();
+        let mut any_collision = false;
         for caps in id_re.captures_iter(&self.content) {
             let block_id = caps.get(1).unwrap().as_str();
             let block_entity = EntityUri::block(block_id);
             if let Some(existing_doc) = state.block_state.block_documents.get(&block_entity)
                 && *existing_doc != doc_uri
             {
-                return false;
+                any_collision = true;
+                break;
             }
         }
-        true
+        checks.push(check(!any_collision, Reason::BlockIdAlreadyExists));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -271,7 +286,7 @@ impl E2ETransitionImpl for WriteOrgFile {
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,
             writes: 0,

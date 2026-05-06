@@ -72,9 +72,9 @@ pub use input_types::{Key, KeyChord};
 
 // Re-export render types
 pub use render_types::{
-    extract_widget_names, Arg, BinaryOperator, Operation, OperationDescriptor, OperationParam,
-    OperationWiring, ParamMapping, PreconditionChecker, RenderExpr, RenderProfile, RenderVariant,
-    RenderableItem, RowProfile, RowTemplate, Trigger, TypeHint, ViewSpec,
+    extract_widget_names, Arg, BinaryOperator, ClickModifiers, Operation, OperationDescriptor,
+    OperationParam, OperationWiring, ParamMapping, PreconditionChecker, RenderExpr, RenderProfile,
+    RenderVariant, RenderableItem, RowProfile, RowTemplate, Trigger, TypeHint, ViewSpec,
 };
 
 // CompletionStateInfo is defined in holon-core and re-exported here for frontend use

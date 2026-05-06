@@ -34,7 +34,7 @@ use crate::reactive::{BuilderServices, ReactiveEngine};
 use crate::reactive_view_model::ReactiveViewModel;
 
 /// Default operation dispatched when a drop completes on a block drop zone.
-/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable.
+/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. // ALLOW(fallback): doc comment describing pre-existing default-op semantics
 pub const DEFAULT_DROP_OP_NAME: &str = "move_block";
 
 /// Param key for the source block id on a drop dispatch.
@@ -105,10 +105,14 @@ pub trait UserDriver: Send + Sync {
 
     /// Send a key chord on a focused entity.
     ///
-    /// Default impl: DFS the `ReactiveViewModel` tree to find the entity,
-    /// bubble the chord through ancestors, and dispatch the matched
-    /// operation via `synthetic_dispatch`. `ReactiveEngineDriver` and
-    /// native drivers override this to use their native input pipelines.
+    /// No default impl: each driver must implement input dispatch in its
+    /// own medium. Headless drivers (`ReactiveEngineDriver`,
+    /// `DirectUserDriver`) DFS the `ReactiveViewModel` tree, bubble the
+    /// chord through ancestors, and `synthetic_dispatch` the matched
+    /// operation. Screen drivers (GPUI, TUI) route the chord through their
+    /// real input pipeline (`InteractionEvent` channel, `crossterm` event,
+    /// etc.) so the keystroke traverses the editor's `capture_action` /
+    /// `InputState` machinery before reaching dispatch.
     ///
     /// `extra_params` is the canonical channel for UI-observable context
     /// that the chord resolver can't read (today: `split_block` cursor
@@ -117,15 +121,7 @@ pub trait UserDriver: Send + Sync {
     /// real OS or channel input cannot thread this through the window
     /// pipeline, so chord dispatch falls through to a focus-path that
     /// injects `extra_params` into the matched operation's params.
-    /// This is NOT a fallback — it is the intended path for that feature.
-    ///
-    /// TODO(simulate-real-input): the headless default impl below short-circuits
-    /// `synthetic_dispatch` instead of going through the actual editor view's
-    /// `capture_action(Enter)` / InputState pipeline. That hides bugs like
-    /// "InputState swallows Enter as multi-line newline insertion." A truer
-    /// headless equivalent would mount the same EditorViewModel + on_key
-    /// state machine the GPUI frontend uses, so chord dispatch traverses the
-    /// editor before reaching the operation dispatcher.
+    /// This is NOT a fallback — it is the intended path for that feature. // ALLOW(fallback): doc explicitly says "NOT a fallback"
     ///
     /// Returns `true` if the chord matched an operation and was dispatched.
     async fn send_key_chord(
@@ -135,27 +131,7 @@ pub trait UserDriver: Send + Sync {
         entity_id: &str,
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
-    ) -> Result<bool> {
-        let input = WidgetInput::KeyChord {
-            keys: chord.0.clone(),
-        };
-        let action = crate::focus_path::bubble_input_oneshot(root_tree, entity_id, &input);
-        match action {
-            Some(InputAction::ExecuteOperation {
-                entity_name,
-                operation,
-                entity_id,
-            }) => {
-                let mut params = HashMap::new();
-                params.insert("id".into(), Value::String(entity_id));
-                params.extend(extra_params);
-                self.synthetic_dispatch(&entity_name, &operation.name, params)
-                    .await?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
+    ) -> Result<bool>;
 
     /// Resolve a key chord on a focused entity without dispatching. Used by
     /// the SUT's `assert_keychord_resolves` diagnostic. Returns the resolved
@@ -177,73 +153,107 @@ pub trait UserDriver: Send + Sync {
     }
 
     /// Click an entity — analogous to a mouse-down + mouse-up on the
-    /// rendered element. Default impl dispatches the `navigation::editor_focus`
-    /// intent with `region` and `cursor_offset=0`, matching what
-    /// `frontends/gpui/src/render/builders/render_entity.rs` does inside the
-    /// real GPUI click handler. Native drivers override this to synthesize
-    /// real mouse input.
-    async fn click_entity(&self, entity_id: &str, region: &str) -> Result<()> {
-        let mut params = HashMap::new();
-        params.insert("region".into(), Value::String(region.to_string()));
-        params.insert("block_id".into(), Value::String(entity_id.to_string()));
-        params.insert("cursor_offset".into(), Value::Integer(0));
-        self.synthetic_dispatch("navigation", "editor_focus", params)
-            .await
-    }
+    /// rendered element. Screen drivers (GPUI, TUI) synthesize real input
+    /// at the entity's coordinates so the click traverses the
+    /// production click handler chain (`selectable.on_mouse_down`,
+    /// `render_entity` cursor-placement). Headless drivers dispatch the
+    /// bound `click_intent` (or `navigation.editor_focus` when none).
+    ///
+    /// No default impl by design: the trait must not silently launder a
+    /// `synthetic_dispatch` shortcut into a screen-mode driver where the
+    /// user couldn't actually reach the action without going through the
+    /// click handler. See [`UserDriver`] doc block on medium-faithfulness.
+    async fn click_entity(&self, entity_id: &str, region: &str) -> Result<()>;
 
-    /// Tree-aware click — finds the node bound to `entity_id` in the live
-    /// reactive tree and dispatches its `click_intent()` if the node has a
-    /// click-triggered operation (e.g. a sidebar `selectable` whose
-    /// `action: navigation_focus(...)` was wired by the shadow builder).
+    /// Tree-aware click — same gesture as `click_entity`, but with access
+    /// to a `ReactiveViewModel` root the headless driver can use to
+    /// resolve the bound click intent before dispatch. Screen drivers
+    /// ignore the tree (their click handler reads `click_intent` itself
+    /// at the rendered widget) and delegate to `click_entity`.
     ///
-    /// Falls back to `click_entity` (which dispatches `navigation.editor_focus`,
-    /// matching `render_entity`'s GPUI click handler) when the targeted node
-    /// has no click action — that's the right behavior for clicking inside
-    /// a main-panel block where the user just wants to place the editor cursor.
-    /// `region` is the region the click happened in; needed by the
-    /// `editor_focus` fallback (the bound-action path ignores it because the
-    /// region is already in `bound_params`).
-    ///
-    /// Returns `true` if a bound click action was dispatched, `false` if the
-    /// fallback `editor_focus` path was used. Errors propagate dispatch failures.
+    /// Returns `true` iff the driver could establish that a bound click
+    /// action was dispatched. Screen drivers return `false` because they
+    /// can't synchronously prove which intent fired — callers needing
+    /// post-click state must observe through the SUT.
     async fn click_entity_with_tree(
         &self,
-        _root_block_id: &str,
+        root_block_id: &str,
         root_tree: &ReactiveViewModel,
         entity_id: &str,
         region: &str,
-    ) -> Result<bool> {
-        if let Some(intent) = crate::focus_path::find_click_intent_oneshot(root_tree, entity_id) {
-            self.apply_intent(intent).await?;
-            return Ok(true);
-        }
-        self.click_entity(entity_id, region).await?;
-        Ok(false)
-    }
+    ) -> Result<bool>;
 
     /// Replace the content of an entity with the given text — the headless
-    /// equivalent of "focus the editor and type". Default impl dispatches
-    /// `block::update { id, content: text }`. Native drivers override this
-    /// to synthesize real key-by-key input, exercising the full IME /
-    /// focus / editor pipeline.
+    /// equivalent of "focus the editor and type". Headless drivers
+    /// `synthetic_dispatch` `block::update { id, content }`; screen
+    /// drivers synthesize per-keystroke input through the real focus +
+    /// editor pipeline (IME, `InputState`, cursor-dependent edits).
     ///
-    /// Note: this is a content replacement, not an append. The real user
-    /// path at `frontends/gpui/src/lib.rs:670-702` goes through the focused
-    /// editor state which reads/writes cursor-position-dependent content.
-    /// The simplification is explicit — native drivers override this
-    /// method to exercise the full editor pipeline.
-    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()> {
-        let mut params = HashMap::new();
-        params.insert("id".into(), Value::String(entity_id.to_string()));
-        params.insert("content".into(), Value::String(text.to_string()));
-        self.synthetic_dispatch("block", "update", params).await
-    }
+    /// No default impl by design — silently inheriting the headless body
+    /// in a screen driver would hide the bug class atomic editor PBT
+    /// primitives target (in-memory vs DB content divergence).
+    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()>;
+
+    // ── Observation verbs ──────────────────────────────────────────────
+    //
+    // The test asks the driver "what's visible / what's reachable / what
+    // does clicking here do" — the driver answers in its own medium.
+    // Screen drivers consult their bounds registry; headless walks the
+    // ViewModel tree. PBT generators talk only to these verbs and never
+    // peek into geometry or VM trees directly, so the medium difference
+    // stays inside the driver.
+
+    /// True if `entity_id` is currently visible to the user — has rendered
+    /// bounds with non-zero area (screen drivers) or appears in the
+    /// rendered ViewModel tree (headless).
+    ///
+    /// Sync — observation verbs are point-in-time reads of state the
+    /// driver already maintains (BoundsRegistry, VM-tree snapshot).
+    /// Generators are sync, so all observation must be sync too; if a
+    /// future impl needs to wait for state to settle, expose a separate
+    /// barrier verb and have the generator call it explicitly.
+    fn is_widget_visible(&self, entity_id: &str) -> bool;
+
+    /// True iff `entity_id` is visible AND located within `region`'s panel.
+    fn is_in_region(&self, entity_id: &str, region: holon_api::Region) -> bool;
+
+    /// Entity ids currently visible in `region`'s panel. Use this when you
+    /// want the actually-on-screen set (post-scroll, post-viewport-cull).
+    fn entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri>;
+
+    /// Entity ids the user could reach in `region` by scrolling — a
+    /// superset of `entities_in_region`. PBT generators pick targets from
+    /// this set and then call `scroll_to_entity` before clicking, so the
+    /// scroll mechanism itself is part of the user verb under test.
+    fn reachable_entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri>;
+
+    /// Bring `entity_id` into the user-visible viewport via a real user
+    /// action (scroll the parent scrollable). Returns `Ok(())` whether or
+    /// not the entity was reached — caller must follow up with
+    /// `is_widget_visible` to confirm (catches "last items can't be
+    /// scrolled to" regressions). Headless is a no-op (no viewport).
+    ///
+    /// Stays `async` because this is an action verb — screen drivers
+    /// dispatch real scroll input that must be awaited.
+    async fn scroll_to_entity(&self, entity_id: &str) -> Result<()>;
+
+    /// The click intent bound to `entity_id` if the rendered widget has
+    /// one (e.g. a `selectable` whose action is `navigation_focus(...)`).
+    /// Read-only — does not dispatch. Used by the generator to decide
+    /// "would clicking here do what I want?"
+    fn click_intent_of(&self, entity_id: &str) -> Option<OperationIntent>;
+
+    /// The text the user actually sees rendered for `entity_id`. Screen
+    /// drivers return the live displayed text; headless returns the
+    /// ViewModel's resolved content. None for widgets without textual
+    /// content.
+    fn displayed_text(&self, entity_id: &str) -> Option<String>;
 
     /// Scroll at a window coordinate. `dx`/`dy` are scroll-wheel line deltas
     /// (positive `dy` = scroll down, positive `dx` = scroll right). Default
     /// impl is a no-op — headless drivers have no viewport. Native drivers
     /// override this to synthesize real scroll-wheel input.
-    async fn scroll_at(&self, _x: f32, _y: f32, _dx: f32, _dy: f32) -> Result<()> {
+    async fn scroll_at(&self, _: f32, _: f32, _: f32, _: f32) -> Result<()> {
         Ok(())
     }
 
@@ -251,7 +261,7 @@ pub trait UserDriver: Send + Sync {
     /// the element and turning the wheel. Default impl is a no-op. Native
     /// drivers look up the element's screen position via their geometry
     /// provider and delegate to `scroll_at` with the element's center.
-    async fn scroll_entity(&self, _entity_id: &str, _dx: f32, _dy: f32) -> Result<()> {
+    async fn scroll_entity(&self, _: &str, _: f32, _: f32) -> Result<()> {
         Ok(())
     }
 
@@ -296,22 +306,45 @@ pub trait UserDriver: Send + Sync {
              Was PBT_ATOMIC_EDITOR=1 set in a headless run?"
         )
     }
+
+    /// Whether `send_raw_keystroke` routes through a real input pipeline
+    /// that performs key-chord resolution before any keystroke reaches an
+    /// editor (TUI / GPUI native drivers). Headless drivers
+    /// (`ReactiveEngineDriver`, `DirectUserDriver`) return `false` —
+    /// their `send_raw_keystroke` writes straight into the focused
+    /// editor's `MutableText` mirror, so a leader chord like `SPC b`
+    /// would TYPE " b" into the editor instead of dispatching `go_back`.
+    /// PBT helpers like `send_leader_chord` consult this to decide
+    /// whether to emit raw keystrokes (chord-routed) or call
+    /// `synthetic_dispatch` directly.
+    fn dispatches_chords_via_raw_keystroke(&self) -> bool {
+        false
+    }
 }
 
 /// Dispatches mutations via `BuilderServices::dispatch_intent` — the same
 /// code path that GPUI click handlers and key-chord handlers use.
 ///
 /// Also owns a `HeadlessInputRouter` that stores per-block content
-/// snapshots for cross-block input routing.
+/// snapshots for cross-block input routing, and a `HeadlessEditorMirror`
+/// that lets `send_raw_keystroke` simulate per-keystroke typing through
+/// `MutableText`/Loro the same way `gpui-component`'s `InputState` does
+/// in production GPUI.
 pub struct ReactiveEngineDriver {
     engine: Arc<ReactiveEngine>,
     router: Arc<HeadlessInputRouter>,
+    editor_mirror: Arc<crate::headless_editor_mirror::HeadlessEditorMirror>,
 }
 
 impl ReactiveEngineDriver {
     pub fn new(engine: Arc<ReactiveEngine>) -> Self {
         let router = HeadlessInputRouter::new(engine.clone());
-        Self { engine, router }
+        let editor_mirror = Arc::new(crate::headless_editor_mirror::HeadlessEditorMirror::new());
+        Self {
+            engine,
+            router,
+            editor_mirror,
+        }
     }
 
     /// Ensure the router is warmed for `root_block_id`. Idempotent — safe to
@@ -359,10 +392,64 @@ impl UserDriver for ReactiveEngineDriver {
         self.engine.dispatch_intent_sync(intent).await
     }
 
+    /// Mirror GPUI's `selectable` + `render_entity` click priority:
+    /// dispatch the node's bound click intent if one exists; otherwise
+    /// fall through to `navigation::editor_focus` (cursor placement).
+    ///
+    /// The bound-action path is the same one GPUI takes
+    /// (`frontends/gpui/src/render/builders/selectable.rs:46-54` reads
+    /// `node.click_intent()` and dispatches it from `on_mouse_down`).
+    /// `BuilderServices::snapshot_resolved` recursively interprets every
+    /// nested `live_block` so the resolved tree contains the
+    /// sidebar/panel children where the bound action lives;
+    /// `find_click_intent_in_view_model` then walks it.
+    ///
+    /// This keeps the headless and GPUI paths converging on the same
+    /// click semantics: ViewModels carry the intent, drivers dispatch it.
+    ///
+    /// Poll for the entity in the resolved tree: nested `live_block`
+    /// watches stream in async, so a click that lands immediately after
+    /// `apply_start_app` may see an empty list. Same pattern
+    /// `send_key_chord` uses for its router fallback. If the entity is // ALLOW(fallback): pre-existing doc on router-poll behavior
+    /// never found, we fall through to cursor placement — same as GPUI
+    /// when nothing intercepts the click.
+    async fn click_entity(&self, entity_id: &str, region: &str) -> Result<()> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let resolved = self.engine.snapshot_resolved(&root_uri);
+            // Scope the intent lookup to the clicked region. The same
+            // entity_id can appear in multiple panels (e.g. `block:journals`
+            // is both a LeftSidebar list item and a Main-panel doc), and the
+            // wrappers bind different actions per region. The unscoped
+            // walker would return the LeftSidebar's `navigation.focus` for a
+            // Main click and diverge from production GPUI semantics. See
+            // FU-15 in `devlog/2026-05-07-164740-logseq-sidebar-followups.md`.
+            if let Some(intent) =
+                crate::focus_path::find_click_intent_in_region(&resolved, entity_id, region)
+            {
+                return self.apply_intent(intent).await;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // No bound action found within the deadline — fall through to
+        // cursor placement, matching GPUI's `render_entity` click
+        // handler when nothing intercepts.
+        let mut params = HashMap::new();
+        params.insert("region".into(), Value::String(region.to_string()));
+        params.insert("block_id".into(), Value::String(entity_id.to_string()));
+        params.insert("cursor_offset".into(), Value::Integer(0));
+        self.synthetic_dispatch("navigation", "editor_focus", params)
+            .await
+    }
+
     async fn send_key_chord(
         &self,
         root_block_id: &str,
-        _root_tree: &ReactiveViewModel,
+        _: &ReactiveViewModel,
         entity_id: &str,
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
@@ -403,7 +490,7 @@ impl UserDriver for ReactiveEngineDriver {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        // Final fallback: if the router never saw the entity within the
+        // Final fallback: if the router never saw the entity within the // ALLOW(fallback): pre-existing one-shot DFS escape hatch with explicit warn
         // poll window, build a fresh engine-snapshot focus path. This is
         // the same pattern GPUI uses for chord resolution when its router
         // is mid-fan-out, and it forces `ensure_watching` for every
@@ -427,6 +514,7 @@ impl UserDriver for ReactiveEngineDriver {
                 );
                 if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
                     eprintln!(
+                        // ALLOW(fallback): debug message describing existing fallback path
                         "[CHORD-FALLBACK] router timeout for entity={} chord={:?}; \
                          engine fp_found={}",
                         entity_id,
@@ -485,7 +573,7 @@ impl UserDriver for ReactiveEngineDriver {
                 _ => return None,
             }
         }
-        // Fallback: one-shot DFS+bubble from the tree snapshot.
+        // Fallback: one-shot DFS+bubble from the tree snapshot. // ALLOW(fallback): pre-existing one-shot escape hatch when router has no path
         let input = WidgetInput::KeyChord {
             keys: chord.0.clone(),
         };
@@ -595,6 +683,149 @@ impl UserDriver for ReactiveEngineDriver {
             .context("emissions did not quiesce after drop dispatch — CDC pipeline stuck?")?;
         Ok(true)
     }
+
+    /// Headless per-keystroke routing. Mirrors the production GPUI editor:
+    /// char keys mutate the focused block's `MutableText` in Loro one
+    /// codepoint at a time; Enter / Backspace-at-0 / Tab / Shift+Tab
+    /// dispatch their structural intents at the live cursor (same path
+    /// `editor_view.rs:548-619` takes from `capture_action`).
+    ///
+    /// Without this override, atomic editor PBT primitives (`TypeChars`,
+    /// `PressKey`, `DeleteBackward`, `MoveCursor`) bail at the trait
+    /// default and the keystroke-driven bug surface — sync race between
+    /// MutableText writes and `block.content` SQL projection — never
+    /// reaches the headless pipeline.
+    async fn send_raw_keystroke(&self, keystroke: &str, modifiers: &[&str]) -> Result<()> {
+        self.editor_mirror
+            .handle_keystroke(&self.engine, keystroke, modifiers)
+            .await
+    }
+
+    /// Tree-aware click: dispatch the bound `click_intent()` if the node has
+    /// one, else fall through to `click_entity` (cursor placement). Headless
+    /// — synchronous resolution against the passed `root_tree`, no router
+    /// warm-up needed because the caller already produced the tree.
+    async fn click_entity_with_tree(
+        &self,
+        _: &str,
+        root_tree: &ReactiveViewModel,
+        entity_id: &str,
+        region: &str,
+    ) -> Result<bool> {
+        if let Some(intent) = crate::focus_path::find_click_intent_oneshot(root_tree, entity_id) {
+            self.apply_intent(intent).await?;
+            return Ok(true);
+        }
+        self.click_entity(entity_id, region).await?;
+        Ok(false)
+    }
+
+    /// Headless content replacement — dispatches `block::update { id, content }`.
+    /// Screen drivers override this to drive the real editor pipeline.
+    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()> {
+        let mut params = HashMap::new();
+        params.insert("id".into(), Value::String(entity_id.to_string()));
+        params.insert("content".into(), Value::String(text.to_string()));
+        self.synthetic_dispatch("block", "update", params).await
+    }
+
+    // ── Observation verbs ──────────────────────────────────────────────
+    //
+    // Headless answers via VM-tree walk over the router's per-block
+    // snapshots. The router warms watches as nested `live_block`s
+    // resolve, so the panel's tree may take a moment to populate after
+    // app start — callers that need synchronous answers must
+    // `warm_for_block` first.
+
+    fn is_widget_visible(&self, entity_id: &str) -> bool {
+        let contents = self.router.block_contents.lock().unwrap();
+        contents.values().any(|tree| {
+            let mut found = false;
+            walk_tree(tree, &mut |n| {
+                if !found && n.entity_id().as_deref() == Some(entity_id) {
+                    found = true;
+                }
+            });
+            found
+        })
+    }
+
+    fn is_in_region(&self, entity_id: &str, region: holon_api::Region) -> bool {
+        self.entities_in_region(region)
+            .iter()
+            .any(|uri| uri.as_str() == entity_id)
+    }
+
+    fn entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
+        let panel_id = region_panel_block_id(region);
+        let contents = self.router.block_contents.lock().unwrap();
+        let Some(tree) = contents.get(panel_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        walk_tree(tree, &mut |n| {
+            if let Some(eid) = n.entity_id() {
+                if let Ok(uri) = holon_api::EntityUri::parse(&eid) {
+                    out.push(uri);
+                }
+            }
+        });
+        out
+    }
+
+    /// Headless has no viewport, so "reachable by scrolling" == "in tree".
+    /// Same answer as `entities_in_region`.
+    fn reachable_entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
+        self.entities_in_region(region)
+    }
+
+    /// No-op: headless has no viewport. Tests that exercise scrolling as
+    /// a user verb must run against a screen driver.
+    async fn scroll_to_entity(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn click_intent_of(&self, entity_id: &str) -> Option<OperationIntent> {
+        let contents = self.router.block_contents.lock().unwrap();
+        for tree in contents.values() {
+            if let Some(intent) = crate::focus_path::find_click_intent_oneshot(tree, entity_id) {
+                return Some(intent);
+            }
+        }
+        None
+    }
+
+    fn displayed_text(&self, entity_id: &str) -> Option<String> {
+        let contents = self.router.block_contents.lock().unwrap();
+        for tree in contents.values() {
+            let mut result: Option<String> = None;
+            walk_tree(tree, &mut |n| {
+                if result.is_some() {
+                    return;
+                }
+                if n.entity_id().as_deref() == Some(entity_id) {
+                    result = n.prop_str("content");
+                }
+            });
+            if result.is_some() {
+                return result;
+            }
+        }
+        None
+    }
+}
+
+/// Map a `Region` to the block id of the default-layout panel that hosts
+/// it. The PBT seeds the default layout (`assets/default/index.org`); custom
+/// layouts that move panels to other block ids would need this map updated
+/// — but the PBT generators that drive `Region`-based queries are scoped to
+/// the default layout for exactly that reason.
+fn region_panel_block_id(region: holon_api::Region) -> &'static str {
+    match region {
+        holon_api::Region::LeftSidebar => "block:default-left-sidebar",
+        holon_api::Region::Main => "block:default-main-panel",
+        holon_api::Region::RightSidebar => "block:default-right-sidebar",
+    }
 }
 
 // ── HeadlessInputRouter ───────────────────────────────────────────────
@@ -636,7 +867,7 @@ const DEFAULT_DROP_WIDGET_TIMEOUT_MS: u64 = 5000;
 fn drop_widget_timeout() -> Duration {
     let ms = std::env::var("HOLON_PBT_DROP_TIMEOUT_MS")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse().ok()) // ALLOW(ok): malformed env var → use default
         .unwrap_or(DEFAULT_DROP_WIDGET_TIMEOUT_MS);
     Duration::from_millis(ms)
 }
@@ -644,11 +875,11 @@ fn drop_widget_timeout() -> Duration {
 fn quiescence_config() -> (Duration, Duration) {
     let window = std::env::var("HOLON_PBT_QUIESCENCE_MS")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse().ok()) // ALLOW(ok): malformed env var → use default
         .unwrap_or(DEFAULT_QUIESCENCE_MS);
     let timeout = std::env::var("HOLON_PBT_QUIESCENCE_TIMEOUT_MS")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse().ok()) // ALLOW(ok): malformed env var → use default
         .unwrap_or(DEFAULT_QUIESCENCE_TIMEOUT_MS);
     (
         Duration::from_millis(window),

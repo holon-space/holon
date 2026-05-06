@@ -283,6 +283,13 @@ pub struct Block {
     #[serde(skip, default)]
     pub tags: Vec<String>,
 
+    /// Block IDs this block requires (depends on / is blocked by) before it
+    /// can be acted upon. Stored in the `block_requires` junction table
+    /// (edge field), not as a direct column. Reads from the `block` matview's
+    /// hydrated `requires` JSON array.
+    #[serde(skip, default)]
+    pub requires: Vec<String>,
+
     // --- Content fields (flattened from BlockContent) ---
     /// Text content (raw text or source code)
     pub content: String,
@@ -351,6 +358,7 @@ impl Default for Block {
             id: EntityUri::block_random(),
             parent_id: EntityUri::no_parent(),
             tags: Vec::new(),
+            requires: Vec::new(),
             content: String::new(),
             content_type: ContentType::Text,
             source_language: None,
@@ -497,7 +505,7 @@ impl Block {
         }
     }
 
-    /// Get the content as a BlockContent enum (for API compatibility).
+    /// Get the content as a BlockContent enum (used at the API surface).
     /// `marks IS NOT NULL` reconstitutes `RichText`; `None` flattens to plain `Text`.
     /// flutter_rust_bridge:ignore
     pub fn to_block_content(&self) -> BlockContent {
@@ -616,7 +624,7 @@ impl Block {
         self.updated_at = chrono::Utc::now().timestamp_millis();
     }
 
-    /// Get source header arguments from properties (for Org Mode compatibility)
+    /// Get source header arguments from properties (used by the Org Mode round-trip)
     /// flutter_rust_bridge:ignore
     pub fn get_source_header_args(&self) -> HashMap<String, Value> {
         self.properties
@@ -631,7 +639,7 @@ impl Block {
             .unwrap_or_default()
     }
 
-    /// Set source header arguments in properties (for Org Mode compatibility)
+    /// Set source header arguments in properties (used by the Org Mode round-trip)
     /// flutter_rust_bridge:ignore
     pub fn set_source_header_args(&mut self, header_args: HashMap<String, Value>) {
         if !header_args.is_empty() {
@@ -643,7 +651,7 @@ impl Block {
         }
     }
 
-    /// Get source results from properties (for Org Mode compatibility)
+    /// Get source results from properties (used by the Org Mode round-trip)
     /// flutter_rust_bridge:ignore
     pub fn get_source_results(&self) -> Option<String> {
         self.properties
@@ -651,7 +659,7 @@ impl Block {
             .and_then(|v| v.as_string().map(|s| s.to_string()))
     }
 
-    /// Set source results in properties (for Org Mode compatibility)
+    /// Set source results in properties (used by the Org Mode round-trip)
     /// flutter_rust_bridge:ignore
     pub fn set_source_results(&mut self, results: Option<String>) {
         if let Some(r) = results {
@@ -772,6 +780,26 @@ impl TryFrom<HashMap<String, Value>> for Block {
                 _ => Vec::new(),
             })
             .unwrap_or_default();
+        let requires = row
+            .get("requires")
+            .cloned()
+            .map(|v| match v {
+                Value::Array(arr) => arr
+                    .into_iter()
+                    .filter_map(|elem| elem.as_string().map(|s| s.to_string()))
+                    .collect(),
+                Value::Json(s) | Value::String(s) => {
+                    if s.is_empty() {
+                        Vec::new()
+                    } else {
+                        serde_json::from_str::<Vec<String>>(&s)
+                            .expect("stored requires JSON must be valid")
+                    }
+                }
+                Value::Null => Vec::new(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default();
         let sort_key = row
             .get("sort_key")
             .and_then(|v| v.as_string())
@@ -788,6 +816,7 @@ impl TryFrom<HashMap<String, Value>> for Block {
             id,
             parent_id,
             tags,
+            requires,
             content,
             content_type,
             source_language,

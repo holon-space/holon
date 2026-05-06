@@ -3,7 +3,10 @@
 //! All blocks live in one LoroDoc with a LoroTree. The store handles persistence
 //! (saving/loading the `.loro` snapshot) and provides access to the global doc.
 //!
-//! Legacy per-file methods are retained for backward compatibility during migration
+//! Legacy per-file methods are retained for backward compat during migration
+// ALLOW(compatibility): legacy per-file API shape predates the single-global-doc
+// model. Removing requires migrating every per-path caller (org sync, share
+// backend, tests); covered separately by the cell-authority cleanup roadmap.
 //! but all internally delegate to the single global document.
 
 use crate::api::LoroBackend;
@@ -124,7 +127,7 @@ impl LoroDocumentStore {
     // -- Legacy methods that delegate to the global doc --
 
     /// Register an alias doc_id that maps to a canonical file path.
-    /// Kept for org sync backward compatibility.
+    /// Kept for org sync. // ALLOW(compatibility): see module-level doc.
     pub async fn register_alias(&self, alias_doc_id: &str, file_path: &Path) {
         let canonical = CanonicalPath::new(file_path);
         self.doc_id_aliases
@@ -134,7 +137,7 @@ impl LoroDocumentStore {
     }
 
     /// Resolve a doc_id to the global LoroDocument.
-    pub async fn resolve_by_doc_id(&self, _doc_id: &str) -> Option<Arc<LoroDocument>> {
+    pub async fn resolve_by_doc_id(&self, _: &str) -> Option<Arc<LoroDocument>> {
         self.get_global_doc().await.ok() // ALLOW(ok): doc may not be initialized
     }
 
@@ -146,7 +149,7 @@ impl LoroDocumentStore {
 
     /// Legacy: get or load a document for a file path.
     /// Now always returns the global doc.
-    pub async fn get_or_load(&mut self, _path: &Path) -> Result<Arc<LoroDocument>> {
+    pub async fn get_or_load(&mut self, _: &Path) -> Result<Arc<LoroDocument>> {
         self.get_global_doc().await
     }
 
@@ -169,15 +172,15 @@ impl LoroDocumentStore {
         Ok(())
     }
 
-    pub async fn save(&self, _path: &Path) -> Result<()> {
+    pub async fn save(&self, _: &Path) -> Result<()> {
         self.save_all().await
     }
 
-    pub async fn remove(&mut self, _path: &Path) {
+    pub async fn remove(&mut self, _: &Path) {
         // No-op: we don't remove the global doc
     }
 
-    pub async fn get(&self, _path: &Path) -> Option<Arc<LoroDocument>> {
+    pub async fn get(&self, _: &Path) -> Option<Arc<LoroDocument>> {
         self.get_global_doc().await.ok() // ALLOW(ok): doc may not be initialized
     }
 
@@ -205,7 +208,7 @@ impl LoroDocumentStore {
     /// Legacy: load existing .loro files. Now just loads the global snapshot.
     pub async fn load_all_existing(
         &mut self,
-        _root_dir: &Path,
+        _: &Path,
     ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
         // Just ensure the global doc is loaded
         self.get_global_doc().await?;

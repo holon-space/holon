@@ -1009,7 +1009,15 @@ fn launch_holon_window_impl(
 
     tracing::debug!("[GPUI] About to call cx.open_window...");
     let bounds_registry_for_pump = bounds_registry.clone();
-    let window_result = cx.open_window(window_options, |window, cx| {
+
+    // Pre-create the root entity cache outside the window-creation closure
+    // so we can share its `Arc<RwLock<_>>` with `setup_interaction_pump`
+    // (which needs to walk the cache hierarchy for scroll-into-view).
+    // `HolonApp::entity_cache` clones this same Arc, so both ends observe
+    // the same map.
+    let entity_cache: entity_view_registry::EntityCache = Default::default();
+    let entity_cache_for_view = entity_cache.clone();
+    let window_result = cx.open_window(window_options, move |window, cx| {
         tracing::debug!("[GPUI] Inside open_window callback — building root view");
         window.on_window_should_close(cx, |_window, cx| {
             cx.quit();
@@ -1123,7 +1131,7 @@ fn launch_holon_window_impl(
                 app_model,
                 nav,
                 bounds_registry,
-                entity_cache: Default::default(),
+                entity_cache: entity_cache_for_view,
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,
                 share_ui: share_ui_entity,
@@ -1161,6 +1169,7 @@ fn launch_holon_window_impl(
             &async_cx,
             bounds_registry_for_pump,
             engine.clone(),
+            entity_cache.clone(),
         );
     }
 
@@ -1304,6 +1313,7 @@ pub fn setup_interaction_pump(
     cx: &gpui::AsyncApp,
     bounds_registry: BoundsRegistry,
     engine: Arc<ReactiveEngine>,
+    entity_cache: entity_view_registry::EntityCache,
 ) {
     let (tx, mut rx) = futures::channel::mpsc::channel::<holon_mcp::server::InteractionCommand>(16);
     debug.interaction_tx.set(tx.clone()).ok();
@@ -1311,21 +1321,40 @@ pub fn setup_interaction_pump(
     // Install the channel-based `UserDriver` so MCP tools can dispatch
     // UI mutations through the same pipeline as click/key/scroll.
     let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> = Arc::new(bounds_registry);
-    let driver: Arc<dyn holon_frontend::user_driver::UserDriver> =
-        Arc::new(user_driver::GpuiUserDriver::new(tx, geometry, engine));
+    let driver: Arc<dyn holon_frontend::user_driver::UserDriver> = Arc::new(
+        user_driver::GpuiUserDriver::new(tx, geometry, engine.clone()),
+    );
     debug.user_driver.set(driver).ok();
 
+    let engine_for_pump = engine;
+    let entity_cache_for_pump = entity_cache;
     cx.spawn({
         async move |cx| {
             use futures::StreamExt;
             while let Some(cmd) = rx.next().await {
                 let result = cx.update_window(window_handle, |_, window, cx| {
-                    dispatch_interaction(&cmd.event, window, cx)
+                    use holon_mcp::server::InteractionEvent;
+                    match &cmd.event {
+                        InteractionEvent::ScrollEntityIntoView { entity_id } => {
+                            scroll_entity_into_view(
+                                entity_id,
+                                &engine_for_pump,
+                                &entity_cache_for_pump,
+                                window,
+                                cx,
+                            )
+                        }
+                        _ => Ok(dispatch_interaction(&cmd.event, window, cx)),
+                    }
                 });
                 let response = match result {
-                    Ok(handled) => holon_mcp::server::InteractionResponse {
+                    Ok(Ok(handled)) => holon_mcp::server::InteractionResponse {
                         handled,
                         detail: None,
+                    },
+                    Ok(Err(detail)) => holon_mcp::server::InteractionResponse {
+                        handled: false,
+                        detail: Some(detail),
                     },
                     Err(e) => holon_mcp::server::InteractionResponse {
                         handled: false,
@@ -1337,6 +1366,113 @@ pub fn setup_interaction_pump(
         }
     })
     .detach();
+}
+
+/// Scroll a virtualized list shell so the named `entity_id` becomes
+/// visible. Returns `Ok(true)` when scrolled, `Ok(false)` if already
+/// visible / not in any virtualized list (caller should keep polling
+/// bounds and rely on the timeout as the authoritative failure signal),
+/// or `Err(detail)` if the lookup couldn't be performed.
+///
+/// Approach: for each `block:default-*` panel, snapshot its
+/// `ReactiveViewModel` and walk it to find a `collection: Some(view)`
+/// whose `children_snapshot()` contains a child with this `entity_id` at
+/// position `ix`. Then look up the list-mode `ReactiveShell` cached at
+/// `CacheKey::ReactiveShell(view.stable_cache_key())` inside the panel
+/// shell's own `entity_cache`, and call
+/// `list_state.scroll_to_reveal_item(ix); cx.notify();`.
+///
+/// Block-mode panels (Main) don't virtualize — every rendered entity has
+/// bounds via prepaint regardless of viewport. The only place this
+/// function moves the needle is the LeftSidebar's flat doc list.
+fn scroll_entity_into_view(
+    entity_id: &str,
+    engine: &Arc<ReactiveEngine>,
+    entity_cache: &entity_view_registry::EntityCache,
+    _window: &mut Window,
+    cx: &mut App,
+) -> Result<bool, String> {
+    use crate::entity_view_registry::CacheKey;
+    use crate::views::ReactiveShell;
+
+    for panel_id in [
+        "block:default-left-sidebar",
+        "block:default-main-panel",
+        "block:default-right-sidebar",
+    ] {
+        let panel_uri = holon_api::EntityUri::from_raw(panel_id);
+        let root = engine.snapshot_reactive(&panel_uri);
+        let Some((view, ix)) = find_collection_for_entity(&root, entity_id) else {
+            continue;
+        };
+
+        // The list-mode `ReactiveShell` for this `view` is cached in the
+        // panel shell's local `entity_cache`, NOT the top-level cache.
+        // Walk: top-level → panel shell → its `entity_cache` → list shell.
+        let panel_shell: Option<gpui::Entity<ReactiveShell>> = {
+            let cache = entity_cache.read().unwrap();
+            cache
+                .get(&CacheKey::LiveBlock(panel_id.to_string()))
+                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok())
+        };
+        let Some(panel_shell) = panel_shell else {
+            // Panel not rendered as a live_block yet. Continue scanning
+            // other panels rather than reporting an error.
+            continue;
+        };
+        let panel_cache = panel_shell.read(cx).entity_cache_clone();
+        let list_shell: Option<gpui::Entity<ReactiveShell>> = {
+            let cache = panel_cache.read().unwrap();
+            cache
+                .get(&CacheKey::ReactiveShell(view.stable_cache_key()))
+                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok())
+        };
+        let Some(list_shell) = list_shell else {
+            // List shell not in the panel's cache. The list might use a
+            // GPUI-specific layout renderer (columns/board) rather than
+            // the default ReactiveShell path — those layouts manage their
+            // own scrolling and aren't reachable here.
+            continue;
+        };
+
+        list_shell.update(cx, |shell, cx| {
+            shell.list_state_handle().scroll_to_reveal_item(ix);
+            cx.notify();
+        });
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Walk a `ReactiveViewModel` to find a `collection: Some(view)` whose
+/// `children_snapshot()` contains `entity_id` at some index. Returns the
+/// matching view + index, or `None` if no such collection exists.
+fn find_collection_for_entity(
+    node: &holon_frontend::reactive_view_model::ReactiveViewModel,
+    entity_id: &str,
+) -> Option<(
+    std::sync::Arc<holon_frontend::reactive_view::ReactiveView>,
+    usize,
+)> {
+    if let Some(ref view) = node.collection {
+        for (ix, item) in view.children_snapshot().into_iter().enumerate() {
+            if item.entity_id().as_deref() == Some(entity_id) {
+                return Some((view.clone(), ix));
+            }
+        }
+    }
+    for child in &node.children {
+        if let Some(found) = find_collection_for_entity(child, entity_id) {
+            return Some(found);
+        }
+    }
+    if let Some(ref slot) = node.slot {
+        let guard = slot.content.lock_ref();
+        if let Some(found) = find_collection_for_entity(&guard, entity_id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 pub fn dispatch_interaction(
@@ -1556,6 +1692,14 @@ pub fn interaction_event_to_platform_inputs(
                 modifiers: mods,
                 touch_phase: gpui::TouchPhase::default(),
             })]
+        }
+        InteractionEvent::ScrollEntityIntoView { .. } => {
+            // Handled directly by `dispatch_interaction`'s match arm via
+            // cache walk + `ListState::scroll_to_reveal_item`, not by
+            // synthesizing a platform input. Returning an empty vec keeps
+            // this fn's callers (which iterate inputs) a no-op for this
+            // variant.
+            vec![]
         }
     }
 }

@@ -106,7 +106,7 @@ mod backend {
     use holon::api::holon_service::HolonService;
     use holon::di::lifecycle::create_backend_engine;
     use holon::storage::types::StorageEntity;
-    use holon_api::{Change, EntityUri, QueryLanguage, Value};
+    use holon_api::{Change, EntityName, EntityUri, QueryLanguage, Value};
     use holon_frontend::command_provider::CommandProvider;
     use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
     use holon_frontend::shadow_builders::build_shadow_interpreter;
@@ -386,8 +386,9 @@ mod backend {
         let runtime = state.runtime.clone();
         drop(guard);
 
+        let entity_name = EntityName::from(entity.as_str());
         let result = runtime
-            .block_on(async { session.execute_operation(&entity, &op, params).await })
+            .block_on(async { session.execute_operation(&entity_name, &op, params).await })
             .map_err(|e| super::nerr("execute_operation", e))?;
 
         serde_json::to_string(&result).map_err(|e| super::nerr("serialize result", e))
@@ -777,7 +778,7 @@ mod backend {
                     })
                     .unwrap_or_default();
                 let result = runtime.block_on(service.execute_operation(
-                    &entity_name,
+                    &EntityName::from(entity_name.as_str()),
                     &operation,
                     storage_entity,
                 ))?;
@@ -851,7 +852,7 @@ mod backend {
                     .entry("id".to_string())
                     .or_insert_with(|| Value::String(block_id.clone()));
                 let result = runtime.block_on(service.execute_operation(
-                    &entity_name,
+                    &EntityName::from(entity_name.as_str()),
                     &command_name,
                     storage_entity,
                 ))?;

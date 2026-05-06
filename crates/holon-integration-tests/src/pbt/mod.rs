@@ -4,9 +4,9 @@
 //! reused by other test harnesses (e.g. Flutter FFI PBT).
 
 pub mod generators;
-pub mod live_geometry;
 pub mod loro_sut;
 pub mod loro_sync;
+pub mod panic_diag;
 pub mod peer_ops;
 pub mod phased;
 pub mod query;
@@ -21,6 +21,7 @@ pub mod transitions;
 pub mod types;
 pub mod ui_harness;
 pub mod ui_interaction;
+pub mod validation;
 pub mod value_fn_invariants;
 
 pub use phased::{

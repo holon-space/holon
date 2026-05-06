@@ -38,6 +38,7 @@ impl HeadlessLiveTree {
             item_template,
             sort_key: None,
             virtual_child: None,
+            rules: Vec::new(),
         };
         let view = ReactiveView::new_collection(config, data_source, None, None);
         view.start(services, rt);

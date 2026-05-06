@@ -5,6 +5,9 @@
 //! - `BlockOperations`: Block-specific operations (indent, outdent, move_block, etc.)
 //! - `TaskOperations`: Task-specific operations (set_state, set_priority, set_due_date)
 
+pub mod block_ordering;
+pub mod cell;
+pub mod cell_registry;
 pub mod core;
 pub mod file_format;
 pub mod fractional_index;

@@ -22,6 +22,17 @@ pub mod cli;
 pub mod collection_layout;
 pub mod lane_filtered_provider;
 
+/// Re-exports for the cell primitive (defined in `holon-core`). Frontends
+/// depend on `holon-frontend` already; this saves them adding a direct
+/// `holon-core` dep just to import `Cell<String>` / `TextOp` / etc.
+pub mod cell {
+    pub use holon_core::cell::{
+        Cell, CellBacking, CursorAnchor, CursorBias, DeltaOp, LwwTextCellBacking, TextCellBacking,
+        TextDelta, TextOp,
+    };
+    pub use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
+}
+
 /// A default org file bundled with the app, seeded on first launch.
 pub struct DefaultAsset {
     pub filename: &'static str,
@@ -40,12 +51,12 @@ pub const DEFAULT_ASSETS: &[DefaultAsset] = &[DefaultAsset {
 }];
 pub mod command_provider;
 pub mod config;
-pub mod editable_text_provider;
 pub mod editor_view_model;
 pub mod focus_path;
 pub mod frontend_module;
 pub mod geometry;
 pub use geometry::vms_button_id_for;
+pub mod headless_editor_mirror;
 pub mod input;
 pub mod input_trigger;
 pub(crate) mod link_provider;
@@ -66,6 +77,7 @@ pub mod reactive_view_model;
 mod render_context;
 pub mod render_interpreter;
 pub mod rich_text_selection;
+pub mod row_pipeline;
 pub mod shadow_builders;
 pub mod size_expectation;
 pub mod theme;
@@ -603,8 +615,30 @@ impl<T> FrontendSession<T> {
             }
         }
 
+        // FU-10: land first-launch users on the Journals overview block.
+        // The Journals page itself can later display all journal entries
+        // and create today's entry — that's a separate concern. Going
+        // through `navigation::focus` (rather than raw INSERT) keeps
+        // navigation_history and navigation_cursor atomically in sync, so
+        // the focus_roots / current_focus matviews resolve correctly on
+        // first render. Reached only on the fresh-DB path (after the
+        // early return above), so existing DBs preserve whatever the user
+        // last navigated to.
+        let mut nav_params: HashMap<String, holon_api::Value> = HashMap::new();
+        nav_params.insert(
+            "region".to_string(),
+            holon_api::Value::from(holon_api::Region::Main),
+        );
+        nav_params.insert(
+            "block_id".to_string(),
+            holon_api::Value::String(EntityUri::block("journals").as_str().to_string()),
+        );
+        engine
+            .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
+            .await?;
+
         tracing::info!(
-            "[FrontendSession] Seeded default layout ({} blocks)",
+            "[FrontendSession] Seeded default layout ({} blocks); main panel focused on block:journals",
             parse_result.blocks.len()
         );
         Ok(())

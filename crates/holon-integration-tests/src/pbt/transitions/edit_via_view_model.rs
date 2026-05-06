@@ -8,10 +8,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -26,78 +28,81 @@ pub struct EditViaViewModel {
 }
 
 impl E2ETransitionFactory for EditViaViewModel {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-        // `EditViaViewModel` bypasses the keyboard pipeline (queries the
-        // DB directly, calls `on_blur` on a synthetically-rendered
-        // editor). When the atomic editor is enabled, the proper
-        // UI-driven primitives — `FocusEditableText`, `TypeChars`,
-        // `DeleteBackward`, `Blur` — cover the same surface through
-        // real keystrokes. Disable the bypass path in that mode so
-        // the PBT can't accidentally rely on it. See
-        // `frontends/tui/TODO.md` item A6.
-        if ReferenceState::atomic_editor_enabled() {
-            return None;
-        }
-
-        let no_content_update: std::collections::HashSet<EntityUri> = state
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .chain(state.layout_blocks.query_source_ids.iter())
-            .chain(state.profile_block_ids.iter())
-            .cloned()
-            .collect();
-
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let focused_in_main = state.focused_entity(holon_api::Region::Main).cloned();
-
-        let editable_block_ids: Vec<EntityUri> =
-            if state.is_properly_setup() && focused_in_main.is_some() {
-                let focused = focused_in_main.as_ref().unwrap();
-                let valid = state
-                    .block_state
-                    .blocks
-                    .get(focused)
-                    .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page())
-                    && state.layout_blocks.is_focusable(focused)
-                    && !no_content_update.contains(focused)
-                    && state.is_descendant_of_any(focused, &focus_roots);
-                if valid { vec![focused.clone()] } else { vec![] }
-            } else {
-                vec![]
-            };
-
-        if editable_block_ids.is_empty() {
-            return None;
-        }
-
-        let strat = (prop::sample::select(editable_block_ids), "[a-z ]{3,20}")
-            .prop_map(|(block_id, new_content)| EditViaViewModel {
-                block_id,
-                new_content,
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Enumerate parameter space (editable descendants) and let
+        // `preconditions` be the single source of truth for which ones are
+        // actually editable. Avoids duplicating the content_type / layout /
+        // focusable / page / atomic-editor checks across two sites.
+        let candidates: Vec<EntityUri> = state
+            .main_editable_descendants()
+            .into_iter()
+            .filter(|uri| {
+                EditViaViewModel {
+                    block_id: uri.clone(),
+                    new_content: String::new(),
+                }
+                .preconditions(state)
+                .is_good()
             })
-            .boxed();
-        Some((5, strat))
+            .collect();
+        check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
+            let strat = (prop::sample::select(candidates), "[a-z ]{3,20}")
+                .prop_map(|(block_id, new_content)| EditViaViewModel {
+                    block_id,
+                    new_content,
+                })
+                .boxed();
+            (5, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for EditViaViewModel {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        state.app_started
-            && state.is_properly_setup()
-            && state.block_state.blocks.contains_key(&self.block_id)
-            && state
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.is_properly_setup(), Reason::NotProperlySetup),
+            // `EditViaViewModel` bypasses the keyboard pipeline (queries the
+            // DB directly, calls `on_blur` on a synthetically-rendered
+            // editor). When the atomic editor is enabled, the proper
+            // UI-driven primitives — `FocusEditableText`, `TypeChars`,
+            // `DeleteBackward`, `PressKey` — cover the same surface through
+            // real keystrokes. Disable the bypass path in that mode so
+            // the PBT can't accidentally rely on it. See
+            // `frontends/tui/TODO.md` item A6.
+            check(
+                !ReferenceState::atomic_editor_enabled(),
+                Reason::AtomicEditorActiveOverride,
+            ),
+        ];
+
+        checks.push(check(
+            state.block_state.blocks.contains_key(&self.block_id),
+            Reason::FocusedBlockMissing,
+        ));
+        checks.push(check(
+            state
                 .block_state
                 .blocks
                 .get(&self.block_id)
-                .is_some_and(|b| b.content_type == ContentType::Text)
-            && !state.layout_blocks.contains(&self.block_id)
-            && state.is_descendant_of_any(&self.block_id, &focus_roots)
+                .is_some_and(|b| b.content_type == ContentType::Text),
+            Reason::FocusedNotText,
+        ));
+        checks.push(check(
+            !state.layout_blocks.contains(&self.block_id),
+            Reason::FocusedInLayoutBlocks,
+        ));
+        checks.push(check(
+            state.is_descendant_of_any(&self.block_id, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -117,7 +122,7 @@ impl E2ETransitionImpl for EditViaViewModel {
         state.reset_cursor_if_focused(&self.block_id);
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_edit_via_view_model(&self.block_id, &self.new_content)
             .await;
     }

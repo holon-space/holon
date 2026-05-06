@@ -82,10 +82,12 @@ holon_macros::widget_builder! {
                 } else {
                     virtual_child_slot_from_arg(&ba)
                 };
-                ViewModel::streaming_collection("tree", tmpl, ds, 4.0, __sort_key, __parent_space, None, virtual_child, __trailing_slot)
+                let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
+                ViewModel::streaming_collection("tree", tmpl, ds, 4.0, __sort_key, __parent_space, None, virtual_child, __trailing_slot, __rules)
             }
             _ => {
-                let mut flat: Vec<(ViewModel, usize)> = shared_tree_build(&ba);
+                let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =
+                    shared_tree_build(&ba);
                 // Push the trailing slot BEFORE the empty check so the slot
                 // renders even for empty collections — the user needs to be
                 // able to create the first child via the slot. Prefer the
@@ -93,11 +95,11 @@ holon_macros::widget_builder! {
                 // `virtual_parent` only when the new flag is absent.
                 if let Some(slot) = __trailing_slot {
                     if let Ok(inner) = std::sync::Arc::try_unwrap(slot.view_model) {
-                        flat.push((inner, 0));
+                        flat.push((inner, 0, std::collections::HashMap::new()));
                     }
                 } else if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
                     if let Some(vc) = interpret_virtual_child(&ba, tmpl) {
-                        flat.push((vc, 0));
+                        flat.push((vc, 0, std::collections::HashMap::new()));
                     }
                 }
                 if flat.is_empty() {
@@ -109,18 +111,31 @@ holon_macros::widget_builder! {
     }
 }
 
-/// Convert a flat depth-first `(node, depth)` list into flat `TreeItem` wrappers.
-/// Each item carries its depth for indentation and a `has_children` flag for
-/// the collapse chevron. `has_children` is true when the next item has a greater depth.
-pub fn flat_tree_items(flat: Vec<(ViewModel, usize)>) -> Vec<ViewModel> {
+/// Convert a flat depth-first `(node, depth, overrides)` list into flat
+/// `TreeItem` wrappers. Each item carries its depth for indentation and a
+/// `has_children` flag for the collapse chevron; `has_children` is true
+/// when the next item has a greater depth. The per-row override map (from
+/// tree builder rules: evaluation) is merged into the resulting tree_item's
+/// props alongside `depth` / `has_children`, so chrome-affecting keys like
+/// `show_bullet` and `show_chevron` reach the frontend's tree_item builder.
+pub fn flat_tree_items(
+    flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)>,
+) -> Vec<ViewModel> {
     let len = flat.len();
-    let depths: Vec<usize> = flat.iter().map(|(_, d)| *d).collect();
+    let depths: Vec<usize> = flat.iter().map(|(_, d, _)| *d).collect();
     flat.into_iter()
         .enumerate()
-        .map(|(i, (node, depth))| {
+        .map(|(i, (node, depth, overrides))| {
             let has_children = i + 1 < len && depths[i + 1] > depth;
             let entity = node.entity();
-            ViewModel::tree_item(node, depth, has_children).with_entity(entity)
+            let vm = ViewModel::tree_item(node, depth, has_children);
+            if !overrides.is_empty() {
+                let mut p = vm.props.lock_mut();
+                for (k, v) in overrides {
+                    p.insert(k, v);
+                }
+            }
+            vm.with_entity(entity)
         })
         .collect()
 }

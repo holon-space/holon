@@ -172,6 +172,7 @@ holon_macros::widget_builder! {
                 let parent_space = ba.ctx.available_space;
                 let child_space_fn: Option<Arc<ChildSpaceFn>> =
                     Some(Arc::new(move |p, c| partition(p, c, gap)));
+                let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
                 ViewModel::streaming_collection(
                     "columns",
                     tmpl,
@@ -182,6 +183,7 @@ holon_macros::widget_builder! {
                     child_space_fn,
                     None,
                     None,
+                    rules,
                 )
             }
             (Some(tmpl), None) => {

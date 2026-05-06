@@ -129,6 +129,7 @@ holon_macros::widget_builder! {
             // observed in BOTH source and target lanes for one frame).
             if let Some(ds) = ba.ctx.data_source.as_ref() {
                 let upstream: Arc<dyn ReactiveRowProvider> = ds.clone();
+                let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
                 let view = crate::reactive_view::ReactiveView::new_grouped(
                     crate::reactive_view_model::CollectionVariant::from_name("board", 0.0)
                         .expect("`board` layout is registered as a builtin"),
@@ -139,6 +140,7 @@ holon_macros::widget_builder! {
                     lane_order_pref.clone(),
                     Some("sort_key".to_string()),
                     ba.ctx.available_space,
+                    rules,
                 );
                 tracing::info!("[BOARD_INTERP] grouped view created (single-driver path)");
                 return ViewModel {

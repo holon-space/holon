@@ -11,9 +11,12 @@ use crate::models::OrgBlockExt;
 /// Converts a parsed `Block` into a flat `HashMap<String, Value>` suitable
 /// for passing to `OperationProvider::execute_operation` (create/update).
 ///
-/// The `document_uri` is inserted under `ROUTING_DOC_URI_KEY` so the
-/// `OrgSyncController` can route the operation to the correct document
-/// regardless of where `parent_id` points.
+/// The `document_uri` is inserted under `ROUTING_DOC_URI_KEY` as the
+/// param-side routing hint. `SqlOperationProvider` lifts the value onto
+/// the typed `Event::routing_doc_uri` field at its boundary; the consumer
+/// (`OrgSyncController`) reads the typed field, so it can route the
+/// operation to the correct document regardless of where `parent_id`
+/// points.
 pub fn build_block_params(
     block: &Block,
     parent_id: &EntityUri,
@@ -58,6 +61,17 @@ pub fn build_block_params(
             .collect();
         params.insert("tags".to_string(), Value::Array(arr));
     }
+
+    // Edge-typed field — `SqlOperationProvider`'s edge partition routes this
+    // to the `block_requires` junction (see schema_modules.rs::edge_fields).
+    // Always emit (even when empty) so an empty Vec correctly clears stale
+    // junction rows on update.
+    let arr: Vec<Value> = block
+        .requires
+        .iter()
+        .map(|r| Value::String(r.clone()))
+        .collect();
+    params.insert("requires".to_string(), Value::Array(arr));
 
     if block.content_type == ContentType::Source {
         if let Some(ref lang) = block.source_language {

@@ -34,6 +34,30 @@ pub struct RenderVariant {
     pub condition: Predicate,
 }
 
+/// One per-row override rule on a builder (today: `tree`).
+///
+/// Schema in DSL:
+/// ```text
+/// rules: [#{
+///   when: #{eq: #{field: "level", value: 0}},
+///   override: #{role: "page_title", show_bullet: false}
+/// }]
+/// ```
+///
+/// All rules whose `when` matches a row contribute their `overrides` map.
+/// Later rules' keys override earlier rules' keys per key (all-matches-merge).
+/// Builders consume the merged map for both render-context flags (e.g. `role`
+/// is read by `pick_active_variant`) and chrome props (`show_bullet`,
+/// `show_chevron` on tree_item).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleSpec {
+    pub when: Predicate,
+    /// `override` is a Rust keyword; field renamed to `overrides`. Serde keeps
+    /// the user-facing DSL field name `override` via `rename`.
+    #[serde(rename = "override")]
+    pub overrides: std::collections::HashMap<String, Value>,
+}
+
 /// Per-row UI template for heterogeneous data rendering.
 ///
 /// When a PRQL query uses `derive { ui = (render ...) }` after a `from <table>`,
@@ -73,8 +97,81 @@ pub struct RenderProfile {
     pub variants: Vec<RenderVariant>,
 }
 
+// ALLOW(compatibility): RowProfile is a deprecated alias still used by serialized fixtures
 /// Backward compatibility alias.
 pub type RowProfile = RenderProfile;
+
+/// Modifier keys held during a mouse click.
+///
+/// Carried inside `Trigger::Click` so the same widget can route different
+/// modifier combinations to different operations (e.g. plain click =
+/// `navigation.focus`, shift+click = `navigation.focus_pin`). Adding a new
+/// modifier just sets another field — no new `Trigger` variant required.
+///
+/// `ClickModifiers::none()` denotes a primary click; the named constructors
+/// (`shift()`, `alt()`, `cmd()`, `ctrl()`) cover the single-modifier cases
+/// that have actually shipped. For combined modifiers, construct directly
+/// (e.g. `ClickModifiers { shift: true, alt: true, ..Default::default() }`).
+///
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClickModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub cmd: bool,
+    pub ctrl: bool,
+}
+
+impl ClickModifiers {
+    pub const fn none() -> Self {
+        Self {
+            shift: false,
+            alt: false,
+            cmd: false,
+            ctrl: false,
+        }
+    }
+
+    pub const fn shift() -> Self {
+        Self {
+            shift: true,
+            alt: false,
+            cmd: false,
+            ctrl: false,
+        }
+    }
+
+    pub const fn alt() -> Self {
+        Self {
+            shift: false,
+            alt: true,
+            cmd: false,
+            ctrl: false,
+        }
+    }
+
+    pub const fn cmd() -> Self {
+        Self {
+            shift: false,
+            alt: false,
+            cmd: true,
+            ctrl: false,
+        }
+    }
+
+    pub const fn ctrl() -> Self {
+        Self {
+            shift: false,
+            alt: false,
+            cmd: false,
+            ctrl: true,
+        }
+    }
+
+    pub const fn is_none(&self) -> bool {
+        !self.shift && !self.alt && !self.cmd && !self.ctrl
+    }
+}
 
 /// Input that invokes an operation when bound to a widget.
 ///
@@ -84,13 +181,17 @@ pub type RowProfile = RenderProfile;
 /// widget binding).
 ///
 /// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Trigger {
     /// A keyboard chord (e.g. Cmd+Enter).
     KeyChord { chord: crate::input_types::KeyChord },
-    /// A primary click on the widget this wiring is attached to.
-    Click,
+    /// A mouse click with the given modifier keys held. `modifiers ==
+    /// ClickModifiers::none()` is a primary click; non-empty modifiers (e.g.
+    /// `ClickModifiers::shift()` for "open in side panel" / "pin" gestures)
+    /// route to a different op. Frontends `stop_propagation` on any
+    /// modifier-click path so the row-level click handler doesn't also fire.
+    Click { modifiers: ClickModifiers },
 }
 
 /// Complete metadata for an operation
@@ -193,9 +294,24 @@ impl OperationDescriptor {
         }
     }
 
-    /// Returns true if this op is invoked by a primary click.
+    /// Returns the click modifiers if this op is click-triggered, else `None`.
+    /// Mirrors `key_chord()` for the keyboard case. Use this when matching a
+    /// runtime modifier set against bound operations.
+    pub fn click_modifiers(&self) -> Option<ClickModifiers> {
+        match &self.trigger {
+            Some(Trigger::Click { modifiers }) => Some(*modifiers),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this op is invoked by a primary click (no modifiers).
     pub fn is_click_triggered(&self) -> bool {
-        matches!(self.trigger, Some(Trigger::Click))
+        self.click_modifiers().is_some_and(|m| m.is_none())
+    }
+
+    /// Returns true if this op is invoked by shift+click on the bound widget.
+    pub fn is_shift_click_triggered(&self) -> bool {
+        self.click_modifiers() == Some(ClickModifiers::shift())
     }
 }
 
@@ -317,6 +433,7 @@ pub enum TypeHint {
 }
 
 impl TypeHint {
+    // ALLOW(compatibility): legacy string format is still emitted by older fixtures
     /// Convert from legacy string format for backward compatibility
     pub fn from_string(s: &str) -> Self {
         match s {
@@ -333,13 +450,14 @@ impl TypeHint {
                     .split(',')
                     .map(|v| v.trim().to_string())
                     .collect();
+                // ALLOW(compatibility): legacy enum:foo,bar form predates the structured Value::String list
                 // Convert string values to Value::String for backward compatibility
                 let values: Vec<Value> = string_values.into_iter().map(Value::String).collect();
                 TypeHint::OneOf { values }
             }
             "expr" | "expression" | "template" => TypeHint::Expr,
             "collection" | "items" => TypeHint::Collection,
-            _ => TypeHint::String, // Default fallback
+            _ => TypeHint::String, // Default fallback // ALLOW(fallback): legacy string-format conversion default
         }
     }
 }
@@ -445,7 +563,8 @@ where
                 Some("number") | Some("Number") => Ok(TypeHint::Number),
                 Some("expr") | Some("Expr") => Ok(TypeHint::Expr),
                 Some("collection") | Some("Collection") => Ok(TypeHint::Collection),
-                // Backward compatibility: handle "enum" as "one_of"
+                // ALLOW(compatibility): older fixtures still serialize "enum" rather than "one_of"
+                // Older fixtures: handle "enum" as "one_of"
                 Some("enum") | Some("Enum") => {
                     let values = values.ok_or_else(|| de::Error::missing_field("values"))?;
                     Ok(TypeHint::OneOf { values })

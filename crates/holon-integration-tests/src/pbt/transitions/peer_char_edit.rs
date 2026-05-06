@@ -11,11 +11,13 @@
 //! `None` unconditionally, matching that behaviour exactly.
 
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transitions::TextOp;
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -29,26 +31,42 @@ pub struct PeerCharEdit {
 }
 
 impl E2ETransitionFactory for PeerCharEdit {
-    fn weighted_generator(_state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
+    fn weighted_generator(_: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // The legacy generator never emits PeerCharEdit — it has no
         // `strategies.add_weighted("peer_char_edit", ...)` call. Mirror that
         // exactly: return None so this variant is never selected.
-        None
+        Validated::fail(Reason::Unmigrated)
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for PeerCharEdit {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        ReferenceState::mutable_text_enabled()
-            && state.app_started
-            && self.peer_idx < state.peers.len()
-            && state.peers[self.peer_idx]
-                .blocks
-                .contains_key(&self.block_id)
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(ReferenceState::mutable_text_enabled(), Reason::Unmigrated),
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                self.peer_idx < state.peers.len(),
+                Reason::PeerIndexOutOfBounds,
+            ),
+        ];
+
+        if self.peer_idx < state.peers.len() {
+            checks.push(check(
+                state.peers[self.peer_idx]
+                    .blocks
+                    .contains_key(&self.block_id),
+                Reason::PeerBlockMissing,
+            ));
+        }
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _state: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut ReferenceState) {
         // Reference model: PeerCharEdit doesn't change block-level
         // content (it operates at the LoroText character level).
         // The block content in the reference model stays the same;
@@ -57,13 +75,13 @@ impl E2ETransitionImpl for PeerCharEdit {
         let _ = (&self.peer_idx, &self.block_id);
     }
 
-    async fn apply_to_sut(&self, _ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_peer_char_edit(self.peer_idx, &self.block_id, &self.op)
             .await;
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // PeerCharEdit: async CDC drain from previous transitions can land here.
         ExpectedSql {
             reads: 5,

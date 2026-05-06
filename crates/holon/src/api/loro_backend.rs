@@ -390,12 +390,20 @@ fn read_block_from_tree(
         .unwrap_or(0);
 
     let tags = read_tags_from_meta(&meta);
+    // Phase 3.4: sort_key comes from Loro's internal fractional index
+    // (`tree.fractional_index`), not a shadow meta key. Loro's hex format
+    // matches `loro_fractional_index::FractionalIndex::to_string()` exactly
+    // — the same format chord ops produce via `gen_key_between`.
+    let sort_key = tree.fractional_index(node);
 
     let mut block = Block::from_block_content(id, parent_id, content);
     block.set_properties_map(properties);
     block.tags = tags;
     block.created_at = created_at;
     block.updated_at = updated_at;
+    if let Some(sk) = sort_key {
+        block.sort_key = sk;
+    }
     block
 }
 
@@ -407,12 +415,75 @@ fn read_tags_from_meta(meta: &loro::LoroMap) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Phase 3.4 sibling-scan helper. Given a `sort_key_hint` (a fractional-index
+/// hex string a chord op or CDC event produced via `gen_key_between`), find
+/// the predecessor sibling whose `tree.fractional_index` is the greatest one
+/// strictly less than the hint. Returns `(parent_id_str, predecessor_id_str)`
+/// suitable for [`LoroBackend::update_block_position`]. `target_bare_id` is
+/// the STABLE_ID (no `block:` prefix).
+pub(crate) fn find_position_for_sort_key_hint(
+    tree: &loro::LoroTree,
+    target_bare_id: &str,
+    sort_key_hint: &str,
+) -> Option<(String, Option<String>)> {
+    let alive: Vec<loro::TreeNode> = tree
+        .get_nodes(false)
+        .into_iter()
+        .filter(|n| {
+            !matches!(
+                n.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            )
+        })
+        .collect();
+
+    let stable_id_of = |id: loro::TreeID| -> Option<String> {
+        let meta = tree.get_meta(id).ok()?; // ALLOW(ok): missing node returns None — caller treats it as skip.
+        match meta.get(STABLE_ID) {
+            Some(loro::ValueOrContainer::Value(v)) => v.as_string().map(|s| s.to_string()),
+            _ => None,
+        }
+    };
+
+    let target_node = alive
+        .iter()
+        .find(|n| stable_id_of(n.id).is_some_and(|sid| sid == target_bare_id))?;
+
+    let parent_id_str = match target_node.parent {
+        loro::TreeParentId::Node(p) => match stable_id_of(p) {
+            Some(sid) => EntityUri::block(&sid).to_string(),
+            None => EntityUri::no_parent().to_string(),
+        },
+        _ => EntityUri::no_parent().to_string(),
+    };
+
+    let mut siblings: Vec<(String, String)> = alive
+        .iter()
+        .filter(|n| n.parent == target_node.parent && n.id != target_node.id)
+        .filter_map(|n| {
+            let fi = tree.fractional_index(n.id)?;
+            let sid = stable_id_of(n.id)?;
+            Some((sid, fi))
+        })
+        .collect();
+    siblings.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let predecessor_uri = siblings
+        .iter()
+        .filter(|(_, fi)| fi.as_str() < sort_key_hint)
+        .next_back()
+        .map(|(sid, _)| EntityUri::block(sid).to_string());
+
+    Some((parent_id_str, predecessor_uri))
+}
+
 /// Check if two blocks differ in content, structure, or properties.
 fn diff_blocks_changed(a: &Block, b: &Block) -> bool {
     a.content != b.content
         || a.parent_id != b.parent_id
         || a.content_type != b.content_type
         || a.source_language != b.source_language
+        || a.sort_key != b.sort_key
         || a.properties_map() != b.properties_map()
 }
 
@@ -485,10 +556,13 @@ fn resolve_parent_tree_id(
         return Ok(None);
     }
     // Try TreeID format first, then stable ID cache, then walk the tree.
-    // The tree walk is a fallback for the seed phase: when blocks are
+    // The tree walk handles the seed phase: when blocks are
     // created in the same batch with dependency chains >1 level deep,
     // a parent node may already exist in the tree but hasn't been added
     // to the id_cache yet (cache is populated lazily by create_block).
+    // ALLOW(fallback): seed-time recovery is a deliberate disclosed path;
+    // the alternative (eagerly populating id_cache across the batch) would
+    // need a multi-pass create, which is the larger refactor.
     let tree_id = uri_to_tree_id(parent_uri)
         .or_else(|| {
             if parent_uri.is_block() {
@@ -498,7 +572,8 @@ fn resolve_parent_tree_id(
             }
         })
         .or_else(|| {
-            // Fallback: walk the Loro tree looking for the stable ID.
+            // ALLOW(fallback): tree walk after id_cache miss covers seed-time
+            // ordering — same disclosed path as the comment block above.
             if parent_uri.is_block() {
                 for node in tree.get_nodes(false) {
                     if matches!(
@@ -1213,6 +1288,92 @@ impl LoroBackend {
         Ok(())
     }
 
+    /// Phase 3.4 positioned move. Drives Loro's built-in fractional-index
+    /// machinery (`tree.mov_after` / `tree.mov_to`) instead of writing a
+    /// shadow `sort_key` meta key. Callers that previously paired
+    /// `set_field("parent_id", …)` with `set_field("sort_key", …)` now
+    /// dispatch through this single call: the `target` ends up as a child
+    /// of `new_parent_id`, placed immediately after `predecessor_id` when
+    /// it is `Some(_)`, or as the first child when it is `None`.
+    ///
+    /// Block.sort_key is no longer stored separately; it is projected on
+    /// read from `tree.fractional_index(target)` (see
+    /// `read_block_from_tree`).
+    pub async fn update_block_position(
+        &self,
+        target_id: &str,
+        new_parent_id: &str,
+        predecessor_id: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let target = self.require_tree_id(target_id).await?;
+        let new_parent_uri = EntityUri::from_raw(new_parent_id);
+        let predecessor = match predecessor_id {
+            Some(p) => Some(self.require_tree_id(p).await?),
+            None => None,
+        };
+        let id_cache = self.id_cache.clone();
+
+        self.collab_doc
+            .with_write(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                match predecessor {
+                    Some(pred_id) => {
+                        tree.mov_after(target, pred_id)?;
+                    }
+                    None => {
+                        let new_parent = resolve_parent_tree_id(&tree, &id_cache, &new_parent_uri)?;
+                        match new_parent {
+                            Some(p) => tree.mov_to(target, p, 0)?,
+                            None => tree.mov_to(target, loro::TreeParentId::Root, 0)?,
+                        }
+                    }
+                }
+                let meta = tree.get_meta(target)?;
+                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                doc.commit();
+                Ok(())
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("Failed to update block position: {}", e),
+            })?;
+
+        let block = self.get_block(target_id).await?;
+        self.emit_change(Change::Updated {
+            id: target_id.to_string(),
+            data: block,
+            origin: ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
+            },
+        });
+        Ok(())
+    }
+
+    /// Phase 3.4 convenience: apply a `sort_key` hint (a fractional-index
+    /// hex string from `gen_key_between`) by scanning the target's siblings
+    /// and dispatching `update_block_position` with the right predecessor.
+    /// Used by the inbound `apply_*` paths (org-parser seed) and any caller
+    /// that has a hint string but not a typed predecessor ID. Returns
+    /// `Ok(())` (no-op) if the target isn't in the tree yet.
+    pub async fn apply_sort_key_hint(&self, target_id: &str, hint: &str) -> Result<(), ApiError> {
+        let bare = target_id.strip_prefix("block:").unwrap_or(target_id);
+        let position = self
+            .collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                Ok(find_position_for_sort_key_hint(&tree, bare, hint))
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("apply_sort_key_hint scan: {}", e),
+            })?;
+
+        let Some((parent_id, predecessor_id)) = position else {
+            return Ok(());
+        };
+        self.update_block_position(target_id, &parent_id, predecessor_id.as_deref())
+            .await
+    }
+
     // -- Tags (page marker + user tags) --
 
     /// Replace the `tags` list on a tree node. The literal `"Page"` tag in
@@ -1384,6 +1545,11 @@ impl LoroBackend {
                 }
                 Ok(None)
             })
+            // ALLOW(ok): returning Option<TreeID> at the API surface; the
+            // with_read error is a "couldn't acquire read lock" diagnostic
+            // that the lookup callers (resolve_to_tree_id) already treat as
+            // "not found" — preserving the Option signature here is the
+            // intended behavior of the resolver.
             .ok()
             .flatten()
     }
@@ -2115,7 +2281,7 @@ impl P2POperations for LoroBackend {
         "local-only".to_string()
     }
 
-    async fn connect_to_peer(&self, _peer_node_id: String) -> Result<(), ApiError> {
+    async fn connect_to_peer(&self, _: String) -> Result<(), ApiError> {
         Err(ApiError::NetworkError {
             message: "P2P sync requires IrohSyncAdapter (not wired to LoroBackend)".to_string(),
         })
@@ -2155,6 +2321,178 @@ mod tests {
 
         let fetched = backend.get_block(block.id.as_str()).await.unwrap();
         assert_eq!(fetched.content_text(), "Hello");
+    }
+
+    #[tokio::test]
+    async fn sort_key_reflects_tree_fractional_index() {
+        // Phase 3.4: Block.sort_key projects `tree.fractional_index(node)`.
+        // For a freshly-created block, Loro auto-assigns a fractional
+        // index; the read path returns exactly that string.
+        let backend = create_test_backend().await;
+        let block = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "x".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        let fetched = backend.get_block(block.id.as_str()).await.unwrap();
+        let tree_index = backend
+            .collab_doc
+            .with_read(|doc| {
+                Ok(doc
+                    .get_tree(TREE_NAME)
+                    .fractional_index(resolve_to_tree_id_sync(doc, block.id.as_str())))
+            })
+            .unwrap()
+            .expect("freshly-created block has a fractional index");
+        assert_eq!(fetched.sort_key, tree_index);
+    }
+
+    #[tokio::test]
+    async fn apply_sort_key_hint_repositions() {
+        // Phase 3.4: `apply_sort_key_hint` is the inbound CDC entry point —
+        // it scans siblings to find the predecessor whose fractional_index
+        // is closest below the hint and dispatches update_block_position.
+        let backend = create_test_backend().await;
+        let first = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "a".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        let second = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "b".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        let third = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "c".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        let first_fi = backend.get_block(first.id.as_str()).await.unwrap().sort_key;
+        let second_fi = backend
+            .get_block(second.id.as_str())
+            .await
+            .unwrap()
+            .sort_key;
+        // Pick a hint strictly between first and second — `third` should
+        // land between them.
+        let between = crate::api::loro_backend::find_position_for_sort_key_hint;
+        // Build the hint via gen_key_between so it's guaranteed valid.
+        let hint = holon_core::fractional_index::gen_key_between(Some(&first_fi), Some(&second_fi))
+            .expect("gen_key_between");
+        backend
+            .apply_sort_key_hint(third.id.as_str(), &hint)
+            .await
+            .unwrap();
+        // Silence the unused-import lint when this test binary is built
+        // without the registry feature.
+        let _ = between;
+        let s_first = backend.get_block(first.id.as_str()).await.unwrap();
+        let s_third = backend.get_block(third.id.as_str()).await.unwrap();
+        let s_second = backend.get_block(second.id.as_str()).await.unwrap();
+        assert!(
+            s_first.sort_key < s_third.sort_key,
+            "{} < {}",
+            s_first.sort_key,
+            s_third.sort_key
+        );
+        assert!(
+            s_third.sort_key < s_second.sort_key,
+            "{} < {}",
+            s_third.sort_key,
+            s_second.sort_key
+        );
+    }
+
+    #[tokio::test]
+    async fn update_block_position_reorders_siblings() {
+        // Phase 3.4: update_block_position uses Loro's tree.mov_after to
+        // place a node between two siblings. read_block_from_tree projects
+        // the resulting fractional index into Block.sort_key, so the SQL
+        // ordering matches the chord-op intent.
+        let backend = create_test_backend().await;
+        let first = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "a".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        let third = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "c".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        let second = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "b".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        // `second` was created last, so it sits at the end. Move it to
+        // sit immediately after `first` instead.
+        backend
+            .update_block_position(
+                second.id.as_str(),
+                EntityUri::no_parent().as_str(),
+                Some(first.id.as_str()),
+            )
+            .await
+            .unwrap();
+        let s_first = backend.get_block(first.id.as_str()).await.unwrap();
+        let s_second = backend.get_block(second.id.as_str()).await.unwrap();
+        let s_third = backend.get_block(third.id.as_str()).await.unwrap();
+        assert!(
+            s_first.sort_key < s_second.sort_key,
+            "{} < {}",
+            s_first.sort_key,
+            s_second.sort_key
+        );
+        assert!(
+            s_second.sort_key < s_third.sort_key,
+            "{} < {}",
+            s_second.sort_key,
+            s_third.sort_key
+        );
+    }
+
+    fn resolve_to_tree_id_sync(doc: &loro::LoroDoc, id: &str) -> loro::TreeID {
+        let tree = doc.get_tree(TREE_NAME);
+        let bare = id.strip_prefix("block:").unwrap_or(id);
+        for node in tree.get_nodes(false) {
+            if matches!(
+                node.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            ) {
+                continue;
+            }
+            if let Ok(meta) = tree.get_meta(node.id) {
+                if let Some(loro::ValueOrContainer::Value(v)) = meta.get(STABLE_ID) {
+                    if v.as_string().is_some_and(|s| s.to_string() == bare) {
+                        return node.id;
+                    }
+                }
+            }
+        }
+        panic!("resolve_to_tree_id_sync: {id} not found");
     }
 
     #[tokio::test]

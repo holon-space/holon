@@ -77,13 +77,11 @@ fn main() {
     let screenshot_dir = screenshot_dir("gpui");
 
     let bounds_registry = BoundsRegistry::new();
-    // Install the live-geometry bridge so the PBT generator can filter
-    // FocusEditableText candidates by what's *actually* rendered.
-    // Without this, the ref-state's "descendant of main focus root" set
-    // leaks blocks that aren't in the GPUI tree (CDC lag, ghost matview
-    // rows, peer-pending) and the SUT click would land on a missing
-    // element.
-    holon_integration_tests::pbt::live_geometry::install(Arc::new(bounds_registry.clone()));
+    // Generators now read entirely from `ReferenceState` (pure model);
+    // there is no longer any process-wide driver/geometry singleton.
+    // BoundsRegistry is still threaded into the GPUI window for its
+    // rendering pipeline, and `wait_for_entity_bounds` reads from
+    // `sut.frontend_geometry` (the SUT field, not a static).
     let visual_state: holon_integration_tests::ui_driver::VisualState =
         std::sync::Arc::new(std::sync::Mutex::new(None));
 
@@ -146,13 +144,19 @@ fn main() {
                          setup_interaction_pump should have run by now",
                     )
                     .clone();
-                let gpui_driver = holon_gpui::user_driver::GpuiUserDriver::new(
-                    tx,
-                    driver_geometry.clone(),
-                    pbt_ctx.reactive_engine.clone(),
-                );
+                // The medium-aware driver is built once here, returned via
+                // PbtReadyResult; `run_pbt_with_driver_sync_callback` then
+                // installs the same `Arc` into both `sut.driver` and
+                // `live_driver()` so transitions and generators converge on
+                // the same medium.
+                let gpui_driver: std::sync::Arc<dyn holon_frontend::user_driver::UserDriver> =
+                    std::sync::Arc::new(holon_gpui::user_driver::GpuiUserDriver::new(
+                        tx,
+                        driver_geometry.clone(),
+                        pbt_ctx.reactive_engine.clone(),
+                    ));
                 Some(PbtReadyResult {
-                    driver: Some(Box::new(gpui_driver)),
+                    driver: Some(gpui_driver),
                     frontend_engine: Some(pbt_ctx.reactive_engine.clone()),
                     frontend_geometry: Some(Box::new(inv14_registry)),
                     frontend_visual_state: Some(inv14_visual_state),
@@ -195,6 +199,7 @@ fn main() {
     // window open for inspection).
     let (pbt_failed, quit_rx) =
         spawn_quit_on_pbt_finish(pbt_handle, "PBT_KEEP_WINDOW", "gpui_ui_pbt");
+    let pbt_failed_for_app = pbt_failed.clone();
 
     let app = Application::with_platform(gpui_platform::current_platform(false));
 
@@ -234,12 +239,24 @@ fn main() {
 
         // When the PBT thread finishes, `quit_rx` (set up before app.run)
         // fires; a GPUI background timer polls it and shuts the app down.
+        //
+        // On macOS, `cx.quit()` invokes `NSApplication.terminate:` which
+        // calls `exit(0)` from Cocoa *before* `app.run` returns. The code
+        // after `app.run` below is therefore unreachable on macOS, so the
+        // failure check and chrome-trace flush must happen here, before
+        // we hand off to the platform terminator.
+        let pbt_failed_for_quit = pbt_failed_for_app.clone();
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(200))
                     .await;
                 if quit_rx.try_recv().is_ok() {
+                    holon_integration_tests::test_tracing::flush_chrome_trace();
+                    if pbt_failed_for_quit.load(std::sync::atomic::Ordering::SeqCst) {
+                        eprintln!("[gpui_ui_pbt] exiting with PBT failure");
+                        std::process::exit(1);
+                    }
                     let _ = cx.update(|cx| cx.quit());
                     break;
                 }

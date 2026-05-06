@@ -78,7 +78,7 @@ pub fn set_loro_peer_id_if_unset(default: &str) {
 
 /// Enable `PBT_ATOMIC_EDITOR=1` if it isn't already set. The atomic
 /// editor primitives (`FocusEditableText`, `TypeChars`,
-/// `DeleteBackward`, `MoveCursor`, `PressKey`, `Blur`) are the
+/// `DeleteBackward`, `MoveCursor`, `PressKey`) are the
 /// keyboard-driven UI path; with this on, the bypass-style
 /// `EditViaViewModel` / `EditViaDisplayTree` transitions are gated
 /// off. See `frontends/tui/TODO.md` items A6 and the May 2026

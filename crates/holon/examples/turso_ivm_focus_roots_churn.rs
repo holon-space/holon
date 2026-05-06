@@ -2,7 +2,7 @@
 //! `current_focus → focus_roots` fire `set_change_callback` for upstream
 //! transactions that don't actually change the matview's output.
 //!
-//! Production symptom: `gpui_ui_pbt` `[inv16] CDC not quiescent — spurious
+//! Production symptom: `gpui_ui_pbt` `[inv-editable-text-has-draggable] CDC not quiescent — spurious
 //! events: [("region:main", 9..11)]` (`crates/holon-integration-tests/src/
 //! test_environment.rs:1333`). The Holon test framework's
 //! `setup_region_watch` subscribes to a `watch_view` shaped like
@@ -316,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     // Navigation 2: journals (no children — to mirror the seed=7 trace
-    // where ClickBlock(journals) produced inv16 panic)
+    // where ClickBlock(journals) produced inv-editable-text-has-draggable panic)
     conn.execute(
         "INSERT INTO block (id, parent_id, content) VALUES ('journals', 'root', 'Journals')",
         (),
@@ -457,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
     // (`WHERE fr.region = 'main'`) to emit a 4-item batch:
     //
     //   [apply] ClickBlock: region=LeftSidebar block=block:ref-doc-1
-    //   [inv16] CDC not quiescent — spurious events: [("region:main", 4)]
+    //   [inv-editable-text-has-draggable] CDC not quiescent — spurious events: [("region:main", 4)]
     //
     // Whatever changed in `current_focus`/`focus_roots` for region=
     // 'left_sidebar' is propagating through region_main_view's WHERE
@@ -573,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
     // ====================================================================
     // Phase 3: editor_cursor write triggers spurious CDC on region_main_view
     //
-    // gpui_ui_pbt symptom: ClickBlock(LeftSidebar, ...) fires inv16 on
+    // gpui_ui_pbt symptom: ClickBlock(LeftSidebar, ...) fires inv-editable-text-has-draggable on
     // `region:main` with 4 items. The click handler at
     // `frontends/gpui/src/render/builders/render_entity.rs:54` dispatches
     // `editor_focus(region="main", block_id=...)` (region is hard-coded

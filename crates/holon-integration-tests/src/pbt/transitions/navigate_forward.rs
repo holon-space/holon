@@ -6,9 +6,11 @@
 //! `sut.rs:1308-1314` (SUT apply), and
 //! `transition_budgets.rs:176-181` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use holon_api::Region;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -27,29 +29,33 @@ pub struct NavigateForward {
 }
 
 impl E2ETransitionFactory for NavigateForward {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Restricted to Main — only TUI binding (leader+'f') targets
         // `region: "main"`. See `assets/default/keybindings.yaml`.
-        if !state.can_go_forward(Region::Main) {
-            return None;
-        }
-        let strat = proptest::strategy::Just(NavigateForward {
+        let instance = NavigateForward {
             region: Region::Main,
+        };
+        instance.preconditions(state).map(|_| {
+            let strat = proptest::strategy::Just(instance).boxed();
+            (1, strat)
         })
-        .boxed();
-
-        Some((1, strat))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for NavigateForward {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && state.can_go_forward(self.region)
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                state.can_go_forward(self.region),
+                Reason::NoNavigationHistory,
+            ),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -60,9 +66,12 @@ impl E2ETransitionImpl for NavigateForward {
         }
         state.focused_entity_id.remove(&self.region);
         state.focused_cursor.remove(&self.region);
+
+        // Blur on nav: see `navigate_focus.rs` for verification.
+        state.active_editor = None;
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_navigate_forward(self.region).await;
     }
 

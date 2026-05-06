@@ -8,12 +8,14 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::peer_ops::PeerBlock;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::state_machine::{merge_peer_blocks_into_primary, refresh_peer_baseline};
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -25,25 +27,42 @@ pub struct SyncWithPeer {
 }
 
 impl E2ETransitionFactory for SyncWithPeer {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started || !state.variant.enable_loro {
-            return None;
-        }
-        if state.peers.is_empty() {
-            return None;
-        }
-        let peer_count = state.peers.len();
-        let strat = (0..peer_count)
-            .prop_map(|peer_idx| SyncWithPeer { peer_idx })
-            .boxed();
-        Some((2, strat))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Enumerate parameter space (peer indices) and let `preconditions`
+        // be the single source of truth for which ones are actually syncable.
+        let candidates: Vec<usize> = (0..state.peers.len())
+            .filter(|peer_idx| {
+                SyncWithPeer {
+                    peer_idx: *peer_idx,
+                }
+                .preconditions(state)
+                .is_good()
+            })
+            .collect();
+        check(!candidates.is_empty(), Reason::NoPeersAvailable).map(|_| {
+            let strat = prop::sample::select(candidates)
+                .prop_map(|peer_idx| SyncWithPeer { peer_idx })
+                .boxed();
+            (2, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for SyncWithPeer {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && self.peer_idx < state.peers.len()
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.variant.enable_loro, Reason::LoroRequiredForPeers),
+            check(
+                self.peer_idx < state.peers.len(),
+                Reason::PeerIndexOutOfBounds,
+            ),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -122,12 +141,12 @@ impl E2ETransitionImpl for SyncWithPeer {
         refresh_peer_baseline(peer);
     }
 
-    async fn apply_to_sut(&self, _ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_sync_with_peer(self.peer_idx).await;
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // SyncWithPeer: async CDC drain from previous transitions can land here.
         // In production, fires Loro's `subscribe_root` callback, which wakes
         // `LoroSyncController` to reconcile the diff into the command/event bus.

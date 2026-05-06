@@ -24,7 +24,6 @@ use holon_api::streaming::UiEvent;
 use holon_api::widget_spec::{DataRow, EnrichedRow};
 use holon_api::{ptr_identity, EntityUri, QueryLanguage, ReactiveRowProvider};
 
-use crate::editable_text_provider::EditableTextProvider;
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
@@ -139,7 +138,7 @@ pub trait BuilderServices: Send + Sync {
     /// Returns context variables like `is_focused`, `view_mode` that
     /// `Predicate::evaluate()` can use to pick the active render variant.
     /// Default: empty map (all UI predicates evaluate to false/default).
-    fn ui_state(&self, _block_id: &EntityUri) -> HashMap<String, holon_api::Value> {
+    fn ui_state(&self, _: &EntityUri) -> HashMap<String, holon_api::Value> {
         HashMap::new()
     }
 
@@ -186,16 +185,14 @@ pub trait BuilderServices: Send + Sync {
     }
 
     /// Set the currently focused block. Pass `None` to clear focus.
-    fn set_focus(&self, _block_id: Option<EntityUri>) {}
+    fn set_focus(&self, _: Option<EntityUri>) {}
 
-    /// Get a `MutableText` handle for collaborative editing of a block field.
-    ///
-    /// Returns `Err` for headless/stub services that don't have a LoroDoc.
-    fn editable_text(
-        &self,
-        _block_id: &str,
-        _field: &str,
-    ) -> anyhow::Result<holon::sync::mutable_text::MutableText> {
+    /// Get a [`Cell<String>`] handle for collaborative editing of a block
+    /// field. Resolves through the `BlockCellRegistry` (Loro-backed when
+    /// LoroModule is loaded). Returns `Err` for headless/stub services
+    /// that don't have a LoroDoc, or for blocks not yet present in the
+    /// Loro tree.
+    fn editable_text(&self, _: &str, _: &str) -> anyhow::Result<crate::cell::Cell<String>> {
         Err(anyhow::anyhow!(
             "editable_text not supported by this BuilderServices implementation"
         ))
@@ -227,7 +224,7 @@ pub trait BuilderServices: Send + Sync {
     /// Default: returns a ready future (for headless/stub impls that don't stream).
     fn await_ready(
         &self,
-        _id: &EntityUri,
+        _: &EntityUri,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(std::future::ready(()))
     }
@@ -236,7 +233,7 @@ pub trait BuilderServices: Send + Sync {
     /// signal that tracks the block's render expression + data.
     fn watch_block_signal(
         &self,
-        _block_id: &EntityUri,
+        _: &EntityUri,
     ) -> std::pin::Pin<
         Box<dyn futures_signals::signal::Signal<Item = crate::ReactiveViewModel> + Send>,
     > {
@@ -248,24 +245,20 @@ pub trait BuilderServices: Send + Sync {
     /// Returns a `LiveBlock` whose tree has ReactiveView nodes that self-manage
     /// their streaming pipelines. `structural_changes` fires only on render
     /// expression changes.
-    fn watch_live(
-        &self,
-        _block_id: &EntityUri,
-        _services: Arc<dyn BuilderServices>,
-    ) -> crate::LiveBlock {
+    fn watch_live(&self, _: &EntityUri, _: Arc<dyn BuilderServices>) -> crate::LiveBlock {
         panic!("watch_live not supported by this BuilderServices implementation")
     }
 
     /// Stop watching a block and release its reactive state (watchers, MutableVec items).
     /// No-op by default. Implemented by ReactiveEngine.
-    fn unwatch(&self, _block_id: &EntityUri) {}
+    fn unwatch(&self, _: &EntityUri) {}
 
     /// Get a reactive signal for a live query's UI. GPUI polls this directly.
     fn watch_query_signal(
         &self,
-        _sql: String,
-        _render_expr: holon_api::render_types::RenderExpr,
-        _query_context: Option<crate::QueryContext>,
+        _: String,
+        _: holon_api::render_types::RenderExpr,
+        _: Option<crate::QueryContext>,
     ) -> std::pin::Pin<
         Box<dyn futures_signals::signal::Signal<Item = crate::ReactiveViewModel> + Send>,
     > {
@@ -912,7 +905,13 @@ impl UiState {
             holon_api::Value::Boolean(is_focused),
         );
 
-        // Global viewport fallback: emitted so blocks not reached by any
+        // ALLOW(fallback): the seeded global viewport is intentionally
+        // emitted as a default-value baseline that per-subtree writes from
+        // `pick_active_variant` then shadow — see CLAUDE.md "Falls back
+        // visibly — clearly signals degraded mode" — so blocks not reached
+        // by any partitioning container's space cascade still have a
+        // viewport context to evaluate `viewport_*` predicates against.
+        // Global viewport baseline: emitted so blocks not reached by any
         // partitioning container's space cascade still have something to
         // evaluate their `viewport_*` predicates against. Per-subtree
         // `available_*` values written by `pick_active_variant` shadow
@@ -973,10 +972,12 @@ pub struct ReactiveEngine {
     /// `watch_editor_cursor()` call so we have at most one CDC stream on
     /// `current_editor_focus` regardless of how many editors subscribe.
     editor_cursor: Mutex<Option<Mutable<Option<(String, i64)>>>>,
-    /// Optional MutableText provider. When `Some`, `BuilderServices::editable_text()`
-    /// delegates to it. Set by test harnesses that want CRDT-backed editors.
-    pub editable_text_provider:
-        Mutex<Option<Arc<crate::editable_text_provider::LoroEditableTextProvider>>>,
+    /// Optional `BlockCellRegistry`. When `Some`,
+    /// `BuilderServices::editable_text()` resolves
+    /// `live_field::<String>(EntityUri::block(id), "content")` through
+    /// it. Set by frontend DI factories that want CRDT-backed editors.
+    pub block_cell_registry:
+        Mutex<Option<Arc<holon::sync::block_cell_registry::BlockCellRegistry>>>,
 }
 
 impl ReactiveEngine {
@@ -1029,7 +1030,7 @@ impl ReactiveEngine {
             key_bindings,
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
             editor_cursor: Mutex::new(None),
-            editable_text_provider: Mutex::new(None),
+            block_cell_registry: Mutex::new(None),
         }
     }
 
@@ -1942,12 +1943,18 @@ impl BuilderServices for ReactiveEngine {
         &self,
         block_id: &str,
         field: &str,
-    ) -> anyhow::Result<holon::sync::mutable_text::MutableText> {
-        let guard = self.editable_text_provider.lock().unwrap();
+    ) -> anyhow::Result<crate::cell::Cell<String>> {
+        let guard = self.block_cell_registry.lock().unwrap();
         match &*guard {
-            Some(p) => p.editable_text(block_id, field),
+            Some(reg) => {
+                use crate::cell::EntityCellRegistryExt;
+                let uri = EntityUri::block(block_id);
+                let reg_dyn: &dyn crate::cell::EntityCellRegistry = reg.as_ref();
+                reg_dyn.live_field::<String>(&uri, field)
+            }
             None => Err(anyhow::anyhow!(
-                "editable_text not configured for this ReactiveEngine"
+                "editable_text not configured for this ReactiveEngine \
+                 (BlockCellRegistry not wired)"
             )),
         }
     }
@@ -1984,7 +1991,7 @@ impl BuilderServices for HeadlessBuilderServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
-    fn get_block_data(&self, _id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
+    fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         (table_expr(), vec![])
     }
 
@@ -2003,13 +2010,13 @@ impl BuilderServices for HeadlessBuilderServices {
 
     fn start_query(
         &self,
-        _sql: String,
-        _ctx: Option<crate::QueryContext>,
+        _: String,
+        _: Option<crate::QueryContext>,
     ) -> Result<crate::RowChangeStream> {
         anyhow::bail!("HeadlessBuilderServices does not support live queries")
     }
 
-    fn widget_state(&self, _id: &str) -> WidgetState {
+    fn widget_state(&self, _: &str) -> WidgetState {
         WidgetState::default()
     }
 
@@ -2024,7 +2031,7 @@ impl BuilderServices for HeadlessBuilderServices {
     fn present_op(
         &self,
         op: holon_api::render_types::OperationDescriptor,
-        _ctx_params: HashMap<String, holon_api::Value>,
+        _: HashMap<String, holon_api::Value>,
     ) {
         panic!(
             "HeadlessBuilderServices::present_op({}.{}) — op_button must not be \
@@ -2110,27 +2117,27 @@ impl BuilderServices for StubBuilderServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
-    fn get_block_data(&self, _id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
+    fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         (table_expr(), vec![])
     }
 
-    fn resolve_profile(&self, _row: &DataRow) -> Option<holon::entity_profile::RowProfile> {
+    fn resolve_profile(&self, _: &DataRow) -> Option<holon::entity_profile::RowProfile> {
         None
     }
 
-    fn compile_to_sql(&self, _query: &str, _lang: QueryLanguage) -> Result<String> {
+    fn compile_to_sql(&self, _: &str, _: QueryLanguage) -> Result<String> {
         anyhow::bail!("StubBuilderServices does not support query compilation")
     }
 
     fn start_query(
         &self,
-        _sql: String,
-        _ctx: Option<crate::QueryContext>,
+        _: String,
+        _: Option<crate::QueryContext>,
     ) -> Result<crate::RowChangeStream> {
         anyhow::bail!("StubBuilderServices does not support live queries")
     }
 
-    fn widget_state(&self, _id: &str) -> WidgetState {
+    fn widget_state(&self, _: &str) -> WidgetState {
         WidgetState::default()
     }
 
@@ -2145,7 +2152,7 @@ impl BuilderServices for StubBuilderServices {
     fn present_op(
         &self,
         op: holon_api::render_types::OperationDescriptor,
-        _ctx_params: HashMap<String, holon_api::Value>,
+        _: HashMap<String, holon_api::Value>,
     ) {
         panic!(
             "StubBuilderServices::present_op({}.{}) — op_button must not be \
@@ -2162,7 +2169,7 @@ impl BuilderServices for StubBuilderServices {
 
     fn popup_query(
         &self,
-        _sql: String,
+        _: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>
     {
         Box::pin(async { anyhow::bail!("StubBuilderServices does not support popup_query") })

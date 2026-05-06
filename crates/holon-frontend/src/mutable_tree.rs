@@ -442,6 +442,14 @@ fn wrap_tree_item(
     ReactiveViewModel {
         children: vec![widget.clone()],
         data: futures_signals::signal::Mutable::new(widget.entity()).read_only(),
+        // Per-instance collapse state. `true = expanded` (default — children
+        // visible). Two `tree_item`s wrapping the same widget id get
+        // independent `Mutable`s, so collapsing one doesn't collapse the
+        // other. Preserved across structural rebuilds via
+        // `with_update`'s `expanded: self.expanded.clone()` chain — the
+        // `Mutable` handle is itself an `Arc` so the cell survives even
+        // when the wrapping `ReactiveViewModel` is replaced.
+        expanded: Some(futures_signals::signal::Mutable::new(true)),
         ..ReactiveViewModel::from_widget("tree_item", props)
     }
 }

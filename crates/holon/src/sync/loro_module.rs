@@ -82,6 +82,25 @@ impl Module for LoroModule {
             ))
         }));
 
+        // Register a Loro-aware `BlockCellRegistry`. `SqlBlockOperations`
+        // consumes this so chord-time `split_block` / `join_block` reads
+        // the live `content_raw` `LoroText` through `Cell<String>` rather
+        // than the SQL `block.content` projection — closing the
+        // typed-text-discarded race documented in
+        // `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`.
+        // Only registered when LoroModule is loaded; SqlOnly mode wires
+        // `BlockCellRegistry::sql_only()` in `event_infra_module.rs`.
+        injector.provide::<crate::sync::block_cell_registry::BlockCellRegistry>(
+            Provider::root_async(|resolver| async move {
+                let doc_store = resolver.resolve::<LoroDocumentStore>();
+                let collab = doc_store
+                    .get_global_doc()
+                    .await
+                    .expect("LoroDocumentStore::get_global_doc failed for BlockCellRegistry");
+                Shared::new(crate::sync::block_cell_registry::BlockCellRegistry::with_loro(collab))
+            }),
+        );
+
         // NOTE: LoroBlockOperations is NOT registered as an OperationProvider.
         // All block CRUD operations go through SqlOperationProvider → Turso (source of truth).
         // Loro is populated via EventBus subscriptions (reverse sync), not through the command path.
@@ -214,7 +233,10 @@ impl Module for LoroModule {
             );
 
             match controller.start().await {
-                Ok(handle) => Shared::new(handle),
+                Ok(handle) => {
+                    handle.disable_inbound_runtime();
+                    Shared::new(handle)
+                }
                 Err(e) => {
                     error!("[LoroModule] Failed to start LoroSyncController: {}", e);
                     // Startup failure: return a handle to a controller
@@ -352,12 +374,33 @@ pub async fn seed_loro_from_persistent_store(
     tracing::info!("[LoroModule] SEED-STAGE 1: function entry");
     info!("[LoroModule] seed: querying block table");
     tracing::info!("[LoroModule] SEED-STAGE 2: about to query block table");
+    // Phantom-Loro-exists fix (devlog 2026-05-11-phantom-loro-root-cause-found.md):
+    // skip rows whose `block.created` event has NOT been processed by the `loro`
+    // consumer yet. Those blocks will arrive via the regular CDC inbound path
+    // and `apply_create` will create them with correct typed positional intent.
+    // Without this filter, `apply_seed_row` creates them in HashMap-iteration
+    // order, the CDC events then find them already in Loro and bypass to
+    // `apply_update_with_backend` — scrambling tree children order.
+    //
+    // Blocks that bypass `OperationProvider` (notably `seed_default_layout`'s
+    // layout panel + sidebar entities written via raw INSERTs) produce no
+    // events, so the LEFT JOIN keeps them and the seed creates them as
+    // intended.
     let rows = db_handle
         .query(
             &format!(
-                "SELECT id, parent_id, content, content_type, source_language, \
-                        properties \
-                 FROM {table} ORDER BY created_at ASC",
+                "SELECT b.id, b.parent_id, b.content, b.content_type, b.source_language, \
+                        b.properties \
+                 FROM {table} b \
+                 LEFT JOIN events e ON e.aggregate_id = b.id \
+                                   AND e.aggregate_type = 'block' \
+                                   AND e.event_type = 'block.created' \
+                                   AND NOT EXISTS ( \
+                                       SELECT 1 FROM event_acks a \
+                                       WHERE a.event_id = e.id AND a.consumer = 'loro' \
+                                   ) \
+                 WHERE e.id IS NULL \
+                 ORDER BY b.created_at ASC, b.id ASC",
                 table = crate::storage::BLOCK_READ_TABLE,
             ),
             std::collections::HashMap::new(),
@@ -366,7 +409,7 @@ pub async fn seed_loro_from_persistent_store(
         .map_err(|e| anyhow::anyhow!("query block table: {}", e))?;
 
     tracing::info!(
-        "[LoroModule] SEED-STAGE 3: query returned {} rows",
+        "[LoroModule] SEED-STAGE 3: query returned {} rows (filtered to events the loro consumer has already processed or pre-event raw inserts)",
         rows.len()
     );
     info!(

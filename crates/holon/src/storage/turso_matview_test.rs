@@ -230,9 +230,6 @@ async fn test_create_matview_full_init_schema_pattern() {
                         trace_id TEXT,
                         command_id TEXT,
                         created_at INTEGER NOT NULL,
-                        processed_by_loro INTEGER DEFAULT 0,
-                        processed_by_org INTEGER DEFAULT 0,
-                        processed_by_cache INTEGER DEFAULT 0,
                         speculative_id TEXT,
                         rejection_reason TEXT
                     )",

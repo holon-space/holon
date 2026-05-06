@@ -223,6 +223,21 @@ fastest path.
 | `hardcoded_table_name` | dylint | `hardcoded_table_name` | matview/junction names as bare string literals |
 | `serde_skip_default_on_deserialize` | dylint | `serde_skip_default_on_deserialize` | `#[serde(skip*)]` on `derive(Deserialize)` field |
 
+### Cell-architecture rules (added by the Cells plan)
+
+These gates lock in the Cells architecture (see [Storage](Storage.md), [Sync](Sync.md), [Operations](Operations.md)). They land per phase and tighten as fields move to cells.
+
+| Rule id | Phase | Tag | What it catches |
+|---------|-------|-----|-----------------|
+| `no-block-content-resolver` | Phase 1 | `no_block_content_resolver` | Re-introducing any `*ContentResolver` trait or struct for blocks |
+| `no-deleted-symbols-resurface` | Phase 1+ | — | `BlockContentResolver` / `live_content` / `set_live_content` / `EditableTextProvider` / `_expected_*` / `with_content_resolver` reappearing in source |
+| `cells-only-constructed-in-registry-layer` | Phase 1 | `cells_construct` | `Cell::new` and cell backing constructors callable only from cell-registry code + tests |
+| `no-raw-mutable-for-cell-fields` | Phase 2 | `cell_field_mutable` | Source files outside cell-registry crates declaring `Mutable<T>` where `T` is an entity field type listed in any registered `cell_fields()` schema (deny-list grows per migrated field) |
+| `cells-are-sole-block-writer` | Phase 2 | `block_write_via_cells` | Direct `INSERT INTO block` / `UPDATE block SET` outside `SqlBlockProjector` and the LoroSyncController startup-seed code |
+| `no-inbound-loro-sync-runtime` | Phase 2 | `loro_inbound_runtime` | Re-introducing the runtime SQL→Loro inbound subscription path; only startup seeding is allowed |
+
+`cell-field-mutable` and `cells-are-sole-block-writer` start as ast-grep CST rules with allow-lists; the deny-lists grow as more fields migrate. See `archlint/rules/no-block-content-resolver.yml` (and siblings) for the canonical rule definitions.
+
 ## Related
 
 - [Principles](Principles.md) — the "Fail Loud, Never Fake" and

@@ -132,25 +132,27 @@ The render pipeline follows Model-View-ViewModel (MVVM). The three layers are:
 
 | Layer | Holon Component | Responsibility |
 |-------|-----------------|----------------|
-| **Model** | Turso/Loro (blocks, documents, queries) | Domain data, persistence, CDC streams |
-| **ViewModel** | `ReactiveViewModel` tree (`holon-frontend`) | Platform-agnostic reactive presentation tree — persistent nodes that self-update via futures-signals |
+| **Model** | Loro (authority for blocks) + Turso (projection / matview / CDC) | Domain data, persistence, CDC streams; cells (`Cell<T>`) are the in-memory reactive read primitive |
+| **ViewModel** | `ReactiveViewModel` tree (`holon-frontend`) | Platform-agnostic reactive presentation tree — persistent nodes that self-update via futures-signals; per-instance widget state lives here |
 | **View** | GPUI elements, Flutter widgets, Dioxus components, TUI cells | Platform-specific UI — mechanical mapping from `ReactiveViewModel` to native widgets |
 
-`ReactiveViewModel` (`crates/holon-frontend/src/reactive_view_model.rs`) is the boundary between shared render logic and platform-specific frontends:
+`ReactiveViewModel` (`crates/holon-frontend/src/reactive_view_model.rs`) is the boundary between shared render logic and platform-specific frontends. It holds **per-instance widget state** as `Mutable<T>` fields (the FU-1 pattern); **entity field state** is resolved through cells by `(uri, field)` and is not stored on the VM:
 
 ```rust
 pub struct ReactiveViewModel {
     pub expr: Mutable<RenderExpr>,       // Render expression this node was built from
-    pub data: Mutable<Arc<DataRow>>,     // The data row this node is interpreting
+    pub data: Mutable<Arc<DataRow>>,     // The data row this node is interpreting (sourced from cells)
     pub children: Vec<Arc<ReactiveViewModel>>,  // Static layout children
     pub collection: Option<Arc<ReactiveView>>,  // Reactive collection (MutableVec)
     pub slot: Option<ReactiveSlot>,      // Deferred content (live_block, live_query)
-    pub expanded: Option<Mutable<bool>>, // Expand/collapse state
+    pub expanded: Option<Mutable<bool>>, // Per-instance expand/collapse state (NOT a cell — see UI.md FU-1)
     pub operations: Vec<OperationWiring>,
     pub triggers: Vec<InputTrigger>,
     pub layout_hint: LayoutHint,
 }
 ```
+
+See [UI](UI.md) for the cells-vs-`Mutable<T>` cut.
 
 `ReactiveView` (`crates/holon-frontend/src/reactive_view.rs`) is a self-managing reactive collection that owns its data pipeline. The driver is spawned internally and stopped on Drop.
 

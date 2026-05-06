@@ -6,8 +6,10 @@
 //! `sut.rs:1323-1325` (SUT apply), and
 //! `transition_budgets.rs:137-143` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -23,32 +25,45 @@ pub struct SwitchView {
 }
 
 impl E2ETransitionFactory for SwitchView {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-        let strat = prop::sample::select(vec![
-            "all".to_string(),
-            "sidebar".to_string(),
-            "main".to_string(),
-        ])
-        .prop_map(|view_name| SwitchView { view_name })
-        .boxed();
-        Some((1, strat))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Enumerate parameter space (fixed view names) and let `preconditions`
+        // be the single source of truth for which ones are actually switchable.
+        let candidates: Vec<String> =
+            vec!["all".to_string(), "sidebar".to_string(), "main".to_string()]
+                .into_iter()
+                .filter(|view_name| {
+                    SwitchView {
+                        view_name: view_name.clone(),
+                    }
+                    .preconditions(state)
+                    .is_good()
+                })
+                .collect();
+        check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
+            let strat = prop::sample::select(candidates)
+                .prop_map(|view_name| SwitchView { view_name })
+                .boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for SwitchView {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> =
+            vec![check(state.app_started, Reason::AppNotStarted)];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.current_view = self.view_name.clone();
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_switch_view(&self.view_name).await;
     }
 

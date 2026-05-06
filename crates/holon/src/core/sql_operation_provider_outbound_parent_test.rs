@@ -1,14 +1,15 @@
-//! Reproduce the outbound parent_id stomping race: a stale Loro outbound
-//! `update` op whose `before` snapshot showed parent_id=P0 must NOT clobber
-//! a fresh local SQL write that has already advanced the row to a different
-//! parent. Same shape as Bug #1 for content (`_expected_content` guard);
-//! this is its analog for `parent_id`.
+//! Phase 2 authority flip: `_expected_parent_id` watermark gating dropped.
+//! `SqlBlockOperations::set_field` routes block writes through
+//! `BlockCellRegistry::write_field` (Loro), and `LoroSyncController.
+//! on_loro_changed` is the only path that writes block columns to SQL.
+//! With one writer per field there's no concurrent direct SQL dispatch
+//! to regress against, so the compare-and-set is dead weight. The diff
+//! guard at the end of `prepare_update` (`AND (col1 IS NOT val1 OR …)`)
+//! still keeps no-op UPDATEs from firing spurious CDC.
 //!
-//! On `main` (before the fix) `prepare_update` does not consume
-//! `_expected_parent_id` and the generated WHERE clause has no
-//! `parent_id = '<old>'` gate — the stale UPDATE goes through. After the
-//! fix, the WHERE clause includes the gate and the stale UPDATE affects
-//! zero rows.
+//! This file kept as a regression gate: if a future refactor reintroduces
+//! `_expected_parent_id` (or any other `_expected_*` key) without a
+//! matching authority concern, the assertion below fails loudly.
 
 use super::*;
 
@@ -21,32 +22,24 @@ fn build_provider(db_handle: crate::storage::DbHandle) -> SqlOperationProvider {
     )
 }
 
-fn params_with_expected_parent(
-    id: &str,
-    new_parent: &str,
-    expected_parent: &str,
-) -> HashMap<String, Value> {
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(id.to_string()));
-    params.insert(
-        "parent_id".to_string(),
-        Value::String(new_parent.to_string()),
-    );
-    params.insert(
-        "_expected_parent_id".to_string(),
-        Value::String(expected_parent.to_string()),
-    );
-    params
-}
-
 #[tokio::test]
-async fn prepare_update_emits_expected_parent_id_gate() {
+async fn prepare_update_ignores_expected_parent_id_after_authority_flip() {
+    // Provide `_expected_parent_id` in params. The post-Phase-2 update
+    // path treats it as an unknown key and silently drops it (it was a
+    // pre-Phase-2 control field; Loro is now the sole writer so the
+    // gating it provided is no longer needed).
     let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
         .await
         .expect("in-memory turso");
     let provider = build_provider(db_handle);
 
-    let params = params_with_expected_parent("X", "P_NEW", "P_OLD");
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::String("X".to_string()));
+    params.insert("parent_id".to_string(), Value::String("P_NEW".to_string()));
+    params.insert(
+        "_expected_parent_id".to_string(),
+        Value::String("P_OLD".to_string()),
+    );
 
     let prepared = provider
         .prepare_update(&params)
@@ -56,18 +49,17 @@ async fn prepare_update_emits_expected_parent_id_gate() {
 
     let sql = prepared.sql_statements.join(";");
     assert!(
-        sql.contains("parent_id = 'P_OLD'"),
-        "expected WHERE clause to gate on parent_id = 'P_OLD' (the Loro \
-         snapshot's pre-image), so a stale outbound UPDATE no-ops when SQL \
-         has already advanced. SQL was: {sql}"
+        !sql.contains("parent_id = 'P_OLD'"),
+        "post-authority-flip: no `parent_id = 'P_OLD'` equality gate \
+         expected. SQL was: {sql}"
     );
 }
 
 #[tokio::test]
 async fn prepare_update_without_expected_parent_id_has_no_gate() {
-    // Sanity: when `_expected_parent_id` is absent, no `parent_id = '...'`
-    // appears in the WHERE clause beyond the diff guard's `IS NOT` check.
-    // This guards against accidentally always-on gating.
+    // Sanity: a plain `parent_id` UPDATE has no equality gate against
+    // any pre-image value. The diff guard still appears as `parent_id
+    // IS NOT 'P_NEW'`.
     let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
         .await
         .expect("in-memory turso");
@@ -84,11 +76,8 @@ async fn prepare_update_without_expected_parent_id_has_no_gate() {
         .expect("Some(PreparedOp)");
 
     let sql = prepared.sql_statements.join(";");
-    // The diff guard adds `parent_id IS NOT 'P_NEW'`. That's fine.
-    // The point is there is no equality gate against a pre-image value.
     assert!(
         !sql.contains("parent_id = '"),
-        "no parent_id equality gate when _expected_parent_id is absent; \
-         SQL was: {sql}"
+        "no parent_id equality gate after authority flip; SQL was: {sql}"
     );
 }

@@ -63,7 +63,7 @@ const KNOWN_TABLE_NAMES: &[&str] = &[
     "block",
     "block_raw",
     "block_tags",
-    "task_blockers",
+    "block_requires",
     "focus_roots",
 ];
 

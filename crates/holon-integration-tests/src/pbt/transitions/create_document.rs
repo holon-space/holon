@@ -8,10 +8,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -28,23 +30,26 @@ pub struct CreateDocument {
 }
 
 impl E2ETransitionFactory for CreateDocument {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-        let next_doc_id = state.next_doc_id;
-        let strat = Just(CreateDocument {
-            file_name: format!("doc_{}.org", next_doc_id),
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let instance = CreateDocument {
+            file_name: format!("doc_{}.org", state.next_doc_id),
+        };
+        instance.preconditions(state).map(|_| {
+            let strat = Just(instance).boxed();
+            (1, strat)
         })
-        .boxed();
-        Some((1, strat))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for CreateDocument {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> =
+            vec![check(state.app_started, Reason::AppNotStarted)];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {

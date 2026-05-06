@@ -11,7 +11,9 @@
 //! CRDT resolution is timing-dependent. The transition struct is preserved for
 //! completeness and potential future re-enablement.
 
+use crate::pbt::validation::{Reason, check};
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -36,11 +38,13 @@ pub struct ConcurrentMutations {
 }
 
 impl E2ETransitionFactory for ConcurrentMutations {
-    fn weighted_generator(_state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
+    fn weighted_generator(_: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // DISABLED: reference model assumes External always wins (LWW),
         // but actual CRDT resolution is timing-dependent. The legacy generator
-        // is wrapped in `if false && ...` so no strategy is ever built.
-        None
+        // is wrapped in `if false && ...` so no strategy is ever built. The
+        // single `Fail(ConcurrentMutationsDisabled)` makes the disabled state
+        // explicit in the rejection histogram.
+        Validated::fail(Reason::ConcurrentMutationsDisabled)
     }
 }
 
@@ -86,17 +90,25 @@ fn mutation_precondition(event: &MutationEvent, state: &ReferenceState) -> bool 
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for ConcurrentMutations {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        if !state.app_started {
-            return false;
-        }
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let mut checks: Vec<Validated<(), Reason>> =
+            vec![check(state.app_started, Reason::AppNotStarted)];
+
         let ui_ok = mutation_precondition(&self.ui_mutation, state);
         let ext_ok = mutation_precondition(&self.external_mutation, state);
         let same_create_id = matches!(
             (&self.ui_mutation.mutation, &self.external_mutation.mutation),
             (Mutation::Create { id: id1, .. }, Mutation::Create { id: id2, .. }) if id1 == id2
         );
-        ui_ok && ext_ok && !same_create_id
+
+        checks.push(check(ui_ok, Reason::PreconditionFailed));
+        checks.push(check(ext_ok, Reason::PreconditionFailed));
+        checks.push(check(!same_create_id, Reason::PreconditionFailed));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {

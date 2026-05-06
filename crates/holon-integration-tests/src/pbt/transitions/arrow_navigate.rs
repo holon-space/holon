@@ -6,10 +6,12 @@
 //! `sut.rs:2848-2897` (SUT apply), and
 //! `transition_budgets.rs:199-205` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use holon_api::Region;
 use holon_frontend::navigation::NavDirection;
 use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::{CursorPosition, ReferenceState};
@@ -29,11 +31,7 @@ pub struct ArrowNavigate {
 }
 
 impl E2ETransitionFactory for ArrowNavigate {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let regions = [Region::Main, Region::LeftSidebar, Region::RightSidebar];
         let mut arms: Vec<(u32, BoxedStrategy<ArrowNavigate>)> = Vec::new();
 
@@ -53,33 +51,46 @@ impl E2ETransitionFactory for ArrowNavigate {
                     _ => vec![NavDirection::Up, NavDirection::Down],
                 };
 
-                let r = *region;
-                arms.push((
-                    1,
-                    (proptest::sample::select(directions), 1u8..=3u8)
-                        .prop_map(move |(direction, steps)| ArrowNavigate {
-                            region: r,
+                let r = region;
+                let candidates: Vec<ArrowNavigate> = directions
+                    .into_iter()
+                    .flat_map(|direction| {
+                        (1u8..=3u8).map(move |steps| ArrowNavigate {
+                            region: *r,
                             direction,
                             steps,
                         })
-                        .boxed(),
-                ));
+                    })
+                    .filter(|nav| nav.preconditions(state).is_good())
+                    .collect();
+
+                if !candidates.is_empty() {
+                    arms.push((1, prop::sample::select(candidates).boxed()));
+                }
             }
         }
 
-        if arms.is_empty() {
-            return None;
-        }
-
-        let strat = Union::new_weighted(arms).boxed();
-        Some((1, strat))
+        check(!arms.is_empty(), Reason::PreconditionFailed).map(|_| {
+            let strat = Union::new_weighted(arms).boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for ArrowNavigate {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && state.focused_entity_id.contains_key(&self.region)
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                state.focused_entity_id.contains_key(&self.region),
+                Reason::MainFocusNotSet,
+            ),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {

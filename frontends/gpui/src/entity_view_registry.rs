@@ -76,22 +76,28 @@ impl CacheKey {
 /// re-renders.
 pub type EntityCache = Arc<RwLock<HashMap<CacheKey, AnyEntity>>>;
 
-/// Parent-scoped entity context, built fresh each render pass.
+/// Per-row entity context, built fresh each render pass.
 ///
-/// Wraps the parent-owned `EntityCache` Arc so builders can lazily create
-/// or look up cached entities by [`CacheKey`]. Older versions of this
-/// struct also held two typed `HashMap` snapshots (`render_entitys`,
-/// `live_queries`) that the row-iteration sites would populate before
-/// dispatching to builders — those are gone now; everything flows through
-/// `entity_cache`.
+/// Wraps the row-owned `EntityCache` Arc so builders can lazily create
+/// or look up cached entities by [`CacheKey`]. The optional `parent_cache`
+/// is the shell-level cache one level up; `LiveQuery` lookups route to it
+/// (data-semantic — same SQL → same cached result is correct). All other
+/// kinds (`LiveBlock`, `RenderEntity`, `Ephemeral`) use the row's
+/// `entity_cache` so two `live_block(X)` rendered in the same shell don't
+/// collide on `tree-collapse:X`, `editable_text` input, or `RenderEntity(X)`.
+///
+/// When `parent_cache` is `None`, all lookups use `entity_cache` — that is
+/// the shell-level scope itself, the root of the chain.
 pub struct LocalEntityScope {
     pub(crate) entity_cache: EntityCache,
+    pub(crate) parent_cache: Option<EntityCache>,
 }
 
 impl LocalEntityScope {
     pub fn new() -> Self {
         Self {
             entity_cache: Default::default(),
+            parent_cache: None,
         }
     }
 
@@ -100,11 +106,29 @@ impl LocalEntityScope {
         self
     }
 
+    pub fn with_parent(mut self, parent: EntityCache) -> Self {
+        self.parent_cache = Some(parent);
+        self
+    }
+
+    fn cache_for_key(&self, key: &CacheKey) -> &EntityCache {
+        match (&self.parent_cache, key) {
+            (Some(parent), CacheKey::LiveQuery(_)) => parent,
+            _ => &self.entity_cache,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn target_cache_for_test(&self, key: &CacheKey) -> EntityCache {
+        self.cache_for_key(key).clone()
+    }
+
     /// Get or create a cached entity by typed key. Persists across
     /// re-renders because the parent view owns the [`EntityCache`] Arc.
     pub fn get_or_create(&self, key: CacheKey, create: impl FnOnce() -> AnyEntity) -> AnyEntity {
-        let mut cache = self.entity_cache.write().unwrap();
-        cache.entry(key).or_insert_with(create).clone()
+        let cache = self.cache_for_key(&key);
+        let mut g = cache.write().unwrap();
+        g.entry(key).or_insert_with(create).clone()
     }
 
     /// Typed wrapper around [`get_or_create`] that downcasts back to
@@ -112,8 +136,9 @@ impl LocalEntityScope {
     ///
     /// A cache hit under a different `T` is a programming error (key
     /// collision across types) and panics loudly — per the project's
-    /// "fail loud, never fake" rule, that's not a runtime fallback
-    /// condition.
+    /// "fail loud, never fake" rule, that's not a runtime
+    // ALLOW(fallback): describing the absence of a fallback, not introducing one — the panic IS the contract
+    /// fallback condition.
     pub fn get_or_create_typed<T: 'static>(
         &self,
         key: CacheKey,
@@ -197,6 +222,73 @@ mod tests {
         assert!(CacheKey::LiveQuery("lq-1234".into()).is_state_bearing());
         assert!(CacheKey::RenderEntity("block:xyz".into()).is_state_bearing());
         assert!(!CacheKey::Ephemeral("toggle-foo".into()).is_state_bearing());
+    }
+
+    #[test]
+    fn live_query_routes_to_parent_other_kinds_route_to_self() {
+        // Two row scopes share a parent_cache (shell-level), but each has
+        // its own entity_cache (row-level). LiveQuery routes to parent;
+        // every other kind stays row-scoped — the per-row state-isolation
+        // guarantee that lets two `live_block(X)` in the same shell keep
+        // independent expand-toggle / editor / RenderEntity state.
+        let parent: EntityCache = Default::default();
+        let row_a: EntityCache = Default::default();
+        let row_b: EntityCache = Default::default();
+
+        let scope_a = LocalEntityScope::new()
+            .with_cache(row_a.clone())
+            .with_parent(parent.clone());
+        let scope_b = LocalEntityScope::new()
+            .with_cache(row_b.clone())
+            .with_parent(parent.clone());
+
+        let lq = CacheKey::LiveQuery("sql:select 1".into());
+        let lb = CacheKey::LiveBlock("block:X".into());
+        let eph = CacheKey::Ephemeral("tree-collapse:block:X".into());
+        let re = CacheKey::RenderEntity("block:X".into());
+
+        // LiveQuery: both scopes route to the same parent cache (data-semantic share).
+        let lq_a = scope_a.target_cache_for_test(&lq);
+        let lq_b = scope_b.target_cache_for_test(&lq);
+        assert!(Arc::ptr_eq(&lq_a, &parent));
+        assert!(Arc::ptr_eq(&lq_b, &parent));
+
+        // LiveBlock / Ephemeral / RenderEntity: each scope keeps its own
+        // entity, so two pinned instances of block X don't share toggle
+        // state, editor input, or row entity.
+        for key in [&lb, &eph, &re] {
+            let target_a = scope_a.target_cache_for_test(key);
+            let target_b = scope_b.target_cache_for_test(key);
+            assert!(
+                Arc::ptr_eq(&target_a, &row_a),
+                "key {key:?} did not route to row_a"
+            );
+            assert!(
+                Arc::ptr_eq(&target_b, &row_b),
+                "key {key:?} did not route to row_b"
+            );
+            assert!(
+                !Arc::ptr_eq(&target_a, &target_b),
+                "key {key:?} should not share state across rows"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_without_parent_uses_self_for_all_keys() {
+        // Shell-level scope has no parent; every kind routes to its own
+        // entity_cache. Same shape as today's behaviour.
+        let cache: EntityCache = Default::default();
+        let scope = LocalEntityScope::new().with_cache(cache.clone());
+
+        for key in [
+            CacheKey::LiveQuery("sql".into()),
+            CacheKey::LiveBlock("block:X".into()),
+            CacheKey::Ephemeral("eph".into()),
+            CacheKey::RenderEntity("block:X".into()),
+        ] {
+            assert!(Arc::ptr_eq(&scope.target_cache_for_test(&key), &cache));
+        }
     }
 
     #[test]

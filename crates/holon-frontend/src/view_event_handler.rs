@@ -136,6 +136,14 @@ impl ViewEventHandler {
     /// Virtual entities (`virtual:{entity_type}:{parent_id}`) are materialized
     /// via `{entity_type}.create` instead of `set_field`. After creation, the
     /// CDC delivers the real entity and a new virtual row appears at the end.
+    ///
+    /// **Phase 2 (Loro single-writer):** for `content` on real (non-virtual)
+    /// entities, the per-keystroke pipeline already writes through
+    /// `MutableText` → Loro → `LoroSyncController.on_loro_changed` → SQL,
+    /// so the on-blur `set_field("content", …)` is a redundant second writer
+    /// that races with the Loro projection. Drop it. Virtual-entity creates
+    /// (which materialize a new entity, not edit content) are unaffected,
+    /// and non-content fields still go through `set_field`.
     fn handle_text_sync(&mut self, new_value: String) -> PopupResult {
         if new_value == self.original_value {
             return PopupResult::NotActive;
@@ -161,6 +169,10 @@ impl ViewEventHandler {
                 op_name: "create".to_string(),
                 params,
             };
+        }
+
+        if self.field == "content" {
+            return PopupResult::NotActive;
         }
 
         let (Some(entity_name), Some(op_name)) = (&self.set_field_entity, &self.set_field_op)

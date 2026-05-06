@@ -65,15 +65,15 @@ pub struct SortKey {
 }
 
 /// Reference to an edge — i.e. a junction table relating blocks to other
-/// blocks (`task_blockers`) or to scalar values (`block_tags`).
+/// blocks (`block_requires`) or to scalar values (`block_tags`).
 ///
 /// `Block` edges traverse to another block on the target side; `Scalar`
 /// edges store a literal payload (e.g. a tag string).
 #[derive(Debug, Clone)]
 pub enum EdgeRef {
-    /// `task_blockers(blocked_id, blocker_id)` — the inner row is the
-    /// *blocker* block, accessible through `Alias::EdgeTarget`.
-    BlockedBy,
+    /// `block_requires(block_id, required_id)` — the inner row is the
+    /// *required* block, accessible through `Alias::EdgeTarget`.
+    Requires,
     /// `block_tags(block_id, tag)` — the inner side is a tag value, not a
     /// block; `inner` predicates may not use `Alias::EdgeTarget`.
     Tag(String),
@@ -209,9 +209,9 @@ fn pred_to_sql(pred: &Predicate) -> String {
                     format!("EXISTS ({inner})")
                 }
             }
-            EdgeRef::BlockedBy => panic!(
+            EdgeRef::Requires => panic!(
                 "Membership predicate is only meaningful for scalar edges (Tag); \
-                 use EdgeExists for BlockedBy"
+                 use EdgeExists for Requires"
             ),
         },
         Predicate::EdgeExists {
@@ -220,15 +220,15 @@ fn pred_to_sql(pred: &Predicate) -> String {
             inner,
         } => {
             let body = match edge {
-                EdgeRef::BlockedBy => {
+                EdgeRef::Requires => {
                     let where_clause = match inner {
                         Some(p) => format!(" AND {}", pred_to_sql(p)),
                         None => String::new(),
                     };
                     format!(
-                        "SELECT 1 FROM task_blockers tb \
-                         JOIN block bl ON bl.id = tb.blocker_id \
-                         WHERE tb.blocked_id = b.id{where_clause}"
+                        "SELECT 1 FROM block_requires br \
+                         JOIN block bl ON bl.id = br.required_id \
+                         WHERE br.block_id = b.id{where_clause}"
                     )
                 }
                 EdgeRef::Tag(_) => {
@@ -309,8 +309,9 @@ impl QueryAst {
 
 /// Storage shim — the reference state's HashMap of blocks plus the edge
 /// relations it tracks. The PBT reference state already maintains
-/// `properties.tags` as a CSV (via `Tags::from_csv`) and stores
-/// `blocked_by` as an array property, so we read both back here.
+/// `properties.tags` as a CSV (via `Tags::from_csv`); `requires` is the
+/// typed `Vec<String>` field on `Block` (edge-typed, hydrated from the
+/// `block_requires` junction).
 ///
 /// Splitting evaluation from `ReferenceState` directly lets the AST be
 /// unit-tested with hand-built block sets (see the `tests` module).
@@ -341,22 +342,14 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    /// IDs blocking `block`. Reads `properties.blocked_by` as either an
-    /// array of strings or a comma-separated string.
-    fn blocker_ids_of(&self, block: &Block) -> Vec<EntityUri> {
-        match block.properties.get("blocked_by") {
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_string().map(EntityUri::from_raw))
-                .collect(),
-            Some(Value::String(s)) => s
-                .split(',')
-                .map(|t| t.trim())
-                .filter(|t| !t.is_empty())
-                .map(EntityUri::from_raw)
-                .collect(),
-            _ => Vec::new(),
-        }
+    /// IDs that `block` requires. Reads the typed `block.requires` field
+    /// (edge-typed, hydrated from `block_requires`).
+    fn required_ids_of(&self, block: &Block) -> Vec<EntityUri> {
+        block
+            .requires
+            .iter()
+            .map(|s| EntityUri::from_raw(s.as_str()))
+            .collect()
     }
 
     fn get_prop_for(
@@ -397,8 +390,8 @@ impl<'a> EvalContext<'a> {
                     let has = self.tags_of(outer).iter().any(|t| t == tag);
                     if *negated { !has } else { has }
                 }
-                EdgeRef::BlockedBy => {
-                    panic!("Membership only valid for Tag; use EdgeExists for BlockedBy")
+                EdgeRef::Requires => {
+                    panic!("Membership only valid for Tag; use EdgeExists for Requires")
                 }
             },
             Predicate::EdgeExists {
@@ -407,10 +400,10 @@ impl<'a> EvalContext<'a> {
                 inner,
             } => {
                 let any_match = match edge {
-                    EdgeRef::BlockedBy => {
-                        let blockers = self.blocker_ids_of(outer);
-                        blockers.iter().any(|bid| {
-                            let Some(b) = self.blocks.get(bid) else {
+                    EdgeRef::Requires => {
+                        let required = self.required_ids_of(outer);
+                        required.iter().any(|rid| {
+                            let Some(b) = self.blocks.get(rid) else {
                                 return false;
                             };
                             match inner {
@@ -540,7 +533,7 @@ pub fn now_query_ast() -> QueryAst {
             },
             Predicate::EdgeExists {
                 negated: true,
-                edge: EdgeRef::BlockedBy,
+                edge: EdgeRef::Requires,
                 inner: Some(Box::new(Predicate::PropNe {
                     alias: Alias::EdgeTarget,
                     key: "task_state".to_string(),
@@ -592,9 +585,9 @@ FROM block b
 WHERE json_extract(b.properties, '$.task_state') = 'TODO'
   AND json_extract(b.properties, '$.gate') = 'G1'
   AND NOT EXISTS (
-    SELECT 1 FROM task_blockers tb
-    JOIN block bl ON bl.id = tb.blocker_id
-    WHERE tb.blocked_id = b.id
+    SELECT 1 FROM block_requires br
+    JOIN block bl ON bl.id = br.required_id
+    WHERE br.block_id = b.id
       AND COALESCE(json_extract(bl.properties, '$.task_state'), '') <> 'DONE'
   )
   AND (
@@ -617,7 +610,23 @@ LIMIT 10";
         let uri = EntityUri::block(id);
         let mut b = Block::new_text(uri.clone(), EntityUri::no_parent(), "");
         for (k, v) in props {
-            b.properties.insert(k.to_string(), v.clone());
+            // `requires` is a typed Vec<String> on Block, not a property —
+            // accept either a single String (one required id) or a String
+            // array, mirroring how the org parser populates it.
+            if *k == "requires" {
+                match v {
+                    Value::String(s) => b.requires = vec![s.clone()],
+                    Value::Array(arr) => {
+                        b.requires = arr
+                            .iter()
+                            .filter_map(|item| item.as_string().map(|s| s.to_string()))
+                            .collect();
+                    }
+                    _ => {}
+                }
+            } else {
+                b.properties.insert(k.to_string(), v.clone());
+            }
         }
         (uri, b)
     }
@@ -655,7 +664,7 @@ LIMIT 10";
                 ("gate", Value::String("G1".into())),
                 ("priority", Value::Integer(2)),
                 ("effort", Value::Integer(0)),
-                ("blocked_by", Value::String("block:blocker_done".into())),
+                ("requires", Value::String("block:blocker_done".into())),
             ],
         )));
 
@@ -672,7 +681,7 @@ LIMIT 10";
                 ("gate", Value::String("G1".into())),
                 ("priority", Value::Integer(0)),
                 ("effort", Value::Integer(0)),
-                ("blocked_by", Value::String("block:blocker_active".into())),
+                ("requires", Value::String("block:blocker_active".into())),
             ],
         )));
 

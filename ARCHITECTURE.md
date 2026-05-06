@@ -2372,6 +2372,98 @@ Documents converge via CRDT merge
 - **Unix-like systems**: Full Iroh P2P support
 - **WASM**: Local-only mode (document operations work, no P2P sync)
 
+### Cells & Authority/Projection Model (Phase 1+2, May 2026)
+
+**`Cell<T>` is the universal reactive read primitive for entity fields.**
+A `Cell<T>` is identified by `(EntityUri, FieldPath)` and exposes:
+
+- `current() -> T` — synchronous snapshot
+- `signal() -> BoxStream<'static, T>` — reactive updates
+- `set(v) -> Result<()>` — async write through the field's authoritative store
+
+Backings implement `CellBacking<T>` and choose the storage:
+- `LoroTextCellBacking` wraps a `LoroText` container; `apply_text_op`
+  produces minimal Loro `insert`/`delete` ops (preserves RGA causal
+  history under concurrent peer edits).
+- `LwwTextCellBacking` reads from the entity cache and writes via the
+  typed `CrudOperations::set_field`. Used in SqlOnly mode and
+  synthetic test stores.
+
+`MutableText` is gone — `Cell<String>` IS the text cell, with the
+rich-text methods (`apply_text_op`, `anchor_cursor`, `resolve_cursor`,
+`remote_deltas`) as inherent impls dispatching through
+`CellBacking::as_text_backing`.
+
+**Location:**
+- `crates/holon-core/src/cell.rs` — `Cell<T>`, `CellBacking<T>`,
+  `TextCellBacking`, `LwwTextCellBacking`.
+- `crates/holon-core/src/cell_registry.rs` — `EntityCellRegistry` trait,
+  `CellCache` (Weak-keyed cache for natural eviction +
+  `on_entity_deleted` proactive prune).
+- `crates/holon/src/sync/loro_text_cell_backing.rs` —
+  `LoroTextCellBacking`.
+- `crates/holon/src/sync/block_cell_registry.rs` —
+  `BlockCellRegistry`, the per-entity-type registry for blocks.
+
+**Authority/projection model for blocks: Loro is authoritative; SQL is
+projected.** All block field writes flow through Loro first; SQL is
+populated downstream by `LoroSyncController.on_loro_changed` watching
+the doc subscription.
+
+```
+chord op / set_field
+     │
+     ▼
+SqlBlockOperations::set_field
+     │
+     ▼
+BlockCellRegistry::write_field(uri, field, value)
+     │
+     ├── "content"      → Cell<String>::set → LoroText.update + commit
+     ├── "parent_id"    → LoroBackend::update_parent_id → tree.mov
+     ├── "tags"         → LoroBackend::set_block_tags
+     ├── other scalars  → LoroBackend::update_block_fields (LoroMap meta)
+     └── unsupported    → Ok(false), caller falls through to SQL
+                          (sort_key, depth, marks, content_type,
+                           source_language, source_name, id)
+     │
+     ▼ (commit fires subscribe_root)
+LoroSyncController.on_loro_changed
+     │
+     ▼ (diff vs last_synced frontiers)
+SqlOperationProvider::execute_batch_with_origin(EventOrigin::Loro)
+     │
+     ▼
+SQL UPDATE on block_raw → CDC → LiveData / matviews / UI
+```
+
+`LoroSyncController.on_inbound_event` (SQL → Loro) is still active at
+runtime to mirror the SQL-first fields back into Loro and to seed Loro
+from external (non-Loro-origin) writers. It echo-suppresses any event
+with `origin == Loro`, so the cell-routed write path doesn't loop.
+
+**Why single-writer for SQL block columns matters:** the
+`_expected_content` / `_expected_parent_id` / `_expected_marks`
+compare-and-set guards in `SqlOperationProvider::prepare_update` are
+gone. They existed to prevent a stale Loro outbound from regressing a
+concurrent direct SQL write; with a single writer per field there's
+no such race. The diff guard at the end of `prepare_update`
+(`AND (col1 IS NOT val1 OR …)`) still suppresses spurious CDC for
+no-op UPDATEs.
+
+**Synthetic test stores (`MemStore` in `block_operations_tests.rs`)
+inherit `BlockOperations::cells() == None` from the trait default and
+fall through to `T::content()` / `T::set_field` exactly as before —
+no Loro = no cell registry, the in-memory test substrate is
+unaffected.**
+
+**Architecture-test gate (`archlint/smells/words.toml`,
+`deleted_cell_symbol`):** blocks reintroduction of
+`BlockContentResolver`, `LoroEditableTextProvider`,
+`EditableTextProvider`, `with_content_resolver`, `live_content`,
+`set_live_content`, `_expected_content`, `_expected_parent_id`,
+`_expected_marks` — all replaced by the cells layer.
+
 ### LoroBackend (Document Repository)
 
 The high-level repository implementation that provides the primary API for block document operations. `LoroBackend` wraps `CollaborativeDoc` and implements the repository trait hierarchy.

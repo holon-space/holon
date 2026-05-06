@@ -42,6 +42,17 @@ pub enum CollectionData {
         item_template: RenderExpr,
         data_source: std::sync::Arc<dyn holon_api::ReactiveRowProvider>,
         sort_key: Option<String>,
+        /// Optional `rules:` arg parsed by the macro and threaded through to
+        /// the streaming driver, which evaluates each rule's predicate per
+        /// row and merges matching `override` maps into the row's
+        /// `ctx.flags`. Empty = no rules: arg supplied; pipeline applies
+        /// no overrides.
+        ///
+        /// Streaming rules currently see only the row's own columns —
+        /// position/count/is_first/is_last (knowable for `Static` rows)
+        /// are NOT injected because the driver receives rows incrementally
+        /// via `VecDiff` and the collection size shifts with each event.
+        rules: Vec<holon_api::render_types::RuleSpec>,
     },
     Static {
         items: Vec<ReactiveViewModel>,
@@ -546,26 +557,41 @@ impl ReactiveViewModel {
         self.props.lock_ref().get(key).cloned()
     }
 
-    /// The intent that would be dispatched if this node were clicked.
+    /// Find the click intent bound to this exact modifier set.
     ///
-    /// Walks `operations` for a `Trigger::Click` entry and returns an
-    /// `OperationIntent` built from the descriptor's entity/op name and
-    /// `bound_params`. Returns `None` for nodes without a click action.
+    /// Walks `operations` for a `Trigger::Click { modifiers: <m> }` entry
+    /// where `m == modifiers` and returns an `OperationIntent` built from
+    /// the descriptor's entity/op name and `bound_params`. Returns `None`
+    /// for nodes without a matching click action.
     ///
     /// Pure read — no services, no dispatch. The caller (GPUI click handler,
     /// test driver, headless click simulator) decides what to do with the
     /// returned intent. This separation lets unit tests assert the click
     /// binding is correct without spinning up a dispatch pipeline.
-    pub fn click_intent(&self) -> Option<crate::operations::OperationIntent> {
+    pub fn intent_for_modifiers(
+        &self,
+        modifiers: holon_api::ClickModifiers,
+    ) -> Option<crate::operations::OperationIntent> {
         let op = self
             .operations
             .iter()
-            .find(|ow| ow.descriptor.is_click_triggered())?;
+            .find(|ow| ow.descriptor.click_modifiers() == Some(modifiers))?;
         Some(crate::operations::OperationIntent::new(
             op.descriptor.entity_name.clone(),
             op.descriptor.name.clone(),
             op.descriptor.bound_params.clone(),
         ))
+    }
+
+    /// Convenience: the intent for a primary (no-modifier) click.
+    pub fn click_intent(&self) -> Option<crate::operations::OperationIntent> {
+        self.intent_for_modifiers(holon_api::ClickModifiers::none())
+    }
+
+    /// Convenience: the intent for shift+click. Frontends `stop_propagation`
+    /// on the shift path so the row-level click handler doesn't also fire.
+    pub fn shift_click_intent(&self) -> Option<crate::operations::OperationIntent> {
+        self.intent_for_modifiers(holon_api::ClickModifiers::shift())
     }
 }
 
@@ -603,6 +629,7 @@ impl ReactiveViewModel {
     fn to_view_kind(
         &self,
         expr: &RenderExpr,
+        // ALLOW(unused_param): retained for snapshot input shape; current code reads self.data
         _data: &DataRow,
         resolve_block: Option<&dyn Fn(&EntityUri) -> ViewModel>,
     ) -> ViewKind {
@@ -653,6 +680,12 @@ impl ReactiveViewModel {
                     .prop_str("field")
                     .unwrap_or_else(|| "content".to_string()),
             },
+            "rendered_text" => ViewKind::RenderedText {
+                content: self.prop_str("content").unwrap_or_default(),
+                field: self
+                    .prop_str("field")
+                    .unwrap_or_else(|| "content".to_string()),
+            },
             "image" => ViewKind::Image {
                 path: self.prop_str("path").unwrap_or_default(),
                 alt: self.prop_str("alt").unwrap_or_default(),
@@ -684,8 +717,8 @@ impl ReactiveViewModel {
 
             // Collections — the registered layout name selects which
             // `ViewKind` variant we serialize to. Layouts whose name doesn't
-            // match a built-in `ViewKind` variant fall through to a generic
-            // `Column` snapshot; that's serialization-only fallback (the
+            // match a built-in `ViewKind` variant route to a generic
+            // `Column` snapshot; that's a serialization-only path (the
             // streaming runtime + platform renderers still see the real
             // layout via `view.layout()`).
             n if crate::collection_layout::is_layout(n) => {
@@ -985,6 +1018,7 @@ impl ReactiveViewModel {
         }
     }
 
+    // ALLOW(unused_param): _widget kept in signature for caller readability and future use
     pub fn error(_widget: impl Into<String>, message: impl Into<String>) -> Self {
         let mut props = HashMap::new();
         props.insert("message".to_string(), Value::String(message.into()));
@@ -1052,7 +1086,7 @@ impl ReactiveViewModel {
                     Value::Boolean(value.as_bool().unwrap_or(false)),
                 );
             }
-            "editable_text" => {
+            "editable_text" | "rendered_text" => {
                 props.insert(
                     "content".to_string(),
                     Value::String(value.to_display_string()),
@@ -1209,6 +1243,7 @@ impl ReactiveViewModel {
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
         virtual_child: Option<crate::reactive_view::VirtualChildSlot>,
         trailing_slot: Option<crate::reactive_view::TrailingSlot>,
+        rules: Vec<holon_api::render_types::RuleSpec>,
     ) -> Self {
         if widget == "query_result" {
             return Self::from_widget("query_result", HashMap::new());
@@ -1220,6 +1255,7 @@ impl ReactiveViewModel {
                 item_template,
                 sort_key,
                 virtual_child,
+                rules,
             },
             data_source,
             parent_space,
@@ -1472,7 +1508,9 @@ mod tests {
 
     #[test]
     fn click_intent_builds_from_click_triggered_op() {
-        use holon_api::render_types::{OperationDescriptor, OperationWiring, Trigger};
+        use holon_api::render_types::{
+            ClickModifiers, OperationDescriptor, OperationWiring, Trigger,
+        };
 
         let mut bound = HashMap::new();
         bound.insert("region".to_string(), Value::String("main".into()));
@@ -1484,7 +1522,9 @@ mod tests {
             descriptor: OperationDescriptor {
                 entity_name: holon_api::EntityName::new("navigation"),
                 name: "focus".into(),
-                trigger: Some(Trigger::Click),
+                trigger: Some(Trigger::Click {
+                    modifiers: ClickModifiers::none(),
+                }),
                 bound_params: bound.clone(),
                 ..Default::default()
             },
@@ -1496,6 +1536,50 @@ mod tests {
         assert_eq!(intent.entity_name.as_str(), "navigation");
         assert_eq!(intent.op_name, "focus");
         assert_eq!(intent.params, bound);
+    }
+
+    #[test]
+    fn intent_for_modifiers_disambiguates_shift_from_plain() {
+        use holon_api::render_types::{
+            ClickModifiers, OperationDescriptor, OperationWiring, Trigger,
+        };
+
+        let mut node = ReactiveViewModel::default();
+        node.operations.push(OperationWiring {
+            modified_param: String::new(),
+            descriptor: OperationDescriptor {
+                entity_name: holon_api::EntityName::new("navigation"),
+                name: "focus".into(),
+                trigger: Some(Trigger::Click {
+                    modifiers: ClickModifiers::none(),
+                }),
+                ..Default::default()
+            },
+        });
+        node.operations.push(OperationWiring {
+            modified_param: String::new(),
+            descriptor: OperationDescriptor {
+                entity_name: holon_api::EntityName::new("navigation"),
+                name: "focus_pin".into(),
+                trigger: Some(Trigger::Click {
+                    modifiers: ClickModifiers::shift(),
+                }),
+                ..Default::default()
+            },
+        });
+
+        let plain = node
+            .intent_for_modifiers(ClickModifiers::none())
+            .expect("plain click resolves");
+        assert_eq!(plain.op_name, "focus");
+
+        let shift = node
+            .intent_for_modifiers(ClickModifiers::shift())
+            .expect("shift+click resolves");
+        assert_eq!(shift.op_name, "focus_pin");
+
+        // No alt-bound op; alt-click yields None.
+        assert!(node.intent_for_modifiers(ClickModifiers::alt()).is_none());
     }
 
     #[test]

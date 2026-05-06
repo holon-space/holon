@@ -8,10 +8,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
@@ -28,103 +30,112 @@ pub struct TriggerDocLink {
 }
 
 impl E2ETransitionFactory for TriggerDocLink {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let all_text: Vec<EntityUri> = state
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.content_type == ContentType::Text && !b.is_page())
+            .map(|b| b.id.clone())
+            .collect();
+
+        let count_check: Validated<(), Reason> =
+            check(all_text.len() >= 2, Reason::InsufficientTextBlocksForLink);
+        if count_check.is_fail() {
+            return count_check.map(|_| unreachable!());
         }
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let focused_in_main = state.focused_entity(holon_api::Region::Main).cloned();
-        let editable_block_ids: Vec<EntityUri> =
-            if state.is_properly_setup() && focused_in_main.is_some() {
-                let focused = focused_in_main.as_ref().unwrap();
-                let no_content_update: std::collections::HashSet<EntityUri> = state
-                    .layout_blocks
-                    .render_source_ids
-                    .iter()
-                    .chain(state.layout_blocks.query_source_ids.iter())
-                    .chain(state.profile_block_ids.iter())
-                    .cloned()
-                    .collect();
-                let valid = state
-                    .block_state
-                    .blocks
-                    .get(focused)
-                    .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page())
-                    && state.layout_blocks.is_focusable(focused)
-                    && !no_content_update.contains(focused)
-                    && state.is_descendant_of_any(focused, &focus_roots);
-                if valid { vec![focused.clone()] } else { vec![] }
-            } else {
-                vec![]
-            };
-        if editable_block_ids.len() < 2 {
-            // Widening vs. legacy: the legacy generator computed
-            // `editable_block_ids` from `focused_in_main` (always at most one
-            // element), so `len() < 2` was unconditionally true and the
-            // variant was effectively unreachable. Falling back to "any two
-            // text blocks in the focusable tree" makes generation actually
-            // exercise the [[ doc-link pipeline. The precondition below
-            // already requires `block_id` to be in the focus tree + text +
-            // non-layout, so the fallback can't produce invalid pairs.
-            let all_text: Vec<EntityUri> = state
-                .block_state
-                .blocks
-                .values()
-                .filter(|b| b.content_type == ContentType::Text && !b.is_page())
-                .map(|b| b.id.clone())
-                .collect();
-            if all_text.len() < 2 {
-                return None;
-            }
-            let ids = all_text.clone();
-            let target_ids = all_text.clone();
-            let strat = (
-                proptest::sample::select(ids),
-                proptest::sample::select(target_ids),
-            )
-                .prop_filter("block and target must differ", |(a, b)| a != b)
+
+        // Enumerate all valid (block_id, target_block_id) pairs by filtering
+        // candidates through preconditions. `preconditions` is the single
+        // source of truth for validation, so `candidates` may legitimately
+        // be empty even when `all_text` has 2+ entries; gate the strategy
+        // build below so `select` never sees an empty Vec.
+        let candidates: Vec<(EntityUri, EntityUri)> = all_text
+            .iter()
+            .flat_map(|block_id| {
+                all_text.iter().filter_map(move |target_id| {
+                    let instance = TriggerDocLink {
+                        block_id: block_id.clone(),
+                        target_block_id: target_id.clone(),
+                    };
+                    instance
+                        .preconditions(state)
+                        .is_good()
+                        .then_some((block_id.clone(), target_id.clone()))
+                })
+            })
+            .collect();
+
+        check(
+            !candidates.is_empty(),
+            Reason::InsufficientTextBlocksForLink,
+        )
+        .map(|_| {
+            let strat = prop::sample::select(candidates)
                 .prop_map(|(block_id, target_block_id)| TriggerDocLink {
                     block_id,
                     target_block_id,
                 })
                 .boxed();
-            return Some((1, strat));
-        }
-        let ids = editable_block_ids.clone();
-        let target_ids = editable_block_ids.clone();
-        let strat = (
-            proptest::sample::select(ids),
-            proptest::sample::select(target_ids),
-        )
-            .prop_filter("block and target must differ", |(a, b)| a != b)
-            .prop_map(|(block_id, target_block_id)| TriggerDocLink {
-                block_id,
-                target_block_id,
-            })
-            .boxed();
-        Some((1, strat))
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for TriggerDocLink {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        state.app_started
-            && state.is_properly_setup()
-            && state.block_state.blocks.contains_key(&self.block_id)
-            && state.block_state.blocks.contains_key(&self.target_block_id)
-            && self.block_id != self.target_block_id
-            && state
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.is_properly_setup(), Reason::NotProperlySetup),
+        ];
+
+        checks.push(check(
+            state.block_state.blocks.contains_key(&self.block_id),
+            Reason::FocusedBlockMissing,
+        ));
+        checks.push(check(
+            state.block_state.blocks.contains_key(&self.target_block_id),
+            Reason::FocusedBlockMissing,
+        ));
+        checks.push(check(
+            self.block_id != self.target_block_id,
+            Reason::PreconditionFailed,
+        ));
+        checks.push(check(
+            state
                 .block_state
                 .blocks
                 .get(&self.block_id)
-                .is_some_and(|b| b.content_type == ContentType::Text)
-            && !state.layout_blocks.contains(&self.block_id)
-            && state.is_descendant_of_any(&self.block_id, &focus_roots)
+                .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page()),
+            Reason::FocusedNotText,
+        ));
+        checks.push(check(
+            !state.layout_blocks.contains(&self.block_id),
+            Reason::FocusedInLayoutBlocks,
+        ));
+        checks.push(check(
+            state.is_descendant_of_any(&self.block_id, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ));
+        // Target must also be a text block (and not a page).
+        checks.push(check(
+            state
+                .block_state
+                .blocks
+                .get(&self.target_block_id)
+                .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page()),
+            Reason::FocusedNotText,
+        ));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _state: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut ReferenceState) {
         // Read-only: validates the [[ trigger → InsertText pipeline.
         // No state change in the reference model.
     }
@@ -135,7 +146,7 @@ impl E2ETransitionImpl for TriggerDocLink {
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE,
             writes: 0,

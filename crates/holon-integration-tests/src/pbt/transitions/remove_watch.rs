@@ -6,8 +6,10 @@
 //! `sut.rs:1319-1321` (SUT apply), and
 //! `transition_budgets.rs:144-150` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -23,29 +25,53 @@ pub struct RemoveWatch {
 }
 
 impl E2ETransitionFactory for RemoveWatch {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started || state.active_watches.is_empty() {
-            return None;
-        }
-        let watch_ids: Vec<String> = state.active_watches.keys().cloned().collect();
-        let strat = prop::sample::select(watch_ids)
-            .prop_map(|query_id| RemoveWatch { query_id })
-            .boxed();
-        Some((1, strat))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Enumerate parameter space (active watch IDs) and let
+        // `preconditions` be the single source of truth for which ones are
+        // actually removable. Avoids duplicating the app_started / watch_exists checks.
+        let candidates: Vec<String> = state
+            .active_watches
+            .keys()
+            .filter(|query_id| {
+                RemoveWatch {
+                    query_id: query_id.to_string(),
+                }
+                .preconditions(state)
+                .is_good()
+            })
+            .cloned()
+            .collect();
+        check(!candidates.is_empty(), Reason::NoActiveWatches).map(|_| {
+            let strat = prop::sample::select(candidates)
+                .prop_map(|query_id| RemoveWatch { query_id })
+                .boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for RemoveWatch {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && state.active_watches.contains_key(&self.query_id)
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                state.active_watches.contains_key(&self.query_id),
+                Reason::NoActiveWatches,
+            ),
+        ];
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.active_watches.remove(&self.query_id);
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_remove_watch(&self.query_id).await;
     }
 

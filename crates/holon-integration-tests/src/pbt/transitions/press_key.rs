@@ -6,9 +6,11 @@
 //! `sut.rs:4430-4463` (SUT apply), and
 //! `transition_budgets.rs:378-387` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use holon_api::KeyChord;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -27,21 +29,16 @@ pub struct PressKey {
 }
 
 impl E2ETransitionFactory for PressKey {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !ReferenceState::atomic_editor_enabled() {
-            return None;
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Verify preconditions hold. All structural gates are delegated to preconditions().
+        let sample_chord = holon_api::KeyChord(std::iter::once(holon_api::Key::Enter).collect());
+        let app_check = PressKey {
+            chord: sample_chord.clone(),
         }
-        if !state.app_started {
-            return None;
-        }
-        if !state.is_properly_setup() {
-            return None;
-        }
-        if state.current_focus(holon_api::Region::Main).is_none() {
-            return None;
-        }
-        if state.active_editor.is_none() {
-            return None;
+        .preconditions(state);
+        match app_check {
+            Validated::Fail(reasons) => return Validated::Fail(reasons),
+            Validated::Good(_) => {}
         }
 
         let last = state.last_transition_kind;
@@ -79,21 +76,38 @@ impl E2ETransitionFactory for PressKey {
             2 => Just(holon_api::KeyChord(
                 std::iter::once(holon_api::Key::Backspace).collect()
             )),
-            // Escape — blur-ish; production may discard pending.
-            1 => Just(holon_api::KeyChord(
-                std::iter::once(holon_api::Key::Escape).collect()
-            )),
         ];
 
         let strat = chord_strategy.prop_map(|chord| PressKey { chord }).boxed();
-        Some((pk_weight, strat))
+        Validated::Good((pk_weight, strat))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for PressKey {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        ReferenceState::atomic_editor_enabled() && state.active_editor.is_some()
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(
+                ReferenceState::atomic_editor_enabled(),
+                Reason::AtomicEditorDisabled,
+            ),
+            check(
+                state.variant.enable_loro,
+                Reason::LoroRequiredForAtomicEditor,
+            ),
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.is_properly_setup(), Reason::NotProperlySetup),
+            check(
+                state.current_focus(holon_api::Region::Main).is_some(),
+                Reason::NoFocusInMain,
+            ),
+            check(state.active_editor.is_some(), Reason::NoActiveEditor),
+        ];
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -169,12 +183,22 @@ impl E2ETransitionImpl for PressKey {
                 state.active_editor = None;
             }
         }
-        // Other chords (Tab, Escape, etc.): no structural change
-        // modeled in v1. Pending edits remain in InputState.
+        // Backspace at cursor > 0: production's `InputState` removes one
+        // character before the cursor. No structural change. Mirror that
+        // on `active_editor.in_memory_content` so `inv-displayed-text`'s
+        // expected (= in_memory_content while editor is active) tracks
+        // what's actually on screen.
+        else if matches!(single, Some(Key::Backspace)) && !has_modifier && cursor_byte > 0 {
+            if let Some(editor) = state.active_editor.as_mut() {
+                editor.delete_backward(1);
+            }
+        }
+        // Other chords (Tab, etc.): no structural change modeled in v1.
+        // Pending edits remain in InputState.
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
-        sut.apply_press_key(&self.chord).await;
+    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+        sut.apply_press_key(&self.chord, ref_state).await;
     }
 
     #[cfg(feature = "otel-testing")]

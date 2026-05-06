@@ -164,7 +164,7 @@ impl ProviderEvalCtx {
 
     /// Construct from an already-collected vector of elements (avoids a
     /// double `all_elements()` call when the caller has the data in hand —
-    /// e.g. inv14c iterates the same set).
+    /// e.g. inv-frontend-bounds-rendered iterates the same set).
     pub fn from_snapshot(
         elements: &[(String, ElementInfo)],
         self_id: impl Into<String>,

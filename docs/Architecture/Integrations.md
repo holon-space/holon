@@ -154,6 +154,8 @@ TodoistOperationProvider
 4. Create `SyncProvider` for data synchronization
 5. Register in DI container
 
+> **Future direction (F5 follow-up of the Cells plan)**: each external system will gain its own `EntityCellRegistry` impl alongside its `OperationProvider`. Consumers will then read entity field state through `services.cells().live_field::<T>(uri, field)` uniformly across local and external entities. The third-party API stays as the authority; cells project from the existing CDC stream. No changes to the integration story above — this is additive once the cell infrastructure lands.
+
 ### MCP Client Integration (holon-mcp-client)
 
 External systems that expose an MCP server can be integrated without writing Rust code per operation. `holon-mcp-client` connects to any MCP server over Streamable HTTP, reads its tool schemas at runtime, and converts them into `OperationDescriptor`s that plug into Holon's existing `OperationDispatcher`.

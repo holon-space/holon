@@ -136,25 +136,10 @@ impl FrontendInjectorExt for Injector {
                 .configure(self)
                 .map_err(|e| anyhow::anyhow!("Failed to register LoroModule: {}", e))?;
 
-            // Register MutableText provider — async factory that resolves
-            // LoroDocumentStore and gets the global doc. Frontends wire it
-            // into ReactiveEngine.editable_text_provider in on_start.
-            self.provide::<crate::editable_text_provider::LoroEditableTextProvider>(
-                Provider::root_async(|resolver| async move {
-                    let store =
-                        resolver.resolve::<holon::sync::loro_document_store::LoroDocumentStore>();
-                    let collab = store
-                        .get_global_doc()
-                        .await
-                        .expect("Failed to get global LoroDoc for MutableText");
-                    let doc = collab.doc();
-                    let resolver =
-                        Arc::new(crate::editable_text_provider::LoroDocTextResolver { doc });
-                    Shared::new(
-                        crate::editable_text_provider::LoroEditableTextProvider::new(resolver),
-                    )
-                }),
-            );
+            // BlockCellRegistry is registered by LoroModule above; no
+            // additional registration needed here. Frontends resolve
+            // `Arc<BlockCellRegistry>` from DI and assign it to
+            // `ReactiveEngine.block_cell_registry` in their `on_start`.
 
             Some(loro_dir)
         } else {

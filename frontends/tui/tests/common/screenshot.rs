@@ -13,7 +13,7 @@
 //! [`holon_integration_tests::ui_driver::analyze_screenshot_emptiness`]
 //! counts as content. Spacer / Void cells get a near-black pixel so the
 //! background stays below the brightness threshold (45 per channel).
-//! Reusing the existing analyzer means inv14 fires identically across
+//! Reusing the existing analyzer means inv-frontend-engine fires identically across
 //! GPUI and TUI without changing trait surfaces.
 //!
 //! Cell-to-pixel ratio is fixed by `(cell_w, cell_h)` constants

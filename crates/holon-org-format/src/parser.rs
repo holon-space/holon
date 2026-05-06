@@ -395,9 +395,25 @@ fn process_headlines(
             }),
         );
 
-        // Store drawer properties as flat keys in block properties
+        // Store drawer properties as flat keys in block properties.
+        // `REQUIRES` is the only edge-typed drawer key — it gets pulled out
+        // into block.requires (Vec<String>) so SqlOperationProvider's edge
+        // partition can route it to the block_requires junction. Values may
+        // be either comma- or whitespace-separated (org-edna convention is
+        // space-separated; we accept both for ergonomics). Bare slugs are
+        // promoted to `block:` URIs at the boundary so block_requires.required_id
+        // matches block.id (per docs/ORG_SYNTAX.md). Anything else stays as
+        // a flat string property on block.properties.
         for (key, value) in string_properties.iter() {
-            block.set_property(key, holon_api::Value::String(value.to_string()));
+            if key.eq_ignore_ascii_case("REQUIRES") {
+                block.requires = value
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| EntityUri::from_raw(s).to_string())
+                    .collect();
+            } else {
+                block.set_property(key, holon_api::Value::String(value.to_string()));
+            }
         }
         // Store ID in properties (extract_properties filters it out since it's used for block.id)
         block.set_property("ID", holon_api::Value::String(id.clone()));
@@ -857,6 +873,38 @@ mod tests {
         assert_eq!(h.task_state(), Some(TaskState::active("TODO")));
         assert_eq!(h.priority(), Some(holon_api::Priority::High));
         assert_eq!(h.tags(), holon_api::Tags::from_csv("work,urgent"));
+    }
+
+    #[test]
+    fn test_parse_requires_drawer_promotes_bare_slugs_to_block_uris() {
+        // Bare slugs in :REQUIRES: must be promoted to `block:` URIs so the
+        // junction table's required_id matches block.id at JOIN time.
+        let content = "* TODO Task\n:PROPERTIES:\n:ID: t1\n:REQUIRES: foo, bar baz\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+
+        let h = result.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
+        assert_eq!(
+            h.requires,
+            vec![
+                "block:foo".to_string(),
+                "block:bar".to_string(),
+                "block:baz".to_string(),
+            ],
+            "bare slugs (comma- or whitespace-separated) must be normalised to block: URIs"
+        );
+    }
+
+    #[test]
+    fn test_parse_requires_preserves_existing_block_uris() {
+        let content = "* TODO Task\n:PROPERTIES:\n:ID: t2\n:REQUIRES: block:foo\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+
+        let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
+        assert_eq!(h.requires, vec!["block:foo".to_string()]);
     }
 
     #[test]

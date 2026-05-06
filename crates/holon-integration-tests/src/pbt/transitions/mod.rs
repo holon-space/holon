@@ -36,7 +36,6 @@
 mod add_peer;
 mod apply_mutation;
 mod arrow_navigate;
-mod blur;
 mod bulk_external_add;
 mod click_block;
 mod concurrent_mutations;
@@ -66,6 +65,7 @@ mod nothing;
 mod outdent;
 mod peer_char_edit;
 mod peer_edit;
+mod pin_block;
 mod press_key;
 mod redo;
 mod remove_watch;
@@ -80,12 +80,12 @@ mod trigger_doc_link;
 mod trigger_slash_command;
 mod type_chars;
 mod undo_last_mutation;
+mod unpin_block;
 mod write_org_file;
 
 pub use add_peer::AddPeer;
 pub use apply_mutation::ApplyMutation;
 pub use arrow_navigate::ArrowNavigate;
-pub use blur::Blur;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_mutations::ConcurrentMutations;
@@ -115,6 +115,7 @@ pub use nothing::Nothing;
 pub use outdent::Outdent;
 pub use peer_char_edit::PeerCharEdit;
 pub use peer_edit::PeerEdit;
+pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
 pub use remove_watch::RemoveWatch;
@@ -129,6 +130,7 @@ pub use trigger_doc_link::TriggerDocLink;
 pub use trigger_slash_command::TriggerSlashCommand;
 pub use type_chars::TypeChars;
 pub use undo_last_mutation::UndoLastMutation;
+pub use unpin_block::UnpinBlock;
 pub use write_org_file::WriteOrgFile;
 
 // ── Shared helper types for peer-sync transitions ──────────────────
@@ -198,7 +200,6 @@ crate::declare_e2e_transitions! {
         // unit tests in `arch_tests` below the macro invocation.
         ApplyMutation(ApplyMutation),
         ArrowNavigate(ArrowNavigate),
-        Blur(Blur),
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
         ClickBlock(ClickBlock),
@@ -227,6 +228,7 @@ crate::declare_e2e_transitions! {
         NavigateForward(NavigateForward),
         NavigateHome(NavigateHome),
         Outdent(Outdent),
+        PinBlock(PinBlock),
         PressKey(PressKey),
         Redo(Redo),
         SimulateRestart(SimulateRestart),
@@ -239,6 +241,7 @@ crate::declare_e2e_transitions! {
         TriggerSlashCommand(TriggerSlashCommand),
         TypeChars(TypeChars),
         UndoLastMutation(UndoLastMutation),
+        UnpinBlock(UnpinBlock),
         AddPeer(AddPeer),
         PeerEdit(PeerEdit),
         SyncWithPeer(SyncWithPeer),

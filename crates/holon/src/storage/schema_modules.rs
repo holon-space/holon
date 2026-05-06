@@ -4,9 +4,9 @@
 //! schema objects in Holon:
 //!
 //! - `CoreSchemaModule`: block_raw (the underlying block table), directories, files
-//! - `BlockSchemaModule`: task_blockers, block_tags junction tables (FK to block_raw)
-//! - `BlockMatviewSchemaModule`: the `block` matview hydrating tags + blocked_by
-//! - `TaskBlockingEdgesSchemaModule`: the task_blocking_edges matview (chained on block)
+//! - `BlockSchemaModule`: block_requires, block_tags junction tables (FK to block_raw)
+//! - `BlockMatviewSchemaModule`: the `block` matview hydrating tags + requires
+//! - `BlockRequirementEdgesSchemaModule`: the block_requirement_edges matview (chained on block)
 //! - `BlockHierarchySchemaModule`: block_with_path materialized view
 //! - `NavigationSchemaModule`: navigation_history, navigation_cursor, current_focus
 //! - `SyncStateSchemaModule`: sync_states table
@@ -73,10 +73,10 @@ impl SchemaModule for CoreSchemaModule {
 
 /// Block junction-table schema module.
 ///
-/// Owns `task_blockers` and `block_tags` (the production junction tables).
+/// Owns `block_requires` and `block_tags` (the production junction tables).
 /// FKs target `block_raw`. The chained matviews that depend on these
-/// junctions (`block` matview, `task_blocking_edges`) are owned by
-/// `BlockMatviewSchemaModule` and `TaskBlockingEdgesSchemaModule`
+/// junctions (`block` matview, `block_requirement_edges`) are owned by
+/// `BlockMatviewSchemaModule` and `BlockRequirementEdgesSchemaModule`
 /// respectively to keep the dependency graph acyclic.
 pub struct BlockSchemaModule;
 
@@ -88,7 +88,7 @@ impl SchemaModule for BlockSchemaModule {
 
     fn provides(&self) -> Vec<Resource> {
         vec![
-            Resource::schema("task_blockers"),
+            Resource::schema("block_requires"),
             Resource::schema("block_tags"),
         ]
     }
@@ -100,18 +100,26 @@ impl SchemaModule for BlockSchemaModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[BlockSchemaModule] Migrating junction tables");
 
-        // Drop Phase 0 scratch tables (lacked composite PK + FK CASCADE).
+        // Drop the legacy and the previous-name junction tables before
+        // recreating. `task_blockers` is the pre-rename name; dropping it
+        // (rather than ALTER RENAME) is correct because the matviews and
+        // edge-field descriptors all reference `block_requires` now and
+        // existing rows would no longer be reachable through the renamed
+        // schema.
         db_handle
             .execute_ddl("DROP TABLE IF EXISTS task_blockers")
+            .await?;
+        db_handle
+            .execute_ddl("DROP TABLE IF EXISTS block_requires")
             .await?;
         db_handle
             .execute_ddl("DROP TABLE IF EXISTS block_tags")
             .await?;
 
-        for stmt in sql_statements(include_str!("../../sql/schema/task_blockers.sql")) {
+        for stmt in sql_statements(include_str!("../../sql/schema/block_requires.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
-        tracing::debug!("[BlockSchemaModule] task_blockers table created");
+        tracing::debug!("[BlockSchemaModule] block_requires table created");
 
         for stmt in sql_statements(include_str!("../../sql/schema/block_tags.sql")) {
             db_handle.execute_ddl(stmt).await?;
@@ -126,10 +134,10 @@ impl SchemaModule for BlockSchemaModule {
         vec![
             EdgeFieldDescriptor {
                 entity: "block".to_string(),
-                field: "blocked_by".to_string(),
-                join_table: "task_blockers".to_string(),
-                source_col: "blocked_id".to_string(),
-                target_col: "blocker_id".to_string(),
+                field: "requires".to_string(),
+                join_table: "block_requires".to_string(),
+                source_col: "block_id".to_string(),
+                target_col: "required_id".to_string(),
             },
             EdgeFieldDescriptor {
                 entity: "block".to_string(),
@@ -144,7 +152,7 @@ impl SchemaModule for BlockSchemaModule {
 
 /// `block` matview schema module.
 ///
-/// Hydrates `block_raw` rows with `tags` + `blocked_by` JSON arrays from the
+/// Hydrates `block_raw` rows with `tags` + `requires` JSON arrays from the
 /// junction tables. Every consumer that wants a hydrated block row reads
 /// from this matview; raw structural reads/writes target `block_raw`. The
 /// dual-LEFT + json_group_array + GROUP BY shape is the one verified by
@@ -165,7 +173,7 @@ impl SchemaModule for BlockMatviewSchemaModule {
     fn requires(&self) -> Vec<Resource> {
         vec![
             Resource::schema("block_raw"),
-            Resource::schema("task_blockers"),
+            Resource::schema("block_requires"),
             Resource::schema("block_tags"),
         ]
     }
@@ -188,37 +196,44 @@ impl SchemaModule for BlockMatviewSchemaModule {
     }
 }
 
-/// `task_blocking_edges` matview schema module.
+/// `block_requirement_edges` matview schema module.
 ///
 /// Chained matview: `JOIN block ON ...` — block here is the matview, so
-/// task_blocking_edges is matview-on-matview. Verified safe by the chain_join
-/// shape in the chained-matview preflight.
-pub struct TaskBlockingEdgesSchemaModule;
+/// block_requirement_edges is matview-on-matview. Verified safe by the
+/// chain_join shape in the chained-matview preflight.
+pub struct BlockRequirementEdgesSchemaModule;
 
 #[async_trait]
-impl SchemaModule for TaskBlockingEdgesSchemaModule {
+impl SchemaModule for BlockRequirementEdgesSchemaModule {
     fn name(&self) -> &str {
-        "task_blocking_edges"
+        "block_requirement_edges"
     }
 
     fn provides(&self) -> Vec<Resource> {
-        vec![Resource::schema("task_blocking_edges")]
+        vec![Resource::schema("block_requirement_edges")]
     }
 
     fn requires(&self) -> Vec<Resource> {
-        vec![Resource::schema("block"), Resource::schema("task_blockers")]
+        vec![
+            Resource::schema("block"),
+            Resource::schema("block_requires"),
+        ]
     }
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
-        tracing::info!("[TaskBlockingEdgesSchemaModule] Reconciling task_blocking_edges matview");
+        tracing::info!(
+            "[BlockRequirementEdgesSchemaModule] Reconciling block_requirement_edges matview"
+        );
         reconcile_named_view(
             db_handle,
-            "task_blocking_edges",
-            include_str!("../../sql/schema/task_blocking_edges_matview.sql"),
+            "block_requirement_edges",
+            include_str!("../../sql/schema/block_requirement_edges_matview.sql"),
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        tracing::debug!("[TaskBlockingEdgesSchemaModule] task_blocking_edges matview reconciled");
+        tracing::debug!(
+            "[BlockRequirementEdgesSchemaModule] block_requirement_edges matview reconciled"
+        );
         Ok(())
     }
 }

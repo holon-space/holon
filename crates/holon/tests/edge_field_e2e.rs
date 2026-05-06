@@ -29,10 +29,10 @@ const TABLE: &str = "block_raw";
 fn descriptor() -> EdgeFieldDescriptor {
     EdgeFieldDescriptor {
         entity: ENTITY.to_string(),
-        field: "blocked_by".to_string(),
-        join_table: "task_blockers".to_string(),
-        source_col: "blocked_id".to_string(),
-        target_col: "blocker_id".to_string(),
+        field: "requires".to_string(),
+        join_table: "block_requires".to_string(),
+        source_col: "block_id".to_string(),
+        target_col: "required_id".to_string(),
     }
 }
 
@@ -58,19 +58,19 @@ async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
         .expect("block_raw table");
     handle
         .execute_ddl(
-            "CREATE TABLE task_blockers (
-                blocked_id TEXT NOT NULL,
-                blocker_id TEXT NOT NULL,
-                PRIMARY KEY (blocked_id, blocker_id),
-                FOREIGN KEY (blocked_id) REFERENCES block_raw(id) ON DELETE CASCADE,
-                FOREIGN KEY (blocker_id) REFERENCES block_raw(id) ON DELETE CASCADE
+            "CREATE TABLE block_requires (
+                block_id TEXT NOT NULL,
+                required_id TEXT NOT NULL,
+                PRIMARY KEY (block_id, required_id),
+                FOREIGN KEY (block_id) REFERENCES block_raw(id) ON DELETE CASCADE,
+                FOREIGN KEY (required_id) REFERENCES block_raw(id) ON DELETE CASCADE
             )",
         )
         .await
-        .expect("task_blockers table");
+        .expect("block_requires table");
     // `find_document_uri` joins block_tags unconditionally; create it so
     // SqlOperationProvider can satisfy the page-resolution query even when
-    // the test only exercises task_blockers.
+    // the test only exercises block_requires.
     handle
         .execute_ddl(
             "CREATE TABLE block_tags (
@@ -84,15 +84,15 @@ async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
         .expect("block_tags table");
 }
 
-async fn read_blockers(handle: &holon::storage::turso::DbHandle, blocked_id: &str) -> Vec<String> {
+async fn read_requires(handle: &holon::storage::turso::DbHandle, block_id: &str) -> Vec<String> {
     let sql = format!(
-        "SELECT blocker_id FROM task_blockers WHERE blocked_id = '{}' ORDER BY blocker_id",
-        blocked_id.replace('\'', "''")
+        "SELECT required_id FROM block_requires WHERE block_id = '{}' ORDER BY required_id",
+        block_id.replace('\'', "''")
     );
     let rows = handle.query(&sql, HashMap::new()).await.expect("query");
     rows.into_iter()
         .filter_map(|r| {
-            r.get("blocker_id")
+            r.get("required_id")
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
         })
@@ -124,15 +124,15 @@ fn make_provider(handle: holon::storage::turso::DbHandle) -> SqlOperationProvide
     )
 }
 
-fn create_params(id: &str, content: &str, blockers: &[&str]) -> HashMap<String, Value> {
+fn create_params(id: &str, content: &str, requires: &[&str]) -> HashMap<String, Value> {
     let mut p = HashMap::new();
     p.insert("id".to_string(), Value::String(id.to_string()));
     p.insert("content".to_string(), Value::String(content.to_string()));
-    if !blockers.is_empty() {
+    if !requires.is_empty() {
         p.insert(
-            "blocked_by".to_string(),
+            "requires".to_string(),
             Value::Array(
-                blockers
+                requires
                     .iter()
                     .map(|s| Value::String((*s).to_string()))
                     .collect(),
@@ -163,31 +163,31 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
             .expect("create blocker");
     }
 
-    // --- create A with blocked_by = [B, C] ------------------------------
+    // --- create A with requires = [B, C] --------------------------------
     let create = create_params("A", "task A", &["B", "C"]);
     provider
         .execute_operation(&entity_name, "create", create)
         .await
         .expect("create A");
 
-    let blockers = read_blockers(&handle, "A").await;
+    let requires = read_requires(&handle, "A").await;
     assert_eq!(
-        blockers,
+        requires,
         vec!["B".to_string(), "C".to_string()],
-        "junction must hold the blocked_by edges after create"
+        "junction must hold the requires edges after create"
     );
 
     let props = read_properties(&handle, "A").await.unwrap_or_default();
     assert!(
-        !props.contains("blocked_by"),
+        !props.contains("requires"),
         "edge field MUST NOT leak into properties JSON; got: {props}"
     );
 
-    // --- update A: blocked_by = [C, D] (drop B, add D) ------------------
+    // --- update A: requires = [C, D] (drop B, add D) --------------------
     let mut update = HashMap::new();
     update.insert("id".to_string(), Value::String("A".to_string()));
     update.insert(
-        "blocked_by".to_string(),
+        "requires".to_string(),
         Value::Array(vec![
             Value::String("C".to_string()),
             Value::String("D".to_string()),
@@ -198,9 +198,9 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
         .await
         .expect("update A");
 
-    let blockers = read_blockers(&handle, "A").await;
+    let requires = read_requires(&handle, "A").await;
     assert_eq!(
-        blockers,
+        requires,
         vec!["C".to_string(), "D".to_string()],
         "update must replace the junction rows"
     );
@@ -208,23 +208,23 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
     // --- set_field with empty Array clears the edges -------------------
     let mut clear = HashMap::new();
     clear.insert("id".to_string(), Value::String("A".to_string()));
-    clear.insert("field".to_string(), Value::String("blocked_by".to_string()));
+    clear.insert("field".to_string(), Value::String("requires".to_string()));
     clear.insert("value".to_string(), Value::Array(Vec::new()));
     provider
         .execute_operation(&entity_name, "set_field", clear)
         .await
         .expect("set_field clear");
 
-    let blockers = read_blockers(&handle, "A").await;
+    let requires = read_requires(&handle, "A").await;
     assert!(
-        blockers.is_empty(),
-        "set_field with empty Array must clear junction rows; got {blockers:?}"
+        requires.is_empty(),
+        "set_field with empty Array must clear junction rows; got {requires:?}"
     );
 
     // --- set_field with a non-empty Array re-installs them -------------
     let mut reset = HashMap::new();
     reset.insert("id".to_string(), Value::String("A".to_string()));
-    reset.insert("field".to_string(), Value::String("blocked_by".to_string()));
+    reset.insert("field".to_string(), Value::String("requires".to_string()));
     reset.insert(
         "value".to_string(),
         Value::Array(vec![Value::String("B".to_string())]),
@@ -234,8 +234,8 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
         .await
         .expect("set_field reset");
 
-    let blockers = read_blockers(&handle, "A").await;
-    assert_eq!(blockers, vec!["B".to_string()]);
+    let requires = read_requires(&handle, "A").await;
+    assert_eq!(requires, vec!["B".to_string()]);
 
     // --- FK CASCADE: deleting block B drops the junction row -----------
     let mut delete_b = HashMap::new();
@@ -245,10 +245,10 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
         .await
         .expect("delete B");
 
-    let blockers = read_blockers(&handle, "A").await;
+    let requires = read_requires(&handle, "A").await;
     assert!(
-        blockers.is_empty(),
-        "FK ON DELETE CASCADE should drop A→B from the junction; got {blockers:?}"
+        requires.is_empty(),
+        "FK ON DELETE CASCADE should drop A→B from the junction; got {requires:?}"
     );
 }
 
@@ -374,21 +374,21 @@ async fn setup_production_schema(handle: &holon::storage::turso::DbHandle) {
         .expect("BlockSchemaModule::ensure_schema");
 }
 
-async fn read_task_blockers(
+async fn read_block_requires(
     handle: &holon::storage::turso::DbHandle,
-    blocked_id: &str,
+    block_id: &str,
 ) -> Vec<String> {
     let sql = format!(
-        "SELECT blocker_id FROM task_blockers WHERE blocked_id = '{}' ORDER BY blocker_id",
-        blocked_id.replace('\'', "''")
+        "SELECT required_id FROM block_requires WHERE block_id = '{}' ORDER BY required_id",
+        block_id.replace('\'', "''")
     );
     handle
         .query(&sql, HashMap::new())
         .await
-        .expect("query task_blockers")
+        .expect("query block_requires")
         .into_iter()
         .filter_map(|r| {
-            r.get("blocker_id")
+            r.get("required_id")
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
         })
@@ -415,7 +415,7 @@ async fn read_block_tags(handle: &holon::storage::turso::DbHandle, block_id: &st
 
 /// Track 1C: BlockSchemaModule creates the production junction tables and
 /// declares the correct descriptors so SqlOperationProvider routes
-/// `blocked_by` → task_blockers and `tags` → block_tags.
+/// `requires` → block_requires and `tags` → block_tags.
 #[tokio::test(flavor = "multi_thread")]
 async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
     let (_backend, handle) = TursoBackend::new_in_memory()
@@ -433,7 +433,7 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
     ));
     let entity_name: EntityName = "block".to_string().into();
 
-    // pre-create blocker blocks
+    // pre-create the required blocks
     for id in ["X", "Y"] {
         let mut p = HashMap::new();
         p.insert("id".to_string(), Value::String(id.to_string()));
@@ -441,15 +441,15 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
         provider
             .execute_operation(&entity_name, "create", p)
             .await
-            .expect("create blocker");
+            .expect("create required");
     }
 
-    // create task A with blocked_by = [X, Y] and tags = [work, urgent]
+    // create task A with requires = [X, Y] and tags = [work, urgent]
     let mut create = HashMap::new();
     create.insert("id".to_string(), Value::String("A".to_string()));
     create.insert("content".to_string(), Value::String("task A".to_string()));
     create.insert(
-        "blocked_by".to_string(),
+        "requires".to_string(),
         Value::Array(vec![
             Value::String("X".to_string()),
             Value::String("Y".to_string()),
@@ -467,11 +467,11 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
         .await
         .expect("create A");
 
-    let blockers = read_task_blockers(&handle, "A").await;
+    let requires = read_block_requires(&handle, "A").await;
     assert_eq!(
-        blockers,
+        requires,
         vec!["X".to_string(), "Y".to_string()],
-        "blocked_by must land in task_blockers"
+        "requires must land in block_requires"
     );
 
     let tags = read_block_tags(&handle, "A").await;
@@ -484,8 +484,8 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
     // verify neither leaked into properties JSON
     let props = read_properties(&handle, "A").await.unwrap_or_default();
     assert!(
-        !props.contains("blocked_by"),
-        "blocked_by must not bleed into properties; got: {props}"
+        !props.contains("requires"),
+        "requires must not bleed into properties; got: {props}"
     );
     assert!(
         !props.contains("tags"),
@@ -508,17 +508,17 @@ async fn edge_field_create_with_empty_array_writes_no_junction_rows() {
     let mut create = HashMap::new();
     create.insert("id".to_string(), Value::String("X".to_string()));
     create.insert("content".to_string(), Value::String("X".into()));
-    create.insert("blocked_by".to_string(), Value::Array(Vec::new()));
+    create.insert("requires".to_string(), Value::Array(Vec::new()));
     provider
         .execute_operation(&entity_name, "create", create)
         .await
         .expect("create X");
 
-    let blockers = read_blockers(&handle, "X").await;
-    assert!(blockers.is_empty());
+    let requires = read_requires(&handle, "X").await;
+    assert!(requires.is_empty());
     let props = read_properties(&handle, "X").await.unwrap_or_default();
     assert!(
-        !props.contains("blocked_by"),
+        !props.contains("requires"),
         "empty edge field must not bleed into properties JSON; got: {props}"
     );
 }

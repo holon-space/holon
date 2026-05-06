@@ -257,6 +257,7 @@ fn dioxus_widgets() -> std::collections::HashSet<String> {
         "tree",
         "columns",
         "editable_text",
+        "rendered_text",
         "selectable",
         "icon",
         "live_query",

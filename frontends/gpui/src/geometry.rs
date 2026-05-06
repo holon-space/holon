@@ -235,6 +235,11 @@ pub struct TransparentTracker {
     widget_type: &'static str,
     registry: BoundsRegistry,
     expected_size: SizeBounds,
+    /// Optional entity binding for region-scoped queries against
+    /// `BoundsRegistry`. `live_block` sets this so PBT generators can find
+    /// which subtree of the rendered tree belongs to which panel (e.g.
+    /// `block:default-left-sidebar`) without consulting ref-state predictions.
+    entity_id: Option<String>,
     child: Option<AnyElement>,
 }
 
@@ -250,8 +255,17 @@ impl TransparentTracker {
             widget_type,
             registry,
             expected_size: SizeBounds::default(),
+            entity_id: None,
             child: Some(child),
         }
+    }
+
+    /// Bind an entity URI so region queries can find this subtree by
+    /// `entity_id` (e.g. the `live_block` for the LeftSidebar binds itself
+    /// to `block:default-left-sidebar`).
+    pub fn with_entity_id(mut self, entity_id: impl Into<String>) -> Self {
+        self.entity_id = Some(entity_id.into());
+        self
     }
 
     /// Declare an expected min/max size for this transparently-tracked
@@ -285,8 +299,8 @@ impl Element for TransparentTracker {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
@@ -296,10 +310,10 @@ impl Element for TransparentTracker {
 
     fn prepaint(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
+        _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -312,7 +326,7 @@ impl Element for TransparentTracker {
                 width: f32::from(bounds.size.width),
                 height: f32::from(bounds.size.height),
                 widget_type: self.widget_type.to_string(),
-                entity_id: None,
+                entity_id: self.entity_id.clone(),
                 has_content: false,
                 parent_id,
                 displayed_text: None,
@@ -326,11 +340,11 @@ impl Element for TransparentTracker {
 
     fn paint(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
-        _prepaint: &mut (),
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -359,8 +373,8 @@ impl Element for BoundsTracker {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
@@ -376,10 +390,10 @@ impl Element for BoundsTracker {
 
     fn prepaint(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _child_layout_id: &mut LayoutId,
+        _: &mut LayoutId,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -406,11 +420,11 @@ impl Element for BoundsTracker {
 
     fn paint(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _child_layout_id: &mut LayoutId,
-        _prepaint: &mut (),
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut LayoutId,
+        _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {

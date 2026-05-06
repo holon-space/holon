@@ -4,7 +4,7 @@
 //! The TUI renderer already discovers every entity-bearing region during the
 //! render walk and stores it in `state.last_registry: Arc<Mutex<RenderRegistry>>`
 //! (see `app_main`). [`TuiGeometry`] wraps that same `Arc` so PBT consumers
-//! (drivers, inv14, the readiness gate) get the latest paint via the standard
+//! (drivers, inv-frontend-engine, the readiness gate) get the latest paint via the standard
 //! `holon_frontend::geometry::GeometryProvider` interface.
 //!
 //! Cell→pixel translation uses fixed [`CELL_W`] / [`CELL_H`] constants so the

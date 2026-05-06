@@ -659,4 +659,64 @@ impl UserDriver for TuiUserDriver {
         let deadline = Instant::now() + Duration::from_secs(5);
         self.await_render(deadline).await
     }
+
+    fn dispatches_chords_via_raw_keystroke(&self) -> bool {
+        true
+    }
+
+    /// TUI tree-aware click — Enter dispatches whatever the focused widget
+    /// binds on Enter (`navigation.focus` on a Selectable, edit-mode on a
+    /// Block). The bool return mirrors `click_entity` semantics: we can't
+    /// synchronously prove which intent fired, so return `false`.
+    async fn click_entity_with_tree(
+        &self,
+        _: &str,
+        _: &ReactiveViewModel,
+        entity_id: &str,
+        region: &str,
+    ) -> Result<bool> {
+        self.click_entity(entity_id, region).await?;
+        Ok(false)
+    }
+
+    // ── Observation verbs ──────────────────────────────────────────────
+    //
+    // Stubs for now. Step 2 / future TUI work fills these in — the TUI
+    // has its own widget registry that maps to the same `ReactiveViewModel`
+    // tree the headless driver uses, so the impl can follow the
+    // `ReactiveEngineDriver` pattern.
+
+    fn is_widget_visible(&self, _: &str) -> bool {
+        unimplemented!("TuiUserDriver::is_widget_visible — pending TUI observation impl")
+    }
+
+    fn is_in_region(&self, _: &str, _: holon_api::Region) -> bool {
+        unimplemented!("TuiUserDriver::is_in_region — pending TUI observation impl")
+    }
+
+    fn entities_in_region(&self, _: holon_api::Region) -> Vec<holon_api::EntityUri> {
+        unimplemented!("TuiUserDriver::entities_in_region — pending TUI observation impl")
+    }
+
+    fn reachable_entities_in_region(&self, _: holon_api::Region) -> Vec<holon_api::EntityUri> {
+        unimplemented!("TuiUserDriver::reachable_entities_in_region — pending TUI observation impl")
+    }
+
+    async fn scroll_to_entity(&self, _: &str) -> Result<()> {
+        // TUI has no virtualized lists today — every rendered entity has
+        // bounds via its full-screen redraw. Return Ok so the
+        // `wait_for_entity_bounds` scroll RPC is a benign no-op under TUI;
+        // a missing entity still surfaces as the polling timeout, which is
+        // the right failure signal. Replace with real page-up/down driving
+        // if/when TUI ever grows a virtualized list.
+        Ok(())
+    }
+
+    fn click_intent_of(&self, _: &str) -> Option<holon_frontend::operations::OperationIntent> {
+        unimplemented!("TuiUserDriver::click_intent_of — pending TUI observation impl")
+    }
+
+    fn displayed_text(&self, _: &str) -> Option<String> {
+        unimplemented!("TuiUserDriver::displayed_text — pending TUI observation impl")
+    }
 }

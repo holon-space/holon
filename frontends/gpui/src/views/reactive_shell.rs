@@ -99,6 +99,15 @@ impl ReactiveShell {
         self.list_state.clone()
     }
 
+    /// Clone the shell's local `EntityCache` so external callers can walk
+    /// the cache hierarchy (e.g. PBT scroll-into-view needs to descend
+    /// from a panel's block-mode shell into its nested list-mode shell
+    /// keyed by `CacheKey::ReactiveShell(view.stable_cache_key())`).
+    /// `EntityCache` is an `Arc<RwLock<_>>`, so this is cheap.
+    pub fn entity_cache_clone(&self) -> EntityCache {
+        self.entity_cache.clone()
+    }
+
     /// Create a shell for a block (watches structural changes).
     ///
     /// `live_block_ancestors` is the chain of `live_block` ids leading down
@@ -266,6 +275,7 @@ impl ReactiveShell {
                     let cache = self.entity_cache.read().unwrap();
                     cache
                         .get(&CacheKey::LiveBlock(nested_id.to_string()))
+                        // ALLOW(ok): downcast Option<Entity<T>> miss is "not the type we asked for", treated as cache miss
                         .and_then(|any| any.clone().downcast::<ReactiveShell>().ok())
                 };
                 if let Some(entity) = nested_entity {
@@ -309,6 +319,7 @@ impl ReactiveShell {
                         let cache = self.entity_cache.read().unwrap();
                         cache
                             .get(&CacheKey::RenderEntity(row_id))
+                            // ALLOW(ok): downcast Option<Entity<T>> miss is "not the type we asked for", treated as cache miss
                             .and_then(|any| any.clone().downcast::<RenderEntityView>().ok())
                     };
                     if let Some(entity) = cached {
@@ -778,10 +789,20 @@ fn render_row(item: &Arc<ReactiveViewModel>, gpui_ctx: &GpuiRenderContext) -> An
         let nav = gpui_ctx.nav.clone();
         let bounds = gpui_ctx.bounds_registry.clone();
         let ancestors = gpui_ctx.live_block_ancestors.clone();
+        let parent_cache = gpui_ctx.local.entity_cache.clone();
         let entity = gpui_ctx.local.get_or_create_typed(cache_key, || {
             gpui_ctx.with_gpui(|_window, cx| {
                 cx.new(|cx| {
-                    RenderEntityView::new(arc, render_ctx, services, nav, bounds, ancestors, cx)
+                    RenderEntityView::new(
+                        arc,
+                        render_ctx,
+                        services,
+                        nav,
+                        bounds,
+                        parent_cache,
+                        ancestors,
+                        cx,
+                    )
                 })
             })
         });

@@ -133,6 +133,15 @@ pub enum ViewKind {
         #[serde(default = "default_editable_field")]
         field: String,
     },
+    /// Read-only sibling of `EditableText`. Renders the same content but
+    /// does not mount a live editor — click dispatches `navigation.editor_focus`
+    /// which flips the block_profile variant to `is_focused` and swaps in
+    /// `editable_text` on the next render.
+    RenderedText {
+        content: String,
+        #[serde(default = "default_editable_field")]
+        field: String,
+    },
     /// Inline image loaded from a file path.
     Image {
         path: String,
@@ -303,7 +312,7 @@ pub enum ViewKind {
     /// renderer resolves the `OperationDescriptor` matching `op_name` on
     /// the profile for `target_id`, and dispatches via
     /// `BuilderServices::present_op`. `display_name` is the a11y label
-    /// and the fallback short-label for sighted users; `icon` is the
+    /// and the alternate short-label for sighted users; `icon` is the
     /// op_name passed through so GPUI can apply its hardcoded icon table.
     OpButton {
         op_name: String,
@@ -356,6 +365,7 @@ impl ViewKind {
             ViewKind::Checkbox { .. } => "checkbox",
             ViewKind::Spacer { .. } => "spacer",
             ViewKind::EditableText { .. } => "editable_text",
+            ViewKind::RenderedText { .. } => "rendered_text",
             ViewKind::Image { .. } => "image",
             ViewKind::Row { .. } => "row",
             ViewKind::Section { .. } => "section",
@@ -706,6 +716,10 @@ impl ViewModel {
                 content: value.to_display_string(),
                 field: default_editable_field(),
             },
+            "rendered_text" => ViewKind::RenderedText {
+                content: value.to_display_string(),
+                field: default_editable_field(),
+            },
             _ => ViewKind::Text {
                 content: value.to_display_string(),
                 bold: false,
@@ -752,7 +766,7 @@ impl ViewModel {
         self
     }
 
-    pub fn error(_widget: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn error(_: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             kind: ViewKind::Error {
                 message: message.into(),
@@ -814,6 +828,9 @@ impl ViewModel {
             }
             ViewKind::EditableText { content, .. } => {
                 let _ = writeln!(out, "{pad}editable_text {content:?}{ops_suffix}");
+            }
+            ViewKind::RenderedText { content, .. } => {
+                let _ = writeln!(out, "{pad}rendered_text {content:?}{ops_suffix}");
             }
             ViewKind::Image { path, alt, .. } => {
                 let label = if alt.is_empty() {
@@ -1102,6 +1119,7 @@ impl ViewModel {
             | ViewKind::Checkbox { .. }
             | ViewKind::Spacer { .. }
             | ViewKind::EditableText { .. }
+            | ViewKind::RenderedText { .. }
             | ViewKind::Image { .. }
             | ViewKind::SourceBlock { .. }
             | ViewKind::SourceEditor { .. }
@@ -1143,6 +1161,7 @@ impl ViewModel {
             ViewKind::Checkbox { .. } => "checkbox",
             ViewKind::Spacer { .. } => "spacer",
             ViewKind::EditableText { .. } => "editable_text",
+            ViewKind::RenderedText { .. } => "rendered_text",
             ViewKind::Image { .. } => "image",
             ViewKind::Row { .. } => "row",
             ViewKind::Section { .. } => "section",

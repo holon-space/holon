@@ -443,7 +443,7 @@ mod tests {
             &mut c,
             &Overlay::fail(
                 "ToggleState  •  block.cycle_task_state(block:7a44bf6f)",
-                "inv12: block:7a44bf6f task_state expected `DONE` after toggle, but reference \
+                "inv-value-fn-provider-identity: block:7a44bf6f task_state expected `DONE` after toggle, but reference \
                  model has `TODO`. Reference state computed by ReferenceState::apply, observed \
                  state read from sut.snapshot().",
             ),

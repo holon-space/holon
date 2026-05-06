@@ -22,9 +22,10 @@ use crate::sync::event_bus::{
 };
 use holon_api::Value;
 
-const WATERMARK_VIEW: &str = "mv_events_watermark";
+const GLOBAL_WATERMARK_VIEW: &str = "mv_events_global_watermark";
+const ACKS_WATERMARK_VIEW: &str = "mv_event_acks_watermark";
 
-/// Watermark state backed by CDC on `mv_events_watermark`.
+/// Watermark state backed by CDC on the global and per-consumer ack matviews.
 #[derive(Clone)]
 pub struct WatermarkState {
     pub global: Mutable<i64>,
@@ -34,7 +35,7 @@ pub struct WatermarkState {
 impl WatermarkState {
     /// Start the CDC listener and bootstrap current values from SQL.
     ///
-    /// Call after `TursoEventBus::init_schema()` so the matview exists.
+    /// Call after `TursoEventBus::init_schema()` so the matviews exist.
     pub async fn start(db_handle: &DbHandle) -> Result<Self> {
         let state = Self {
             global: Mutable::new(0),
@@ -44,49 +45,52 @@ impl WatermarkState {
         // Subscribe to CDC _before_ bootstrap so nothing is missed.
         let mut cdc_stream = db_handle.row_changes();
 
-        // Bootstrap: single query to seed current values.
-        let bootstrap_sql = "SELECT \
-            MAX(created_at) AS global_ts, \
-            MAX(CASE WHEN processed_by_loro  = 1 THEN created_at END) AS loro_ts, \
-            MAX(CASE WHEN processed_by_org   = 1 THEN created_at END) AS org_ts, \
-            MAX(CASE WHEN processed_by_cache = 1 THEN created_at END) AS cache_ts, \
-            MAX(CASE WHEN processed_by_links = 1 THEN created_at END) AS links_ts \
-            FROM events";
-        if let Ok(rows) = db_handle.query(bootstrap_sql, HashMap::new()).await {
+        // Bootstrap global: max created_at across events.
+        if let Ok(rows) = db_handle
+            .query("SELECT MAX(created_at) AS ts FROM events", HashMap::new())
+            .await
+        {
             if let Some(row) = rows.into_iter().next() {
-                let read_i64 = |key: &str| -> i64 {
-                    row.get(key)
-                        .and_then(|v| match v {
-                            Value::Integer(i) => Some(*i),
-                            _ => None,
-                        })
-                        .unwrap_or(0)
-                };
-                *state.global.lock_mut() = read_i64("global_ts");
-                let mut by_consumer = state.by_consumer.lock_mut();
-                for (consumer, col) in [
-                    ("loro", "loro_ts"),
-                    ("org", "org_ts"),
-                    ("cache", "cache_ts"),
-                    ("links", "links_ts"),
-                ] {
-                    let ts = read_i64(col);
-                    if ts > 0 {
-                        by_consumer.insert_cloned(consumer.to_string(), ts);
-                    }
+                if let Some(Value::Integer(ts)) = row.get("ts") {
+                    *state.global.lock_mut() = *ts;
                 }
             }
         }
 
-        // Spawn background task that applies CDC increments.
+        // Bootstrap per-consumer: max acked_at per consumer from the ack table.
+        if let Ok(rows) = db_handle
+            .query(
+                "SELECT consumer, MAX(acked_at) AS ts FROM event_acks GROUP BY consumer",
+                HashMap::new(),
+            )
+            .await
+        {
+            let mut by_consumer = state.by_consumer.lock_mut();
+            for row in rows {
+                let consumer = match row.get("consumer") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => continue,
+                };
+                let ts = match row.get("ts") {
+                    Some(Value::Integer(i)) => *i,
+                    _ => continue,
+                };
+                if ts > 0 {
+                    by_consumer.insert_cloned(consumer, ts);
+                }
+            }
+        }
+
+        // Spawn background task that applies CDC increments from both matviews.
         let state_clone = state.clone();
         crate::util::spawn_actor(async move {
             while let Some(batch) = cdc_stream.next().await {
                 for rc in &batch.inner.items {
-                    if rc.relation_name != WATERMARK_VIEW {
-                        continue;
+                    match rc.relation_name.as_str() {
+                        GLOBAL_WATERMARK_VIEW => state_clone.apply_global_cdc(&rc.change),
+                        ACKS_WATERMARK_VIEW => state_clone.apply_acks_cdc(&rc.change),
+                        _ => {}
                     }
-                    state_clone.apply_cdc(&rc.change);
                 }
             }
             tracing::debug!("[WatermarkState] CDC stream closed");
@@ -110,35 +114,31 @@ impl WatermarkState {
         }
     }
 
-    fn apply_cdc(&self, change: &crate::storage::turso::ChangeData) {
+    fn apply_global_cdc(&self, change: &crate::storage::turso::ChangeData) {
         use crate::storage::turso::ChangeData;
         match change {
             ChangeData::Created { data, .. } | ChangeData::Updated { data, .. } => {
-                let ts = data
-                    .get("created_at")
-                    .and_then(|v| match v {
-                        Value::Integer(i) => Some(*i),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-                if ts > 0 {
-                    self.bump_global(ts);
+                if let Some(Value::Integer(ts)) = data.get("ts") {
+                    if *ts > 0 {
+                        self.bump_global(*ts);
+                    }
                 }
-                for (consumer, col) in [
-                    ("loro", "processed_by_loro"),
-                    ("org", "processed_by_org"),
-                    ("cache", "processed_by_cache"),
-                    ("links", "processed_by_links"),
-                ] {
-                    let is_processed = data
-                        .get(col)
-                        .and_then(|v| match v {
-                            Value::Integer(i) => Some(*i == 1),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-                    if is_processed {
-                        self.bump_consumer(consumer, ts);
+            }
+            ChangeData::Deleted { .. } | ChangeData::FieldsChanged { .. } => {}
+        }
+    }
+
+    fn apply_acks_cdc(&self, change: &crate::storage::turso::ChangeData) {
+        use crate::storage::turso::ChangeData;
+        match change {
+            ChangeData::Created { data, .. } | ChangeData::Updated { data, .. } => {
+                let consumer = match data.get("consumer") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return,
+                };
+                if let Some(Value::Integer(ts)) = data.get("ts") {
+                    if *ts > 0 {
+                        self.bump_consumer(&consumer, *ts);
                     }
                 }
             }
@@ -185,12 +185,13 @@ impl TursoEventBus {
             })?;
         }
 
-        db_handle
-            .execute_ddl(include_str!("../../sql/schema/mv_events_watermark.sql"))
-            .await
-            .map_err(|e| {
-                StorageError::DatabaseError(format!("Failed to create {WATERMARK_VIEW}: {e}"))
+        for stmt in
+            crate::storage::sql_statements(include_str!("../../sql/schema/mv_events_watermark.sql"))
+        {
+            db_handle.execute_ddl(stmt).await.map_err(|e| {
+                StorageError::DatabaseError(format!("Failed to create watermark matviews: {e}"))
             })?;
+        }
 
         tracing::info!("[TursoEventBus] Schema initialized");
         Ok(())
@@ -297,13 +298,32 @@ impl TursoEventBus {
                         StorageError::DatabaseError("Missing 'payload' in event row".to_string())
                     })?;
 
-                let payload: HashMap<String, serde_json::Value> =
+                let mut payload: HashMap<String, serde_json::Value> =
                     serde_json::from_str(&payload_json).map_err(|e| {
                         StorageError::SerializationError(format!(
                             "Failed to parse payload JSON: {}",
                             e
                         ))
                     })?;
+
+                // Lift the transport-key view of the typed positional intent
+                // back into the [`Event::position_after_block_id`] field, then
+                // strip the key from the payload so downstream consumers only
+                // ever see the typed view.
+                let position_after_block_id = payload
+                    .remove(crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PAYLOAD_KEY)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) if !s.is_empty() => Some(s),
+                        _ => None,
+                    });
+
+                // Same round-trip for the typed document-routing intent.
+                let routing_doc_uri = payload
+                    .remove(crate::sync::event_bus::ROUTING_DOC_URI_PAYLOAD_KEY)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) if !s.is_empty() => Some(s),
+                        _ => None,
+                    });
 
                 let trace_id = data.get("trace_id").and_then(|v| match v {
                     Value::String(s) if !s.is_empty() => Some(s.clone()),
@@ -368,6 +388,8 @@ impl TursoEventBus {
                     created_at,
                     speculative_id,
                     rejection_reason,
+                    position_after_block_id,
+                    routing_doc_uri,
                 })
             }
             ChangeData::Deleted { id, .. } => {
@@ -474,14 +496,33 @@ impl TursoEventBus {
 #[async_trait]
 impl EventBus for TursoEventBus {
     async fn publish(&self, event: Event, command_id: Option<EventId>) -> Result<EventId> {
-        let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
-            StorageError::SerializationError(format!("Failed to serialize payload: {}", e))
-        })?;
-
         let mut event = event;
         if let Some(cmd_id) = command_id {
             event.command_id = Some(cmd_id);
         }
+
+        // Flush the typed positional intent into the payload JSON under the
+        // transport key. The events SQL table has a fixed column set; we
+        // round-trip the typed field via the payload so that the CDC-stream
+        // consumer can reconstruct it. See
+        // `POSITION_AFTER_BLOCK_ID_PAYLOAD_KEY` for the contract.
+        if let Some(ref after_id) = event.position_after_block_id {
+            event.payload.insert(
+                crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PAYLOAD_KEY.to_string(),
+                serde_json::Value::String(after_id.clone()),
+            );
+        }
+        // Same round-trip for the typed document-routing intent.
+        if let Some(ref doc_uri) = event.routing_doc_uri {
+            event.payload.insert(
+                crate::sync::event_bus::ROUTING_DOC_URI_PAYLOAD_KEY.to_string(),
+                serde_json::Value::String(doc_uri.clone()),
+            );
+        }
+
+        let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
+            StorageError::SerializationError(format!("Failed to serialize payload: {}", e))
+        })?;
 
         let event_id = event.id.clone();
         let event_type_str = event.event_type_string();
@@ -515,7 +556,24 @@ impl EventBus for TursoEventBus {
         let mut event_ids = Vec::with_capacity(events.len());
 
         for event in &events {
-            let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
+            // Flush the typed positional intent into the payload before
+            // serializing (same round-trip contract as `publish`). We clone
+            // the payload locally rather than mutating the caller's Event,
+            // since this is the only spot that needs the transport-key view.
+            let mut payload = event.payload.clone();
+            if let Some(ref after_id) = event.position_after_block_id {
+                payload.insert(
+                    crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PAYLOAD_KEY.to_string(),
+                    serde_json::Value::String(after_id.clone()),
+                );
+            }
+            if let Some(ref doc_uri) = event.routing_doc_uri {
+                payload.insert(
+                    crate::sync::event_bus::ROUTING_DOC_URI_PAYLOAD_KEY.to_string(),
+                    serde_json::Value::String(doc_uri.clone()),
+                );
+            }
+            let payload_json = serde_json::to_string(&payload).map_err(|e| {
                 StorageError::SerializationError(format!("Failed to serialize payload: {}", e))
             })?;
             let params = Self::event_to_params(event, &payload_json);
@@ -617,12 +675,16 @@ impl EventBus for TursoEventBus {
         // Querying the base `events` table (not the matview) gives us a
         // deterministic snapshot of everything `consumer` hasn't acknowledged
         // yet. We mirror the matview's WHERE clause so replay matches what the
-        // CDC stream will deliver going forward.
-        let column = consumer.column();
-        let mut replay_where = vec![format!("{} = 0", column)];
-        replay_where.extend(where_clauses.iter().cloned());
+        // CDC stream will deliver going forward. "Unprocessed" = no row in
+        // `event_acks` for this (event, consumer) pair.
+        let mut replay_where = where_clauses.clone();
+        replay_where.push(format!(
+            "NOT EXISTS (SELECT 1 FROM event_acks a \
+                          WHERE a.event_id = events.id AND a.consumer = '{}')",
+            consumer.name()
+        ));
         let replay_sql = format!(
-            "SELECT * FROM events WHERE {} ORDER BY created_at, id",
+            "SELECT events.* FROM events WHERE {} ORDER BY created_at, id",
             replay_where.join(" AND ")
         );
         tracing::debug!("[TursoEventBus::subscribe] replay SQL: {}", replay_sql);
@@ -755,12 +817,20 @@ impl EventBus for TursoEventBus {
 
     #[tracing::instrument(skip(self, event_id), fields(consumer = %consumer), name = "events.mark_processed")]
     async fn mark_processed(&self, event_id: &EventId, consumer: Consumer) -> Result<()> {
-        let column = consumer.column();
-
-        // Use execute_via_actor which routes through the database actor
-        let sql = format!("UPDATE events SET {} = 1 WHERE id = ?", column);
+        // Insert-only into the side table — never mutates `events`, so the
+        // `events_view_*` matviews don't see a delete+insert per ack.
+        let now = chrono::Utc::now().timestamp_millis();
+        let sql =
+            "INSERT OR IGNORE INTO event_acks (event_id, consumer, acked_at) VALUES (?, ?, ?)";
         self.db_handle
-            .execute(&sql, vec![turso::Value::Text(event_id.clone())])
+            .execute(
+                sql,
+                vec![
+                    turso::Value::Text(event_id.clone()),
+                    turso::Value::Text(consumer.name().to_string()),
+                    turso::Value::Integer(now),
+                ],
+            )
             .await
             .map_err(|e| {
                 StorageError::DatabaseError(format!("Failed to mark event as processed: {}", e))
@@ -774,21 +844,24 @@ impl EventBus for TursoEventBus {
         if event_ids.is_empty() {
             return Ok(());
         }
-        let column = consumer.column();
-        // `WHERE id IN (?, ?, ...)` — one statement, one CDC trigger, one
-        // matview re-eval, instead of N round-trips through the DB actor.
-        let placeholders = std::iter::repeat("?")
+        // Single multi-VALUES INSERT — one statement, one matview re-eval,
+        // instead of N round-trips through the DB actor.
+        let now = chrono::Utc::now().timestamp_millis();
+        let placeholders = std::iter::repeat("(?, ?, ?)")
             .take(event_ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "UPDATE events SET {} = 1 WHERE id IN ({})",
-            column, placeholders
+            "INSERT OR IGNORE INTO event_acks (event_id, consumer, acked_at) VALUES {}",
+            placeholders
         );
-        let params: Vec<turso::Value> = event_ids
-            .iter()
-            .map(|id| turso::Value::Text(id.clone()))
-            .collect();
+        let consumer_name = consumer.name().to_string();
+        let mut params: Vec<turso::Value> = Vec::with_capacity(event_ids.len() * 3);
+        for id in event_ids {
+            params.push(turso::Value::Text(id.clone()));
+            params.push(turso::Value::Text(consumer_name.clone()));
+            params.push(turso::Value::Integer(now));
+        }
         self.db_handle.execute(&sql, params).await.map_err(|e| {
             StorageError::DatabaseError(format!(
                 "Failed to mark {} events as processed: {}",

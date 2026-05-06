@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc eb321546ac0c23a34a29f9f1b3738252abf4303e9416eb67a2d0ccd930852daf # shrinks to actions = []
+cc f5f2bb29d09f0b3e8c3ada8251795772105dc2f662c8c8622ccdefbd04d745bd # shrinks to (initial_state, transitions, seen_counter) = (GroupState { peers: 2, peer_counter: 3, last_transition_was_sync_all: false }, [], None)
+cc a3523809c8115befc5060e9787eb9852034daf778030768183c22333f4fdf43b # shrinks to actions = [EditOnA(" [A:a]"), RestartB, CrossPeerSyncAfterRestart(" [X:a]")]

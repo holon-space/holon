@@ -4,11 +4,38 @@
 //! across all systems (Loro, OrgMode, Todoist, etc.).
 
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use ulid::Ulid;
+use ulid::{Generator, Ulid};
+
+/// Process-global monotonic ULID generator. Events created within the
+/// same millisecond from this generator get strictly-increasing ULIDs,
+/// so the CDC stream's `ORDER BY created_at, id` is also insert-order
+/// for same-ms batches.
+///
+/// `Ulid::new()` alone uses random tie-breaking bits, which means two
+/// events emitted from the same batch in the same millisecond can sort
+/// in either order — breaking ordered application of dependent events
+/// (e.g. `tree.mov_after` ops on freshly-created blocks).
+static ULID_GEN: Lazy<Mutex<Generator>> = Lazy::new(|| Mutex::new(Generator::new()));
+
+fn next_event_id() -> String {
+    let mut g = ULID_GEN.lock().expect("ULID_GEN mutex poisoned");
+    // `Generator::generate` only fails on monotonic-counter exhaustion
+    // within a single millisecond (a value-space wraparound).
+    // ALLOW(fallback): disclosed wraparound recovery — extremely rare
+    // burst (>2^80 events in 1ms) drops to `Ulid::new()` so we don't
+    // deadlock the event bus; intra-ms ordering becomes non-monotonic
+    // for the wrapped burst and self-heals on the next ms tick.
+    match g.generate() {
+        Ok(u) => u.to_string(),
+        Err(_) => Ulid::new().to_string(),
+    }
+}
 
 use crate::storage::types::Result;
 
@@ -81,13 +108,12 @@ pub type CommandId = String;
 
 /// Identifies a durable EventBus consumer (Loro / Org / Cache / …).
 ///
-/// The `events` table has one `processed_by_<name>` column per consumer; only
-/// known names are valid. `Consumer` is a validating newtype so callers can't
-/// silently typo a name into a missing column.
+/// Acks for each consumer are recorded in the `event_acks` side table
+/// (`(event_id, consumer, acked_at)`) — insert-only, so per-consumer
+/// progress never mutates the `events` row. `Consumer` is a validating
+/// newtype so callers can't silently typo a name.
 ///
-/// To add a new consumer: add a constant here, add the matching
-/// `processed_by_<name>` column in `sql/schema/events.sql`, and update the
-/// `mv_events_watermark` matview.
+/// To add a new consumer: add a constant here and add it to `KNOWN`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Consumer(&'static str);
 
@@ -97,12 +123,11 @@ impl Consumer {
     pub const CACHE: Consumer = Consumer("cache");
     pub const LINKS: Consumer = Consumer("links");
 
-    /// Whitelist of all known consumer names — the source of truth for
-    /// `parse()` and the `processed_by_*` columns in the events schema.
+    /// Whitelist of all known consumer names — the source of truth for `parse()`.
     const KNOWN: &'static [Consumer] = &[Self::LORO, Self::ORG, Self::CACHE, Self::LINKS];
 
     /// Parse a consumer name. Rejects unknown names so a typo can't silently
-    /// resolve to a non-existent SQL column.
+    /// become a new consumer row.
     pub fn parse(name: &str) -> Result<Self> {
         Self::KNOWN
             .iter()
@@ -124,12 +149,6 @@ impl Consumer {
     /// Short name (e.g. `"loro"`).
     pub fn name(&self) -> &'static str {
         self.0
-    }
-
-    /// SQL column tracking which events this consumer has processed
-    /// (e.g. `"processed_by_loro"`).
-    pub fn column(&self) -> String {
-        format!("processed_by_{}", self.0)
     }
 }
 
@@ -283,11 +302,51 @@ impl std::fmt::Display for AggregateType {
     }
 }
 
-/// Event payload key for routing events to document-specific handlers.
-/// Contains the document URI that owns the affected block.
-/// Stored as a top-level payload key (not inside `data`) to avoid corrupting
-/// the block's actual `parent_id` when CacheEventSubscriber upserts from `data`.
+/// Param-side name for the document-routing hint — names the document
+/// URI that owns the block this op applies to. Producers
+/// (`build_block_params` in `holon-orgmode`, plus internal lookups in
+/// `SqlOperationProvider`) add this to the params HashMap they hand to a
+/// create/update/delete op; the provider lifts the value onto the typed
+/// [`Event::routing_doc_uri`] field at the boundary and drops the key
+/// from both the SQL INSERT and the payload data. Consumers (OrgMode's
+/// event handler) read `event.routing_doc_uri` — there is no payload-side
+/// string lookup. The leading underscore is retained on the *param* key
+/// because the SqlOperationProvider's `partition_params` recognises it as
+/// operation-control metadata via the `_routing_` prefix.
+// ALLOW(routing_payload_key): producer-side param const, see doc-comment above.
 pub const ROUTING_DOC_URI_KEY: &str = "_routing_doc_uri";
+
+/// Transport key used by `TursoEventBus` to round-trip the typed
+/// [`Event::routing_doc_uri`] field through the events SQL table (which
+/// has a fixed column set). Same contract as
+/// [`POSITION_AFTER_BLOCK_ID_PAYLOAD_KEY`]: the producer flushes the
+/// typed field into the payload JSON under this key just before INSERT;
+/// the consumer reads it back into the typed field and strips it from
+/// the payload so downstream code only ever sees the typed view.
+pub const ROUTING_DOC_URI_PAYLOAD_KEY: &str = "__transport_routing_doc_uri";
+
+/// Param-side name for the typed positional intent — names the predecessor
+/// sibling a freshly-created block should sit after. Producers
+/// (`BlockOperations::split_block`, `OrgSyncController::on_file_changed`)
+/// add this key to the params HashMap they hand to a create op;
+/// `SqlOperationProvider` extracts the value and projects it onto the typed
+/// [`Event::position_after_block_id`] field, then drops the key from both
+/// the SQL INSERT and the payload data. Consumers
+/// (`LoroSyncController::apply_create`) read `event.position_after_block_id`
+/// — there is no payload-side string lookup. Replaces the previous
+/// underscore-prefixed `_routing_after_block_id` smuggling convention.
+pub const POSITION_AFTER_BLOCK_ID_PARAM: &str = "after_block_id";
+
+/// Transport key used by `TursoEventBus` to round-trip the typed
+/// [`Event::position_after_block_id`] field through the events SQL table
+/// (which has a fixed column set). The producer flushes the typed field
+/// into the payload JSON under this key just before INSERT; the consumer
+/// reads it back into the typed field and strips it from the payload so
+/// downstream code only ever sees the typed view. Not a producer-facing
+/// API — chord ops / OrgSync use `POSITION_AFTER_BLOCK_ID_PARAM` and the
+/// typed builder; this constant is the persistence implementation
+/// detail.
+pub const POSITION_AFTER_BLOCK_ID_PAYLOAD_KEY: &str = "__transport_position_after_block_id";
 
 /// An event representing a fact that occurred in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +381,37 @@ pub struct Event {
     pub speculative_id: Option<EventId>,
     /// Rejection reason (if status = Rejected)
     pub rejection_reason: Option<String>,
+    /// Typed positional intent for `EventKind::Created` events on block
+    /// aggregates: names the predecessor sibling the new block should sit
+    /// after (`None` → first child of parent; absent → leave at the end where
+    /// the create lands by default).
+    ///
+    /// Lives on the typed [`Event`] struct rather than inside `payload` so
+    /// consumers ([`crate::sync::loro_sync_controller`]'s `apply_create`)
+    /// read it as first-class metadata, not via a string lookup against an
+    /// underscore-prefixed payload key. Replaces the previous
+    /// `_routing_after_block_id` HashMap-smuggling convention.
+    ///
+    /// Producers thread the value through via
+    /// [`POSITION_AFTER_BLOCK_ID_PARAM`] in the create-op params map;
+    /// `SqlOperationProvider::prepare_create` extracts it onto this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_after_block_id: Option<String>,
+    /// Typed document-routing intent for events on block aggregates: names
+    /// the document URI that owns the block this event refers to.
+    /// Consumers (OrgMode's event handler) use this to route
+    /// `on_block_changed` to the correct file rather than re-rendering all
+    /// tracked documents.
+    ///
+    /// Lives on the typed [`Event`] struct rather than inside `payload` for
+    /// the same reason as `position_after_block_id`: consumers read it as
+    /// first-class metadata, not via a string lookup against an
+    /// underscore-prefixed payload key. Producers thread the value through
+    /// via [`ROUTING_DOC_URI_KEY`] in the op params map (or internal
+    /// `find_document_uri` lookups inside `SqlOperationProvider`); the
+    /// provider extracts it onto this field at the operation boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_doc_uri: Option<String>,
 }
 
 impl Event {
@@ -352,7 +442,7 @@ impl Event {
         origin: EventOrigin,
         payload: HashMap<String, serde_json::Value>,
     ) -> Self {
-        let id = Ulid::new().to_string();
+        let id = next_event_id();
         let created_at = chrono::Utc::now().timestamp_millis();
 
         let (trace_id, span_id, trace_flags) = current_span_context();
@@ -371,7 +461,31 @@ impl Event {
             created_at,
             speculative_id: None,
             rejection_reason: None,
+            position_after_block_id: None,
+            routing_doc_uri: None,
         }
+    }
+
+    /// Builder: attach a typed positional intent. Pass `Some(predecessor_id)`
+    /// to place the new block immediately after `predecessor_id`, `Some(_)`
+    /// resolving to a block already known to the consumer, or
+    /// `Some("")` is invalid — pass `None` for "first child of parent" by
+    /// omitting the key on the producer side and not calling this builder.
+    ///
+    /// Returns `self` for chaining, so producers can write
+    /// `Event::new(...).with_position_after_block_id(after)`.
+    pub fn with_position_after_block_id(mut self, after: Option<String>) -> Self {
+        self.position_after_block_id = after;
+        self
+    }
+
+    /// Builder: attach a typed document-routing intent. Pass
+    /// `Some(doc_uri_string)` so consumers (OrgMode's event handler) can
+    /// route `on_block_changed` to the correct file without reading an
+    /// underscore-prefixed string from `payload`.
+    pub fn with_routing_doc_uri(mut self, doc_uri: Option<String>) -> Self {
+        self.routing_doc_uri = doc_uri;
+        self
     }
 
     /// Create a speculative event (for offline mode)
@@ -632,8 +746,8 @@ pub trait EventBus: Send + Sync {
     /// events for `consumer`.
     ///
     /// The returned stream emits, in order:
-    /// 1. All events matching `filter` that have `processed_by_<consumer> = 0`
-    ///    on the `events` table at subscribe-time (the *replay*, ordered by
+    /// 1. All events matching `filter` that have no row in `event_acks` for
+    ///    this `consumer` at subscribe-time (the *replay*, ordered by
     ///    `created_at, id`).
     /// 2. All matching events that arrive after subscribe-time (the *live*
     ///    stream).
@@ -689,7 +803,7 @@ pub trait EventBus: Send + Sync {
     /// Highest `created_at` of an event that consumer `c` has marked
     /// processed. Pair with `watermark()` to detect lag without sleeping.
     /// Returns `0` when the consumer has processed nothing yet.
-    async fn consumer_position(&self, _consumer: Consumer) -> Result<i64> {
+    async fn consumer_position(&self, _: Consumer) -> Result<i64> {
         Ok(0)
     }
 }

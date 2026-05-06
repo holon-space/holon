@@ -13,6 +13,7 @@
 //! Note: Block hierarchy schema is now managed by `BlockHierarchySchemaModule`
 //! in `storage/schema_modules.rs` via the `SchemaRegistry`.
 
+pub mod block_cell_registry;
 pub mod cache_event_subscriber;
 pub mod canonical_path;
 
@@ -63,10 +64,10 @@ pub mod loro_module;
 ))]
 pub mod loro_share_backend;
 pub mod loro_sync_controller;
+pub mod loro_text_cell_backing;
 pub mod matview_manager;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod multi_peer;
-pub mod mutable_text;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

@@ -253,6 +253,13 @@ fn generate_extraction(params: &[WidgetParam]) -> proc_macro2::TokenStream {
                                 ba.ctx.data_source.clone()
                                     .map(|r| r as std::sync::Arc<dyn holon_api::ReactiveRowProvider>)
                             });
+                        // Parse `rules:` once for both arms (FU-6). Streaming
+                        // and Static both apply the same pipeline; positional
+                        // context differs (streaming has no count/is_last,
+                        // static has all four).
+                        let __rules = crate::row_pipeline::parse_rules_arg(
+                            ba.args.named.get("rules"),
+                        );
                         match (__template, __ds) {
                             // Live data source + explicit template → Streaming.
                             // Zero eager interpretation — the signal_vec driver
@@ -262,30 +269,45 @@ fn generate_extraction(params: &[WidgetParam]) -> proc_macro2::TokenStream {
                                     item_template: tmpl,
                                     data_source: ds,
                                     sort_key: __sort_key,
+                                    rules: __rules,
                                 }
                             }
                             // Template but no data source: headless/snapshot path.
                             // Eagerly interpret ctx.data_rows through the template,
                             // sorted by sort_key if present (matches streaming behaviour).
+                            //
+                            // Per-row pipeline (rules: + profile/ops + interpret) goes
+                            // through `crate::row_pipeline::apply_full_row_pipeline` so
+                            // every collection-arm builder gets `rules:` support without
+                            // touching the macro further. Positional context injects
+                            // `position`/`count`/`is_first`/`is_last` so rules can match
+                            // on collection position.
                             (Some(tmpl), None) => {
                                 let __sorted = holon_api::render_eval::sorted_rows(
                                     &ba.ctx.data_rows,
                                     __sort_key.as_deref(),
                                 );
+                                let __count = __sorted.len();
                                 let items = __sorted.into_iter()
-                                    .map(|__row| {
-                                        let __row_ctx = ba.ctx.with_row(__row);
-                                        let __ops: Vec<holon_api::render_types::OperationWiring> = ba
-                                            .services
-                                            .resolve_profile(__row_ctx.row())
-                                            .map(|p| p.operations.into_iter().map(|d| d.to_default_wiring()).collect())
-                                            .unwrap_or_default();
-                                        let __row_ctx = if __ops.is_empty() {
-                                            __row_ctx
-                                        } else {
-                                            __row_ctx.with_operations(__ops, ba.services)
-                                        };
-                                        (ba.interpret)(&tmpl, &__row_ctx)
+                                    .enumerate()
+                                    .map(|(__i, __row)| {
+                                        let __positional = std::collections::HashMap::from([
+                                            ("position".to_string(), holon_api::Value::Integer(__i as i64)),
+                                            ("count".to_string(), holon_api::Value::Integer(__count as i64)),
+                                            ("is_first".to_string(), holon_api::Value::Boolean(__i == 0)),
+                                            ("is_last".to_string(), holon_api::Value::Boolean(__i + 1 == __count)),
+                                            ("is_empty_collection".to_string(), holon_api::Value::Boolean(__count == 0)),
+                                        ]);
+                                        let (__node, _) = crate::row_pipeline::apply_full_row_pipeline(
+                                            ba.services,
+                                            ba.ctx,
+                                            &tmpl,
+                                            &__rules,
+                                            &__row,
+                                            __positional,
+                                            |__expr, __c| (ba.interpret)(__expr, __c),
+                                        );
+                                        __node
                                     })
                                     .collect();
                                 crate::reactive_view_model::CollectionData::Static { items }

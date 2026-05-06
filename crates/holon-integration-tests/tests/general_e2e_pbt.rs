@@ -114,15 +114,66 @@
 // etc.) have moved to `tracing::trace!`. They emit no output by default;
 // initialize a subscriber and set `RUST_LOG=trace` (or
 // `holon_integration_tests=trace`) to opt in.
+//
+// # Bug-class reproducers
+//
+// The atomic editor primitives (`TypeChars` → `PressKey(Enter)`) reproduce
+// the split_block-discards-pending-edits bug in ~25s with biased weights:
+//
+//   PROPTEST_CASES=1 PROPTEST_MAX_SHRINK_ITERS=0 \
+//     HOLON_PBT_WEIGHTS="ClickBlock:30,FocusEditableText:50,TypeChars:50,PressKey:50,Navigate*:0" \
+//     cargo test -p holon-integration-tests --test general_e2e_pbt \
+//     general_e2e_pbt_sql_only -- --nocapture --exact
+//
+// `ClickBlock:30` is needed so focus moves from `block:journals` (default)
+// to a user doc where `BulkExternalAdd` placed text-content blocks; without
+// it `FocusEditableText` finds no candidates and never fires.
+// `Navigate*:0` silences a separate (pre-existing) NavigateBack focus
+// mismatch that masks this bug otherwise. Devlog:
+// `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`.
 
 use std::path::PathBuf;
 
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-use holon_integration_tests::pbt::{CrossExecutor, E2ESut, Full, SqlOnly};
+use holon_integration_tests::pbt::{
+    CrossExecutor, E2ESut, Full, SqlOnly, enable_atomic_editor_if_unset,
+};
+
+/// Print the per-transition rejection histogram on every panic. Without this
+/// `proptest_state_machine!` swallows the validation::print_rejection_histogram()
+/// hook that `pbt_teardown` runs in the phased-PBT path, and the histogram is
+/// never surfaced when a case fails. Idempotent — install once per process.
+fn install_rejection_histogram_panic_hook() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            holon_integration_tests::pbt::validation::print_rejection_histogram();
+            prev(info);
+        }));
+    });
+}
 
 fn pbt_config() -> ProptestConfig {
+    // Activate the keystroke-driven atomic editor primitives
+    // (`TypeChars`, `PressKey`, `DeleteBackward`, `MoveCursor`,
+    // `FocusEditableText`). Without this, the only edit transitions
+    // generated are `EditViaViewModel` / `EditViaDisplayTree`, which
+    // commit whole strings via `on_blur` → `set_field` and so can't
+    // surface bug classes that depend on per-keystroke MutableText
+    // writes (e.g. `split_block` reading stale `block.content` while
+    // pending Loro edits haven't yet projected through to SQL — see
+    // `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`).
+    //
+    // `ReactiveEngineDriver::send_raw_keystroke` (in
+    // `crates/holon-frontend/src/headless_editor_mirror.rs`) routes
+    // each char through `MutableText.apply_local`, matching the
+    // production GPUI path.
+    enable_atomic_editor_if_unset();
+    install_rejection_histogram_panic_hook();
     // Default of 50 (was 10) so persisted regression seeds are shrunk to a
     // more minimal form by default. PBT failures are expensive to reproduce
     // (~25 min per case at the time of writing); a slightly higher shrink

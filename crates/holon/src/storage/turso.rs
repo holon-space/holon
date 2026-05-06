@@ -711,6 +711,13 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
     TursoDatabaseConfig {
         path: String::new(),
         experimental_features: None,
+        // TODO(async_io): switch to `true` to match the public Builder
+        // default and stop blocking tokio worker threads inside SQL IO.
+        // The pre-fix matview-cursor-first-open bug used to fire on the
+        // IO yield boundary, which made `false` defensible; nightscape@holon
+        // 290fbb4ff fixed that, so the rationale is gone. Needs a workspace
+        // test+PBT pass and live MCP/TUI/GPUI smoke before flipping — see
+        // resolution devlog 2026-05-08-mcp-first-query-empty-matview.
         async_io: false,
         encryption: None,
         vfs: None,
@@ -770,13 +777,6 @@ pub type RowChangeStream = ReceiverStream<BatchWithMetadata<RowChange>>;
 /// - DELETE + INSERT for the same (relation, entity_id) → UPDATE
 /// - INSERT + DELETE for the same (relation, entity_id) → no-op (both dropped)
 /// - All other changes pass through unchanged
-///
-/// Note: `process_cdc_event` runs `collapse_insert_delete_pairs` first, so by
-/// the time live CDC events reach here the INSERT+DELETE-same-key shape is
-/// already disambiguated using the Delete payload (matview UPDATE folded to
-/// `Updated`; genuine transient already dropped). This function still handles
-/// the no-op path so in-memory tests and external callers — which build
-/// `Deleted` events without a payload — keep working unchanged.
 ///
 /// This is a pure function suitable for both synchronous use in `process_cdc_event()`
 /// and as the `merge` function for `holon_api::reactive::coalesce()`.
@@ -858,147 +858,14 @@ pub(crate) fn coalesce_row_changes(changes: Vec<RowChange>) -> Vec<RowChange> {
     slots.into_iter().flatten().collect()
 }
 
-/// Disambiguate same-key INSERT+DELETE pairs from Turso CDC.
-///
-/// Turso emits a `WITH RECURSIVE` matview's UPDATE delta as `{Insert(new),
-/// Delete(old)}` on the same primary key, in INSERT-then-DELETE order — see
-/// `HANDOFF_TURSO_RECURSIVE_CTE_UPDATE_CDC.md` for the upstream bug. The
-/// previous coalesce logic, which collapsed any same-key Insert+Delete into a
-/// no-op, was correct for genuine base-table transients (an INSERT followed
-/// by a DELETE within one transaction never made the row visible) but wrong
-/// for matview UPDATEs, where the pair represents a real content change.
-///
-/// This function inspects both payloads (the Insert's data, and the Delete's
-/// data captured in `delete_data_by_idx`) and folds them into:
-///
-/// - `Updated(insert.data)` if the row contents differ — the matview UPDATE
-///   shape — preserving the user-visible change.
-/// - dropped both — if the row contents are equal — the genuine transient
-///   shape, matching prior semantics.
-///
-/// `_rowid` and the change-origin metadata column are ignored when comparing
-/// content.
-///
-/// Once Turso emits matview UPDATEs as a single `Update` (or in
-/// DELETE-then-INSERT order with the existing `coalesce_row_changes` handling
-/// it), this function becomes a no-op on matview events and can be removed.
-fn collapse_insert_delete_pairs(
-    raw_changes: Vec<RowChange>,
-    delete_data_by_idx: &HashMap<usize, StorageEntity>,
-) -> Vec<RowChange> {
-    if raw_changes.len() < 2 {
-        return raw_changes;
-    }
-
-    // Locate the first Insert and first Delete for each (relation, entity_id).
-    // We only need the first occurrence of each kind: if the same pair
-    // appears multiple times in one batch, the rest fall through to
-    // `coalesce_row_changes` unchanged — same as today.
-    let mut insert_idx: HashMap<(String, String), usize> = HashMap::new();
-    let mut delete_idx: HashMap<(String, String), usize> = HashMap::new();
-    for (idx, rc) in raw_changes.iter().enumerate() {
-        match &rc.change {
-            ChangeData::Created { data, .. } => {
-                if let Some(id) = data.get("id").and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                }) {
-                    insert_idx
-                        .entry((rc.relation_name.clone(), id))
-                        .or_insert(idx);
-                }
-            }
-            ChangeData::Deleted { id, .. } => {
-                delete_idx
-                    .entry((rc.relation_name.clone(), id.clone()))
-                    .or_insert(idx);
-            }
-            _ => {}
-        }
-    }
-
-    // For each matching pair, decide: Skip / FoldToUpdated.
-    #[derive(Clone, Copy)]
-    enum Action {
-        Pass,
-        Skip,
-        FoldToUpdated,
-    }
-    let mut actions: Vec<Action> = vec![Action::Pass; raw_changes.len()];
-
-    for (key, &i_idx) in insert_idx.iter() {
-        let Some(&d_idx) = delete_idx.get(key) else {
-            continue;
-        };
-        let Some(d_data) = delete_data_by_idx.get(&d_idx) else {
-            // Delete had no parsed payload (parse_record returned None);
-            // fall back to the legacy "no-op" semantics by skipping both.
-            actions[i_idx] = Action::Skip;
-            actions[d_idx] = Action::Skip;
-            continue;
-        };
-        let i_data = match &raw_changes[i_idx].change {
-            ChangeData::Created { data, .. } => data,
-            _ => continue,
-        };
-        if data_equal_ignoring_metadata(i_data, d_data) {
-            // True transient — no net change.
-            actions[i_idx] = Action::Skip;
-            actions[d_idx] = Action::Skip;
-        } else {
-            // Matview UPDATE shape — emit a single Updated using the
-            // Insert's (post-update) data.
-            actions[i_idx] = Action::FoldToUpdated;
-            actions[d_idx] = Action::Skip;
-        }
-    }
-
-    let mut out = Vec::with_capacity(raw_changes.len());
-    for (idx, rc) in raw_changes.into_iter().enumerate() {
-        match actions[idx] {
-            Action::Skip => continue,
-            Action::Pass => out.push(rc),
-            Action::FoldToUpdated => match rc.change {
-                ChangeData::Created { data, origin } => {
-                    let id = data
-                        .get("id")
-                        .and_then(|v| match v {
-                            Value::String(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    out.push(RowChange {
-                        relation_name: rc.relation_name,
-                        change: ChangeData::Updated { id, data, origin },
-                    });
-                }
-                other => out.push(RowChange {
-                    relation_name: rc.relation_name,
-                    change: other,
-                }),
-            },
-        }
-    }
-    out
-}
-
-/// Compare two row payloads ignoring fields the system stamps onto every
-/// row: `_rowid` (per-write Turso assignment) and the change-origin column.
-fn data_equal_ignoring_metadata(a: &StorageEntity, b: &StorageEntity) -> bool {
-    let is_user_field = |k: &str| k != "_rowid" && k != CHANGE_ORIGIN_COLUMN;
-    let count_a = a.iter().filter(|(k, _)| is_user_field(k.as_str())).count();
-    let count_b = b.iter().filter(|(k, _)| is_user_field(k.as_str())).count();
-    if count_a != count_b {
-        return false;
-    }
-    for (k, va) in a.iter().filter(|(k, _)| is_user_field(k.as_str())) {
-        match b.get(k) {
-            Some(vb) if vb == va => {}
-            _ => return false,
-        }
-    }
-    true
-}
+// Removed in favour of `coalesce_row_changes` alone, after the Turso pin
+// 290fbb4ff fixed the recursive-CTE matview UPDATE → INSERT-then-DELETE
+// surface (it now arrives as a single `Update` or DELETE-then-INSERT pair,
+// both of which `coalesce_row_changes` already handles). The
+// `collapse_insert_delete_pairs` + `data_equal_ignoring_metadata` helpers
+// and their unit tests went with it. Verified by re-running
+// `turso_ivm_split_block_cdc_drop_repro` — all 6 characterisation tests
+// pass without the pre-pass.
 
 // ============================================================================
 // SQL tracing
@@ -1011,6 +878,17 @@ fn full_sql_tracing() -> bool {
 
 fn trace_sql(tag: &str, sql: &str) {
     if full_sql_tracing() {
+        // In release builds, workspace-hack's `release_max_level_info` compiles
+        // `trace!`/`debug!` out, so we mirror to stderr in a format
+        // `turso-sql-replay` can parse. Debug builds get the trace! macro live
+        // and the eprintln is pure overhead (each call formats a fresh
+        // timestamp into an stderr that is typically discarded by the parent
+        // process — measured to ~2x startup time on org-pkm initial scan).
+        #[cfg(not(debug_assertions))]
+        {
+            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+            eprintln!("{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql}");
+        }
         tracing::trace!("[TursoBackend] {tag}: {sql}");
     } else {
         tracing::trace!("[TursoBackend] {tag}: {}", &sql[..sql.len().min(120)]);
@@ -1019,10 +897,41 @@ fn trace_sql(tag: &str, sql: &str) {
 
 fn trace_sql_positional(tag: &str, sql: &str, params: &[turso::Value]) {
     if full_sql_tracing() && !params.is_empty() {
+        #[cfg(not(debug_assertions))]
+        {
+            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+            eprintln!(
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params:?}"
+            );
+        }
         tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params:?}");
     } else {
         trace_sql(tag, sql);
     }
+}
+
+/// Named-parameter variant. Emits a stable `key=Value(...)` form so
+/// `inline_named_params` in turso-sql-replay can substitute back.
+fn trace_sql_named(tag: &str, sql: &str, params: &HashMap<String, Value>) {
+    if !full_sql_tracing() {
+        trace_sql(tag, sql);
+        return;
+    }
+    if params.is_empty() {
+        trace_sql(tag, sql);
+        return;
+    }
+    let mut parts: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v:?}")).collect();
+    parts.sort();
+    let params_str = parts.join(", ");
+    #[cfg(not(debug_assertions))]
+    {
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+        eprintln!(
+            "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params_str}"
+        );
+    }
+    tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params_str}");
 }
 
 // ============================================================================
@@ -1097,7 +1006,7 @@ impl TursoBackend {
     }
 
     #[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
-    pub fn open_database<P: AsRef<Path>>(_db_path: P) -> Result<Arc<Database>> {
+    pub fn open_database<P: AsRef<Path>>(_: P) -> Result<Arc<Database>> {
         // wasm32: always in-memory. No OPFS yet (see handoff §Out of scope).
         let opts = DatabaseOpts::default().with_views(true);
         let io = Arc::new(MemoryIO::new());
@@ -1108,7 +1017,7 @@ impl TursoBackend {
     }
 
     #[cfg(all(not(target_family = "unix"), not(target_family = "wasm")))]
-    pub fn open_database<P: AsRef<Path>>(_db_path: P) -> Result<Arc<Database>> {
+    pub fn open_database<P: AsRef<Path>>(_: P) -> Result<Arc<Database>> {
         Err(StorageError::DatabaseError(
             "File-based storage not yet supported on this platform".to_string(),
         ))
@@ -1134,21 +1043,39 @@ impl TursoBackend {
         let cdc_seq = Arc::new(AtomicU64::new(0));
 
         // Set up CDC callback to broadcast to all subscribers
+        if full_sql_tracing() {
+            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+            eprintln!(
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: registering CDC callback"
+            );
+        }
         tracing::trace!("[TursoBackend] set_change_callback: registering CDC callback");
         let cdc_tx_for_callback = cdc_broadcast.clone();
         let cdc_seq_for_callback = cdc_seq.clone();
+        let actor_stats: Option<Arc<crate::storage::turso_actor_stats::ActorStats>> =
+            crate::storage::turso_actor_stats::enabled_interval()
+                .map(|_| crate::storage::turso_actor_stats::ActorStats::new());
+        let cdc_stats_for_callback = actor_stats.clone();
         conn.set_change_callback(move |event: &RelationChangeEvent| {
             tracing::trace!(
                 "[TursoBackend CDC] relation='{}' raw_changes={}",
                 event.relation_name,
                 event.changes.len()
             );
+            let raw_count = event.changes.len() as u64;
             let mut batch = Self::process_cdc_event(event);
             tracing::trace!(
                 "[TursoBackend CDC] relation='{}' after_coalesce={}",
                 event.relation_name,
                 batch.inner.items.len()
             );
+            if let Some(stats) = &cdc_stats_for_callback {
+                stats.record_cdc(
+                    &event.relation_name,
+                    raw_count,
+                    batch.inner.items.len() as u64,
+                );
+            }
             if !batch.inner.items.is_empty() {
                 let next = cdc_seq_for_callback.fetch_add(1, Ordering::SeqCst) + 1;
                 batch.metadata.seq = next;
@@ -1165,10 +1092,31 @@ impl TursoBackend {
         // wasm_bindgen_futures), so we route the actor through
         // wasm_bindgen_futures::spawn_local instead.
         let cdc_broadcast_for_actor = cdc_broadcast.clone();
+        let actor_stats_for_actor = actor_stats.clone();
+        if let (Some(stats), Some(interval)) = (
+            actor_stats.clone(),
+            crate::storage::turso_actor_stats::enabled_interval(),
+        ) {
+            tracing::info!(
+                "[TursoBackend] HOLON_ACTOR_STATS enabled, logging every {:?}",
+                interval
+            );
+            crate::storage::turso_actor_stats::spawn_logger(stats, interval);
+        }
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        tokio::spawn(Self::run_actor(rx, conn, cdc_broadcast_for_actor));
+        tokio::spawn(Self::run_actor(
+            rx,
+            conn,
+            cdc_broadcast_for_actor,
+            actor_stats_for_actor,
+        ));
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        wasm_bindgen_futures::spawn_local(Self::run_actor(rx, conn, cdc_broadcast_for_actor));
+        wasm_bindgen_futures::spawn_local(Self::run_actor(
+            rx,
+            conn,
+            cdc_broadcast_for_actor,
+            actor_stats_for_actor,
+        ));
 
         tracing::info!(
             "[TursoBackend] Created - all database operations will be serialized through internal actor"
@@ -1385,12 +1333,6 @@ impl TursoBackend {
         let mut raw_changes = Vec::new();
         let mut batch_trace_context: Option<BatchTraceContext> = None;
 
-        // Side-band: parsed row payload from each Delete event, keyed by its
-        // index in `raw_changes`. `ChangeData::Deleted` only carries the id,
-        // but we need the full content here to disambiguate two superficially
-        // identical shapes — see `collapse_insert_delete_pairs` below.
-        let mut delete_data_by_idx: HashMap<usize, StorageEntity> = HashMap::new();
-
         for (_change_idx, change) in event.changes.iter().enumerate() {
             let change_data = match &change.change {
                 DatabaseChangeType::Insert { .. } => {
@@ -1448,8 +1390,6 @@ impl TursoBackend {
                         if batch_trace_context.is_none() {
                             batch_trace_context = origin.to_batch_trace_context();
                         }
-                        let position = raw_changes.len();
-                        delete_data_by_idx.insert(position, data);
                         ChangeData::Deleted {
                             id: entity_id,
                             origin,
@@ -1472,7 +1412,6 @@ impl TursoBackend {
             });
         }
 
-        let raw_changes = collapse_insert_delete_pairs(raw_changes, &delete_data_by_idx);
         let coalesced_changes = coalesce_row_changes(raw_changes);
         let batch = Batch {
             items: coalesced_changes,
@@ -1497,6 +1436,7 @@ impl TursoBackend {
         mut rx: mpsc::Receiver<DbCommand>,
         conn: turso::Connection,
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
+        actor_stats: Option<Arc<crate::storage::turso_actor_stats::ActorStats>>,
     ) {
         tracing::info!("[TursoBackend::Actor] Starting actor loop");
 
@@ -1507,6 +1447,15 @@ impl TursoBackend {
         let next_op_id = AtomicU64::new(1);
 
         while let Some(cmd) = rx.recv().await {
+            let stats_meta = actor_stats.as_ref().map(|_| {
+                let (variant, sql) = crate::storage::turso_actor_stats::cmd_fingerprint(&cmd);
+                (
+                    variant,
+                    sql.map(crate::storage::turso_actor_stats::fingerprint_sql),
+                    std::time::Instant::now(),
+                )
+            });
+
             // Wrap command processing in catch_unwind to prevent panics
             // (e.g., from tracing-subscriber span lifecycle bugs) from killing the actor.
             let should_break: std::result::Result<bool, Box<dyn std::any::Any + Send>> =
@@ -1521,6 +1470,10 @@ impl TursoBackend {
                 ))
                 .catch_unwind()
                 .await;
+
+            if let (Some(stats), Some((variant, sql_key, t0))) = (&actor_stats, stats_meta) {
+                stats.record_command(variant, sql_key, t0.elapsed());
+            }
 
             match should_break {
                 Ok(true) => break,
@@ -1573,7 +1526,7 @@ impl TursoBackend {
                 params,
                 response,
             } => {
-                tracing::trace!("[TursoBackend] actor_query: {}", &sql[..sql.len().min(200)]);
+                trace_sql_named("actor_query", &sql, &params);
                 let result = Self::handle_query(conn, &sql, params).await;
                 let _ = response.send(result);
             }
@@ -1583,6 +1536,7 @@ impl TursoBackend {
                 params,
                 response,
             } => {
+                trace_sql_positional("actor_query", &sql, &params);
                 let result = Self::handle_query_positional(conn, &sql, params).await;
                 let _ = response.send(result);
             }
@@ -1592,7 +1546,7 @@ impl TursoBackend {
                 params,
                 response,
             } => {
-                tracing::trace!("[TursoBackend] actor_exec: {}", &sql[..sql.len().min(200)]);
+                trace_sql_positional("actor_exec", &sql, &params);
                 let result = Self::handle_execute(conn, &sql, params).await;
                 let _ = response.send(result);
             }
@@ -2063,9 +2017,6 @@ impl TursoBackend {
             }
         }
     }
-
-    // ========================================================================
-    // Deprecated method for backward compatibility during transition
 }
 
 #[async_trait]
@@ -2465,108 +2416,17 @@ mod cdc_coalescer_tests {
         }
     }
 
-    // -------------------------------------------------------------------
-    // collapse_insert_delete_pairs — content-aware disambiguation between
-    // a base-table transient (drop) and a matview UPDATE surfaced as
-    // Insert+Delete on the same key (fold to Updated).
-    // -------------------------------------------------------------------
-
-    fn make_data(id: &str, value: &str) -> StorageEntity {
-        let mut data = StorageEntity::new();
-        data.insert("id".to_string(), Value::String(id.to_string()));
-        data.insert("value".to_string(), Value::String(value.to_string()));
-        data.insert("_rowid".to_string(), Value::String(id.to_string()));
-        data
-    }
-
     #[test]
-    fn collapse_insert_delete_equal_content_drops_both() {
-        // Genuine base-table transient: same content in Insert and Delete.
-        let raw = vec![
-            make_insert("view1", "id1", "same"),
-            make_delete("view1", "id1"),
-        ];
-        let mut delete_data = HashMap::new();
-        delete_data.insert(1usize, make_data("id1", "same"));
-        let result = collapse_insert_delete_pairs(raw, &delete_data);
-        assert_eq!(result.len(), 0, "equal content → drop both");
-    }
-
-    #[test]
-    fn collapse_insert_delete_different_content_folds_to_updated() {
-        // Matview UPDATE shape: differing content on the +1/-1 pair.
-        let raw = vec![
-            make_insert("view1", "id1", "new"),
-            make_delete("view1", "id1"),
-        ];
-        let mut delete_data = HashMap::new();
-        delete_data.insert(1usize, make_data("id1", "old"));
-        let result = collapse_insert_delete_pairs(raw, &delete_data);
-        assert_eq!(result.len(), 1);
-        match &result[0].change {
-            ChangeData::Updated { id, data, .. } => {
-                assert_eq!(id, "id1");
-                assert_eq!(data.get("value").unwrap(), &Value::String("new".into()));
-            }
-            other => panic!("Expected Updated, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn collapse_ignores_rowid_when_comparing() {
-        // Same logical content, different _rowid → still considered equal.
-        let raw = vec![
-            make_insert("view1", "id1", "same"),
-            make_delete("view1", "id1"),
-        ];
-        let mut delete_data = HashMap::new();
-        // Delete data with a *different* _rowid but same user content.
-        let mut d = make_data("id1", "same");
-        d.insert("_rowid".to_string(), Value::String("999".to_string()));
-        delete_data.insert(1usize, d);
-        let result = collapse_insert_delete_pairs(raw, &delete_data);
-        assert_eq!(result.len(), 0, "_rowid difference must not block coalesce");
-    }
-
-    #[test]
-    fn collapse_no_payload_falls_back_to_legacy_noop() {
-        // Delete with no parsed payload → can't compare; preserve prior
-        // semantics (drop both).
-        let raw = vec![
-            make_insert("view1", "id1", "value"),
-            make_delete("view1", "id1"),
-        ];
-        let result = collapse_insert_delete_pairs(raw, &HashMap::new());
-        assert_eq!(result.len(), 0);
-    }
-
-    #[test]
-    fn collapse_passes_through_unrelated_events() {
-        // Insert+Delete on different ids, plus an unrelated Update.
-        let raw = vec![
-            make_insert("view1", "id1", "a"),
-            make_delete("view1", "id2"),
-            make_update("view1", "id3", "c"),
-        ];
-        let result = collapse_insert_delete_pairs(raw, &HashMap::new());
-        assert_eq!(result.len(), 3);
-    }
-
-    #[test]
-    fn collapse_then_coalesce_handles_split_block_shape() {
-        // The actual production shape from a recursive matview UPDATE:
-        // INSERT new sibling + INSERT-then-DELETE same key for the
-        // truncated original. The pre-pass folds the second pair to
-        // Updated; the new sibling Insert passes through.
+    fn coalesce_handles_split_block_shape() {
+        // The actual production shape from a recursive matview UPDATE,
+        // post-Turso-fix (290fbb4ff) — surfaces as DELETE-then-INSERT,
+        // which `coalesce_row_changes` folds to `Updated` directly.
         let raw = vec![
             make_insert("view1", "child_1_split", "two three"), // new sibling
-            make_insert("view1", "child_1", "one"),             // truncated +
             make_delete("view1", "child_1"),                    // old      -
+            make_insert("view1", "child_1", "one"),             // truncated +
         ];
-        let mut delete_data = HashMap::new();
-        delete_data.insert(2usize, make_data("child_1", "one two three"));
-        let collapsed = collapse_insert_delete_pairs(raw, &delete_data);
-        let final_changes = coalesce_row_changes(collapsed);
+        let final_changes = coalesce_row_changes(raw);
         assert_eq!(final_changes.len(), 2);
         let kinds: Vec<&'static str> = final_changes
             .iter()

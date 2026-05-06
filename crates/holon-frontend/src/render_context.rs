@@ -103,8 +103,16 @@ pub struct RenderContext {
     /// Container-query allocation: how much space THIS subtree was allotted by
     /// its parent. Refined by layout containers via `with_available_space` before
     /// recursing into children. `None` outside a partitioning container; the
+    // ALLOW(fallback): describing the global-viewport merge in pick_active_variant
     /// global viewport is merged in as a fallback by `pick_active_variant`.
     pub available_space: Option<AvailableSpace>,
+    /// Render-context flags that participate in `pick_active_variant` evaluation
+    /// alongside row columns and `available_space`. Well-known flags: `role`
+    /// (e.g. `"page_title"`), `view_mode`, `embed_depth`. Set on a child context
+    /// by callers that want the resolved render to dispatch on context (e.g.
+    /// `live_block(id, #{role: "page_title"})`); cleared inside the resolved
+    /// block's own descendants so flags scope only to the immediate target.
+    pub flags: HashMap<String, holon_api::Value>,
 }
 
 impl RenderContext {
@@ -242,6 +250,26 @@ impl RenderContext {
     pub fn with_available_space(&self, space: AvailableSpace) -> Self {
         Self {
             available_space: Some(space),
+            ..self.clone()
+        }
+    }
+
+    /// Set render-context flags for the immediate child render. Replaces the
+    /// existing flag map. Used by `live_block(id, #{role: ...})` and tree
+    /// builder rule evaluation; descendants inside the resolved block reset
+    /// to `flags: HashMap::new()` so flags scope only to the target.
+    pub fn with_flags(&self, flags: HashMap<String, holon_api::Value>) -> Self {
+        Self {
+            flags,
+            ..self.clone()
+        }
+    }
+
+    /// Drop all render-context flags. Used when descending into the resolved
+    /// body of a `live_block` so its own children render as ordinary content.
+    pub fn without_flags(&self) -> Self {
+        Self {
+            flags: HashMap::new(),
             ..self.clone()
         }
     }

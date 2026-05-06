@@ -234,6 +234,7 @@ mod tests {
             id: EntityUri::block(id),
             parent_id: EntityUri::block(parent_id),
             tags: Vec::new(),
+            requires: Vec::new(),
             content: content.to_string(),
             content_type: ContentType::Source,
             source_language: Some(lang.parse::<SourceLanguage>().unwrap()),

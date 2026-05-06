@@ -56,6 +56,100 @@ fn holon_to_json_value(v: &Value) -> serde_json::Value {
 }
 
 // Helper function to convert HashMap<String, serde_json::Value> to StorageEntity
+/// Resolve the calling agent's id from a tool param or `HOLON_AGENT_ID`.
+fn resolve_agent_id(param: Option<String>) -> Result<String, rmcp::ErrorData> {
+    let id = param
+        .or_else(|| std::env::var("HOLON_AGENT_ID").ok())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                "agent_id required: pass `agent_id` param or set HOLON_AGENT_ID env",
+                None,
+            )
+        })?;
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!("invalid agent_id {id:?} — must match [A-Za-z0-9._-]+"),
+            None,
+        ));
+    }
+    Ok(id)
+}
+
+/// Accept bare slugs (`now-query`) as well as fully-qualified ids
+/// (`block:now-query`) — the org file stores the bare form.
+fn ensure_block_prefix(s: &str) -> String {
+    if s.starts_with("block:") {
+        s.to_string()
+    } else {
+        format!("block:{s}")
+    }
+}
+
+/// Build a filesystem-safe slug from a task id (lowercase alphanumeric + hyphen).
+fn slugify_for_devlog(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out.chars().take(40).collect()
+}
+
+/// Run a single `set_field` op through the standard pipeline so the
+/// org renderer + Loro sync see the write.
+async fn set_field(
+    service: &HolonService,
+    id: &str,
+    field: &str,
+    value: Value,
+) -> Result<(), rmcp::ErrorData> {
+    let mut storage: StorageEntity = HashMap::new();
+    storage.insert("id".to_string(), Value::String(id.to_string()));
+    storage.insert("field".to_string(), Value::String(field.to_string()));
+    storage.insert("value".to_string(), value);
+    service
+        .execute_operation(&EntityName::new("block"), "set_field", storage)
+        .await
+        .map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("set_field({field}) on {id} failed: {e}"), None)
+        })?;
+    Ok(())
+}
+
+/// Read the canonical `assigned-to` value for a block straight from `block_raw`.
+async fn read_assigned_to(
+    engine: &Arc<holon::api::backend_engine::BackendEngine>,
+    id: &str,
+) -> Result<Option<String>, rmcp::ErrorData> {
+    let sql =
+        "SELECT json_extract(properties, '$.assigned-to') AS assigned_to FROM block_raw WHERE id = $id"
+            .to_string();
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::String(id.to_string()));
+    let rows = engine.execute_query(sql, params, None).await.map_err(|e| {
+        rmcp::ErrorData::internal_error(format!("read assigned-to failed: {e}"), None)
+    })?;
+    Ok(rows.into_iter().next().and_then(|row| {
+        row.get("assigned_to").and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        })
+    }))
+}
+
 fn json_map_to_storage_entity(map: HashMap<String, serde_json::Value>) -> StorageEntity {
     map.into_iter()
         .map(|(k, v)| (k, json_to_holon_value(v)))
@@ -403,6 +497,131 @@ impl HolonMcpServer {
                 rmcp::ErrorData::internal_error(
                     format!("Query failed: {}", e),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
+                )
+            })?;
+
+        let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
+        let include_profile = params.include_profile.unwrap_or(false);
+
+        let json_rows: Vec<HashMap<String, serde_json::Value>> = query_result
+            .rows
+            .iter()
+            .map(|row| {
+                let mut json_row: HashMap<String, serde_json::Value> = row
+                    .iter()
+                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
+                    .collect();
+
+                if include_profile {
+                    let profile = self.engine().profile_resolver().resolve(row);
+                    json_row.insert(
+                        "_profile".to_string(),
+                        serde_json::json!({
+                            "name": profile.name,
+                            "render": format!("{:?}", profile.render),
+                            "operations": profile.operations.iter()
+                                .map(|op| format!("{}.{}", op.entity_name, op.name))
+                                .collect::<Vec<_>>(),
+                        }),
+                    );
+                }
+
+                json_row
+            })
+            .collect();
+
+        let result = QueryResult {
+            rows: json_rows.clone(),
+            row_count: json_rows.len(),
+            duration_ms: Some(duration_ms),
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&result).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+
+    #[tool(
+        description = "Execute the query stored in a source block by block_id. Looks up the block's `content` (the query) and `source_language` (one of holon_prql / holon_gql / holon_sql), then dispatches through the same path as `execute_query`. Use this to run live source-block queries (e.g. the Now.org `now-query::src::0`) without copy-pasting the SQL. `params`, `context_id`, `context_parent_id`, `render`, `include_profile`, and `language` (override) all mirror `execute_query`."
+    )]
+    async fn execute_source_block(
+        &self,
+        Parameters(params): Parameters<ExecuteSourceBlockParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let block_id = EntityUri::from_raw(&params.block_id).to_string();
+        let lookup_sql = format!(
+            "SELECT content, source_language FROM block_raw WHERE id = '{}'",
+            block_id.replace('\'', "''")
+        );
+        let lookup = self
+            .service()
+            .execute_raw_sql(&lookup_sql, HashMap::new())
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Failed to look up source block '{}': {}", block_id, e),
+                    None,
+                )
+            })?;
+        let row = lookup.rows.into_iter().next().ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!("No block found with id '{}'", block_id),
+                Some(serde_json::json!({"block_id": block_id})),
+            )
+        })?;
+        let query = row
+            .get("content")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("Block '{}' has no content", block_id),
+                    None,
+                )
+            })?
+            .to_string();
+        let stored_language = row
+            .get("source_language")
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string());
+        let language_str = params.language.or(stored_language).ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "Block '{}' has no source_language; pass `language` explicitly",
+                    block_id
+                ),
+                None,
+            )
+        })?;
+        let language = language_str
+            .parse::<QueryLanguage>()
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("Invalid language: {e}"), None))?;
+
+        let context = self
+            .service()
+            .build_context(
+                params.context_id.as_deref(),
+                params.context_parent_id.as_deref(),
+            )
+            .await;
+
+        let mut holon_params = HashMap::new();
+        for (k, v) in &params.params {
+            holon_params.insert(k.clone(), json_to_holon_value(v.clone()));
+        }
+
+        let query_result = self
+            .service()
+            .execute_query(&query, language, holon_params, context)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Query failed: {}", e),
+                    Some(serde_json::json!({"block_id": block_id, "language": language_str})),
                 )
             })?;
 
@@ -1106,6 +1325,341 @@ impl HolonMcpServer {
         };
 
         Ok(CallToolResult::success(vec![content]))
+    }
+
+    #[tool(
+        description = "Return ranked Now-snapshot tasks visible to the calling agent. Mirrors the `now-query::src::0` block but adds two filters: tasks must be unclaimed OR already assigned to this agent (`assigned-to` property), and any `task_state IN ('TODO','DOING')` is allowed (so an agent re-discovers in-flight work). agent_id falls back to env HOLON_AGENT_ID. Tasks already claimed by the caller sort first."
+    )]
+    async fn now_for_agent(
+        &self,
+        Parameters(params): Parameters<NowForAgentParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let agent_id = resolve_agent_id(params.agent_id)?;
+        let limit = params.limit.unwrap_or(10).clamp(1, 100);
+        let sql = format!(
+            "SELECT b.* \
+             FROM block b \
+             WHERE json_extract(b.properties, '$.task_state') IN ('TODO', 'DOING') \
+               AND json_extract(b.properties, '$.gate') = 'G1' \
+               AND ( \
+                 json_extract(b.properties, '$.assigned-to') IS NULL \
+                 OR json_extract(b.properties, '$.assigned-to') = $agent_id \
+               ) \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM block_requires br \
+                 JOIN block bl ON bl.id = br.required_id \
+                 WHERE br.block_id = b.id \
+                   AND COALESCE(json_extract(bl.properties, '$.task_state'), '') <> 'DONE' \
+               ) \
+               AND ( \
+                 EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') \
+                 OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only') \
+               ) \
+             ORDER BY \
+               CASE WHEN json_extract(b.properties, '$.assigned-to') = $agent_id THEN 0 ELSE 1 END, \
+               json_extract(b.properties, '$.priority'), \
+               json_extract(b.properties, '$.effort'), \
+               b.id \
+             LIMIT {limit}"
+        );
+        let mut q_params = HashMap::new();
+        q_params.insert("agent_id".to_string(), Value::String(agent_id.clone()));
+
+        let rows = self
+            .engine()
+            .execute_query(sql, q_params, None)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("now_for_agent query failed: {e}"),
+                    Some(serde_json::json!({"agent_id": agent_id})),
+                )
+            })?;
+
+        let json_rows: Vec<HashMap<String, serde_json::Value>> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
+                    .collect()
+            })
+            .collect();
+
+        let result = QueryResult {
+            rows: json_rows.clone(),
+            row_count: json_rows.len(),
+            duration_ms: None,
+        };
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&result).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+
+    #[tool(
+        description = "Best-effort claim of a task for the calling agent. Reads current `assigned-to`; refuses if already held by another agent. Otherwise sets `assigned-to`, `claimed-at`, `claimed-from` (worktree path), and flips `task_state` to DOING. Sleeps 1s and re-reads to detect lost races inside the file-watcher debounce window (~500ms). Returns `{claimed: bool, assigned_to, was: <prior>}`."
+    )]
+    async fn claim_task(
+        &self,
+        Parameters(params): Parameters<ClaimTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let agent_id = resolve_agent_id(params.agent_id)?;
+        let task_id = ensure_block_prefix(&params.task_id);
+
+        let current = read_assigned_to(self.engine(), &task_id).await?;
+        if let Some(other) = &current {
+            if other != &agent_id {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::json!({
+                        "claimed": false,
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "was": other,
+                        "reason": "already-claimed-by-other",
+                    })
+                    .to_string(),
+                )]));
+            }
+        }
+
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let worktree = std::env::current_dir()
+            .ok() // ALLOW(ok): best-effort metadata; missing CWD shouldn't block claim
+            .map(|p| p.display().to_string());
+
+        set_field(
+            self.service(),
+            &task_id,
+            "assigned-to",
+            Value::String(agent_id.clone()),
+        )
+        .await?;
+        set_field(
+            self.service(),
+            &task_id,
+            "claimed-at",
+            Value::String(now_iso.clone()),
+        )
+        .await?;
+        if let Some(wt) = &worktree {
+            set_field(
+                self.service(),
+                &task_id,
+                "claimed-from",
+                Value::String(wt.clone()),
+            )
+            .await?;
+        }
+        set_field(
+            self.service(),
+            &task_id,
+            "task_state",
+            Value::String("DOING".to_string()),
+        )
+        .await?;
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let final_assignee = read_assigned_to(self.engine(), &task_id).await?;
+        let claimed = final_assignee.as_deref() == Some(&agent_id);
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "claimed": claimed,
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "assigned_to": final_assignee,
+                "claimed_at": now_iso,
+                "claimed_from": worktree,
+                "reason": if claimed { "ok" } else { "lost-race" },
+            })
+            .to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Append a new TODO block as a child of an existing block. Mints a UUID for the new id (or uses `id` if supplied), defaults task_state to TODO and gate to G1 so the new task is visible to `now_for_agent` immediately. Extra `properties` are merged into the JSON properties bucket. Detects id collision via `block.create`'s response (Some(existing_id) means INSERT OR IGNORE no-op). NOTE: `tags` and `requires` params are reserved for a follow-up — set them via separate operations for now. Returns the new task's id."
+    )]
+    async fn add_subtask(
+        &self,
+        Parameters(params): Parameters<AddSubtaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let parent_id = ensure_block_prefix(&params.parent_id);
+
+        let new_id_bare = params
+            .id
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let new_id = ensure_block_prefix(&new_id_bare);
+
+        let title = params.title.trim();
+        if title.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "title must be non-empty",
+                None,
+            ));
+        }
+        let content = match params
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(body) => format!("{title}\n{body}"),
+            None => title.to_string(),
+        };
+
+        let task_state = params
+            .task_state
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "TODO".to_string());
+        let gate = params
+            .gate
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "G1".to_string());
+
+        let mut storage: StorageEntity = HashMap::new();
+        storage.insert("id".to_string(), Value::String(new_id.clone()));
+        storage.insert("parent_id".to_string(), Value::String(parent_id.clone()));
+        storage.insert("content".to_string(), Value::String(content.clone()));
+        storage.insert(
+            "content_type".to_string(),
+            Value::String("text".to_string()),
+        );
+        storage.insert("task_state".to_string(), Value::String(task_state.clone()));
+        storage.insert("gate".to_string(), Value::String(gate.clone()));
+        // ID property mirrors the bare id so org-rendered :PROPERTIES: blocks stay round-trip stable.
+        storage.insert("ID".to_string(), Value::String(new_id_bare.clone()));
+        for (k, v) in params.properties.into_iter() {
+            storage.insert(k, json_to_holon_value(v));
+        }
+
+        // block.create returns response = None on successful INSERT,
+        // Some(existing_id) when INSERT OR IGNORE no-op'd on a primary-key collision.
+        let response = self
+            .service()
+            .execute_operation(&EntityName::new("block"), "create", storage)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("block.create failed: {e}"), None)
+            })?;
+        if let Some(existing) = response {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "id collision: a block with id {new_id:?} already exists ({existing:?}) — pass a different `id` or omit it to mint a UUID"
+                ),
+                None,
+            ));
+        }
+
+        let tags_warning = params.tags.as_ref().filter(|v| !v.is_empty()).map(|v| {
+            format!(
+                "tags ignored ({} supplied) — set via separate operation",
+                v.len()
+            )
+        });
+        let requires_warning = params.requires.as_ref().filter(|v| !v.is_empty()).map(|v| {
+            format!(
+                "requires ignored ({} supplied) — set via separate operation",
+                v.len()
+            )
+        });
+
+        let warnings: Vec<String> = [tags_warning, requires_warning]
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "task_id": new_id,
+                "id_bare": new_id_bare,
+                "parent_id": parent_id,
+                "task_state": task_state,
+                "gate": gate,
+                "warnings": warnings,
+            })
+            .to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Mark a claimed task DONE and append a devlog file at <cwd>/devlog/YYYY-MM-DD-HHMMSS-<agent-id>-<slug>.md with the supplied summary (and optional commit_sha). Sets `task_state=DONE` and `completed-at` (UTC RFC3339) via the standard operation pipeline. Errors if `<cwd>/devlog/` does not exist (run holon-mcp from a repo checkout that has it). Returns the devlog path."
+    )]
+    async fn complete_task(
+        &self,
+        Parameters(params): Parameters<CompleteTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let agent_id = resolve_agent_id(params.agent_id)?;
+        let task_id = ensure_block_prefix(&params.task_id);
+
+        let cwd = std::env::current_dir().map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("current_dir failed: {e}"), None)
+        })?;
+        let devlog_dir = cwd.join("devlog");
+        if !devlog_dir.is_dir() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "devlog dir not found at {} — run holon-mcp from a repo checkout that contains devlog/",
+                    devlog_dir.display()
+                ),
+                None,
+            ));
+        }
+
+        let completed_iso = chrono::Utc::now().to_rfc3339();
+        set_field(
+            self.service(),
+            &task_id,
+            "task_state",
+            Value::String("DONE".to_string()),
+        )
+        .await?;
+        set_field(
+            self.service(),
+            &task_id,
+            "completed-at",
+            Value::String(completed_iso.clone()),
+        )
+        .await?;
+
+        let datestamp = chrono::Utc::now().format("%Y-%m-%d-%H%M%S").to_string();
+        let slug = slugify_for_devlog(&params.task_id);
+        let filename = if slug.is_empty() {
+            format!("{datestamp}-{agent_id}.md")
+        } else {
+            format!("{datestamp}-{agent_id}-{slug}.md")
+        };
+        let path = devlog_dir.join(&filename);
+
+        let mut body = format!(
+            "# {}\n\n- **Agent:** `{}`\n- **Task:** `{}`\n- **Completed:** {}\n",
+            params.task_id, agent_id, task_id, completed_iso
+        );
+        if let Some(sha) = &params.commit_sha {
+            body.push_str(&format!("- **Commit:** `{sha}`\n"));
+        }
+        body.push_str(&format!("\n## Summary\n\n{}\n", params.summary.trim()));
+
+        std::fs::write(&path, &body).map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("write devlog {} failed: {e}", path.display()),
+                None,
+            )
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "task_state": "DONE",
+                "completed_at": completed_iso,
+                "devlog": path.display().to_string(),
+            })
+            .to_string(),
+        )]))
     }
 }
 

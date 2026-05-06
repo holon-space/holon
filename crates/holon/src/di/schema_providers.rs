@@ -17,9 +17,9 @@ use std::marker::PhantomData;
 use fluxdi::{Injector, Provider, Shared};
 
 use crate::storage::schema_modules::{
-    BlockHierarchySchemaModule, BlockMatviewSchemaModule, BlockSchemaModule, CoreSchemaModule,
-    IdentitySchemaModule, LinkSchemaModule, NavigationSchemaModule, OperationsSchemaModule,
-    SyncStateSchemaModule, TaskBlockingEdgesSchemaModule,
+    BlockHierarchySchemaModule, BlockMatviewSchemaModule, BlockRequirementEdgesSchemaModule,
+    BlockSchemaModule, CoreSchemaModule, IdentitySchemaModule, LinkSchemaModule,
+    NavigationSchemaModule, OperationsSchemaModule, SyncStateSchemaModule,
 };
 use crate::storage::turso::DbHandle;
 
@@ -54,8 +54,8 @@ pub trait DbResource: Send + Sync + 'static {}
 pub struct CoreTables;
 impl DbResource for CoreTables {}
 
-/// The `block` matview hydrating `tags` / `blocked_by` from junction tables
-/// (depends on `block_raw` + `block_tags` + `task_blockers`).
+/// The `block` matview hydrating `tags` / `requires` from junction tables
+/// (depends on `block_raw` + `block_tags` + `block_requires`).
 pub struct BlockMatviewView;
 impl DbResource for BlockMatviewView {}
 
@@ -63,9 +63,9 @@ impl DbResource for BlockMatviewView {}
 pub struct BlockHierarchyView;
 impl DbResource for BlockHierarchyView {}
 
-/// `task_blocking_edges` matview (chained on `block` matview).
-pub struct TaskBlockingEdgesView;
-impl DbResource for TaskBlockingEdgesView {}
+/// `block_requirement_edges` matview (chained on `block` matview).
+pub struct BlockRequirementEdgesView;
+impl DbResource for BlockRequirementEdgesView {}
 
 /// `navigation_history`, `navigation_cursor`, `current_focus`, etc.
 pub struct NavigationTables;
@@ -79,7 +79,7 @@ impl DbResource for SyncStateTables {}
 pub struct OperationTables;
 impl DbResource for OperationTables {}
 
-/// `task_blockers`, `block_tags` junction tables (FK to `block_raw`).
+/// `block_requires`, `block_tags` junction tables (FK to `block_raw`).
 pub struct BlockTables;
 impl DbResource for BlockTables {}
 
@@ -171,16 +171,16 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<BlockMatviewView>>(),
     );
 
-    // -- TaskBlockingEdgesView (chained on block matview + junctions) --
-    injector.provide::<DbReady<TaskBlockingEdgesView>>(
+    // -- BlockRequirementEdgesView (chained on block matview + junctions) --
+    injector.provide::<DbReady<BlockRequirementEdgesView>>(
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
             let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
             let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&TaskBlockingEdgesSchemaModule, &db.handle())
+            run_schema_module(&BlockRequirementEdgesSchemaModule, &db.handle())
                 .await
-                .expect("TaskBlockingEdgesView schema init failed");
-            Shared::new(DbReady::<TaskBlockingEdgesView>::new())
+                .expect("BlockRequirementEdgesView schema init failed");
+            Shared::new(DbReady::<BlockRequirementEdgesView>::new())
         })
         .with_dependency::<DbReady<BlockMatviewView>>()
         .with_dependency::<DbReady<BlockTables>>(),
@@ -282,7 +282,7 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<BlockTables>>(),
         TypeId::of::<DbReady<BlockMatviewView>>(),
         TypeId::of::<DbReady<BlockHierarchyView>>(),
-        TypeId::of::<DbReady<TaskBlockingEdgesView>>(),
+        TypeId::of::<DbReady<BlockRequirementEdgesView>>(),
         TypeId::of::<DbReady<NavigationTables>>(),
         TypeId::of::<DbReady<SyncStateTables>>(),
         TypeId::of::<DbReady<OperationTables>>(),

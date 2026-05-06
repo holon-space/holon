@@ -9,7 +9,7 @@ holon_macros::widget_builder! {
         let mut __props = std::collections::HashMap::new();
         __props.insert("op".to_string(), Value::String(op));
         // Bind data to the current row so `row_id()` returns the target
-        // block's id. The headless drop walker (drop_entity, inv16) and
+        // block's id. The headless drop walker (drop_entity, inv-editable-text-has-draggable) and
         // the GPUI drop_zone builder match by row_id; both fall through
         // silently without this.
         ViewModel {

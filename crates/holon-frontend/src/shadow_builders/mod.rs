@@ -91,6 +91,7 @@ pub(crate) fn dispatch_resolve_props(
         "source_block" => Some(source_block::resolve_props_from_args(ba)),
         "source_editor" => Some(source_editor::resolve_props_from_args(ba)),
         "editable_text" => Some(editable_text::resolve_props_from_args(ba)),
+        "rendered_text" => Some(rendered_text::resolve_props_from_args(ba)),
         _ => None,
     }
 }

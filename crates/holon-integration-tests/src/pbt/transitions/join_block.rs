@@ -10,10 +10,12 @@ use holon_api::entity_uri::EntityUri;
 use holon_api::{ContentType, Region};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::{CursorPosition, ReferenceState};
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -28,118 +30,54 @@ pub struct JoinBlock {
 }
 
 impl E2ETransitionFactory for JoinBlock {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let no_content_update: std::collections::HashSet<EntityUri> = state
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .chain(state.layout_blocks.query_source_ids.iter())
-            .chain(state.profile_block_ids.iter())
-            .cloned()
-            .collect();
-
-        let peer_modified: std::collections::HashSet<String> = state
-            .peers
-            .iter()
-            .flat_map(|p| p.modified_stable_ids.iter().cloned())
-            .collect();
-        let is_peer_modified = |id: &EntityUri| peer_modified.contains(id.id());
-
-        // Editable blocks: non-page text blocks that are user-content (not layout),
-        // not peer-modified, and are descendants of the main focus roots.
-        let editable_block_ids: Vec<EntityUri> = state
-            .block_state
-            .blocks
-            .iter()
-            .filter(|(id, b)| {
-                b.content_type == ContentType::Text
-                    && !b.is_page()
-                    && !state.layout_blocks.contains(id)
-                    && !is_peer_modified(id)
-                    && !no_content_update.contains(id)
-                    && state.is_descendant_of_any(id, &focus_roots)
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        // JoinBlock: two cases that both fire on Backspace at position 0.
-        //   1. Block has a previous text sibling → merge into prev sibling.
-        //   2. Block is the first child of a text parent → merge into parent.
-        // Either case requires the merge target to be a text block (joining
-        // into a headline / source / document has different semantics we
-        // don't model). The parent target also must not be a layout
-        // headline, since those host their own render expression and
-        // mutating their content would corrupt the active layout.
-        let joinable: Vec<EntityUri> = editable_block_ids
-            .iter()
-            .filter(|id| {
-                // Case 1: prev sibling is text
-                let prev_text = state.previous_sibling(id).is_some_and(|prev| {
-                    state
-                        .block_state
-                        .blocks
-                        .get(&prev)
-                        .is_some_and(|b| b.content_type == ContentType::Text)
-                });
-                if prev_text {
-                    return true;
-                }
-                // Case 2: no prev sibling (first child) and parent is
-                // a non-layout text block.
-                if state.previous_sibling(id).is_some() {
-                    return false;
-                }
-                let parent_id = match state.block_state.blocks.get(*id) {
-                    Some(b) => b.parent_id.clone(),
-                    None => return false,
-                };
-                if parent_id.is_no_parent() || parent_id.is_sentinel() {
-                    return false;
-                }
-                let parent_is_text = state
-                    .block_state
-                    .blocks
-                    .get(&parent_id)
-                    .is_some_and(|b| b.content_type == ContentType::Text);
-                parent_is_text && !state.layout_blocks.contains(&parent_id)
-            })
-            .cloned()
-            .collect();
-
-        if joinable.is_empty() {
-            return None;
-        }
-
-        let strat = proptest::sample::select(joinable)
-            .prop_map(|block_id| JoinBlock { block_id })
-            .boxed();
-        Some((1, strat))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // JoinBlock fires on the focused Main entity (preconditions
+        // gate `focused_in_main == self.block_id`). Single-candidate
+        // pattern mirrors move_up.rs / move_down.rs.
+        let Some(block_id) = state.focused_entity(Region::Main).cloned() else {
+            return Validated::fail(Reason::NoFocusInMain);
+        };
+        let instance = JoinBlock { block_id };
+        instance.preconditions(state).map(|()| {
+            let strat = Just(instance.clone()).boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for JoinBlock {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let focused_in_main = state.focused_entity(holon_api::Region::Main);
-        let base_ok = state.app_started
-            && state.is_properly_setup()
-            && focused_in_main == Some(&self.block_id)
-            && state
-                .block_state
-                .blocks
-                .get(&self.block_id)
-                .is_some_and(|b| b.content_type == ContentType::Text)
-            && !state.layout_blocks.contains(&self.block_id)
-            && state.is_descendant_of_any(&self.block_id, &focus_roots);
-        if !base_ok {
-            return false;
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.is_properly_setup(), Reason::NotProperlySetup),
+        ];
+
+        checks.push(check(
+            focused_in_main == Some(&self.block_id),
+            Reason::FocusedIsNotSelf,
+        ));
+
+        let block = state.block_state.blocks.get(&self.block_id);
+        checks.push(check(block.is_some(), Reason::FocusedBlockMissing));
+        if let Some(b) = block {
+            checks.push(check(
+                b.content_type == ContentType::Text,
+                Reason::FocusedNotText,
+            ));
         }
+
+        checks.push(check(
+            !state.layout_blocks.contains(&self.block_id),
+            Reason::FocusedInLayoutBlocks,
+        ));
+        checks.push(check(
+            state.is_descendant_of_any(&self.block_id, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ));
+
         // Case 1: previous text sibling exists → join into prev sibling.
         let prev_text = state
             .previous_sibling(&self.block_id)
@@ -151,28 +89,42 @@ impl E2ETransitionImpl for JoinBlock {
                     .map(|b| b.content_type == ContentType::Text)
             })
             .unwrap_or(false);
-        if prev_text {
-            return true;
-        }
-        // Case 2: no previous sibling AND parent is a non-layout text block
-        // → join into parent. Mirrors the production semantics added
-        // for child→parent join.
-        if state.previous_sibling(&self.block_id).is_some() {
-            return false;
-        }
-        let parent_id = match state.block_state.blocks.get(&self.block_id) {
-            Some(b) => b.parent_id.clone(),
-            None => return false,
+
+        // Case 2: no previous sibling AND parent is a non-layout text block.
+        let parent_ok = if !prev_text {
+            if state.previous_sibling(&self.block_id).is_some() {
+                false
+            } else {
+                let parent_id = match state.block_state.blocks.get(&self.block_id) {
+                    Some(b) => b.parent_id.clone(),
+                    None => {
+                        return checks
+                            .into_iter()
+                            .collect::<Validated<Vec<()>, _>>()
+                            .map(|_| ());
+                    }
+                };
+                if parent_id.is_no_parent() || parent_id.is_sentinel() {
+                    false
+                } else {
+                    state
+                        .block_state
+                        .blocks
+                        .get(&parent_id)
+                        .is_some_and(|b| b.content_type == ContentType::Text)
+                        && !state.layout_blocks.contains(&parent_id)
+                }
+            }
+        } else {
+            true
         };
-        if parent_id.is_no_parent() || parent_id.is_sentinel() {
-            return false;
-        }
-        let parent_is_text = state
-            .block_state
-            .blocks
-            .get(&parent_id)
-            .is_some_and(|b| b.content_type == ContentType::Text);
-        parent_is_text && !state.layout_blocks.contains(&parent_id)
+
+        checks.push(check(prev_text || parent_ok, Reason::PreconditionFailed));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {

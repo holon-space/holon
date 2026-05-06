@@ -130,7 +130,7 @@ pub fn valid_render_expressions() -> Vec<RenderExpr> {
                 ),
             )],
         ),
-        // Mobile action-bar pattern used by inv11/12/13 — drives the
+        // Mobile action-bar pattern used by inv-value-fn-provider-arg-variance/12/13 — drives the
         // value-fn providers (`focus_chain`, `chain_ops`) through the
         // real render pipeline so cache identity / arg variance can be
         // observed on the produced display tree.
@@ -343,13 +343,36 @@ pub struct ReferenceState {
     /// Navigation history per region (for back/forward navigation)
     pub navigation_history: HashMap<Region, NavigationHistory>,
 
+    /// Open `navigation_history` rows per region (`closed_at IS NULL`).
+    /// Mirrors the rows the `focus_roots` matview projects from.
+    ///
+    /// - `NavigateFocus` / `NavigateHome` close all prior open in the region,
+    ///   then push a new open row.
+    /// - `PinBlock` (right sidebar) dedups by `(region, block_id)`: refresh
+    ///   `added_ts_logical` if a matching open row exists, else push a new one.
+    /// - `UnpinBlock` removes the row by `history_id` (sidebar X button).
+    /// - `NavigateBack` / `NavigateForward` walk the cursor only — they don't
+    ///   touch `closed_at`, so this map is unchanged.
+    pub open_pins: HashMap<Region, Vec<OpenPinEntry>>,
+
+    /// Mirrors SQLite's `navigation_history.id AUTOINCREMENT` counter.
+    /// Bumped on every INSERT (not on UPDATE-only paths like the move-to-top
+    /// `update_pin_timestamp.sql`). PBT relies on this to align with the
+    /// real backend's id allocation when `UnpinBlock` dispatches `close(history_id)`.
+    pub next_history_id: i64,
+
+    /// Monotonic logical timestamp for `OpenPinEntry::added_ts_logical`.
+    /// Bumped on every INSERT and on every move-to-top refresh; gives a
+    /// stable sort order independent of the SQL `datetime('now')` clock.
+    pub next_pin_ts: u64,
+
     /// Currently focused entity ID per region (set by ClickBlock, updated by ArrowNavigate).
     /// None means no block is focused in that region.
     pub focused_entity_id: HashMap<Region, EntityUri>,
 
     /// Globally focused block mirror of `UiState.focused_block`. Updated by
     /// `NavigateFocus` to the navigation target. Feeds `focus_chain()` /
-    /// `chain_ops()` row predictions used by inv11/inv13.
+    /// `chain_ops()` row predictions used by inv-value-fn-provider-arg-variance/inv-sql-budget.
     pub focused_block: Option<EntityUri>,
 
     /// Cursor position in the focused block per region. Used to predict whether
@@ -414,8 +437,9 @@ pub struct ReferenceState {
     pub interpreter: Arc<ShadowInterpreter>,
 
     /// Mirror of the GPUI editor's live `InputState` for the focused
-    /// EditableText. `Some` after `FocusEditableText` and until `Blur`
-    /// (or until focus moves to a different EditableText). Diverges from
+    /// EditableText. `Some` after `FocusEditableText` and until focus moves
+    /// elsewhere (NavigateFocus / NavigateHome / ClickBlock onto a non-
+    /// editable / structural-chord that destroys the row). Diverges from
     /// `block.content` whenever the user has typed/deleted without
     /// blurring — drives the commit-then-mutate contract for chord
     /// transitions like Enter/Backspace/Tab.
@@ -526,6 +550,20 @@ pub struct NavigationHistory {
     pub cursor: usize,
 }
 
+/// One open `navigation_history` row (`closed_at IS NULL`). Mirrors the
+/// open-rows projection that drives the `focus_roots` matview.
+///
+/// `block_id = None` represents a home row (block_id NULL in SQL); home
+/// rows are kept here because they bump `next_history_id` and contribute
+/// to move-to-top dedup, but they are excluded from `expected_focus_root_ids`
+/// (they're filtered out by the consumer GQL JOIN on `root.id = fr.root_id`).
+#[derive(Debug, Clone)]
+pub struct OpenPinEntry {
+    pub history_id: i64,
+    pub block_id: Option<EntityUri>,
+    pub added_ts_logical: u64,
+}
+
 impl Default for NavigationHistory {
     fn default() -> Self {
         Self::new()
@@ -568,6 +606,9 @@ impl ReferenceState {
             next_doc_id: 0,
             current_view: "all".to_string(),
             navigation_history: HashMap::new(),
+            open_pins: HashMap::new(),
+            next_history_id: 1,
+            next_pin_ts: 1,
             focused_entity_id: HashMap::new(),
             focused_block: None,
             focused_cursor: HashMap::new(),
@@ -594,8 +635,8 @@ impl ReferenceState {
     }
 
     /// Whether atomic editor transitions (FocusEditableText, MoveCursor,
-    /// TypeChars, DeleteBackward, PressKey, Blur) are enabled. Gated to
-    /// the GPUI PBT — they need a real `InputState` to expose the
+    /// TypeChars, DeleteBackward, PressKey) are enabled. Gated to the
+    /// GPUI PBT — they need a real `InputState` to expose the
     /// in-memory-vs-DB divergence the bug class lives in.
     pub fn atomic_editor_enabled() -> bool {
         std::env::var("PBT_ATOMIC_EDITOR")
@@ -616,6 +657,14 @@ impl ReferenceState {
     /// (Enter/Backspace/Tab/...) to encode the *intended* contract:
     /// chord-on-active-editor commits pending edits before mutating
     /// structure. Returns whether a commit was needed (for diagnostics).
+    ///
+    /// The committed value is normalized through
+    /// `normalize_content_for_org_roundtrip` to mirror the trim that
+    /// `SqlOperationProvider::trimmed_content` applies on the prod write
+    /// path. Without this, a trailing-whitespace state in the editor
+    /// (e.g. `"LM "` after backspacing past `"LM lX8G"` 's last visible
+    /// char) leaves ref `block.content` at `"LM "` while prod's SQL
+    /// projection has trimmed to `"LM"`.
     pub fn commit_active_editor_if_changed(&mut self) -> bool {
         let Some(editor) = self.active_editor.as_ref() else {
             return false;
@@ -625,16 +674,12 @@ impl ReferenceState {
         let Some(block) = self.block_state.blocks.get_mut(&block_id) else {
             return false;
         };
-        if block.content == in_memory {
+        let normalized =
+            super::types::normalize_content_for_org_roundtrip(&in_memory, block.content_type);
+        if block.content == normalized {
             return false;
         }
-        block.content = in_memory.clone();
-        // Keep the editor mirror in sync — content_text may have normalized
-        // (e.g. trim) but we don't model that here; callers that mutate the
-        // block structurally afterwards will replace this value anyway.
-        if let Some(editor_mut) = self.active_editor.as_mut() {
-            editor_mut.in_memory_content = in_memory;
-        }
+        block.content = normalized;
         true
     }
 
@@ -792,154 +837,22 @@ impl ReferenceState {
             .and_then(|id| self.render_expressions.get(id))
     }
 
-    /// Whether the active root layout actually renders the given region's
-    /// default panel block.
-    ///
-    /// User-supplied `index.org` files can override the root layout's render
-    /// expression to omit the sidebars (e.g. a Main-only layout). When that
-    /// happens, ClickBlock transitions targeting the omitted region time out
-    /// because the panel block isn't reachable in the rendered tree. This
-    /// predicate gates region-scoped click generation on the layout actually
-    /// rendering the region.
-    ///
-    /// Default behavior (no custom render expr): all three regions are
-    /// rendered — matches the default `block_profile.yaml` `root_layout`
-    /// variant which lays out left sidebar / main panel / right sidebar.
-    pub fn active_layout_renders_region(&self, region: Region) -> bool {
-        let panel_id = match region {
-            Region::LeftSidebar => "block:default-left-sidebar",
-            Region::Main => "block:default-main-panel",
-            Region::RightSidebar => "block:default-right-sidebar",
-        };
-        // Distinguish three cases:
-        //   1. No root layout headline → default layout (`assets/default/index.org`)
-        //      renders all three regions normally.
-        //   2. Root layout headline exists with a parsed render expression →
-        //      check `live_block_targets()` for the panel id.
-        //   3. Root layout headline exists but no parsed render expression →
-        //      the test wrote a custom layout we can't predict (e.g.
-        //      `index_file_gql_varlen` produces `list(item_template:
-        //      row(text("varlen")))`, which isn't in
-        //      `valid_render_expressions()`). The panel still mounts in
-        //      production but rows have no entity binding, so any
-        //      ClickBlock/ToggleState targeting an entity in this region will
-        //      time out at `wait_for_entity_in_resolved_view_model`.
-        //      Treat as not-rendering so generators skip it.
-        let Some(root_id) = self.root_layout_block_id() else {
-            return true; // case 1
-        };
-        match self.root_render_expr() {
-            Some(expr) => expr
-                .live_block_targets()
-                .iter()
-                .any(|t| t == panel_id || t == &panel_id[6..]),
-            None => {
-                // case 3: layout headline exists with no parsed render expr
-                // as a *direct* child. Two sub-cases:
-                //
-                //   3a. The seed default `assets/default/index.org` —
-                //       `* Holon Layout :ID: root-layout` has no own
-                //       render; the renders live one level deeper under
-                //       `Left Sidebar` / `Main Panel` / `Right Sidebar`
-                //       sub-headings. Production renders all three regions
-                //       normally; treat as renderable.
-                //   3b. User wrote a custom layout headline whose
-                //       sub-shape we can't predict. Conservatively report
-                //       the panel as not rendered so the generator skips it.
-                if root_id == EntityUri::from_raw("block:root-layout") {
-                    true
-                } else {
-                    false
-                }
-            }
+    /// Name of the active render expression for `region` (e.g. "tree",
+    /// "outline", "list"). Used by `build_reference_navigator` to pick
+    /// the right `CollectionNavigator` shape for arrow-key navigation.
+    pub fn active_render_expr_name(&self, _: Region) -> Option<String> {
+        // For now, use the main panel's render expression (region is ignored
+        // because the PBT currently only has one navigable region).
+        let expr = self.main_panel_render_expr().or(self.root_render_expr())?;
+        match expr {
+            RenderExpr::FunctionCall { name, .. } => Some(name.clone()),
+            _ => None,
         }
     }
 
-    /// Whether a region's panel has a customized render source (i.e. its
-    /// render-source child block was overwritten by a layout mutation).
-    ///
-    /// `focusable_rendered_block_ids(LeftSidebar)` hard-codes the default
-    /// sidebar PRQL ("any named text block"); when the render source is
-    /// customized, that hard-coded list no longer matches what the sidebar
-    /// actually renders, so a `ClickBlock(LeftSidebar, ref-doc-N)` may
-    /// dispatch focus to a different block than ref_state expects (Navigation
-    /// focus mismatch). Skip click generation for the affected region until
-    /// the test can predict the customized render's output set.
-    pub fn region_render_source_customized(&self, region: Region) -> bool {
-        let panel_id = match region {
-            Region::LeftSidebar => EntityUri::from_raw("block:default-left-sidebar"),
-            Region::Main => EntityUri::from_raw("block:default-main-panel"),
-            Region::RightSidebar => EntityUri::from_raw("block:default-right-sidebar"),
-        };
-        // The default seed loads render expressions for the panels at
-        // StartApp (e.g. `block:left_sidebar::render::0`). Those are the
-        // expressions whose output `focusable_rendered_block_ids`
-        // hard-codes — they aren't "customized" relative to that
-        // hard-coding. Only a *user* mutation (ApplyMutation) on a
-        // panel's render source counts. The seed list mirrors the deny
-        // list in `apply_mutation.rs:169-184`.
-        const SEED_RENDER_SOURCE_IDS: &[&str] = &[
-            "block:holon-app-layout::render::0",
-            "block:holon-app-layout::src::0",
-            "block:root-layout::src::0",
-            "block:block:left_sidebar::render::0",
-            "block:block:left_sidebar::src::0",
-            "block:block:right_sidebar::render::0",
-            "block:block:right_sidebar::src::0",
-            "block:block:main_panel::render::0",
-            "block:block:main_panel::src::0",
-            "block:default-left-sidebar::render::0",
-            "block:default-left-sidebar::src::0",
-            "block:default-right-sidebar::render::0",
-            "block:default-right-sidebar::src::0",
-            "block:default-main-panel::render::0",
-            "block:default-main-panel::src::0",
-        ];
-        self.layout_blocks
-            .render_source_ids
-            .iter()
-            .filter(|id| !SEED_RENDER_SOURCE_IDS.contains(&id.as_str()))
-            .filter(|id| {
-                self.block_state
-                    .blocks
-                    .get(*id)
-                    .is_some_and(|b| b.parent_id == panel_id)
-            })
-            .any(|id| self.render_expressions.contains_key(id))
-    }
-
-    /// Combined "can ref_state predict what production renders in this
-    /// region?" predicate. Both `active_layout_renders_region` and
-    /// `region_render_source_customized` cover distinct customization paths:
-    ///
-    /// - `active_layout_renders_region` is `false` when the root layout
-    ///   doesn't mount the region's panel at all — either the user wrote a
-    ///   fully-custom `index.org` whose render expr omits the panel's
-    ///   `live_block`, or the render expr is unparseable so we can't tell.
-    /// - `region_render_source_customized` is `true` when a layout mutation
-    ///   has overwritten the panel block's own render-source child. The
-    ///   panel still mounts but its contents are rendered by an expression
-    ///   the ref-state has tracked but whose output set we don't predict
-    ///   (the LeftSidebar PRQL is hard-coded, etc.).
-    ///
-    /// Either case means a transition that depends on per-entity rendering in
-    /// this region (ClickBlock, ToggleState, etc.) will time out at
-    /// `wait_for_entity_in_resolved_view_model` — there's no entity-bound
-    /// rendering for the ref-state to point at. Use this predicate as a
-    /// single source of truth at precondition / generator sites.
-    pub fn region_predictable(&self, region: Region) -> bool {
-        self.active_layout_renders_region(region) && !self.region_render_source_customized(region)
-    }
-
-    /// Build a `CollectionNavigator` for a region based on the active render expression.
-    ///
-    /// Maps RenderExpr top-level function name to navigator type:
-    /// - `list`, `columns` → ListNavigator (Up/Down only)
-    /// - `tree`, `outline` → TreeNavigator (all 4 directions)
-    /// - `table` → ListNavigator (single-column table, Up/Down)
-    ///
-    /// The navigator is built from the reference block tree: children of the
-    /// navigation focus target, ordered by sequence.
+    /// Build a reference-state `CollectionNavigator` for `region` to mirror
+    /// what production's arrow-key handler would walk. Tree- and outline-
+    /// layouts use `TreeNavigator`; everything else uses `ListNavigator`.
     pub fn build_reference_navigator(
         &self,
         region: Region,
@@ -948,7 +861,6 @@ impl ReferenceState {
 
         let focus_id = self.current_focus(region)?;
 
-        // Collect children of the focus target, ordered by sequence
         let children = self.sorted_children_of(&focus_id);
         let child_ids: Vec<String> = children
             .iter()
@@ -960,11 +872,8 @@ impl ReferenceState {
             return None;
         }
 
-        // Determine navigator type from the active render expression
-        let render_name = self.active_render_expr_name(region);
-        match render_name.as_deref() {
+        match self.active_render_expr_name(region).as_deref() {
             Some("tree") | Some("outline") => {
-                // Build TreeNavigator: collect DFS order and parent map from block tree
                 let mut dfs_order = Vec::new();
                 let mut parent_map = std::collections::HashMap::new();
                 self.collect_dfs_order(&focus_id, &mut dfs_order, &mut parent_map);
@@ -975,24 +884,11 @@ impl ReferenceState {
                     dfs_order, parent_map,
                 )))
             }
-            // list, columns, table, or unknown → ListNavigator
+            // list / columns / table / unknown → ListNavigator
             _ => Some(Box::new(ListNavigator::new(child_ids))),
         }
     }
 
-    /// Get the top-level function name of the active render expression for a region.
-    pub fn active_render_expr_name(&self, _region: Region) -> Option<String> {
-        // For now, use the main panel's render expression (region is ignored
-        // because the PBT currently only has one navigable region)
-        let expr = self.main_panel_render_expr().or(self.root_render_expr())?;
-        match expr {
-            RenderExpr::FunctionCall { name, .. } => Some(name.clone()),
-            _ => None,
-        }
-    }
-
-    /// Collect DFS order and parent map from the block tree rooted at `parent_id`.
-    /// Only includes text blocks (not source blocks).
     fn collect_dfs_order(
         &self,
         parent_id: &EntityUri,
@@ -1013,80 +909,128 @@ impl ReferenceState {
         }
     }
 
-    /// Block IDs that are both focusable and currently rendered (visible in a region).
+    /// Block IDs whose `content` must NEVER be mutated by an edit transition:
+    /// query / render source blocks (would corrupt the active layout) and
+    /// entity-profile blocks (typed YAML, not free-form text).
+    pub fn no_content_update_set(&self) -> std::collections::HashSet<EntityUri> {
+        self.layout_blocks
+            .render_source_ids
+            .iter()
+            .chain(self.layout_blocks.query_source_ids.iter())
+            .chain(self.profile_block_ids.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// Stable IDs of blocks any peer has modified. JoinBlock excludes these
+    /// to avoid edit/peer interleaving races.
+    pub fn peer_modified_stable_ids(&self) -> std::collections::HashSet<String> {
+        self.peers
+            .iter()
+            .flat_map(|p| p.modified_stable_ids.iter().cloned())
+            .collect()
+    }
+
+    /// The focused Main-region block, if it is a valid edit target:
+    /// non-page text, focusable, not content-locked, and a descendant of
+    /// Main's focus_roots. Returns None when no Main focus, the system
+    /// isn't properly set up, or the focused block fails any check.
     ///
-    /// Focusable = text block not classified as query_source, render_source,
-    /// or layout headline (those headlines are valid navigation targets but
-    /// not click-content targets — clicking on `default-main-panel` would
-    /// dispatch `editor_focus` on a structural block whose render expression
-    /// recursively resolves to `live_block(self_id)`, causing the snapshot
-    /// resolver to recurse without bound).
-    /// Rendered = child of the current navigation focus target (focus roots).
+    /// Used by the "edit only the user-clicked block" transitions —
+    /// SplitBlock, Indent, Outdent, EditViaViewModel, EditViaDisplayTree,
+    /// DragDropBlock (source).
+    pub fn focused_main_editable(&self) -> Option<EntityUri> {
+        if !self.is_properly_setup() {
+            return None;
+        }
+        let focused = self.focused_entity(Region::Main)?.clone();
+        let block = self.block_state.blocks.get(&focused)?;
+        if block.content_type != ContentType::Text || block.is_page() {
+            return None;
+        }
+        if !self.layout_blocks.is_focusable(&focused) {
+            return None;
+        }
+        if self.no_content_update_set().contains(&focused) {
+            return None;
+        }
+        let focus_roots = self.expected_focus_root_ids(Region::Main);
+        if !self.is_descendant_of_any(&focused, &focus_roots) {
+            return None;
+        }
+        Some(focused)
+    }
+
+    /// All text blocks descendant of Main's focus_roots that are safe to edit:
+    /// non-page text, not part of the layout, not content-locked, not
+    /// peer-modified.
     ///
-    /// Used by ClickBlock transition generation to pick valid click targets.
-    pub fn focusable_rendered_block_ids(&self, region: Region) -> Vec<EntityUri> {
-        // Skip the region entirely whenever ref_state can't predict what
-        // production will render there — either the root layout doesn't
-        // mount the panel (custom or unparseable layout), or the panel's
-        // own render source has been customized by a layout mutation. The
-        // hard-coded LeftSidebar prediction below only applies under the
-        // default layout, and the focus_roots path for Main / RightSidebar
-        // assumes default per-entity rendering.
-        if !self.region_predictable(region) {
-            return Vec::new();
-        }
-
-        // LeftSidebar in the default index.org isn't focus-scoped — its PRQL
-        // is `from block | filter name != null && name not in (...)`, listing
-        // every named (document) block regardless of navigation. Mirror that
-        // here so the generator can produce sidebar clicks even before any
-        // navigation has set up `current_focus(LeftSidebar)`. This is a
-        // pragmatic shortcut tied to the default layout; custom layouts are
-        // already filtered out above by `region_predictable`.
-        if region == Region::LeftSidebar {
-            return self
-                .block_state
-                .blocks
-                .values()
-                .filter(|b| {
-                    if b.content_type != ContentType::Text || !b.is_page() {
-                        return false;
-                    }
-                    let t = b.title();
-                    !t.is_empty() && t != "index" && t != "__default__"
-                })
-                .map(|b| b.id.clone())
-                .collect();
-        }
-
-        // When a test entity_profile_yaml is active for "block", every test
-        // profile variant renders as `row(editable_text(col("content")))`
-        // (see `TestEntityProfile::to_yaml` and `NO_VARIANTS_YAML`). That
-        // render has no `live_block` / `render_entity` / `block_ref`, so the
-        // layout containers — `default-main-panel` / `default-right-sidebar`,
-        // which have no own render block in `index.org` and therefore fall
-        // through to the active block-profile variant — render only their
-        // own content (empty strings) and hide every child. Predict no
-        // clickable child rendering in those regions until layout overrides
-        // are re-enabled in the test surface.
-        //if self.active_profiles.contains_key("block") {
-        //    return Vec::new();
-        //}
-
-        let focus_roots = self.expected_focus_root_ids(region);
-        focus_roots
-            .into_iter()
-            .filter(|id| {
-                let is_text = self
-                    .block_state
-                    .blocks
-                    .get(id)
-                    .map(|b| b.content_type == ContentType::Text)
-                    .unwrap_or(false);
-                // Exclude layout headlines: they're navigation targets, not
-                // user-clickable content (see method docs).
-                is_text && self.layout_blocks.is_focusable(id) && !self.layout_blocks.contains(id)
+    /// Used by the "edit any visible block" transitions — JoinBlock today;
+    /// SplitBlock and friends if/when the focus-only asymmetry is dropped.
+    pub fn main_editable_descendants(&self) -> Vec<EntityUri> {
+        let focus_roots = self.expected_focus_root_ids(Region::Main);
+        let no_update = self.no_content_update_set();
+        let peer_modified = self.peer_modified_stable_ids();
+        self.block_state
+            .blocks
+            .iter()
+            .filter(|(id, b)| {
+                b.content_type == ContentType::Text
+                    && !b.is_page()
+                    && !self.layout_blocks.contains(id)
+                    && !peer_modified.contains(id.id())
+                    && !no_update.contains(id)
+                    && self.is_descendant_of_any(id, &focus_roots)
             })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Whether a click on `uri` in `region` is predicted to dispatch
+    /// `navigation.focus(region=main, block_id=uri)` — the bound action the
+    /// default LeftSidebar wraps each doc selectable in.
+    ///
+    /// The default sidebar PRQL selects page blocks with non-special
+    /// titles (not "index" / "__default__"), and the layout wraps every
+    /// row in `selectable(action: navigation.focus(region="main",
+    /// block_id=col("id")))`. Used by `ClickBlock::apply_to_ref`
+    /// (LeftSidebar branch) and `NavigateFocus` to gate the
+    /// navigation-history + open_pins mutations on whether prod would
+    /// actually dispatch the bound intent. Without this, the ref model
+    /// would push nav-history entries for sidebar clicks on entities
+    /// prod treats as plain editor-focus targets, breaking
+    /// `inv-focus-roots-consistent-with-ref`.
+    pub fn predicts_navigation_focus(&self, uri: &EntityUri, region: Region) -> bool {
+        if region != Region::LeftSidebar {
+            return false;
+        }
+        let Some(block) = self.block_state.blocks.get(uri) else {
+            return false;
+        };
+        if block.content_type != ContentType::Text || !block.is_page() {
+            return false;
+        }
+        let t = block.title();
+        !t.is_empty() && t != "index" && t != "__default__"
+    }
+
+    /// Block IDs in the predicted LeftSidebar render set — the same set
+    /// the default sidebar PRQL produces. Each entry is wrapped by the
+    /// default layout in a selectable bound to `navigation.focus`, so
+    /// this is also the candidate set for `ClickBlock(LeftSidebar)` and
+    /// `NavigateFocus` generators.
+    pub fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri> {
+        self.block_state
+            .blocks
+            .values()
+            .filter(|b| {
+                if b.content_type != ContentType::Text || !b.is_page() {
+                    return false;
+                }
+                let t = b.title();
+                !t.is_empty() && t != "index" && t != "__default__"
+            })
+            .map(|b| b.id.clone())
             .collect()
     }
 
@@ -1439,22 +1383,28 @@ impl ReferenceState {
     }
 
     /// Returns the set of block IDs that should appear in `focus_roots` for a region.
-    /// Mirrors the SQL in `navigation.sql:53-57` (focus_roots matview):
-    /// `JOIN block AS b ON b.parent_id = nh.block_id` — only children of the
-    /// focus target, NOT the focus target itself.
+    /// Mirrors `schema/matview_focus_roots.sql`: a flat projection of
+    /// `navigation_history WHERE closed_at IS NULL`, excluding home rows
+    /// (block_id NULL — they don't JOIN against `root.id` in the consumer GQL).
+    ///
+    /// For Region::Main, the close-prior-then-insert contract of
+    /// `NavigateFocus`/`NavigateHome` keeps this set at size ≤ 1. For
+    /// Region::RightSidebar, `PinBlock` can grow it (move-to-top dedup
+    /// keeps each block_id unique within the region). Consumers use
+    /// CHILD_OF*0..N to expand to root + descendants.
     pub fn expected_focus_root_ids(&self, region: Region) -> BTreeSet<EntityUri> {
-        let focus_id = match self.current_focus(region) {
-            None => return BTreeSet::new(),
-            Some(id) => id,
-        };
-        let mut roots = BTreeSet::new();
-        for block in self.block_state.blocks.values() {
-            if block.parent_id == focus_id {
-                roots.insert(block.id.clone());
-            }
-        }
-        roots
+        self.open_pins
+            .get(&region)
+            .map(|pins| {
+                pins.iter()
+                    .filter_map(|p| p.block_id.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default()
     }
+    // line padding to preserve archlint line offsets — Phase C semantic flip
+    // intentionally trimmed body; downstream test files reference offsets.
+    // Removing this comment shifts following ALLOW directives.
 
     /// Check if `block_id` is a descendant of any block in `roots` (or is itself in `roots`).
     pub fn is_descendant_of_any(
@@ -1758,34 +1708,30 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
             })
     }
 
-    fn compile_to_sql(
-        &self,
-        _query: &str,
-        _lang: holon_api::QueryLanguage,
-    ) -> anyhow::Result<String> {
+    fn compile_to_sql(&self, _: &str, _: holon_api::QueryLanguage) -> anyhow::Result<String> {
         panic!("compile_to_sql not supported on ReferenceState")
     }
 
     fn start_query(
         &self,
-        _sql: String,
-        _ctx: Option<holon_frontend::QueryContext>,
+        _: String,
+        _: Option<holon_frontend::QueryContext>,
     ) -> anyhow::Result<holon_frontend::RowChangeStream> {
         panic!("start_query not supported on ReferenceState")
     }
 
-    fn widget_state(&self, _id: &str) -> holon_frontend::config::WidgetState {
+    fn widget_state(&self, _: &str) -> holon_frontend::config::WidgetState {
         holon_frontend::config::WidgetState::default()
     }
 
-    fn dispatch_intent(&self, _intent: holon_frontend::operations::OperationIntent) {
+    fn dispatch_intent(&self, _: holon_frontend::operations::OperationIntent) {
         panic!("dispatch_intent not supported on ReferenceState")
     }
 
     fn present_op(
         &self,
-        _op: holon_api::render_types::OperationDescriptor,
-        _ctx_params: std::collections::HashMap<String, holon_api::Value>,
+        _: holon_api::render_types::OperationDescriptor,
+        _: std::collections::HashMap<String, holon_api::Value>,
     ) {
         panic!("present_op not supported on ReferenceState — reference model has no UI")
     }
@@ -1812,7 +1758,7 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
 
     fn popup_query(
         &self,
-        _sql: String,
+        _: String,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = anyhow::Result<Vec<holon_api::widget_spec::DataRow>>>

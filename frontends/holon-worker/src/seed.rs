@@ -22,6 +22,8 @@
 
 use holon::api::backend_engine::BackendEngine;
 use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
+use holon_api::{EntityName, EntityUri, Region, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const ROOT_ID: &str = "block:root-layout";
@@ -138,6 +140,34 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
             "text", "", "c1",
             r#"{"sequence":101,"level":2}"#,
         ),
+        // Journals page — bundled inline because the org parser is not available
+        // on wasm32. Native equivalent: `assets/default/Journals.org` parsed by
+        // `seed_default_layout` via DEFAULT_ASSETS. The two source children
+        // (`::src::0` PRQL listing journal entries, `::render::0` render
+        // expression) make `block:journals` resolve to a list-of-journal-entries
+        // when focused. The "Journal Auto-Create" subtree (trigger + action) is
+        // intentionally omitted — auto-create is a page-level concern.
+        (
+            "block:journals",
+            DOC_ID,
+            "Journals",
+            "text", "", "d0",
+            r#"{"name":"Journals","sequence":200,"level":1}"#,
+        ),
+        (
+            "block:journals::src::0",
+            "block:journals",
+            "from block\nfilter parent_id == 'block:journals'\nfilter name != null\nsort {-name}",
+            "source", "holon_prql", "d1",
+            r#"{"sequence":201}"#,
+        ),
+        (
+            "block:journals::render::0",
+            "block:journals",
+            r#"list(#{sortkey: "-name", item_template: selectable(row(icon("calendar"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
+            "source", "render", "d2",
+            r#"{"sequence":202}"#,
+        ),
     ];
 
     for (id, parent_id, content, content_type, source_language, sort_key, properties) in stmts {
@@ -162,13 +192,37 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
     }
 
     // `name` is a top-level column on `block` (not in properties JSON). The
-    // left-sidebar PRQL filters on `name`, so the welcome doc needs it set.
+    // left-sidebar PRQL filters on `name`, so docs need it set.
     db.execute(
         &format!("UPDATE {BLOCK_WRITE_TABLE} SET name = 'Welcome' WHERE id = 'block:welcome'"),
         vec![],
     )
     .await?;
+    db.execute(
+        &format!("UPDATE {BLOCK_WRITE_TABLE} SET name = 'Journals' WHERE id = 'block:journals'"),
+        vec![],
+    )
+    .await?;
 
-    tracing::info!("[seed] seeded {} default layout blocks", stmts.len());
+    // FU-10 browser parity: land first-launch users on `block:journals`. Going
+    // through `navigation::focus` (rather than raw INSERT into navigation_history)
+    // keeps navigation_history and navigation_cursor atomically in sync, so the
+    // focus_roots / current_focus matviews resolve correctly on first render.
+    // Reached only on the fresh-DB path (after the early return above), so
+    // existing DBs preserve whatever the user last navigated to.
+    let mut nav_params: HashMap<String, Value> = HashMap::new();
+    nav_params.insert("region".to_string(), Value::from(Region::Main));
+    nav_params.insert(
+        "block_id".to_string(),
+        Value::String(EntityUri::block("journals").as_str().to_string()),
+    );
+    engine
+        .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
+        .await?;
+
+    tracing::info!(
+        "[seed] seeded {} default layout blocks; main panel focused on block:journals",
+        stmts.len()
+    );
     Ok(())
 }

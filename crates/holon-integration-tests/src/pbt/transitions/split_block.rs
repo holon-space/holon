@@ -7,13 +7,16 @@
 //! `transition_budgets.rs:303-312` (expected SQL).
 
 use holon_api::ContentType;
+use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
-use crate::pbt::reference_state::ReferenceState;
+use crate::pbt::reference_state::{CursorPosition, ReferenceState};
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -29,83 +32,94 @@ pub struct SplitBlock {
 }
 
 impl E2ETransitionFactory for SplitBlock {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-
-        let no_content_update: std::collections::HashSet<EntityUri> = state
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .chain(state.layout_blocks.query_source_ids.iter())
-            .chain(state.profile_block_ids.iter())
-            .cloned()
-            .collect();
-
-        // SplitBlock shares the `editable_block_ids` context from the legacy
-        // post-startup generator: only the focused block (if valid) is
-        // editable. Content is ASCII-only in PBT, so byte == char.
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let focused_in_main = state.focused_entity(holon_api::Region::Main).cloned();
-        let editable_block_ids: Vec<EntityUri> =
-            if state.is_properly_setup() && focused_in_main.is_some() {
-                let focused = focused_in_main.as_ref().unwrap();
-                let valid = state
-                    .block_state
-                    .blocks
-                    .get(focused)
-                    .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page())
-                    && state.layout_blocks.is_focusable(focused)
-                    && !no_content_update.contains(focused)
-                    && state.is_descendant_of_any(focused, &focus_roots);
-                if valid { vec![focused.clone()] } else { vec![] }
-            } else {
-                vec![]
-            };
-
-        if editable_block_ids.is_empty() {
-            return None;
-        }
-
-        let blocks = state.block_state.blocks.clone();
-        let strat = proptest::sample::select(editable_block_ids)
-            .prop_flat_map(move |block_id| {
-                let content_len = blocks
-                    .get(&block_id)
-                    .map(|b| b.content_text().len())
-                    .unwrap_or(0);
-                (Just(block_id), 0..=content_len)
-            })
-            .prop_map(|(block_id, position)| SplitBlock { block_id, position })
-            .boxed();
-        Some((1, strat))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // SplitBlock fires on Enter against the active editor in production —
+        // any text descendant of Main's focus_roots is a legal target.
+        // Content is ASCII-only in PBT, so byte == char.
+        // Candidate set = Main's editable descendants; per-position
+        // preconditions filter to valid positions (0..=content_len).
+        let candidates: Vec<(EntityUri, usize)> = {
+            let editable_block_ids = state.main_editable_descendants();
+            let mut result = vec![];
+            for block_id in editable_block_ids {
+                if let Some(block) = state.block_state.blocks.get(&block_id) {
+                    let content_len = block.content_text().len();
+                    for position in 0..=content_len {
+                        if (SplitBlock {
+                            block_id: block_id.clone(),
+                            position,
+                        })
+                        .preconditions(state)
+                        .is_good()
+                        {
+                            result.push((block_id.clone(), position));
+                        }
+                    }
+                }
+            }
+            result
+        };
+        check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
+            let strat = prop::sample::select(candidates)
+                .prop_map(|(block_id, position)| SplitBlock { block_id, position })
+                .boxed();
+            // High weight when eligible: editing transitions are starved
+            // unless Main is navigated to a populated doc, so when we have
+            // editable descendants we want SplitBlock to fire often enough
+            // to exercise the Enter → split capture-action path.
+            (100, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for SplitBlock {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let focused_in_main = state.focused_entity(holon_api::Region::Main);
-        state.app_started
-            && state.is_properly_setup()
-            && focused_in_main == Some(&self.block_id)
-            && state
-                .block_state
-                .blocks
-                .get(&self.block_id)
-                .is_some_and(|b| {
-                    b.content_type == ContentType::Text && self.position <= b.content_text().len()
-                })
-            && !state.layout_blocks.contains(&self.block_id)
-            && state.is_descendant_of_any(&self.block_id, &focus_roots)
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.is_properly_setup(), Reason::NotProperlySetup),
+        ];
+
+        let block = state.block_state.blocks.get(&self.block_id);
+        checks.push(check(block.is_some(), Reason::FocusedBlockMissing));
+        if let Some(b) = block {
+            checks.push(check(
+                b.content_type == ContentType::Text,
+                Reason::FocusedNotText,
+            ));
+            checks.push(check(
+                self.position <= b.content_text().len(),
+                Reason::PreconditionFailed,
+            ));
+        }
+
+        checks.push(check(
+            !state.layout_blocks.contains(&self.block_id),
+            Reason::FocusedInLayoutBlocks,
+        ));
+        checks.push(check(
+            state.is_descendant_of_any(&self.block_id, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.push_undo_snapshot();
-        state.split_block(&self.block_id, self.position);
-        state.reset_cursor_if_focused(&self.block_id);
+        let new_block_id = state.split_block(&self.block_id, self.position);
+        // Production issues an editor_focus follow-up that moves keyboard focus
+        // to the new block at position 0 (traits.rs::split_block → editor_focus_op).
+        // Mirror that here so subsequent transitions (NavigateFocus, ArrowNavigate,
+        // JoinBlock, SplitBlock) see the correct focused block in Main.
+        state.focused_entity_id.insert(Region::Main, new_block_id);
+        state
+            .focused_cursor
+            .insert(Region::Main, CursorPosition::start());
     }
 
     async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {

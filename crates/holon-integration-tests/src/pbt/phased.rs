@@ -31,14 +31,14 @@ pub struct PbtReadyContext {
 /// Result returned by the `on_ready` callback.
 pub struct PbtReadyResult {
     /// Custom mutation driver (None = use DirectUserDriver).
-    pub driver: Option<Box<dyn crate::UserDriver>>,
-    /// Optional frontend ReactiveEngine for inv14 assertions.
+    pub driver: Option<Arc<dyn crate::UserDriver>>,
+    /// Optional frontend ReactiveEngine for inv-frontend-engine assertions.
     /// When set, each transition checks the frontend's ViewModel for errors.
     pub frontend_engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
-    /// Optional geometry provider for inv14 bounds assertions.
+    /// Optional geometry provider for inv-frontend-engine bounds assertions.
     /// When set, checks that GPUI actually laid out the expected elements.
     pub frontend_geometry: Option<Box<dyn holon_frontend::geometry::GeometryProvider>>,
-    /// Optional shared screenshot analysis state for inv14 empty-UI detection.
+    /// Optional shared screenshot analysis state for inv-frontend-engine empty-UI detection.
     pub frontend_visual_state: Option<crate::ui_driver::VisualState>,
 }
 
@@ -183,10 +183,10 @@ fn run_pre_startup_loop(
         actual_steps += 1;
         current_step += 1;
         eprintln!(
-            "[pbt_setup] Step {}/{}: {:?} ✓",
+            "[pbt_setup] Step {}/{}: {} ✓",
             current_step,
             num_steps,
-            std::mem::discriminant(&transition)
+            transition.variant_name()
         );
     }
 
@@ -579,10 +579,10 @@ async fn pbt_setup_with_runtime(
         current_step += 1;
 
         eprintln!(
-            "[pbt_setup] Step {}/{}: {:?} ✓",
+            "[pbt_setup] Step {}/{}: {} ✓",
             current_step,
             num_steps,
-            std::mem::discriminant(&transition)
+            transition.variant_name()
         );
     }
 
@@ -591,15 +591,18 @@ async fn pbt_setup_with_runtime(
         "pbt_setup exhausted all steps without reaching StartApp"
     );
 
-    // F_direct: install ReactiveEngineDriver so subsequent mutations go
-    // through the same dispatch path GPUI uses. Falls back to
-    // DirectUserDriver only when ReactiveEngine isn't available (legacy
-    // tests that don't wire the reactive runtime).
-    if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
-        sut.driver = Some(Box::new(crate::ReactiveEngineDriver::new(reactive.clone())));
-    } else {
-        sut.driver = Some(Box::new(DirectUserDriver::new(sut.ctx.engine().clone())));
-    }
+    // Construct the medium-aware driver once, then install the same
+    // `Arc<dyn UserDriver>` into both `sut.driver` (so transitions
+    // dispatch through it) and `live_driver()` (so generators read
+    // observation verbs from it). The two views must agree on which
+    // medium answers — there is no fallback inside generators.
+    let driver: Arc<dyn crate::UserDriver> =
+        if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
+            Arc::new(crate::ReactiveEngineDriver::new(reactive.clone()))
+        } else {
+            Arc::new(DirectUserDriver::new(sut.ctx.engine().clone()))
+        };
+    sut.driver = Some(driver);
 
     let summary = format!("setup complete: {actual_steps} pre-startup steps");
 
@@ -763,6 +766,10 @@ pub async fn pbt_teardown() -> anyhow::Result<String> {
         state.actual_steps, state.num_steps
     );
 
+    // Surface why transitions never fired: each weighted_generator or
+    // preconditions rejection has been recorded into a per-thread histogram.
+    crate::pbt::validation::print_rejection_histogram();
+
     std::thread::spawn(move || {
         drop(state);
     })
@@ -877,6 +884,19 @@ pub fn run_pbt_with_driver_sync_callback(
     driver: &mut dyn crate::UiDriver,
     on_ready: impl FnOnce(&PbtReadyContext) -> Option<PbtReadyResult>,
 ) -> anyhow::Result<String> {
+    // Drop guard so the rejection histogram surfaces even when the PBT
+    // panics mid-run (e.g. seed=1 currently hits a Turso scheduler bug at
+    // step 44). Without this, every gpui PBT panic loses the histogram —
+    // and the histogram is the only signal we have for why FocusEditableText
+    // / NavigateFocus never fire.
+    struct PrintHistogramOnDrop;
+    impl Drop for PrintHistogramOnDrop {
+        fn drop(&mut self) {
+            crate::pbt::validation::print_rejection_histogram();
+        }
+    }
+    let _histogram_guard = PrintHistogramOnDrop;
+
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
 
     let mut runner = create_runner()?;
@@ -914,15 +934,18 @@ pub fn run_pbt_with_driver_sync_callback(
             None => (None, None, None, None),
         };
 
-    // F_direct: prefer ReactiveEngineDriver over DirectUserDriver unless the
-    // caller supplied a custom driver (e.g. GpuiUserDriver).
-    if custom_driver.is_some() {
-        sut.driver = custom_driver;
-    } else if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
-        sut.driver = Some(Box::new(crate::ReactiveEngineDriver::new(reactive.clone())));
-    } else {
-        sut.driver = Some(Box::new(DirectUserDriver::new(sut.ctx.engine().clone())));
-    }
+    // Build the medium-aware driver and install into both `sut.driver`
+    // and `live_driver()`. The caller-supplied `custom_driver` wins —
+    // that's how `gpui_ui_pbt.rs` injects `GpuiUserDriver` after the
+    // window is up.
+    let user_driver: Arc<dyn crate::UserDriver> = match custom_driver {
+        Some(d) => d,
+        None => match sut.ctx.reactive_engine.as_ref() {
+            Some(reactive) => Arc::new(crate::ReactiveEngineDriver::new(reactive.clone())),
+            None => Arc::new(DirectUserDriver::new(sut.ctx.engine().clone())),
+        },
+    };
+    sut.driver = Some(user_driver);
     sut.frontend_engine = frontend_engine;
     sut.frontend_geometry = frontend_geometry;
     sut.frontend_visual_state = frontend_visual_state;
@@ -969,13 +992,13 @@ pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
         "run_phased_pbt_sync",
     )?;
 
-    // F_direct: prefer ReactiveEngineDriver so post-startup transitions use
-    // the reactive dispatch pipeline. Falls back when no ReactiveEngine.
-    if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
-        sut.driver = Some(Box::new(crate::ReactiveEngineDriver::new(reactive.clone())));
-    } else {
-        sut.driver = Some(Box::new(DirectUserDriver::new(sut.ctx.engine().clone())));
-    }
+    // Build the medium-aware driver and install into both `sut.driver`
+    // and `live_driver()` so generators read the same source.
+    let user_driver: Arc<dyn crate::UserDriver> = match sut.ctx.reactive_engine.as_ref() {
+        Some(reactive) => Arc::new(crate::ReactiveEngineDriver::new(reactive.clone())),
+        None => Arc::new(DirectUserDriver::new(sut.ctx.engine().clone())),
+    };
+    sut.driver = Some(user_driver);
 
     eprintln!("[run_phased_pbt_sync] setup complete: {actual_steps} pre-startup steps");
 
@@ -992,7 +1015,7 @@ pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
         ref_state =
             <VariantRef<Full> as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
 
-        let transition_label = format!("{:?}", std::mem::discriminant(&transition));
+        let transition_label = transition.variant_name().to_string();
         crate::debug_pause::pause_before_step(current_step + 1, &transition_label);
 
         runtime.block_on(sut.apply_transition_async(&ref_state, &transition));

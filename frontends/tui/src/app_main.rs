@@ -3,8 +3,8 @@ use crate::keybindings::{
 };
 use crate::render::{render_view_model, EditableTarget, RenderCtx, RenderRegistry};
 use crate::stylesheet;
-use holon::sync::mutable_text::TextOp;
 use holon_api::{EntityName, Value};
+use holon_frontend::cell::TextOp;
 use holon_frontend::editor_view_model::EditorViewModel;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
@@ -107,17 +107,17 @@ impl std::fmt::Display for TuiState {
 }
 
 impl r3bl_tui::HasEditorBuffers for TuiState {
-    fn get_mut_editor_buffer(&mut self, _id: FlexBoxId) -> Option<&mut r3bl_tui::EditorBuffer> {
+    fn get_mut_editor_buffer(&mut self, _: FlexBoxId) -> Option<&mut r3bl_tui::EditorBuffer> {
         None
     }
-    fn insert_editor_buffer(&mut self, _id: FlexBoxId, _buffer: r3bl_tui::EditorBuffer) {}
-    fn contains_editor_buffer(&self, _id: FlexBoxId) -> bool {
+    fn insert_editor_buffer(&mut self, _: FlexBoxId, _: r3bl_tui::EditorBuffer) {}
+    fn contains_editor_buffer(&self, _: FlexBoxId) -> bool {
         false
     }
 }
 
 impl r3bl_tui::HasDialogBuffers for TuiState {
-    fn get_mut_dialog_buffer(&mut self, _id: FlexBoxId) -> Option<&mut r3bl_tui::DialogBuffer> {
+    fn get_mut_dialog_buffer(&mut self, _: FlexBoxId) -> Option<&mut r3bl_tui::DialogBuffer> {
         None
     }
 }
@@ -144,19 +144,14 @@ impl App for AppMain {
     type S = TuiState;
     type AS = AppSignal;
 
-    fn app_init(
-        &mut self,
-        _component_registry_map: &mut ComponentRegistryMap<TuiState, AppSignal>,
-        _has_focus: &mut HasFocus,
-    ) {
-    }
+    fn app_init(&mut self, _: &mut ComponentRegistryMap<TuiState, AppSignal>, _: &mut HasFocus) {}
 
     fn app_handle_input_event(
         &mut self,
         input_event: InputEvent,
         global_data: &mut GlobalData<TuiState, AppSignal>,
-        _component_registry_map: &mut ComponentRegistryMap<TuiState, AppSignal>,
-        _has_focus: &mut HasFocus,
+        _: &mut ComponentRegistryMap<TuiState, AppSignal>,
+        _: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({
             // Handle Ctrl+Q exit
@@ -361,10 +356,10 @@ impl App for AppMain {
 
     fn app_handle_signal(
         &mut self,
-        _action: &AppSignal,
-        _global_data: &mut GlobalData<TuiState, AppSignal>,
-        _component_registry_map: &mut ComponentRegistryMap<TuiState, AppSignal>,
-        _has_focus: &mut HasFocus,
+        _: &AppSignal,
+        _: &mut GlobalData<TuiState, AppSignal>,
+        _: &mut ComponentRegistryMap<TuiState, AppSignal>,
+        _: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({ EventPropagation::ConsumedRender });
     }
@@ -372,8 +367,8 @@ impl App for AppMain {
     fn app_render(
         &mut self,
         global_data: &mut GlobalData<TuiState, AppSignal>,
-        _component_registry_map: &mut ComponentRegistryMap<TuiState, AppSignal>,
-        _has_focus: &mut HasFocus,
+        _: &mut ComponentRegistryMap<TuiState, AppSignal>,
+        _: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
         throws_with_return!({
             // Spawn the watch task on the very first render — needs the
@@ -793,7 +788,10 @@ fn active_region_of(registry: &RenderRegistry, focus_idx: usize) -> usize {
 /// first `Block` region if any — so initial load and post-`Enter`
 /// async re-renders (where the previously-focused block no longer exists
 /// because the doc just changed) land the cursor on the first row of the
-/// active doc. Final fallback: index 0 (or NO_FOCUS if empty).
+// ALLOW(fallback): index-0 default below is intentional and obvious from
+// the function logic (an empty registry has no rows to focus). Note:
+// `NO_FOCUS` is the explicit empty sentinel so the choice is disclosed.
+/// active doc. Final default: index 0 (or NO_FOCUS if empty).
 fn reconcile_focus(state: &TuiState, registry: &RenderRegistry) {
     use crate::render::SelectableKind;
 
@@ -930,8 +928,8 @@ fn enter_pressed(state: &mut TuiState) -> EnterAction {
         .engine
         .dispatch_intent(editor_focus_intent_for(&target.block_id));
 
-    let mt = match state.engine.editable_text(&target.block_id, &target.field) {
-        Ok(mt) => mt,
+    let cell = match state.engine.editable_text(&target.block_id, &target.field) {
+        Ok(c) => c,
         Err(e) => {
             state.status_message = format!("editable text unavailable: {e}");
             return EnterAction::Nothing;
@@ -942,9 +940,9 @@ fn enter_pressed(state: &mut TuiState) -> EnterAction {
         Vec::new(),
         std::collections::HashMap::new(),
         target.field.clone(),
-        mt.current(),
+        cell.current(),
     );
-    vm.attach_mutable_text(mt);
+    vm.attach_cell(cell);
     let cursor = vm.current_text().unwrap_or_default().len();
     // Snapshot a remote-delta stream BEFORE moving the VM into EditState.
     // The stream is an independent broadcast subscription, so the VM can

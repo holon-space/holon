@@ -1,0 +1,479 @@
+//! [`EntityCellRegistry`] for the `block` entity type.
+//!
+//! Phase 1 wired `block.content` to a [`LoroTextCellBacking`] when a Loro
+//! doc was configured (Full mode). Phase 2 extends this with a
+//! [`BlockCellRegistry::write_field`] dispatcher: every block field write
+//! is offered to the registry first, which routes it through the Loro
+//! authority (LoroText for `content`, LoroTree `tree.mov` for `parent_id`,
+//! LoroMap meta entries for everything else). On `Ok(false)` the caller
+//! falls through to direct SQL — that branch only runs in SqlOnly mode or
+//! for fields without a clean Loro encoding (`sort_key`, `depth`, ...).
+//!
+//! Caching for the `content` cell is delegated to
+//! [`holon_core::cell_registry::CellCache`] — `Weak`-keyed natural eviction
+//! plus an `on_entity_deleted` proactive prune so a same-id re-create
+//! can't observe a stale cell wrapping an orphaned `LoroText` container.
+
+use std::any::{Any, TypeId};
+use std::sync::Arc;
+
+use anyhow::{Result, anyhow};
+use loro::{LoroDoc, LoroText};
+
+use crate::api::repository::CoreOperations;
+use holon_api::{EntityUri, Value};
+use holon_core::cell::CellBacking;
+use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
+
+use crate::api::loro_backend::{CONTENT_RAW, LoroBackend, STABLE_ID, TREE_NAME};
+use crate::sync::loro_document::LoroDocument;
+use crate::sync::loro_text_cell_backing::LoroTextCellBacking;
+
+/// Registry of [`Cell<T>`](holon_core::cell::Cell)s for `block` entity
+/// fields.
+///
+/// Construction modes:
+/// - `with_loro(doc)` — Full mode; `content` returns a Loro-backed cell.
+/// - `sql_only()` — SqlOnly mode; ANY `live_field_any` call errors loudly
+///   because Phase 1 has no editor in SqlOnly mode and synthetic test
+///   stores bypass the registry entirely (they get `cells() == None`
+///   from the `BlockOperations` default).
+pub struct BlockCellRegistry {
+    cache: CellCache,
+    backing_source: BackingSource,
+}
+
+enum BackingSource {
+    Loro {
+        doc: Arc<LoroDoc>,
+        backend: Arc<LoroBackend>,
+    },
+    SqlOnly,
+}
+
+impl BlockCellRegistry {
+    /// Construct a Loro-backed registry from the shared `LoroDocument`. The
+    /// registry walks the tree on demand to resolve `(block_id, "content")`
+    /// to a `LoroText` container, and dispatches non-content writes through
+    /// the wrapped [`LoroBackend`] (Phase 2 authority flip).
+    pub fn with_loro(loro_doc: Arc<LoroDocument>) -> Self {
+        let doc = loro_doc.doc();
+        let backend = Arc::new(LoroBackend::from_document(loro_doc));
+        Self {
+            cache: CellCache::new(),
+            backing_source: BackingSource::Loro { doc, backend },
+        }
+    }
+
+    /// Convenience constructor that takes a raw `Arc<LoroDoc>`. Used by
+    /// tests and integration test fixtures (`pbt/sut.rs`) that build a
+    /// `LoroDoc` directly via the `loro` crate without going through
+    /// `LoroDocumentStore`. Production callers should prefer
+    /// [`Self::with_loro`].
+    pub fn with_loro_doc(doc: Arc<LoroDoc>) -> Self {
+        let loro_doc = LoroDocument::from_existing(doc.clone(), "test");
+        let backend = Arc::new(LoroBackend::from_document(Arc::new(loro_doc)));
+        Self {
+            cache: CellCache::new(),
+            backing_source: BackingSource::Loro { doc, backend },
+        }
+    }
+
+    /// Construct a SqlOnly-mode registry. All `live_field_any` calls
+    /// error with a clear message — there's no editor in SqlOnly mode.
+    pub fn sql_only() -> Self {
+        Self {
+            cache: CellCache::new(),
+            backing_source: BackingSource::SqlOnly,
+        }
+    }
+
+    /// Thin wrapper over the shared [`find_position_for_sort_key_hint`]
+    /// helper that pulls a tree from the registry's `LoroDoc` and runs the
+    /// sibling scan inline (no async lock — the write_field call site
+    /// follows up with `update_block_position`, which takes its own lock).
+    fn compute_position_for_sort_key(
+        &self,
+        doc: &Arc<LoroDoc>,
+        target_bare_id: &str,
+        new_key: &str,
+    ) -> Result<(String, Option<String>)> {
+        let tree = doc.get_tree(TREE_NAME);
+        crate::api::loro_backend::find_position_for_sort_key_hint(&tree, target_bare_id, new_key)
+            .ok_or_else(|| {
+                anyhow!(
+                    "compute_position_for_sort_key: target {target_bare_id} \
+                     not in Loro tree"
+                )
+            })
+    }
+
+    fn resolve_loro_text_container(&self, block_id: &str) -> Result<(Arc<LoroDoc>, LoroText)> {
+        let doc = match &self.backing_source {
+            BackingSource::Loro { doc, .. } => doc.clone(),
+            BackingSource::SqlOnly => {
+                return Err(anyhow!(
+                    "BlockCellRegistry is in SqlOnly mode; no Loro backing is available \
+                     for ({block_id}, \"content\"). Phase 1 doesn't expect editor cells \
+                     in SqlOnly mode."
+                ));
+            }
+        };
+        let bare_id = block_id.strip_prefix("block:").unwrap_or(block_id);
+        let tree = doc.get_tree(TREE_NAME);
+        for node in tree.get_nodes(false) {
+            if matches!(
+                node.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            ) {
+                continue;
+            }
+            let meta = tree
+                .get_meta(node.id)
+                .map_err(|e| anyhow!("tree.get_meta({:?}) failed: {e:#}", node.id))?;
+            let stable_id_matches = match meta.get(STABLE_ID) {
+                Some(loro::ValueOrContainer::Value(v)) => {
+                    v.as_string().is_some_and(|s| s.to_string() == bare_id)
+                }
+                _ => false,
+            };
+            if stable_id_matches {
+                let text = meta
+                    .get_or_create_container(CONTENT_RAW, LoroText::new())
+                    .map_err(|e| {
+                        anyhow!("get_or_create_container({CONTENT_RAW}) for {block_id}: {e:?}")
+                    })?;
+                return Ok((doc, text));
+            }
+        }
+        Err(anyhow!(
+            "Block {block_id} not found in Loro tree (inbound consumer hasn't applied the \
+             create event yet, or the block was never imported)"
+        ))
+    }
+
+    /// Write a single block field through the Loro authority. Returns
+    /// `Ok(true)` when the write landed via Loro; `Ok(false)` when this
+    /// registry can't handle the (uri, field) pair (SqlOnly mode, or a
+    /// field whose Loro encoding doesn't round-trip cleanly to SQL today —
+    /// `sort_key` lives only in SQL; `depth` is derived from tree
+    /// structure; the various `_expected_*` watermark fields produced by
+    /// the outbound projector are control metadata, not field writes).
+    /// On `Ok(false)` the caller falls through to the SQL `set_field`
+    /// path. On `Err` the error is loud and the SQL path is NOT tried.
+    pub async fn write_field(&self, uri: &EntityUri, field: &str, value: Value) -> Result<bool> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly => return Ok(false),
+        };
+
+        // Watermark / control fields produced by `LoroSyncController`'s
+        // outbound diff. They're not field writes; they're WHERE-clause
+        // hints for the SQL UPDATE the projector emits. Pass straight
+        // through to SQL.
+        if field.starts_with("_expected_") {
+            return Ok(false);
+        }
+
+        // Fields without a clean Loro encoding today. Keep them on the
+        // SQL path; the inbound consumer (when it sees a non-Loro origin
+        // CDC event) reflects them back into Loro where applicable.
+        // - `id`: the row's primary key, never reassigned
+        // - `depth`: derived from the tree structure on snapshot
+        // - `content_type`, `source_language`, `source_name`: stored in
+        //   Loro but written by `update_block_text` / chord-time content
+        //   create paths, not by `set_field` callers
+        if matches!(
+            field,
+            "id" | "depth" | "content_type" | "source_language" | "source_name"
+        ) {
+            return Ok(false);
+        }
+
+        let id = uri.to_string();
+        match field {
+            "content" => {
+                let s = value.as_string().map(String::from).ok_or_else(|| {
+                    anyhow!("write_field(content): expected String, got {value:?}")
+                })?;
+                let cell =
+                    (self as &dyn EntityCellRegistry).live_field::<String>(uri, "content")?;
+                cell.set(s).await?;
+                Ok(true)
+            }
+            "parent_id" => {
+                let s = value.as_string().map(String::from).ok_or_else(|| {
+                    anyhow!("write_field(parent_id): expected String, got {value:?}")
+                })?;
+                backend
+                    .update_parent_id(&id, s)
+                    .await
+                    .map_err(|e| anyhow!("update_parent_id({id}): {e:#}"))?;
+                Ok(true)
+            }
+            "tags" => {
+                let arr = match &value {
+                    Value::Array(a) => a.clone(),
+                    other => {
+                        return Err(anyhow!("write_field(tags): expected Array, got {other:?}"));
+                    }
+                };
+                let tags: Vec<String> = arr
+                    .into_iter()
+                    .map(|v| {
+                        v.as_string()
+                            .map(String::from)
+                            .ok_or_else(|| anyhow!("write_field(tags): entry not a string"))
+                    })
+                    .collect::<Result<_>>()?;
+                backend
+                    .set_block_tags(&id, &tags)
+                    .await
+                    .map_err(|e| anyhow!("set_block_tags({id}): {e:#}"))?;
+                Ok(true)
+            }
+            "sort_key" => {
+                // Phase 3.4: a sort_key write is interpreted as a positional
+                // intent — "place me where this fractional-index would sort
+                // among my siblings". We scan the target's current siblings,
+                // find the largest fractional_index strictly less than the
+                // incoming value, and call `tree.mov_after(target, that)`
+                // (or `mov_to(parent, 0)` if no sibling is smaller). Loro
+                // generates the actual fractional index for the resulting
+                // position; `read_block_from_tree` projects it as
+                // `Block.sort_key`. The caller's computed key is discarded
+                // — it carried order info, not lasting value.
+                let new_key = value.as_string().map(String::from).ok_or_else(|| {
+                    anyhow!("write_field(sort_key): expected String, got {value:?}")
+                })?;
+                let doc = match &self.backing_source {
+                    BackingSource::Loro { doc, .. } => doc.clone(),
+                    BackingSource::SqlOnly => return Ok(false),
+                };
+                let (parent_id_str, predecessor_uri) =
+                    self.compute_position_for_sort_key(&doc, uri.id(), &new_key)?;
+                backend
+                    .update_block_position(&id, &parent_id_str, predecessor_uri.as_deref())
+                    .await
+                    .map_err(|e| anyhow!("update_block_position({id}): {e:#}"))?;
+                Ok(true)
+            }
+            "marks" => {
+                // Phase 3.2: marks go through the Peritext write path
+                // (`update_block_marked`). The marks live on the LoroText
+                // container; we re-assert the current text alongside the new
+                // mark set so the existing helper's "wholesale replace" stays
+                // tight. `Value::Null` clears all marks.
+                let marks: Vec<holon_api::MarkSpan> = match &value {
+                    Value::Null => Vec::new(),
+                    Value::String(s) => holon_api::marks_from_json(s)
+                        .map_err(|e| anyhow!("write_field(marks): marks JSON parse error: {e}"))?,
+                    other => {
+                        return Err(anyhow!(
+                            "write_field(marks): expected String (JSON) or Null, got {other:?}"
+                        ));
+                    }
+                };
+                let current = backend
+                    .get_block(&id)
+                    .await
+                    .map_err(|e| anyhow!("write_field(marks): get_block({id}): {e:#}"))?;
+                backend
+                    .update_block_marked(&id, &current.content, &marks)
+                    .await
+                    .map_err(|e| anyhow!("update_block_marked({id}): {e:#}"))?;
+                Ok(true)
+            }
+            // Other scalars (completed, collapsed, block_type, properties,
+            // created_at, updated_at, …) round-trip through the meta
+            // `properties` map: written by `update_block_fields`, read back
+            // into `block.properties` HashMap by `read_block_from_tree`,
+            // and projected to SQL columns by `block_to_params`.
+            _ => {
+                backend
+                    .update_block_fields(&id, &[(field.to_string(), Value::Null, value)])
+                    .await
+                    .map_err(|e| anyhow!("update_block_fields({field}) for {id}: {e:#}"))?;
+                Ok(true)
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EntityCellRegistry for BlockCellRegistry {
+    fn live_field_any(
+        &self,
+        uri: &EntityUri,
+        field: &str,
+        type_id: TypeId,
+    ) -> Result<Arc<dyn Any + Send + Sync>> {
+        if field != "content" {
+            return Err(anyhow!(
+                "BlockCellRegistry::live_field_any: field {field:?} not registered \
+                 (Phase 1 only handles \"content\"); other fields land in Phase 2"
+            ));
+        }
+        if type_id != TypeId::of::<String>() {
+            return Err(anyhow!(
+                "BlockCellRegistry::live_field_any: field \"content\" requires T=String \
+                 (caller asked for a different type)"
+            ));
+        }
+        let block_id = uri.id();
+        let block_id_owned = block_id.to_string();
+        self.cache.get_or_construct::<String, _>(uri, field, || {
+            let (doc, text) = self.resolve_loro_text_container(&block_id_owned)?;
+            let backing = LoroTextCellBacking::new(doc, text)?;
+            Ok(Arc::new(backing) as Arc<dyn CellBacking<String>>)
+        })
+    }
+
+    fn on_entity_deleted(&self, uri: &EntityUri) {
+        self.cache.evict_uri(uri);
+    }
+
+    /// Item 4 phase 1: typed positional write. Routes a (parent, after_id)
+    /// positional intent straight to `LoroBackend::update_block_position`,
+    /// bypassing the legacy `set_field("sort_key", gen_key_between(...))`
+    /// string round-trip. In SqlOnly mode, returns `Ok(false)` so the
+    /// caller falls back to the gen_key_between + `set_field` shape that
+    /// still persists the fractional-index value in the SQL column.
+    async fn write_position(
+        &self,
+        uri: &EntityUri,
+        parent_id: &str,
+        after_id: Option<&str>,
+    ) -> Result<bool> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly => return Ok(false),
+        };
+        backend
+            .update_block_position(uri.id(), parent_id, after_id)
+            .await
+            .map_err(|e| anyhow!("update_block_position({}): {e:#}", uri.id()))?;
+        Ok(true)
+    }
+
+    /// Authoritative block create through `LoroBackend::create_block` +
+    /// `update_block_position`. The chord-op (`split_block`) drives this
+    /// instead of `BlockOperations::create` so the new block lands in the
+    /// Loro tree first; the outbound projector then emits the SQL INSERT
+    /// tagged `EventOrigin::Loro`, which the inbound gate `EchoSuppress`es
+    /// rather than dropping as an unmigrated SQL-direct write. SqlOnly
+    /// mode returns `Ok(false)` so the caller falls back to the SQL path.
+    async fn create_entity(
+        &self,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+        new_id: &EntityUri,
+        content: &str,
+    ) -> Result<bool> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly => return Ok(false),
+        };
+        let block_content = holon_api::BlockContent::text(content.to_string());
+        backend
+            .create_block(parent_id.clone(), block_content, Some(new_id.clone()))
+            .await
+            .map_err(|e| anyhow!("create_block({new_id}): {e:#}"))?;
+        eprintln!(
+            "[create_entity-diag] create_block done new={} parent={} after={:?}",
+            new_id.as_str(),
+            parent_id.as_str(),
+            after_id.map(|a| a.as_str().to_string())
+        );
+        if let Some(after) = after_id {
+            eprintln!(
+                "[create_entity-diag] calling update_block_position target_id={} parent={} pred_id={}",
+                new_id.id(),
+                parent_id.as_str(),
+                after.id()
+            );
+            backend
+                .update_block_position(new_id.id(), parent_id.as_str(), Some(after.id()))
+                .await
+                .map_err(|e| anyhow!("update_block_position({new_id}): {e:#}"))?;
+            eprintln!("[create_entity-diag] update_block_position done");
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use holon_core::cell::Cell;
+    use holon_core::cell_registry::EntityCellRegistryExt;
+
+    fn make_loro_doc_with_block(block_id: &str) -> Arc<LoroDoc> {
+        let doc = Arc::new(LoroDoc::new());
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+        let node = tree.create(None).unwrap();
+        let meta = tree.get_meta(node).unwrap();
+        meta.insert(STABLE_ID, block_id.to_string()).unwrap();
+        meta.insert_container(CONTENT_RAW, LoroText::new()).unwrap();
+        doc.commit();
+        doc
+    }
+
+    #[test]
+    fn loro_mode_resolves_content_cell() -> Result<()> {
+        let doc = make_loro_doc_with_block("abc");
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let uri = EntityUri::block("abc");
+        let cell: Cell<String> = registry.as_ref().live_field::<String>(&uri, "content")?;
+        assert_eq!(cell.current(), "");
+        Ok(())
+    }
+
+    #[test]
+    fn loro_mode_unknown_field_errs() {
+        let doc = make_loro_doc_with_block("abc");
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let uri = EntityUri::block("abc");
+        let res = registry.as_ref().live_field::<String>(&uri, "completed");
+        let err = res.err().expect("expected an error for unknown field");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("not registered"), "msg = {msg}");
+    }
+
+    #[test]
+    fn sql_only_mode_errs_loudly() {
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::sql_only());
+        let uri = EntityUri::block("abc");
+        let res = registry.as_ref().live_field::<String>(&uri, "content");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn loro_mode_block_not_in_tree_errs() {
+        let doc = make_loro_doc_with_block("present");
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let uri = EntityUri::block("missing");
+        let res = registry.as_ref().live_field::<String>(&uri, "content");
+        let err = res.err().expect("expected an error for missing block");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("not found in Loro tree"), "msg = {msg}");
+    }
+
+    #[test]
+    fn on_entity_deleted_prunes_cache() -> Result<()> {
+        let doc = make_loro_doc_with_block("zzz");
+        let registry: Arc<dyn EntityCellRegistry> = Arc::new(BlockCellRegistry::with_loro_doc(doc));
+        let uri = EntityUri::block("zzz");
+        let _cell = registry.as_ref().live_field::<String>(&uri, "content")?;
+        registry.on_entity_deleted(&uri);
+        // The cache entry was pruned; a fresh lookup constructs again.
+        // We can't directly observe construction without instrumentation,
+        // but we can confirm the resolve still succeeds and returns a
+        // working cell.
+        let cell: Cell<String> = registry.as_ref().live_field::<String>(&uri, "content")?;
+        assert_eq!(cell.current(), "");
+        Ok(())
+    }
+}

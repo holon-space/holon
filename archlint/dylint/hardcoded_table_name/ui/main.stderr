@@ -15,11 +15,11 @@ LL |     let t2 = "block_tags";
    |
    = help: reference it via the typed constant in `crates/holon/src/storage/block_table_names.rs` (`BLOCK_WRITE_TABLE`, `BLOCK_READ_TABLE`, …) so a future rename or matview-promotion is a compile error, not a silent runtime write-rejection. See devlog/MEMORY: LoroSyncController May 2026.
 
-warning: string literal `"task_blockers"` is a known holon matview/junction name
+warning: string literal `"block_requires"` is a known holon matview/junction name
   --> $DIR/main.rs:5:14
    |
-LL |     let t3 = "task_blockers";
-   |              ^^^^^^^^^^^^^^^
+LL |     let t3 = "block_requires";
+   |              ^^^^^^^^^^^^^^^^
    |
    = help: reference it via the typed constant in `crates/holon/src/storage/block_table_names.rs` (`BLOCK_WRITE_TABLE`, `BLOCK_READ_TABLE`, …) so a future rename or matview-promotion is a compile error, not a silent runtime write-rejection. See devlog/MEMORY: LoroSyncController May 2026.
 

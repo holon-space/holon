@@ -8,13 +8,15 @@
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::{ContentType, SourceLanguage};
+use holon_api::{ContentType, Region, SourceLanguage};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -30,26 +32,40 @@ pub struct StartApp {
 }
 
 impl E2ETransitionFactory for StartApp {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if state.app_started {
-            return None;
-        }
-
-        let strat = Just(StartApp {
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let instance = StartApp {
             wait_for_ready: true,
             enable_todoist: true,
             enable_loro: state.variant.enable_loro,
+        };
+        instance.preconditions(state).map(|()| {
+            let strat = Just(instance).boxed();
+            // Scale weight with how much pre-startup work has already
+            // accumulated so an unlucky proptest seed can't starve us out
+            // of the 50-step pre-startup budget. Each org file written
+            // raises StartApp's odds (capped to keep early steps able to
+            // still pick CreateDirectory/WriteOrgFile/JjGitInit).
+            let weight =
+                2u32.saturating_add((state.pre_startup_file_count as u32).saturating_mul(8));
+            (weight, strat)
         })
-        .boxed();
-
-        Some((2, strat))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for StartApp {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        !state.app_started && state.pre_startup_file_count > 0
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(!state.app_started, Reason::AppAlreadyStarted),
+            check(
+                state.pre_startup_file_count > 0,
+                Reason::PreStartupFileCountZero,
+            ),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -219,6 +235,34 @@ impl E2ETransitionImpl for StartApp {
             .get("block")
             .expect("Block type must be registered");
         state.seed_profile = holon::entity_profile::profile_from_type_def(&block_type_def);
+
+        // FU-10 mirror: production `seed_default_layout` calls
+        // `navigation::focus(Main, block:journals)` on fresh DBs, which
+        // inserts a navigation_history row and updates the cursor. Mirror
+        // that here so the reference state's `current_focus` and
+        // `expected_focus_root_ids(Main)` line up with what the SUT
+        // actually has post-StartApp.
+        use crate::pbt::reference_state::{NavigationHistory, OpenPinEntry};
+        let journals_uri = EntityUri::block("journals");
+        let history = state
+            .navigation_history
+            .entry(Region::Main)
+            .or_insert_with(NavigationHistory::new);
+        history.entries.truncate(history.cursor + 1);
+        history.entries.push(Some(journals_uri.clone()));
+        history.cursor = history.entries.len() - 1;
+
+        let history_id = state.next_history_id;
+        state.next_history_id += 1;
+        let added_ts_logical = state.next_pin_ts;
+        state.next_pin_ts += 1;
+        let pins = state.open_pins.entry(Region::Main).or_default();
+        pins.clear();
+        pins.push(OpenPinEntry {
+            history_id,
+            block_id: Some(journals_uri),
+            added_ts_logical,
+        });
     }
 
     async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut dyn SutHandle) {
@@ -232,7 +276,7 @@ impl E2ETransitionImpl for StartApp {
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 200,
             writes: 60,

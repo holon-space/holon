@@ -656,6 +656,37 @@ impl TestEnvironment {
             .unwrap_or(0)
     }
 
+    /// Whether the `LoroSyncController` inbound runtime gate is currently
+    /// open (events are reflected SQL→Loro). Returns `true` when Loro is
+    /// disabled — the gate's "off" state only matters when there's a
+    /// controller to gate.
+    pub fn loro_sync_inbound_runtime_enabled(&self) -> bool {
+        self.loro_sync_handle
+            .as_ref()
+            .map(|h| h.inbound_runtime_enabled())
+            .unwrap_or(true)
+    }
+
+    /// Number of non-Loro-origin block events the inbound runtime path has
+    /// dropped (because the gate is disabled). Stays 0 while the gate is open.
+    /// Returns 0 when Loro is disabled.
+    pub fn loro_sync_drop_count(&self) -> usize {
+        self.loro_sync_handle
+            .as_ref()
+            .map(|h| h.inbound_runtime_drop_count())
+            .unwrap_or(0)
+    }
+
+    /// Number of non-Loro-origin block events the inbound runtime path has
+    /// applied to Loro (legitimate reflections that passed the gate, e.g.
+    /// `EventOrigin::Org`). Returns 0 when Loro is disabled.
+    pub fn loro_sync_applied_count(&self) -> usize {
+        self.loro_sync_handle
+            .as_ref()
+            .map(|h| h.inbound_runtime_applied_count())
+            .unwrap_or(0)
+    }
+
     /// Wait until every named EventBus consumer has caught up to the
     /// current published watermark, or until `timeout` elapses.
     ///
@@ -1213,7 +1244,7 @@ impl TestEnvironment {
         // quiescence races in the cross-executor PBT variant — the short
         // sleep gives other executors a chance to make progress.
         //
-        // Correctness gate: inv1 (SQL = ref), inv3 (UI model = ref), and inv8
+        // Correctness gate: inv-backend-blocks-match-ref (SQL = ref), inv-watch-rows-match-ref (UI model = ref), and inv-region-focus-roots
         // (region focus roots) all start failing if the producer hasn't
         // actually delivered events by the time we poll. If they flake, bump
         // the sleep.
@@ -1336,7 +1367,7 @@ impl TestEnvironment {
         let mut spurious: Vec<(String, usize)> = Vec::new();
         // For each spurious source, keep a compact one-line summary of every
         // change record so a failure dump shows what actually leaked, not
-        // just the count. inv16 is the panic path, so the cost of the
+        // just the count. inv-editable-text-has-draggable is the panic path, so the cost of the
         // extra Strings only ever matters when the test is failing.
         let mut spurious_dump: Vec<(String, u64, String)> = Vec::new();
         let mut watch_seen: HashMap<String, u64> = HashMap::new();
@@ -1444,18 +1475,20 @@ impl TestEnvironment {
 
         if !spurious.is_empty() {
             eprintln!(
-                "[inv16] CDC not quiescent — spurious events after seq watermark {target_seq}: {:?}",
+                "[inv-editable-text-has-draggable] CDC not quiescent — spurious events after seq watermark {target_seq}: {:?}",
                 spurious,
             );
             // Dump every leaked change so the panic log is enough to
             // identify which writes are firing CDC, without needing MCP
             // attachment or sqlite inspection.
-            eprintln!("[inv16] spurious change records (source, seq, change):");
+            eprintln!(
+                "[inv-editable-text-has-draggable] spurious change records (source, seq, change):"
+            );
             for (source, seq, summary) in &spurious_dump {
                 eprintln!("    [{source} seq={seq}] {summary}");
             }
             crate::debug_pause::pause_on_fail(&format!(
-                "inv16 CDC quiescence violation — spurious events after seq watermark \
+                "inv-editable-text-has-draggable CDC quiescence violation — spurious events after seq watermark \
                  {target_seq}: {:?}",
                 spurious,
             ));
@@ -1463,7 +1496,7 @@ impl TestEnvironment {
 
         assert!(
             spurious.is_empty(),
-            "[inv16] CDC not quiescent after settlement — spurious events: {:?}. \
+            "[inv-editable-text-has-draggable] CDC not quiescent after settlement — spurious events: {:?}. \
              This indicates the backend is churning (emitting add/remove cycles \
              for unchanged data).",
             spurious,
@@ -1728,7 +1761,7 @@ impl TestEnvironment {
         // matview. After `wait_for_blocks_synced` succeeds (CDC accumulator
         // has all expected ids), an immediate SELECT against the matview
         // can still return fewer rows because the matview's IVM state is
-        // mid-propagation — same class of race as the inv10d
+        // mid-propagation — same class of race as the inv-viewmodel-root-matches-render-expr
         // `block_with_query_source.sql` issue
         // (devlog/2026-05-05-110311.md). `block_raw` is synchronously
         // written; the page-tag exclusion via `block_tags` is unaffected.
@@ -1886,7 +1919,7 @@ impl TestEnvironment {
             // (it only does after the StartApp push for the default doc, and after
             // file parsing for pre-seeded regular files), so a header-sensitive
             // hash produces 5 s timeouts in cases where the body is already
-            // correct. inv2's block-equivalence assertion is the real correctness
+            // correct. inv-org-roundtrip-blocks-equal's block-equivalence assertion is the real correctness
             // gate — this hash is just a sync-completion heuristic.
             let expected_org = holon_orgmode::org_renderer::OrgRenderer::render_entitys(
                 &doc_blocks,
@@ -2136,7 +2169,7 @@ pub type TestContext = TestEnvironment;
 /// Alias for backward compatibility
 pub type TestContextBuilder = TestEnvironmentBuilder;
 
-/// Compact one-line summary of a CDC change record. Used by inv16 to
+/// Compact one-line summary of a CDC change record. Used by inv-editable-text-has-draggable to
 /// dump spurious leaked items without the noise of full Debug output.
 fn summarize_change(change: &holon_api::streaming::MapChange) -> String {
     use holon_api::streaming::Change;

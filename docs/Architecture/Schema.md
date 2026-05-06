@@ -235,6 +235,33 @@ To add a new table or view:
 
 The registry automatically determines the correct initialization order.
 
+### Cell Field Declaration
+
+Each entity-type module declares which of its fields are exposed as `Cell<T>` and what backing protocol drives them. This is analogous to the `edge_fields()` declaration on `BlockSchemaModule` (`crates/holon/src/sync/block_schema.rs`) for junction tables, but for the reactive read primitive instead of edge storage.
+
+```rust
+impl BlockSchemaModule {
+    pub fn cell_fields(&self) -> Vec<CellFieldDescriptor> {
+        vec![
+            // Rich-text field — Loro-backed in Full mode, LWW in SqlOnly
+            CellFieldDescriptor::text("content"),
+            // Scalar fields stored in LoroMap meta on the tree node
+            CellFieldDescriptor::scalar::<bool>("completed"),
+            CellFieldDescriptor::scalar::<bool>("collapsed"),
+            CellFieldDescriptor::scalar::<String>("block_type"),
+            CellFieldDescriptor::scalar::<i64>("created_at"),
+            // Tree-structural fields
+            CellFieldDescriptor::tree_parent("parent_id"),
+            CellFieldDescriptor::tree_position("sort_key"),
+        ]
+    }
+}
+```
+
+`BlockCellRegistry` reads this declaration to map `(field_name, T)` → backing constructor at runtime. The DI module picks the variant per build mode: `LoroTextCellBacking` / `LoroMetaCellBacking<T>` / `LoroTreeParentCellBacking` / `LoroTreePositionCellBacking` in Full mode; `LwwTextCellBacking` / `LwwScalarBacking<T>` in SqlOnly. Type mismatches (`live_field::<i64>` for a `bool` field) error loudly.
+
+See [Storage](Storage.md) for cell internals and [Sync](Sync.md) for the authority + projection model.
+
 ### Key Files
 
 | Path | Description |
@@ -243,6 +270,9 @@ The registry automatically determines the correct initialization order.
 | `crates/holon/src/storage/schema_modules.rs` | Concrete module implementations |
 | `crates/holon/src/storage/resource.rs` | `Resource` enum |
 | `crates/holon/src/di/mod.rs` | Integration with DI and startup |
+| `crates/holon-core/src/cell.rs` | `Cell<T>`, `CellBacking<T>`, `TextCellBacking` |
+| `crates/holon-core/src/cell_registry.rs` | `EntityCellRegistry` trait |
+| `crates/holon/src/sync/block_cell_registry.rs` | `BlockCellRegistry` impl + cell-field declaration |
 
 ## Value Types
 

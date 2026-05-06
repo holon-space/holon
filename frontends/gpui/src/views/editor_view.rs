@@ -8,8 +8,8 @@ use gpui_component::input::{
     OutdentInline, Paste,
 };
 use gpui_component::menu::PopupMenuItem;
-use holon::sync::mutable_text::{CursorBias, DeltaOp, TextDelta, TextOp};
 use holon_api::widget_spec::DataRow;
+use holon_frontend::cell::{CursorBias, DeltaOp, TextDelta, TextOp};
 use holon_frontend::editor_view_model::{EditorAction, EditorKey, EditorViewModel};
 use holon_frontend::input::{InputAction, WidgetInput};
 use holon_frontend::navigation::{Boundary, CursorHint, NavDirection};
@@ -54,7 +54,7 @@ pub struct EditorView {
 
 impl EditorView {
     pub fn new(
-        _el_id: String,
+        _: String,
         content: String,
         field: String,
         row_id: String,
@@ -94,11 +94,11 @@ impl EditorView {
         let mut controller =
             EditorViewModel::new(operations, triggers, context_params, field, content);
         controller.set_async_context(services.clone());
-        // Attach MutableText if the provider can resolve one. Headless /
-        // stub / test paths leave it unattached and the VM's pass-through
-        // CRDT methods become no-ops.
-        if let Ok(mt) = services.editable_text(&row_id, &field_for_subscription) {
-            controller.attach_mutable_text(mt);
+        // Attach a `Cell<String>` if the cell registry can resolve one.
+        // Headless / stub / test paths leave it unattached and the VM's
+        // pass-through CRDT methods become no-ops.
+        if let Ok(cell) = services.editable_text(&row_id, &field_for_subscription) {
+            controller.attach_cell(cell);
         }
         let controller = Arc::new(Mutex::new(controller));
 
@@ -119,7 +119,7 @@ impl EditorView {
                         // Without this, clicking inside an editable_text gives the
                         // underlying Input gpui-focus but `focused_block` stays on
                         // whatever was focused before — chord keys and operations
-                        // then dispatch against the wrong block. PBT inv15 and the
+                        // then dispatch against the wrong block. PBT inv-focus-matches-ref and the
                         // GeometryDriver read the focus from the engine's
                         // `focused_block_mutable()` Mutable, so this single write
                         // is the only update needed.
@@ -178,10 +178,10 @@ impl EditorView {
                         execute_action(action, &services_clone, this.input.entity_id(), cx);
 
                         // CRDT: compute local delta and apply through the
-                        // view model. The VM's MutableText filters our own
+                        // view model. The Loro-backed cell filters our own
                         // writes via origin == "ui_local".
                         let vm = ctrl.lock().unwrap();
-                        if vm.has_mutable_text() {
+                        if vm.has_cell() {
                             let prev = this.previous_text.clone();
                             if text != prev {
                                 let op = compute_text_delta(&prev, &text);
@@ -362,7 +362,7 @@ impl EditorView {
 
         // ── CRDT-backed remote delta subscription ──────
         //
-        // When the view model has an attached `MutableText`, seed the
+        // When the view model has an attached `Cell<String>`, seed the
         // diff baseline from its current text and subscribe to remote
         // deltas. Cursor preservation uses Loro's `Cursor` anchoring via
         // the VM's `anchor_cursor` / `resolve_cursor` pass-throughs.
@@ -372,13 +372,13 @@ impl EditorView {
             .unwrap()
             .current_text()
             .unwrap_or_default();
-        let mt_for_remote = controller.lock().unwrap().mutable_text().cloned();
+        let cell_for_remote = controller.lock().unwrap().cell().cloned();
         let input_for_remote = input.clone();
-        let _remote_delta_subscription: Option<Task<()>> = mt_for_remote.map(|mt| {
+        let _remote_delta_subscription: Option<Task<()>> = cell_for_remote.map(|cell| {
             let _input = input_for_remote.clone();
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
-                let mut stream = mt.remote_deltas();
+                let mut stream = cell.remote_deltas();
                 while let Some(delta) = stream.next().await {
                     if this.upgrade().is_none() {
                         break;
@@ -395,17 +395,21 @@ impl EditorView {
                                 if state.ime_marked_range().is_some() {
                                     return;
                                 }
-                                // Anchor cursor before applying remote delta
+                                // Anchor cursor before applying remote delta.
                                 let cursor_codepoint =
                                     state.text().offset_to_char_index(state.cursor());
-                                let anchor = mt.anchor_cursor(cursor_codepoint, CursorBias::Left);
-                                // Release the immutable borrow before updating
+                                let anchor =
+                                    cell.anchor_cursor(cursor_codepoint, CursorBias::Left).ok(); // ALLOW(ok): backings without text-rich support degrade to None; cursor restoration falls back to 0
+                                                                                                 // Release the immutable borrow before updating
                                 let _state = state;
                                 editor_input.update(cx, |state, cx| {
                                     apply_text_delta_to_state(state, &delta, window, cx);
                                 });
-                                // Resolve cursor after applying
-                                let new_codepoint = mt.resolve_cursor(&anchor);
+                                // Resolve cursor after applying remote delta.
+                                let new_codepoint = anchor
+                                    .as_ref()
+                                    .and_then(|a| cell.resolve_cursor(a).ok()) // ALLOW(ok) ALLOW(fallback): backings without text-rich support degrade to position 0
+                                    .unwrap_or(0);
                                 editor_input.update(cx, |state, cx| {
                                     let byte_offset =
                                         state.text().char_index_to_offset(new_codepoint);
@@ -418,6 +422,22 @@ impl EditorView {
                 }
             })
         });
+
+        // First-mount focus grab. The block_profile.yaml variant switch
+        // ("editing" vs "default") mounts this editor only when
+        // `is_focused == true`, so by the time we're constructed the
+        // intended-focused block is already this one. Wait for the cursor
+        // signal's CDC echo is too slow for the PBT click-then-keystroke
+        // pipeline (`SplitBlock` sends `home` immediately after
+        // `wait_for_focus_to_match`, which only polls the matview, not
+        // window focus). Check `UiState.focused_block` synchronously and
+        // grab `window.focus(focus_handle)` if it matches — no CDC
+        // dependency for the variant-switch case.
+        let focused_block_now = services.focused_block();
+        let row_uri = holon_api::EntityUri::from_raw(&row_id);
+        if focused_block_now.as_ref() == Some(&row_uri) {
+            window.focus(&input.read(cx).focus_handle(cx), cx);
+        }
 
         Self {
             input,
@@ -555,6 +575,10 @@ impl Render for EditorView {
                             // Dispatch split_block directly, matching the
                             // Tab → indent / Shift+Tab → outdent pattern below.
                             let cursor_byte = input.read(cx).cursor();
+                            eprintln!(
+                                "[editor-enter-diag] dispatching split_block row_id={:?} cursor_byte={}",
+                                row_id, cursor_byte
+                            );
                             let mut params = std::collections::HashMap::new();
                             params.insert("id".into(), holon_api::Value::String(row_id.clone()));
                             params.insert(

@@ -28,10 +28,16 @@ impl NavigationProvider {
         Self { db_handle }
     }
 
-    /// Focus on a specific block in a region
+    /// Focus on a specific block in a region (Replace semantics).
     ///
-    /// This inserts a new history entry and updates the cursor.
-    /// Any forward history is cleared (like browser navigation).
+    /// Closes the prior open `navigation_history` row in the region (sets
+    /// `closed_at`), inserts a new open row, and updates the cursor. Any
+    /// forward history is cleared (like browser navigation). The
+    /// `focus_roots` matview consumes only `closed_at IS NULL` rows, so the
+    /// region converges to "exactly one open row" for main-panel use.
+    ///
+    /// For pin semantics (sidebar), use `focus_pin` instead — it dedupes
+    /// by `(region, block_id)` and refreshes the timestamp.
     async fn focus(&self, region: Region, block_id: Option<&str>) -> Result<OperationResult> {
         tracing::debug!(
             "[NavigationProvider] focus: region={}, block_id={:?}",
@@ -64,7 +70,19 @@ impl NavigationProvider {
             })?;
         tracing::debug!("[NavigationProvider] focus: DELETE succeeded");
 
-        // Step 3: Insert new history entry
+        // Step 2b: Soft-close every open row in this region so the
+        // focus_roots matview ends up with only the row we're about to
+        // insert. Open rows from prior navigations stay physically present
+        // (for back/forward via the cursor) but exit the matview.
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/close_open_in_region.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to close prior open history rows: {}", e))?;
+
+        // Step 3: Insert new history entry (closed_at defaults to NULL → open).
         let block_id_value = match block_id {
             Some(id) => Value::String(id.to_string()),
             None => Value::Null,
@@ -106,6 +124,85 @@ impl NavigationProvider {
             .map_err(|e| format!("Failed to update navigation cursor: {}", e))?;
 
         tracing::debug!("[NavigationProvider] focus: completed successfully");
+        Ok(OperationResult::irreversible(vec![]))
+    }
+
+    /// Pin a block to a region (Pin semantics, e.g. shift+click → right sidebar).
+    ///
+    /// Move-to-top dedup: if an open row for `(region, block_id)` already
+    /// exists, refresh its timestamp so it sorts to the top of focus_roots.
+    /// Otherwise insert a fresh open row. Cursor is left untouched — pins
+    /// are not part of the back/forward stack.
+    ///
+    /// Implementation note: `db_handle.query()` returns an empty `Vec` for
+    /// UPDATE statements regardless of rows-affected, so we can't infer
+    /// "matched / not matched" from its result. Instead we SELECT first to
+    /// check existence, then branch into UPDATE-or-INSERT. Two round-trips
+    /// per click is acceptable for a UI-driven pin operation.
+    async fn focus_pin(&self, region: Region, block_id: &str) -> Result<OperationResult> {
+        tracing::debug!(
+            "[NavigationProvider] focus_pin: region={}, block_id={}",
+            region,
+            block_id
+        );
+
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+
+        // Step 1: check whether an open pin already exists for (region, block_id).
+        let existing = self
+            .db_handle
+            .query(
+                "SELECT id FROM navigation_history \
+                 WHERE region = $region AND block_id = $block_id AND closed_at IS NULL \
+                 LIMIT 1",
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to look up existing pin: {}", e))?;
+
+        if existing.is_empty() {
+            // Step 2a: no existing pin → insert.
+            self.db_handle
+                .query(
+                    include_str!("../../sql/navigation/insert_history.sql"),
+                    params.clone(),
+                )
+                .await
+                .map_err(|e| format!("Failed to insert pin: {}", e))?;
+            tracing::debug!("[NavigationProvider] focus_pin: inserted new pin");
+        } else {
+            // Step 2b: existing pin → bump its timestamp (move-to-top).
+            self.db_handle
+                .query(
+                    include_str!("../../sql/navigation/update_pin_timestamp.sql"),
+                    params.clone(),
+                )
+                .await
+                .map_err(|e| format!("Failed to refresh pin timestamp: {}", e))?;
+            tracing::debug!("[NavigationProvider] focus_pin: refreshed existing pin");
+        }
+
+        Ok(OperationResult::irreversible(vec![]))
+    }
+
+    /// Soft-close a specific navigation_history row by id.
+    /// Used by sidebar X button.
+    async fn close(&self, history_id: i64) -> Result<OperationResult> {
+        tracing::debug!("[NavigationProvider] close: history_id={}", history_id);
+
+        let mut params = HashMap::new();
+        params.insert("history_id".to_string(), Value::Integer(history_id));
+
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/close_history_id.sql"),
+                params,
+            )
+            .await
+            .map_err(|e| format!("Failed to close history row: {}", e))?;
+
         Ok(OperationResult::irreversible(vec![]))
     }
 
@@ -293,6 +390,43 @@ impl OperationProvider for NavigationProvider {
                 entity_name: ENTITY_NAME.into(),
                 entity_short_name: SHORT_NAME.to_string(),
                 id_column: "region".to_string(),
+                name: "focus_pin".to_string(),
+                display_name: "Pin Block".to_string(),
+                description: "Pin a block to a region (move-to-top dedup; right sidebar uses this)"
+                    .to_string(),
+                required_params: vec![
+                    Self::region_param(),
+                    OperationParam {
+                        name: "block_id".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "Block ID to pin".to_string(),
+                    },
+                ],
+                affected_fields: vec!["block_id".to_string()],
+                param_mappings: vec![],
+                ..Default::default()
+            },
+            OperationDescriptor {
+                entity_name: ENTITY_NAME.into(),
+                entity_short_name: SHORT_NAME.to_string(),
+                id_column: "region".to_string(),
+                name: "close".to_string(),
+                display_name: "Close Pin".to_string(),
+                description: "Soft-close a navigation_history row by id (sidebar X button)"
+                    .to_string(),
+                required_params: vec![OperationParam {
+                    name: "history_id".to_string(),
+                    type_hint: TypeHint::Number,
+                    description: "navigation_history.id to close".to_string(),
+                }],
+                affected_fields: vec!["closed_at".to_string()],
+                param_mappings: vec![],
+                ..Default::default()
+            },
+            OperationDescriptor {
+                entity_name: ENTITY_NAME.into(),
+                entity_short_name: SHORT_NAME.to_string(),
+                id_column: "region".to_string(),
                 name: "go_back".to_string(),
                 display_name: "Go Back".to_string(),
                 description: "Navigate to previous view in history".to_string(),
@@ -353,6 +487,15 @@ impl OperationProvider for NavigationProvider {
             .into());
         }
 
+        // `close` takes only `history_id` (no region) — handle before region extraction.
+        if op_name == "close" {
+            let history_id = params
+                .get("history_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| "Missing required parameter 'history_id'".to_string())?;
+            return self.close(history_id).await;
+        }
+
         let region: Region = params
             .get("region")
             .cloned()
@@ -367,6 +510,16 @@ impl OperationProvider for NavigationProvider {
                     _ => None,
                 });
                 self.focus(region, block_id).await
+            }
+            "focus_pin" => {
+                let block_id = params
+                    .get("block_id")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "Missing required parameter 'block_id'".to_string())?;
+                self.focus_pin(region, block_id).await
             }
             "go_back" => self.go_back(region).await,
             "go_forward" => self.go_forward(region).await,

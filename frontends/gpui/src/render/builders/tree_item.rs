@@ -1,5 +1,5 @@
 use super::prelude::*;
-use crate::entity_view_registry::ToggleState;
+use futures_signals::signal::Mutable;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
 /// Extract a stable ID from the first child's entity data for collapse state tracking.
@@ -43,19 +43,10 @@ fn bullet_dot(ctx: &GpuiRenderContext) -> Div {
         )
 }
 
-fn get_or_create_toggle(
-    ctx: &GpuiRenderContext,
-    key: crate::entity_view_registry::CacheKey,
-) -> gpui::Entity<ToggleState> {
-    ctx.local.get_or_create_typed(key, || {
-        ctx.with_gpui(|_window, cx| cx.new(|_cx| ToggleState { active: false }))
-    })
-}
-
 fn collapse_chevron(
     collapsed: bool,
     el_id: String,
-    toggle_entity: gpui::Entity<ToggleState>,
+    expanded: Mutable<bool>,
     ctx: &GpuiRenderContext,
 ) -> gpui::Stateful<Div> {
     let chevron = if collapsed {
@@ -76,10 +67,8 @@ fn collapse_chevron(
         .justify_center()
         .text_size(px(ctx.style().tree_chevron_font_size))
         .text_color(color)
-        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            toggle_entity.update(cx, |t, _cx| {
-                t.active = !t.active;
-            });
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
+            expanded.set(!expanded.get());
             window.refresh();
         })
         .child(chevron.to_string())
@@ -88,26 +77,25 @@ fn collapse_chevron(
 /// Check if a tree_item node is collapsed.
 /// Returns `(depth, collapsed)` if the node is a TreeItem with has_children=true,
 /// or `(depth, false)` for leaf tree_items. Returns None for non-tree_item nodes.
-pub fn collapse_state(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Option<(usize, bool)> {
+///
+/// Reads the per-instance `expanded` Mutable on the `ReactiveViewModel` —
+/// each tree_item carries its own state (set by `wrap_tree_item` in
+/// `mutable_tree.rs`). Two rows wrapping the same widget id therefore
+/// have independent collapse state.
+pub fn collapse_state(node: &ReactiveViewModel, _ctx: &GpuiRenderContext) -> Option<(usize, bool)> {
     if node.widget_name().as_deref() != Some("tree_item") {
         return None;
     }
 
     let depth = node.prop_f64("depth").unwrap_or(0.0) as usize;
     let has_children = node.prop_bool("has_children").unwrap_or(false);
-    let children = &node.children;
 
     if !has_children {
         return Some((depth, false));
     }
 
-    let id = children.first().and_then(|c| node_id(c));
-    let collapsed = id.map_or(false, |id| {
-        let key = crate::entity_view_registry::CacheKey::Ephemeral(format!("tree-collapse:{id}"));
-        let toggle = get_or_create_toggle(ctx, key);
-        ctx.with_gpui(|_window, cx| toggle.read(cx).active)
-    });
-    Some((depth, collapsed))
+    let expanded = node.expanded.as_ref().map_or(true, |m| m.get());
+    Some((depth, !expanded))
 }
 
 /// Flat tree item renderer.
@@ -119,18 +107,25 @@ pub fn collapse_state(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let depth = node.prop_f64("depth").unwrap_or(0.0) as usize;
     let has_children = node.prop_bool("has_children").unwrap_or(false);
+    // Chrome props from tree builder rules: per-row override map. Defaults
+    // preserve today's behaviour (bullet on leaves, chevron on parents).
+    // See `tree(rules: [...])` in render_dsl + shared_tree_build in
+    // render_interpreter — rule evaluation merges chrome flags into both
+    // ctx.flags AND the row's tree_item props.
+    let show_bullet = node.prop_bool("show_bullet").unwrap_or(true);
+    let show_chevron = node.prop_bool("show_chevron").unwrap_or(has_children);
     let children = &node.children;
     let items = children.clone();
 
     let id = items.first().and_then(|c| node_id(c));
 
-    let collapsed = if has_children {
-        id.as_ref().map_or(false, |id| {
-            let key =
-                crate::entity_view_registry::CacheKey::Ephemeral(format!("tree-collapse:{id}"));
-            let toggle = get_or_create_toggle(ctx, key);
-            ctx.with_gpui(|_window, cx| toggle.read(cx).active)
-        })
+    // Per-instance expand/collapse state. Read the `Mutable` from the VM
+    // (set by `wrap_tree_item`) so two tree_items wrapping the same id keep
+    // independent state. Default to expanded if the field is absent (e.g.,
+    // tree_item built outside `wrap_tree_item`).
+    let expanded_handle = node.expanded.clone();
+    let collapsed = if has_children && show_chevron {
+        !expanded_handle.as_ref().map_or(true, |m| m.get())
     } else {
         false
     };
@@ -150,13 +145,14 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .min_h(px(ctx.style().tree_item_min_height))
         .pl(px(indent));
 
-    if has_children {
+    if show_chevron && has_children {
         let el_id = id.clone().unwrap_or_else(|| "tree-toggle".to_string());
-        let key =
-            crate::entity_view_registry::CacheKey::Ephemeral(format!("tree-collapse:{el_id}"));
-        let toggle = get_or_create_toggle(ctx, key);
-        row = row.child(collapse_chevron(collapsed, el_id, toggle, ctx));
-    } else {
+        // Fall back to a fresh standalone Mutable when the node has no
+        // `expanded` field — the chevron still renders but click toggles
+        // a detached cell. In practice `wrap_tree_item` always sets one.
+        let mutable = expanded_handle.unwrap_or_else(|| Mutable::new(true));
+        row = row.child(collapse_chevron(collapsed, el_id, mutable, ctx));
+    } else if show_bullet {
         row = row.child(bullet_dot(ctx));
     }
 

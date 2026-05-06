@@ -2,12 +2,12 @@
 //!
 //! Bundles the per-editable-field state every frontend needs:
 //! - `ViewEventHandler` + input triggers (slash commands, wikilinks, blur sync)
-//! - the `MutableText` CRDT handle (when attached) for collaborative text edits
+//! - the [`Cell<String>`] handle (when attached) for collaborative text edits
 //!
 //! Frontends create one per editable field and feed it platform events. The
 //! view model returns `EditorAction` values that the frontend executes using
 //! its platform-specific APIs, and exposes pass-through methods for CRDT
-//! reads/writes so frontends never reach for `MutableText` directly.
+//! reads/writes so frontends never reach for the cell backing directly.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -15,11 +15,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use futures::Stream;
-use holon::sync::mutable_text::{CursorAnchor, CursorBias, MutableText, TextDelta, TextOp};
+use futures::stream::BoxStream;
 use holon_api::render_types::OperationWiring;
 use holon_api::types::EntityName;
 use holon_api::{InlineMark, MarkSpan, Value};
+use holon_core::cell::{Cell, CursorAnchor, CursorBias, TextDelta, TextOp};
 
 use crate::input_trigger::{self, InputTrigger, ViewEvent};
 use crate::operations::OperationIntent;
@@ -95,7 +95,7 @@ impl std::fmt::Debug for EditorAction {
 pub struct EditorViewModel {
     handler: ViewEventHandler,
     triggers: Vec<InputTrigger>,
-    mutable_text: Option<MutableText>,
+    cell: Option<Cell<String>>,
 }
 
 impl EditorViewModel {
@@ -110,70 +110,73 @@ impl EditorViewModel {
         Self {
             handler,
             triggers,
-            mutable_text: None,
+            cell: None,
         }
     }
 
-    /// Attach a `MutableText` CRDT handle. Call once, after construction,
-    /// when the production frontend resolves the handle from its
-    /// `EditableTextProvider`. Tests and headless paths leave it
-    /// unattached — CRDT pass-throughs return `None` / `Err` in that case.
-    pub fn attach_mutable_text(&mut self, mt: MutableText) {
-        self.mutable_text = Some(mt);
+    /// Attach a [`Cell<String>`] handle for the editable field. Call once,
+    /// after construction, when the production frontend resolves the cell
+    /// from `BuilderServices::editable_text` (which routes through the
+    /// `BlockCellRegistry`). Tests and headless paths leave it unattached
+    /// — CRDT pass-throughs return `None` / `Err` in that case.
+    pub fn attach_cell(&mut self, cell: Cell<String>) {
+        self.cell = Some(cell);
     }
 
-    /// Whether a `MutableText` is attached. Frontends should check before
-    /// driving the remote-delta loop or computing local diffs.
-    pub fn has_mutable_text(&self) -> bool {
-        self.mutable_text.is_some()
+    /// Whether a [`Cell<String>`] is attached. Frontends should check
+    /// before driving the remote-delta loop or computing local diffs.
+    pub fn has_cell(&self) -> bool {
+        self.cell.is_some()
     }
 
-    /// Borrow the attached `MutableText`. Returns `None` if unattached.
+    /// Borrow the attached [`Cell<String>`]. Returns `None` if unattached.
     /// Most frontends should prefer the pass-through methods below; this
     /// is the escape hatch for spawning long-lived async consumers (e.g.
     /// `cx.spawn` on GPUI) that need to outlive a lock-guard scope.
-    pub fn mutable_text(&self) -> Option<&MutableText> {
-        self.mutable_text.as_ref()
+    pub fn cell(&self) -> Option<&Cell<String>> {
+        self.cell.as_ref()
     }
 
     /// Current CRDT text snapshot. `None` when unattached.
     pub fn current_text(&self) -> Option<String> {
-        self.mutable_text.as_ref().map(|mt| mt.current())
+        self.cell.as_ref().map(|c| c.current())
     }
 
     /// Apply a local edit to the CRDT (origin-tagged so the remote-delta
-    /// stream filters it out). Errors when no `MutableText` is attached —
-    /// callers in headless contexts should gate on `has_mutable_text()`.
+    /// stream filters it out). Errors when no cell is attached —
+    /// callers in headless contexts should gate on [`Self::has_cell`].
     pub fn apply_local(&self, op: TextOp) -> Result<()> {
-        let mt = self
-            .mutable_text
+        let cell = self
+            .cell
             .as_ref()
-            .ok_or_else(|| anyhow!("EditorViewModel has no MutableText attached"))?;
-        mt.apply_local(op)
+            .ok_or_else(|| anyhow!("EditorViewModel has no Cell<String> attached"))?;
+        cell.apply_text_op(op)
     }
 
     /// Stream of remote text deltas (peer edits, file reloads, CDC echoes
-    /// of writes from elsewhere). Returns `None` when no `MutableText` is
+    /// of writes from elsewhere). Returns `None` when no cell is
     /// attached. Each frontend drives its own consumer loop on the
     /// returned stream — see GPUI `editor_view.rs` and TUI `app_main.rs`.
-    pub fn remote_deltas(&self) -> Option<impl Stream<Item = TextDelta> + use<>> {
-        self.mutable_text.as_ref().map(|mt| mt.remote_deltas())
+    pub fn remote_deltas(&self) -> Option<BoxStream<'static, TextDelta>> {
+        self.cell.as_ref().map(|c| c.remote_deltas())
     }
 
     /// Anchor a cursor position so it can be re-resolved after a remote
-    /// delta splices into the CRDT. `None` when no `MutableText`.
+    /// delta splices into the CRDT. `None` when no cell is attached or
+    /// the backing has no text-rich support.
     pub fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> Option<CursorAnchor> {
-        self.mutable_text
+        self.cell
             .as_ref()
-            .map(|mt| mt.anchor_cursor(char_offset, bias))
+            .and_then(|c| c.anchor_cursor(char_offset, bias).ok()) // ALLOW(ok): backings without text-rich support degrade to None
     }
 
     /// Resolve a previously-anchored cursor against the current CRDT state.
-    /// `None` when no `MutableText`.
+    /// `None` when no cell is attached or the backing can't resolve the
+    /// anchor (different backing, no text-rich support).
     pub fn resolve_cursor(&self, anchor: &CursorAnchor) -> Option<usize> {
-        self.mutable_text
+        self.cell
             .as_ref()
-            .map(|mt| mt.resolve_cursor(anchor))
+            .and_then(|c| c.resolve_cursor(anchor).ok()) // ALLOW(ok): backings without text-rich support degrade to None
     }
 
     /// Build an EditorViewModel from an EditableText ViewModel node.

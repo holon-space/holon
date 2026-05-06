@@ -6,10 +6,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::Reason;
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -21,28 +23,30 @@ use crate::pbt::transition_budgets::ExpectedSql;
 pub struct Nothing;
 
 impl E2ETransitionFactory for Nothing {
-    fn weighted_generator(_state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        // Nothing is always enabled with weight 1
-        Some((1, Just(Nothing).boxed()))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        Nothing.preconditions(state).map(|_| {
+            let strat = Just(Nothing).boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for Nothing {
-    fn preconditions(&self, _state: &ReferenceState) -> bool {
-        true
+    fn preconditions(&self, _: &ReferenceState) -> Validated<(), Reason> {
+        Validated::Good(())
     }
 
-    fn apply_to_ref(&self, _state: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut ReferenceState) {
         // No-op: reference state is unchanged
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, _sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, _: &mut dyn SutHandle) {
         // No-op: SUT is unchanged
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,
             writes: 0,

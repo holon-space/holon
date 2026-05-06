@@ -7,9 +7,11 @@
 //! `sut.rs:1016-1028` (SUT apply), and
 //! `transition_budgets.rs:165-172` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use holon_api::Region;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -30,27 +32,28 @@ pub struct NavigateBack {
 }
 
 impl E2ETransitionFactory for NavigateBack {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-        // Restricted to Main — only TUI binding (leader+'b') targets
-        // `region: "main"`. See `assets/default/keybindings.yaml`.
-        if !state.can_go_back(Region::Main) {
-            return None;
-        }
-        let strat = proptest::strategy::Just(NavigateBack {
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let instance = NavigateBack {
             region: Region::Main,
+        };
+        instance.preconditions(state).map(|()| {
+            let strat = proptest::strategy::Just(instance).boxed();
+            (1, strat)
         })
-        .boxed();
-        Some((1, strat))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for NavigateBack {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && state.can_go_back(self.region)
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.can_go_back(self.region), Reason::NoNavigationHistory),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -61,9 +64,12 @@ impl E2ETransitionImpl for NavigateBack {
         }
         state.focused_entity_id.remove(&self.region);
         state.focused_cursor.remove(&self.region);
+
+        // Blur on nav: see `navigate_focus.rs` for verification.
+        state.active_editor = None;
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.navigate_back(self.region).await;
     }
 
@@ -115,7 +121,7 @@ mod tests {
 
         // 1. Direct call on the struct.
         let mut state_a = make_state_with_back_history();
-        assert!(nb.preconditions(&state_a));
+        assert!(nb.preconditions(&state_a).is_good());
         nb.apply_to_ref(&mut state_a);
         assert_eq!(
             state_a.navigation_history[&Region::Main].cursor,
@@ -133,27 +139,27 @@ mod tests {
         }
         .into();
         let mut state_b = make_state_with_back_history();
-        assert!(wrapped.preconditions(&state_b));
+        assert!(wrapped.preconditions(&state_b).is_good());
         wrapped.apply_to_ref(&mut state_b);
         assert_eq!(state_b.navigation_history[&Region::Main].cursor, 0);
         assert!(!state_b.focused_entity_id.contains_key(&Region::Main));
     }
 
-    /// Pilot validation: factory returns Some when applicable, None
+    /// Pilot validation: factory returns Good when applicable, Fail
     /// before app start.
     #[test]
     fn navigate_back_factory_state_gating() {
         let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
         let mut pre_start = ReferenceState::new(TestVariant::full(), interp);
         // app_started == false — must skip.
-        assert!(NavigateBack::weighted_generator(&pre_start).is_none());
+        assert!(NavigateBack::weighted_generator(&pre_start).is_fail());
 
         // Even with app_started, no nav history → still skip.
         pre_start.app_started = true;
-        assert!(NavigateBack::weighted_generator(&pre_start).is_none());
+        assert!(NavigateBack::weighted_generator(&pre_start).is_fail());
 
         // With back-history present → factory yields a strategy.
         let with_back = make_state_with_back_history();
-        assert!(NavigateBack::weighted_generator(&with_back).is_some());
+        assert!(NavigateBack::weighted_generator(&with_back).is_good());
     }
 }

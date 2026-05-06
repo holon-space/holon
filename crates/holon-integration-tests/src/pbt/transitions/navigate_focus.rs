@@ -6,13 +6,17 @@
 //! `sut.rs:1266-1292` (SUT apply), and
 //! `transition_budgets.rs:165-172` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
+use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::Region;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::NavigationHistory;
+use crate::pbt::reference_state::OpenPinEntry;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 
@@ -29,44 +33,98 @@ pub struct NavigateFocus {
 }
 
 impl E2ETransitionFactory for NavigateFocus {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Restricted to Main: in production the only UI that triggers
         // `navigation.focus` is the LeftSidebar selectable's bound
-        // action, and it ALWAYS targets `region: "main"`. There is no
-        // user-facing way to push history into the LeftSidebar's or
-        // RightSidebar's own region. Earlier versions of this generator
-        // emitted those regions and the SUT covered them with a
-        // `execute_op + manual set_focus` shortcut — that's the API
-        // shortcut item A2 in `frontends/tui/TODO.md` removes.
-        //
-        // Targets are restricted to LeftSidebar-listed pages
-        // (`focusable_rendered_block_ids(LeftSidebar)`), which is what
-        // the user can actually click in the sidebar.
-        let navigable_block_ids = state.focusable_rendered_block_ids(Region::LeftSidebar);
-
-        if navigable_block_ids.is_empty() {
-            return None;
-        }
-
-        let strat = prop::sample::select(navigable_block_ids)
-            .prop_map(|block_id| NavigateFocus {
-                region: Region::Main,
-                block_id,
+        // action, and it ALWAYS targets `region: "main"`. The ref model
+        // predicts the set: page blocks with non-special titles
+        // (`predicted_sidebar_navigation_targets`) — same set the default
+        // sidebar PRQL renders and the layout binds nav-focus on.
+        let candidates: Vec<EntityUri> = state
+            .predicted_sidebar_navigation_targets()
+            .into_iter()
+            .filter(|uri| {
+                NavigateFocus {
+                    region: Region::Main,
+                    block_id: uri.clone(),
+                }
+                .preconditions(state)
+                .is_good()
             })
-            .boxed();
+            .collect();
+        check(!candidates.is_empty(), Reason::SidebarFocusNotRendered).map(|_| {
+            // Boost weight when Main's current focus has no text descendants
+            // available to edit. Without this, `FocusEditableText` (and every
+            // other transition gated on `main_editable_descendants` /
+            // `focusable_rendered_block_ids(Main)`) is unreachable because
+            // `StartApp` seeds focus on `block:journals`, which is initially
+            // empty. The base weight of 3 means a 50-step random walk often
+            // skips `NavigateFocus` entirely (verified seeds 1 and 7 both
+            // produced 0 click/edit transitions), so the click-to-focus
+            // pipeline never gets exercised. Mirrors the empty-doc weight
+            // bump in `bulk_external_add.rs:65`. Once a text descendant
+            // exists, the weight drops back to base so the rest of the
+            // random strategy can run.
+            let main_focus_roots = state.expected_focus_root_ids(Region::Main);
+            let main_has_text_descendant = state.block_state.blocks.iter().any(|(id, b)| {
+                b.content_type == ContentType::Text
+                    && !b.is_page()
+                    && !state.layout_blocks.contains(id)
+                    && state.is_descendant_of_any(id, &main_focus_roots)
+            });
+            let weight = if main_has_text_descendant { 3 } else { 100 };
 
-        Some((3, strat))
+            let strat = prop::sample::select(candidates)
+                .prop_map(|block_id| NavigateFocus {
+                    region: Region::Main,
+                    block_id,
+                })
+                .boxed();
+            (weight, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for NavigateFocus {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && state.block_state.blocks.contains_key(&self.block_id)
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                self.block_id.scheme() == "block",
+                Reason::FocusedBlockMissing,
+            ),
+        ];
+
+        // Production binds `navigation.focus(region=main)` only on the
+        // default sidebar's rendered doc list — `predicts_navigation_focus`
+        // is the pure-ref-state predicate for that set. Without this
+        // gate the transition could fire on a sidebar entity prod treats
+        // as a plain editor-focus click and `apply_to_ref` would push
+        // a navigation-history entry prod never produced.
+        checks.push(check(
+            state.predicts_navigation_focus(&self.block_id, Region::LeftSidebar),
+            Reason::SidebarFocusNotRendered,
+        ));
+
+        // Block must be text-typed and not a layout block
+        let block = state.block_state.blocks.get(&self.block_id);
+        checks.push(check(block.is_some(), Reason::FocusedBlockMissing));
+        if let Some(b) = block {
+            checks.push(check(
+                b.content_type == ContentType::Text,
+                Reason::FocusedNotText,
+            ));
+        }
+        checks.push(check(
+            !state.layout_blocks.contains(&self.block_id),
+            Reason::FocusedInLayoutBlocks,
+        ));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -79,6 +137,22 @@ impl E2ETransitionImpl for NavigateFocus {
         history.entries.push(Some(self.block_id.clone()));
         history.cursor = history.entries.len() - 1;
 
+        // Mirror provider.rs `focus`: close all open rows in the region,
+        // then insert a new open row. `next_history_id` matches SQLite's
+        // AUTOINCREMENT, which monotonically increases across INSERTs and
+        // is unaffected by UPDATE (closed_at flip) or DELETE.
+        let history_id = state.next_history_id;
+        state.next_history_id += 1;
+        let added_ts_logical = state.next_pin_ts;
+        state.next_pin_ts += 1;
+        let pins = state.open_pins.entry(self.region).or_default();
+        pins.clear();
+        pins.push(OpenPinEntry {
+            history_id,
+            block_id: Some(self.block_id.clone()),
+            added_ts_logical,
+        });
+
         // NavigateFocus changes what's displayed but clears editor focus —
         // the previously-focused block may no longer be visible.
         state.focused_entity_id.remove(&self.region);
@@ -86,11 +160,21 @@ impl E2ETransitionImpl for NavigateFocus {
 
         // Mirror `UiState::set_focus`: the navigation target becomes the
         // globally focused block. `focus_chain()` and `chain_ops()` read
-        // from this — inv11 asserts they reflect the predicted URI.
+        // from this — inv-value-fn-provider-arg-variance asserts they reflect the predicted URI.
         state.focused_block = Some(self.block_id.clone());
+
+        // Production blurs the editor on this click — empirically verified
+        // by seed 8 of the post-Blur-deletion PBT run, where leaving
+        // `active_editor` set let TypeChars fire and panic with
+        // "GPUI keystroke not consumed: keystroke=\"d\"" (devlog
+        // 2026-05-08-133241). We deliberately do NOT call
+        // `commit_active_editor_if_changed()` — whether prod's `on_blur`
+        // dispatches `set_field` is a separate assumption the PBT's
+        // content invariants should verify, not pre-bake.
+        state.active_editor = None;
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_navigate_focus(self.region, &self.block_id).await;
     }
 

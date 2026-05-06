@@ -139,6 +139,7 @@ pub const VISIBLE_LEAF_TYPES: &[&str] = &[
     "icon",
     "checkbox",
     "editable_text",
+    "rendered_text",
     "spacer",
     "state_toggle",
     "source_block",

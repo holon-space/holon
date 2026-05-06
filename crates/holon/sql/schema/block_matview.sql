@@ -1,5 +1,5 @@
 -- The `block` matview: hydrates the block_raw rows with the
--- edge-typed fields (`tags`, `blocked_by`) reconstructed from the
+-- edge-typed fields (`tags`, `requires`) reconstructed from the
 -- junction tables. Every consumer that wants a hydrated row reads
 -- from here; raw structural reads/writes target `block_raw`.
 --
@@ -10,7 +10,7 @@
 -- junctions, and CDC propagates correctly through DELETE.
 --
 -- All 17 columns of block_raw are projected so downstream readers
--- (block_with_path, task_blocking_edges, GQL/PRQL-generated
+-- (block_with_path, block_requirement_edges, GQL/PRQL-generated
 -- watch_view_*) see the same row shape they did before the table
 -- was renamed.
 SELECT
@@ -30,11 +30,11 @@ SELECT
     b.created_at,
     b.updated_at,
     b._change_origin,
-    COALESCE(json_group_array(bt.tag)        FILTER (WHERE bt.tag        IS NOT NULL), '[]') AS tags,
-    COALESCE(json_group_array(tb.blocker_id) FILTER (WHERE tb.blocker_id IS NOT NULL), '[]') AS blocked_by
+    COALESCE(json_group_array(bt.tag)         FILTER (WHERE bt.tag         IS NOT NULL), '[]') AS tags,
+    COALESCE(json_group_array(br.required_id) FILTER (WHERE br.required_id IS NOT NULL), '[]') AS requires
 FROM block_raw b
-LEFT OUTER JOIN block_tags    bt ON bt.block_id   = b.id
-LEFT OUTER JOIN task_blockers tb ON tb.blocked_id = b.id
+LEFT OUTER JOIN block_tags     bt ON bt.block_id = b.id
+LEFT OUTER JOIN block_requires br ON br.block_id = b.id
 GROUP BY
     b.id,
     b.parent_id,

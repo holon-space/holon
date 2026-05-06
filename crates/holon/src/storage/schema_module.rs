@@ -33,9 +33,9 @@ pub struct EdgeFieldDescriptor {
     /// field appears on.
     pub entity: String,
     /// Field name as it appears in `Block.properties` / params (e.g.
-    /// "blocked_by", "tags").
+    /// "requires", "tags").
     pub field: String,
-    /// Junction table name (e.g. "task_blockers", "block_tags").
+    /// Junction table name (e.g. "block_requires", "block_tags").
     pub join_table: String,
     /// Column on `join_table` holding the source entity's id.
     pub source_col: String,
@@ -76,7 +76,7 @@ pub trait SchemaModule: Send + Sync {
     ///
     /// Called after `ensure_schema()` succeeds but before resources are
     /// marked as available.
-    async fn initialize_data(&self, _db_handle: &DbHandle) -> Result<()> {
+    async fn initialize_data(&self, _: &DbHandle) -> Result<()> {
         Ok(())
     }
 

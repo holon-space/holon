@@ -55,6 +55,28 @@ pub struct ExecuteQueryParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExecuteSourceBlockParams {
+    /// Block ID of a source block whose `content` is the query and whose
+    /// `source_language` is one of `holon_prql` / `holon_gql` / `holon_sql`.
+    /// Bare slugs are accepted (auto-prefixed to `block:`).
+    pub block_id: String,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+    /// Override `source_language`. When omitted, the block's stored
+    /// `source_language` is used.
+    pub language: Option<String>,
+    /// Block ID for `from children` context resolution.
+    pub context_id: Option<String>,
+    /// Parent block ID for `from siblings` context resolution.
+    pub context_parent_id: Option<String>,
+    /// Render spec override (mirrors `execute_query`).
+    pub render: Option<String>,
+    /// When true, each row gets a `_profile` key with resolved entity profile info.
+    #[serde(default)]
+    pub include_profile: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ExecuteOperationParams {
     pub entity_name: String,
     pub operation: String,
@@ -312,4 +334,81 @@ pub struct TypeTextParams {
     /// Modifier keys held during typing, e.g. ["cmd", "shift"].
     #[serde(default)]
     pub modifiers: Vec<String>,
+}
+
+/// Parameters for the `now_for_agent` agent-coordination tool.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct NowForAgentParams {
+    /// Agent identifier (e.g. "claude-feature-x"). Falls back to env
+    /// `HOLON_AGENT_ID` when omitted. Used to filter the now-query so
+    /// the agent sees only unclaimed tasks plus tasks already assigned
+    /// to itself.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Maximum number of tasks to return (default 10, max 100).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Parameters for `claim_task` — atomic best-effort task assignment.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ClaimTaskParams {
+    /// Block id of the task to claim. Bare slugs are accepted
+    /// (auto-prefixed to `block:`).
+    pub task_id: String,
+    /// Agent identifier; falls back to env `HOLON_AGENT_ID`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// Parameters for `add_subtask` — append a new TODO block under an existing one.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AddSubtaskParams {
+    /// Parent block id (bare slug or `block:` prefixed).
+    pub parent_id: String,
+    /// First line of the new block's content (used as the headline).
+    pub title: String,
+    /// Optional body — appended to title with a newline. Use this for the
+    /// task description, runbook notes, etc.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Initial task_state. Defaults to `"TODO"`. Pass `"DOING"` to claim
+    /// in the same call (you'll usually call `claim_task` separately so
+    /// the worktree/agent metadata is set).
+    #[serde(default)]
+    pub task_state: Option<String>,
+    /// Gate for now-query visibility. Defaults to the parent's gate; if
+    /// the parent has none, falls back to `"G1"`.
+    #[serde(default)]
+    pub gate: Option<String>,
+    /// Tags to attach (e.g. `["agent"]` so the new task surfaces in
+    /// `now_for_agent` immediately). NOT yet wired — currently ignored
+    /// because `block.create` partitioning needs additional plumbing
+    /// for edge fields. Track in a follow-up.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Initial blocker list (`requires` edge field). Same caveat as `tags`.
+    #[serde(default)]
+    pub requires: Option<Vec<String>>,
+    /// Additional `properties` key/values merged in (priority, effort, etc.).
+    #[serde(default)]
+    pub properties: HashMap<String, serde_json::Value>,
+    /// Explicit id for the new block. When omitted, a UUID is minted.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Parameters for `complete_task` — marks DONE + writes a devlog file.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CompleteTaskParams {
+    /// Block id of the task to mark complete. Bare slugs accepted.
+    pub task_id: String,
+    /// One- to three-paragraph summary of what shipped, written to the devlog.
+    pub summary: String,
+    /// Agent identifier; falls back to env `HOLON_AGENT_ID`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Optional commit SHA to record in the devlog header.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }

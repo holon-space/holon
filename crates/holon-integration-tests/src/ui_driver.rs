@@ -204,7 +204,7 @@ impl UiDriver for FfiDriver {
 // ──── Geometry-based driver with screenshot support ────
 
 /// Shared state holding the most recent screenshot analysis. Written by
-/// `GeometryDriver::capture_screenshot`, read by inv14 in the PBT checker.
+/// `GeometryDriver::capture_screenshot`, read by inv-frontend-engine in the PBT checker.
 pub type VisualState = std::sync::Arc<std::sync::Mutex<Option<ScreenshotEmptiness>>>;
 
 /// Geometry-based driver — queries element bounds and simulates input via enigo.
@@ -258,7 +258,7 @@ impl GeometryDriver {
         self
     }
 
-    /// Share a `VisualState` so inv14 can read the last screenshot analysis.
+    /// Share a `VisualState` so inv-frontend-engine can read the last screenshot analysis.
     pub fn with_visual_state(mut self, state: VisualState) -> Self {
         self.visual_state = Some(state);
         self

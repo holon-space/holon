@@ -1,6 +1,6 @@
 //! Centralized SQL identifiers for the block table/matview pair.
 //!
-//! Reads target the `block` matview (hydrates tags + blocked_by from
+//! Reads target the `block` matview (hydrates tags + requires from
 //! the junction tables); writes target the underlying `block_raw`
 //! table. The matview DDL lives in `sql/schema/block_matview.sql` and
 //! is owned by `BlockMatviewSchemaModule`.
@@ -13,5 +13,5 @@
 pub const BLOCK_WRITE_TABLE: &str = "block_raw";
 
 /// Matview to read hydrated block rows from (includes `tags` and
-/// `blocked_by` JSON arrays projected from the junction tables).
+/// `requires` JSON arrays projected from the junction tables).
 pub const BLOCK_READ_TABLE: &str = "block";

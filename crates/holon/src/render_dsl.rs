@@ -231,11 +231,120 @@ pub fn create_render_engine_with_names(widget_names: &[impl AsRef<str>]) -> Rhai
         register_widget_fn(&mut engine, name.as_ref());
     }
 
+    // Predicate constructors. Each produces a Rhai map matching the
+    // `Predicate` enum's serde external-tagged shape (`#[serde(rename_all =
+    // "snake_case")]`), so the rule evaluator's `parse_rules_arg` round-trip
+    // (see `render_interpreter.rs::parse_rules_arg`) deserializes cleanly.
+    //
+    // Used inside `tree(rules: [#{when: eq("level", 0), override: ...}])`
+    // and similar predicate-driven constructs.
+    //
+    // Registered AFTER the widget loop on purpose: source-driven
+    // discovery in `parse_render_dsl_with_names` may have added these
+    // names to `widget_names` (any identifier-followed-by-`(` is treated
+    // as a widget call). Registering predicates last makes the
+    // predicate-shaped output win for matching signatures.
+    //
+    // `Predicate::Var` is intentionally not registered — `var` is a Rhai
+    // reserved keyword and the tokenizer rejects it before dispatch.
+    // Users who need `Predicate::Var` write the verbose form
+    // `#{var: "field_name"}` directly.
+    register_binary_predicate(&mut engine, "eq");
+    register_binary_predicate(&mut engine, "ne");
+    register_binary_predicate(&mut engine, "gt");
+    register_binary_predicate(&mut engine, "lt");
+    register_binary_predicate(&mut engine, "gte");
+    register_binary_predicate(&mut engine, "lte");
+    register_string_predicate(&mut engine, "is_not_null");
+    register_n_ary_predicate(&mut engine, "and");
+    register_n_ary_predicate(&mut engine, "or");
+    engine.register_fn("not", |pred: Dynamic| -> Dynamic {
+        let mut outer = RhaiMap::new();
+        outer.insert("not".into(), pred);
+        Dynamic::from(outer)
+    });
+    // Unit variant — Predicate::Always serializes as the bare string
+    // `"always"` under default external tagging.
+    engine.register_fn("always", || -> Dynamic {
+        Dynamic::from("always".to_string())
+    });
+
     // Dotted names: Rhai doesn't allow dots in function names,
     // so users write underscores and we map to the dotted name.
     register_widget_fn_aliased(&mut engine, "navigation_focus", "navigation.focus");
+    register_widget_fn_aliased(&mut engine, "focus_pin", "navigation.focus_pin");
+    register_widget_fn_aliased(&mut engine, "navigation_close", "navigation.close");
 
     engine
+}
+
+/// Register a binary predicate (`eq`/`ne`/`gt`/`lt`/`gte`/`lte`).
+///
+/// All share the `{<key>: {field: <name>, value: <v>}}` serde shape, matching
+/// `Predicate::Eq { field, value }` and friends.
+fn register_binary_predicate(engine: &mut RhaiEngine, name: &'static str) {
+    engine.register_fn(name, move |field: &str, value: Dynamic| -> Dynamic {
+        let mut inner = RhaiMap::new();
+        inner.insert("field".into(), Dynamic::from(field.to_string()));
+        inner.insert("value".into(), value);
+        let mut outer = RhaiMap::new();
+        outer.insert(name.into(), Dynamic::from(inner));
+        Dynamic::from(outer)
+    });
+}
+
+/// Register a single-string-payload predicate (`var`/`is_not_null`).
+///
+/// Both share the `{<key>: <field>}` serde shape, matching
+/// `Predicate::Var(String)` / `Predicate::IsNotNull(String)`.
+fn register_string_predicate(engine: &mut RhaiEngine, name: &'static str) {
+    engine.register_fn(name, move |field: &str| -> Dynamic {
+        let mut outer = RhaiMap::new();
+        outer.insert(name.into(), Dynamic::from(field.to_string()));
+        Dynamic::from(outer)
+    });
+}
+
+/// Register an n-ary predicate (`and`/`or`) for arities 1..=6.
+///
+/// Rhai has no variadic syntax; we register one overload per arity to cover
+/// realistic predicate stacks. Beyond 6 children, users can nest
+/// (`and(and(p1, p2, p3), p4)`).
+///
+/// Output shape `{<key>: [<preds>]}` matches `Predicate::And(Vec<Predicate>)`
+/// / `Predicate::Or(Vec<Predicate>)`.
+fn register_n_ary_predicate(engine: &mut RhaiEngine, name: &'static str) {
+    fn pack(name: &str, preds: Vec<Dynamic>) -> Dynamic {
+        let arr: rhai::Array = preds;
+        let mut outer = RhaiMap::new();
+        outer.insert(name.into(), Dynamic::from(arr));
+        Dynamic::from(outer)
+    }
+    engine.register_fn(name, move |a: Dynamic| -> Dynamic { pack(name, vec![a]) });
+    engine.register_fn(name, move |a: Dynamic, b: Dynamic| -> Dynamic {
+        pack(name, vec![a, b])
+    });
+    engine.register_fn(name, move |a: Dynamic, b: Dynamic, c: Dynamic| -> Dynamic {
+        pack(name, vec![a, b, c])
+    });
+    engine.register_fn(
+        name,
+        move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| -> Dynamic {
+            pack(name, vec![a, b, c, d])
+        },
+    );
+    engine.register_fn(
+        name,
+        move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic, e: Dynamic| -> Dynamic {
+            pack(name, vec![a, b, c, d, e])
+        },
+    );
+    engine.register_fn(
+        name,
+        move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic, e: Dynamic, f: Dynamic| -> Dynamic {
+            pack(name, vec![a, b, c, d, e, f])
+        },
+    );
 }
 
 /// Register a widget function where the Rhai name differs from the output name.
@@ -634,5 +743,167 @@ mod tests {
         let names = extract_function_names("if (x > 0) { table() }");
         assert!(!names.contains(&"if".to_string()));
         assert!(names.contains(&"table".to_string()));
+    }
+
+    // ── Predicate Rhai constructors (FU-2) ─────────────────────────────────
+    //
+    // Each constructor's output `RenderExpr` is evaluated to a `Value`, then
+    // round-tripped through serde_json into a `Predicate` — the same path
+    // `parse_rules_arg` (render_interpreter.rs) takes for `rules: [...]`.
+
+    fn parse_predicate(source: &str) -> holon_api::predicate::Predicate {
+        let expr = parse(source).expect("parse predicate DSL");
+        let val = holon_api::eval_to_value(&expr, &HashMap::new());
+        let json = serde_json::to_value(&val).expect("Value → JSON");
+        serde_json::from_value::<holon_api::predicate::Predicate>(json).expect("JSON → Predicate")
+    }
+
+    #[test]
+    fn predicate_eq() {
+        match parse_predicate(r#"eq("level", 0)"#) {
+            holon_api::predicate::Predicate::Eq { field, value } => {
+                assert_eq!(field, "level");
+                assert_eq!(value, holon_api::Value::Integer(0));
+            }
+            other => panic!("expected Eq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_ne_gt_lt_gte_lte() {
+        // All five share a shape; spot-check each variant rather than
+        // five copies of the same matching boilerplate.
+        use holon_api::predicate::Predicate::*;
+        assert!(matches!(
+            parse_predicate(r#"ne("status", "done")"#),
+            Ne { .. }
+        ));
+        assert!(matches!(parse_predicate(r#"gt("count", 3)"#), Gt { .. }));
+        assert!(matches!(parse_predicate(r#"lt("count", 3)"#), Lt { .. }));
+        assert!(matches!(parse_predicate(r#"gte("count", 3)"#), Gte { .. }));
+        assert!(matches!(parse_predicate(r#"lte("count", 3)"#), Lte { .. }));
+    }
+
+    #[test]
+    fn predicate_is_not_null() {
+        use holon_api::predicate::Predicate::*;
+        match parse_predicate(r#"is_not_null("task_state")"#) {
+            IsNotNull(field) => assert_eq!(field, "task_state"),
+            other => panic!("expected IsNotNull, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_var_via_quoted_verbose_form() {
+        // `var` is a Rhai reserved keyword (the tokenizer rejects it
+        // even inside map literals as an unquoted identifier), so we
+        // don't register a constructor for it. Verify the quoted-key
+        // verbose form `#{"var": "<field>"}` still round-trips into
+        // `Predicate::Var`.
+        use holon_api::predicate::Predicate::*;
+        match parse_predicate(r#"#{"var": "is_focused"}"#) {
+            Var(field) => assert_eq!(field, "is_focused"),
+            other => panic!("expected Var, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_not() {
+        use holon_api::predicate::Predicate::*;
+        match parse_predicate(r#"not(eq("level", 0))"#) {
+            Not(inner) => match *inner {
+                Eq { field, .. } => assert_eq!(field, "level"),
+                other => panic!("expected Not(Eq), got Not({other:?})"),
+            },
+            other => panic!("expected Not, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_and_or_variadic() {
+        use holon_api::predicate::Predicate::*;
+        match parse_predicate(r#"and(eq("level", 0), gt("depth", 0))"#) {
+            And(children) => {
+                assert_eq!(children.len(), 2);
+                assert!(matches!(&children[0], Eq { .. }));
+                assert!(matches!(&children[1], Gt { .. }));
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+        // Three-arity to confirm the additional overloads are wired.
+        match parse_predicate(r#"or(eq("a", 1), eq("b", 2), eq("c", 3))"#) {
+            Or(children) => assert_eq!(children.len(), 3),
+            other => panic!("expected Or, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_always() {
+        assert!(matches!(
+            parse_predicate("always()"),
+            holon_api::predicate::Predicate::Always
+        ));
+    }
+
+    #[test]
+    fn rules_arg_round_trip_through_full_tree_call() {
+        // Mirror the path `parse_rules_arg` takes on a real `tree(rules: [...])`
+        // call: parse the DSL, find the `rules:` arg, evaluate it as a Value,
+        // and deserialize each item as a `RuleSpec`. Confirms the constructors
+        // compose with the rest of the DSL.
+        let expr = parse(
+            r#"tree(#{
+                parent_id: col("parent_id"),
+                rules: [
+                    #{
+                        when: and(eq("level", 0), gt("depth", 0)),
+                        override: #{role: "page_title", show_bullet: false}
+                    },
+                    #{when: always(), override: #{}}
+                ]
+            })"#,
+        )
+        .unwrap();
+
+        let RenderExpr::FunctionCall { args, .. } = expr else {
+            panic!("expected tree(...) FunctionCall");
+        };
+        let rules_arg = args
+            .iter()
+            .find(|a| a.name.as_deref() == Some("rules"))
+            .expect("rules: arg present");
+        let rules_value = holon_api::eval_to_value(&rules_arg.value, &HashMap::new());
+        let holon_api::Value::Array(items) = rules_value else {
+            panic!("rules: must evaluate to Array");
+        };
+
+        let specs: Vec<holon_api::render_types::RuleSpec> = items
+            .iter()
+            .map(|item| {
+                let json = serde_json::to_value(item).expect("Value → JSON");
+                serde_json::from_value(json).expect("JSON → RuleSpec")
+            })
+            .collect();
+
+        assert_eq!(specs.len(), 2);
+
+        use holon_api::predicate::Predicate::*;
+        match &specs[0].when {
+            And(children) => {
+                assert!(matches!(&children[0], Eq { field, .. } if field == "level"));
+                assert!(matches!(&children[1], Gt { field, .. } if field == "depth"));
+            }
+            other => panic!("expected And in first rule, got {other:?}"),
+        }
+        assert_eq!(
+            specs[0].overrides.get("role").and_then(|v| v.as_string()),
+            Some("page_title")
+        );
+        assert_eq!(
+            specs[0].overrides.get("show_bullet"),
+            Some(&holon_api::Value::Boolean(false))
+        );
+
+        assert!(matches!(specs[1].when, Always));
     }
 }

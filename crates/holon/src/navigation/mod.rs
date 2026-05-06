@@ -23,3 +23,41 @@
 mod provider;
 
 pub use provider::NavigationProvider;
+
+#[cfg(test)]
+mod loro_exclusion_test {
+    /// Navigation tables (`navigation_history`, `navigation_cursor`) are
+    /// intentionally local-only — pinned tabs and back/forward history are
+    /// per-device user expectations; cross-device sync would surface
+    /// phantom pins on other machines.
+    ///
+    /// This regression test asserts no source file in the Loro replication
+    /// path references those table names, so a future contributor can't
+    /// accidentally enable replication without the test failing first.
+    #[test]
+    fn loro_paths_do_not_reference_navigation_tables() {
+        const FORBIDDEN: &[&str] = &["navigation_history", "navigation_cursor"];
+        // include_str! is compile-time relative to this file. Each path
+        // hits a distinct Loro touchpoint: the backend (writes) and the
+        // sync controller (orchestrates inbound/outbound).
+        let sources: &[(&str, &str)] = &[
+            ("loro_backend.rs", include_str!("../api/loro_backend.rs")),
+            (
+                "loro_sync_controller.rs",
+                include_str!("../sync/loro_sync_controller.rs"),
+            ),
+        ];
+        for (file, src) in sources {
+            for needle in FORBIDDEN {
+                assert!(
+                    !src.contains(needle),
+                    "Loro source `{file}` references local-only nav table `{needle}` — \
+                     navigation state is per-device by design (pinned tabs, back/forward \
+                     history). If you intended to replicate, add the table to the proper \
+                     replicated-tables list and remove it from this test's FORBIDDEN list \
+                     after a deliberate decision."
+                );
+            }
+        }
+    }
+}

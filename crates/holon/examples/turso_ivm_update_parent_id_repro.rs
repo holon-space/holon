@@ -31,7 +31,7 @@
 //! breaking any consumer that joins on it (the main panel GQL query, the
 //! `descendants` PRQL virtual table, etc.). See
 //! `crates/holon-integration-tests/src/pbt/sut.rs::DragDropBlock` and the
-//! inv16 invariant for the production-side observation.
+//! inv-editable-text-has-draggable invariant for the production-side observation.
 //!
 //! Run with: `cargo run --example turso_ivm_update_parent_id_repro`
 

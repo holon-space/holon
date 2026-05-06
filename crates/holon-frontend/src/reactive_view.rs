@@ -198,6 +198,16 @@ pub struct CollectionConfig {
     /// real rows. The virtual entity is rendered through the normal entity
     /// profile pipeline via `render_entity()`.
     pub virtual_child: Option<VirtualChildSlot>,
+    /// `rules:` arg parsed at builder construction; the driver evaluates
+    /// each rule's predicate per row and merges matching `override` maps
+    /// into the row's `ctx.flags`. Empty = no overrides applied. See
+    /// `crate::row_pipeline` for the per-row pipeline.
+    ///
+    /// Streaming rules currently see only the row's own columns —
+    /// position/count/is_first/is_last are NOT injected (the driver
+    /// receives rows incrementally via VecDiff and the collection size
+    /// shifts with each event).
+    pub rules: Vec<holon_api::render_types::RuleSpec>,
 }
 
 /// Pure function that partitions a parent's container-query allocation
@@ -249,6 +259,11 @@ enum ReactiveViewInner {
         /// When set, the driver appends one virtual editable placeholder
         /// after all real rows, rendered via `render_entity()`.
         virtual_child: Option<VirtualChildSlot>,
+        /// `rules:` arg from the DSL; the driver applies each rule's
+        /// `when` predicate per row and merges matching `override` maps
+        /// into the row's `ctx.flags`. Empty = no rules effect. See
+        /// `crate::row_pipeline::apply_rules_and_interpret_with_ctx`.
+        rules: Vec<holon_api::render_types::RuleSpec>,
     },
     /// A grouped collection (board, future calendar, …): rows are
     /// partitioned by a row column at runtime and the result is a list of
@@ -263,6 +278,10 @@ enum ReactiveViewInner {
         /// Per-card render expression. Each row that lands in a lane is
         /// interpreted through this template.
         item_template: RenderExpr,
+        /// `rules:` arg from the DSL (FU-6). Driver applies each rule's
+        /// predicate per card and merges matching `override` maps into
+        /// the card's `ctx.flags`. Empty = no overrides.
+        rules: Vec<holon_api::render_types::RuleSpec>,
         /// Column name used to bucket rows into lanes (e.g. `task_state`).
         lane_field: String,
         /// Title for the lane that collects rows whose `lane_field` is
@@ -338,6 +357,7 @@ impl ReactiveView {
                 space: Mutable::new(initial_space),
                 child_space_fn,
                 virtual_child: config.virtual_child,
+                rules: config.rules,
             },
             items: MutableVec::new(),
             trailing_slot: None,
@@ -442,6 +462,7 @@ impl ReactiveView {
     /// Create a grouped view (board, future calendar, …) — partitioning is
     /// owned by ONE driver so cross-lane row movement is atomic from
     /// GPUI's render perspective.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_grouped(
         layout: CollectionVariant,
         data_source: Arc<dyn ReactiveRowProvider>,
@@ -451,12 +472,14 @@ impl ReactiveView {
         lane_order: Vec<String>,
         sort_key: Option<String>,
         initial_space: Option<AvailableSpace>,
+        rules: Vec<holon_api::render_types::RuleSpec>,
     ) -> Self {
         Self {
             inner: ReactiveViewInner::Grouped {
                 layout,
                 data_source,
                 item_template,
+                rules,
                 lane_field,
                 lane_label_default,
                 lane_order,
@@ -716,6 +739,7 @@ impl ReactiveView {
             ReactiveViewInner::Grouped {
                 data_source,
                 item_template,
+                rules,
                 lane_field,
                 lane_label_default,
                 lane_order,
@@ -725,6 +749,7 @@ impl ReactiveView {
             } => self.create_grouped_driver(
                 data_source,
                 item_template,
+                rules,
                 lane_field,
                 lane_label_default,
                 lane_order,
@@ -763,6 +788,10 @@ impl ReactiveView {
         let config_sort_key: Option<String> = match &self.inner {
             ReactiveViewInner::Collection { sort_key, .. } => sort_key.clone(),
             _ => None,
+        };
+        let config_rules: Vec<holon_api::render_types::RuleSpec> = match &self.inner {
+            ReactiveViewInner::Collection { rules, .. } => rules.clone(),
+            _ => Vec::new(),
         };
 
         let node_interpret_fn: InterpretFn = {
@@ -803,14 +832,29 @@ impl ReactiveView {
             let space = space_handle.clone();
             let nif = node_interpret_fn;
             let ds = data_source.clone();
+            let rules = config_rules;
             move |row: Arc<holon_api::widget_spec::DataRow>| -> Arc<ReactiveViewModel> {
                 let parent_space = space.get_cloned();
                 let handle = row
                     .get("id")
                     .and_then(|v| v.as_string())
                     .and_then(|id| ds.row_mutable(id));
-                let ctx = row_render_context(row, handle, svc.as_ref(), parent_space);
-                let mut node = svc.interpret(&tmpl, &ctx);
+                let ctx = row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
+                // FU-6: apply `rules:` per-row. Streaming has no count/is_last,
+                // so positional is empty — predicates can still match on row
+                // columns (e.g. `eq("status", "done")`). For position-aware
+                // rules, use the static arm or a dedicated streaming-position
+                // tracker (future work).
+                let positional = std::collections::HashMap::new();
+                let svc_for_interpret = svc.clone();
+                let (mut node, _) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
+                    ctx,
+                    &tmpl,
+                    &rules,
+                    &row,
+                    positional,
+                    move |expr, c| svc_for_interpret.interpret(expr, c),
+                );
                 node.interpret_fn = Some(nif.clone());
                 Arc::new(node)
             }
@@ -908,6 +952,10 @@ impl ReactiveView {
             ReactiveViewInner::Collection { sort_key, .. } => sort_key.clone(),
             _ => None,
         };
+        let config_rules: Vec<holon_api::render_types::RuleSpec> = match &self.inner {
+            ReactiveViewInner::Collection { rules, .. } => rules.clone(),
+            _ => Vec::new(),
+        };
         let has_sort = sort_key.is_some();
 
         let target = self.items.clone();
@@ -966,19 +1014,29 @@ impl ReactiveView {
             let svc = services.clone();
             let nif = node_interpret_fn.clone();
             let ds = data_source.clone();
+            let rules = config_rules;
             move |tmpl: &RenderExpr,
                   row: Arc<holon_api::widget_spec::DataRow>,
                   child_space: Option<AvailableSpace>|
                   -> Arc<ReactiveViewModel> {
-                let entity_row = row.clone();
                 let handle = row
                     .get("id")
                     .and_then(|v| v.as_string())
                     .and_then(|id| ds.row_mutable(id));
-                let ctx = row_render_context(row, handle, svc.as_ref(), child_space);
-                let mut node = svc.interpret(tmpl, &ctx);
+                let ctx = row_render_context(row.clone(), handle, svc.as_ref(), child_space);
+                // FU-6: rules: per-row. Streaming has no count/is_last so the
+                // positional context is empty (column-only predicates fire).
+                let positional = std::collections::HashMap::new();
+                let svc_for_interpret = svc.clone();
+                let (mut node, _) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
+                    ctx,
+                    tmpl,
+                    &rules,
+                    &row,
+                    positional,
+                    move |expr, c| svc_for_interpret.interpret(expr, c),
+                );
                 node.interpret_fn = Some(nif.clone());
-                node = node.with_entity(entity_row);
                 Arc::new(node)
             }
         };
@@ -1191,10 +1249,12 @@ impl ReactiveView {
     /// sizes (≤ 1k rows / ~5 lanes) this is fine; if it ever isn't, the
     /// rebuild can be replaced with fine-grained per-lane diff emission
     /// without changing the public surface.
+    #[allow(clippy::too_many_arguments)]
     fn create_grouped_driver(
         &self,
         data_source: &Arc<dyn ReactiveRowProvider>,
         item_template: &RenderExpr,
+        rules: &[holon_api::render_types::RuleSpec],
         lane_field: &str,
         lane_label_default: &str,
         lane_order: &[String],
@@ -1212,6 +1272,7 @@ impl ReactiveView {
         let tmpl = item_template.clone();
         let ds = data_source.clone();
         let svc = services;
+        let rules: Vec<holon_api::render_types::RuleSpec> = rules.to_vec();
 
         // Per-row entry tracking. Mirrors flat_driver's `entries` shape so
         // we can rebuild lanes deterministically on every event.
@@ -1233,6 +1294,7 @@ impl ReactiveView {
             let lane_field = lane_field_for_partition;
             let lane_label_default = label_default_for_partition;
             let lane_order = lane_order_for_partition;
+            let rules = rules.clone();
             Arc::new(move || {
                 let lock = entries.lock().unwrap();
                 let parent_space = space_handle.get_cloned();
@@ -1296,14 +1358,31 @@ impl ReactiveView {
                     let cards: Vec<Arc<ReactiveViewModel>> = rows
                         .into_iter()
                         .map(|row| {
-                            let entity_row = row.clone();
                             let handle = row
                                 .get("id")
                                 .and_then(|v| v.as_string())
                                 .and_then(|id| ds.row_mutable(id));
-                            let ctx = row_render_context(row, handle, svc.as_ref(), parent_space);
-                            let mut node = svc.interpret(&tmpl, &ctx);
-                            node = node.with_entity(entity_row);
+                            let ctx =
+                                row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
+                            // FU-6: per-card rules: apply. Lane-position
+                            // (which lane this card is in) is available via
+                            // `lane` positional, alongside the card's own
+                            // columns. Predicate authors can write
+                            // `eq("lane", "Done")` to match cards in
+                            // specific lanes.
+                            let positional = std::collections::HashMap::from([(
+                                "lane".to_string(),
+                                holon_api::Value::String(title.clone()),
+                            )]);
+                            let svc_for_interpret = svc.clone();
+                            let (node, _) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
+                                ctx,
+                                &tmpl,
+                                &rules,
+                                &row,
+                                positional,
+                                move |expr, c| svc_for_interpret.interpret(expr, c),
+                            );
                             Arc::new(node)
                         })
                         .collect();
@@ -1600,6 +1679,7 @@ mod tests {
                 },
                 sort_key: None,
                 virtual_child: None,
+                rules: Vec::new(),
             },
             data_source,
             None,

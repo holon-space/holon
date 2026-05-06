@@ -25,6 +25,10 @@ pub struct RenderEntityView {
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
     entity_cache: EntityCache,
+    /// Shell-level cache one level up. `LiveQuery` lookups route here so
+    /// data-semantic queries (same SQL → same result) share state across
+    /// rows in the same shell. All other kinds stay row-scoped.
+    parent_cache: EntityCache,
     /// Ancestor `live_block` ids leading down to this row's parent shell,
     /// captured at creation time. Re-emitted into each render frame's
     /// `GpuiRenderContext` so the lazy `live_block` builder can refuse
@@ -40,8 +44,9 @@ impl RenderEntityView {
         services: Arc<dyn BuilderServices>,
         nav: NavigationState,
         bounds_registry: BoundsRegistry,
+        parent_cache: EntityCache,
         live_block_ancestors: LiveBlockAncestors,
-        _cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) -> Self {
         Self {
             current,
@@ -50,6 +55,7 @@ impl RenderEntityView {
             nav,
             bounds_registry,
             entity_cache: Default::default(),
+            parent_cache,
             live_block_ancestors,
         }
     }
@@ -77,7 +83,9 @@ impl Render for RenderEntityView {
         fields(component = "entity")
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let local = LocalEntityScope::new().with_cache(self.entity_cache.clone());
+        let local = LocalEntityScope::new()
+            .with_cache(self.entity_cache.clone())
+            .with_parent(self.parent_cache.clone());
         let gpui_ctx = GpuiRenderContext::new(
             self.ctx.clone(),
             self.services.clone(),

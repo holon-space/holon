@@ -175,7 +175,7 @@ proptest! {
             let blocks = build_blocks(&doc_id, &headlines);
 
             // Production write path with edge resolver fans tags into
-            // `block_tags` and blockers into `task_blockers`.
+            // `block_tags` and requires into `block_requires`.
             for b in &blocks {
                 let params = block_to_params(b);
                 provider

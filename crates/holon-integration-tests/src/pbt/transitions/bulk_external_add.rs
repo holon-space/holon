@@ -6,8 +6,10 @@
 //! `sut.rs:1565-1847` (SUT apply), and
 //! `transition_budgets.rs:233-251` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -18,6 +20,7 @@ use crate::pbt::transition_budgets::{
     CACHE_EVENT_READS, ExpectedSql, REACTIVE_BASE, READS_PER_WATCH, cdc_tolerance,
 };
 
+use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 
@@ -32,45 +35,90 @@ pub struct BulkExternalAdd {
 }
 
 impl E2ETransitionFactory for BulkExternalAdd {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let doc_uris: Vec<EntityUri> = state.documents.keys().cloned().collect();
-        if doc_uris.is_empty() {
-            return None;
-        }
-        let next_id = state.block_state.next_id;
-        let strat = (
-            prop::sample::select(doc_uris),
-            prop::collection::vec("[a-zA-Z][a-zA-Z0-9 ]{0,20}", 3..=10),
-        )
-            .prop_map(move |(doc_entity_uri, contents)| {
-                let blocks: Vec<Block> = contents
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, content)| {
-                        Block::new_text(
-                            EntityUri::block(&format!("bulk-{}-{}", next_id, i)),
-                            doc_entity_uri.clone(),
-                            content,
-                        )
-                    })
-                    .collect();
-                BulkExternalAdd {
-                    doc_uri: doc_entity_uri,
-                    blocks,
-                }
-            })
-            .boxed();
-        Some((1, strat))
+        check(!doc_uris.is_empty(), Reason::NoDocumentsAvailable).map(|_| {
+            // Boost weight when most documents have no editable Text content.
+            // Without seeded content, every edit-path generator that filters on
+            // `main_editable_descendants` (SplitBlock, Indent, EditViaViewModel,
+            // ClickBlock-as-Main, …) returns `None` and the PBT never reaches
+            // editing code. Once docs hold Text blocks the weight drops back to
+            // base so the rest of the strategy can run.
+            let is_empty_doc = |doc_uri: &EntityUri| -> bool {
+                !state.block_state.blocks.values().any(|b| {
+                    b.parent_id == *doc_uri
+                        && b.content_type == ContentType::Text
+                        && !b.is_page()
+                        && !state.layout_blocks.contains(&b.id)
+                })
+            };
+            let empty_doc_uris: Vec<EntityUri> = doc_uris
+                .iter()
+                .filter(|u| is_empty_doc(u))
+                .cloned()
+                .collect();
+            let total_docs = doc_uris.len();
+            let weight: u32 = if empty_doc_uris.len() * 2 >= total_docs {
+                100
+            } else {
+                1
+            };
+
+            // Prefer empty docs when any exist: the multi-block-into-empty-parent
+            // path is the cleanest exerciser of the Full-mode CDC ordering invariant
+            // (org-parser-assigned sort_keys must agree with the Loro tree's
+            // fractional indices). Sampling from the empty subset deterministically
+            // hits that path on every BulkExternalAdd, instead of leaving it to a
+            // random `select(doc_uris)` to land there.
+            let candidate_docs = if !empty_doc_uris.is_empty() {
+                empty_doc_uris
+            } else {
+                doc_uris
+            };
+
+            let next_id = state.block_state.next_id;
+            let strat = (
+                prop::sample::select(candidate_docs),
+                prop::collection::vec("[a-zA-Z][a-zA-Z0-9 ]{0,20}", 3..=10),
+            )
+                .prop_map(move |(doc_entity_uri, contents)| {
+                    let blocks: Vec<Block> = contents
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, content)| {
+                            Block::new_text(
+                                EntityUri::block(&format!("bulk-{}-{}", next_id, i)),
+                                doc_entity_uri.clone(),
+                                content,
+                            )
+                        })
+                        .collect();
+                    BulkExternalAdd {
+                        doc_uri: doc_entity_uri,
+                        blocks,
+                    }
+                })
+                .boxed();
+            (weight, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for BulkExternalAdd {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && state.documents.contains_key(&self.doc_uri)
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                state.documents.contains_key(&self.doc_uri),
+                Reason::NoDocumentsAvailable,
+            ),
+        ];
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {

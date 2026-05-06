@@ -204,7 +204,7 @@ fn main() {
                     interaction_tx,
                 );
                 Some(PbtReadyResult {
-                    driver: Some(Box::new(tui_driver)),
+                    driver: Some(std::sync::Arc::new(tui_driver)),
                     frontend_engine: Some(pbt_ctx.reactive_engine.clone()),
                     frontend_geometry: Some(Box::new(driver_for_pbtresult.clone())),
                     frontend_visual_state: Some(pbt_visual_state_for_pbtresult.clone()),
@@ -323,7 +323,7 @@ fn main() {
 /// Three select arms (non-biased — fairness keeps inputs from being
 /// starved by the periodic timer):
 ///
-/// - 200 ms periodic re-render — liveness fallback for inv14 (keeps
+/// - 200 ms periodic re-render — liveness fallback for inv-frontend-engine (keeps
 ///   geometry warm during quiet periods, doubles as the deadlock
 ///   backstop for `EventPropagation::Propagate` events that don't
 ///   trigger a signal-driven render).
@@ -405,7 +405,7 @@ async fn run_capturing_renderer(
             // from being starved by the timer / signal arms.
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 // Liveness fallback — re-renders even when the engine
-                // is idle so geometry stays current under inv14.
+                // is idle so geometry stays current under inv-frontend-engine.
                 if let Err(e) = app.app_render(&mut global, &mut registry, &mut focus) {
                     eprintln!("[{LABEL}] periodic app_render failed: {e:?}");
                     break;

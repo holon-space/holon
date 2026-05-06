@@ -494,7 +494,7 @@ fn trigger_presence_on_editable_text_nodes() {
         .await
         .expect("spawn_blocking panicked");
 
-        // Every EditableText with operations should have triggers (inv10g)
+        // Every EditableText with operations should have triggers (inv-viewmodel-editable-text-triggers)
         let (total_with_ops, missing) =
             holon_integration_tests::display_assertions::count_editables_missing_triggers(
                 &display_tree,

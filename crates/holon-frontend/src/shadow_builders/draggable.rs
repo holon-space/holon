@@ -9,7 +9,7 @@ holon_macros::widget_builder! {
         };
         // Bind data to the current row so `row_id()` returns the block's id.
         // GPUI's draggable builder reads `node.row_id()` to set up `on_drag`
-        // and the headless drop walker (and inv16) match by row_id; both
+        // and the headless drop walker (and inv-editable-text-has-draggable) match by row_id; both
         // silently no-op without this binding.
         ViewModel {
             children: vec![Arc::new(child)],

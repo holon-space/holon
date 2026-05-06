@@ -6,8 +6,10 @@
 //! `sut.rs:4159-4167` (SUT apply), and
 //! `transition_budgets.rs:339-343` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::{CursorPosition, ReferenceState};
@@ -21,21 +23,23 @@ use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for
 pub struct Redo;
 
 impl E2ETransitionFactory for Redo {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-        if state.redo_stack.is_empty() {
-            return None;
-        }
-        Some((2, Just(Redo).boxed()))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        Redo.preconditions(state).map(|()| (2, Just(Redo).boxed()))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for Redo {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && !state.redo_stack.is_empty()
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(!state.redo_stack.is_empty(), Reason::NoRedoHistory),
+        ];
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {

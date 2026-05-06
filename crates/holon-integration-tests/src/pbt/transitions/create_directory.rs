@@ -8,10 +8,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -23,42 +25,48 @@ pub struct CreateDirectory {
 }
 
 impl E2ETransitionFactory for CreateDirectory {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if state.app_started {
-            return None;
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Test the preconditions on a dummy instance to ensure state is valid
+        // for creating any directory; the specific path is generated randomly.
+        CreateDirectory {
+            path: String::new(),
         }
-
-        let dir_count = state.pre_startup_directories.len();
-        let dir_weight = if dir_count < 10 { 2 } else { 0 };
-
-        if dir_weight == 0 {
-            return None;
-        }
-
-        let strat = crate::pbt::generators::generate_directory_path()
-            .prop_map(|path| CreateDirectory { path })
-            .boxed();
-
-        Some((dir_weight, strat))
+        .preconditions(state)
+        .map(|_| {
+            let strat = crate::pbt::generators::generate_directory_path()
+                .prop_map(|path| CreateDirectory { path })
+                .boxed();
+            (2, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for CreateDirectory {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        !state.app_started
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(!state.app_started, Reason::AppAlreadyStarted),
+            check(
+                state.pre_startup_directories.len() < 10,
+                Reason::DirectoryLimitReached,
+            ),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.pre_startup_directories.push(self.path.clone());
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_create_directory(&self.path).await;
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,
             writes: 0,

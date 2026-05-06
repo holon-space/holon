@@ -6,8 +6,10 @@
 //! `sut.rs:1302-1317` (SUT apply), and
 //! `transition_budgets.rs:152-163` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::query::WatchSpec;
@@ -30,29 +32,47 @@ pub struct SetupWatch {
 }
 
 impl E2ETransitionFactory for SetupWatch {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-        let strat = (
-            crate::pbt::generators::generate_test_query(),
-            crate::pbt::generators::generate_query_language(),
-            "[a-z]{1,10}",
-        )
-            .prop_map(|(query, language, id)| SetupWatch {
-                query_id: format!("query-{}", id),
-                query,
-                language,
-            })
-            .boxed();
-        Some((1, strat))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Create a dummy instance to validate preconditions (no query/language needed yet);
+        // if they fail, the generator is disabled entirely (no weight=0 fallback).
+        let dummy = SetupWatch {
+            query_id: "dummy".to_string(),
+            query: TestQuery {
+                table: crate::pbt::query::QueryTable::Blocks,
+                columns: vec!["id".to_string()],
+                predicates: vec![],
+            },
+            language: QueryLanguage::HolonSql,
+        };
+        dummy.preconditions(state).map(|_| {
+            let strat = (
+                crate::pbt::generators::generate_test_query(),
+                crate::pbt::generators::generate_query_language(),
+                "[a-z]{1,10}",
+            )
+                .prop_map(|(query, language, id)| SetupWatch {
+                    query_id: format!("query-{}", id),
+                    query,
+                    language,
+                })
+                .boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for SetupWatch {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.is_properly_setup(), Reason::NotProperlySetup),
+        ];
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -65,7 +85,7 @@ impl E2ETransitionImpl for SetupWatch {
         );
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_setup_watch(&self.query_id, &self.query, self.language)
             .await;
     }

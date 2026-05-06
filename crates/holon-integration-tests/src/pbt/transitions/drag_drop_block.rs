@@ -8,10 +8,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -28,158 +30,131 @@ pub struct DragDropBlock {
 }
 
 impl E2ETransitionFactory for DragDropBlock {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let drag_source: Option<EntityUri> = state.focused_main_editable();
+        if drag_source.is_none() {
+            return check(false, Reason::NoFocusInMain).map(|_| unreachable!());
         }
+
+        let source = drag_source.unwrap();
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let focused_in_main = state.focused_entity(holon_api::Region::Main).cloned();
-        let no_content_update: std::collections::HashSet<EntityUri> = state
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .chain(state.layout_blocks.query_source_ids.iter())
-            .chain(state.profile_block_ids.iter())
-            .cloned()
-            .collect();
-        let editable_block_ids: Vec<EntityUri> =
-            if state.is_properly_setup() && focused_in_main.is_some() {
-                let focused = focused_in_main.as_ref().unwrap();
-                let valid = state
-                    .block_state
-                    .blocks
-                    .get(focused)
-                    .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page())
-                    && state.layout_blocks.is_focusable(focused)
-                    && !no_content_update.contains(focused)
-                    && state.is_descendant_of_any(focused, &focus_roots);
-                if valid { vec![focused.clone()] } else { vec![] }
-            } else {
-                vec![]
-            };
-        let text_block_ids: Vec<EntityUri> = state
+        let candidates: Vec<EntityUri> = state
             .block_state
             .blocks
             .values()
-            .filter(|b| b.content_type == ContentType::Text && !b.is_page())
+            .filter(|b| {
+                b.content_type == ContentType::Text
+                    && !b.is_page()
+                    && &b.id != &source
+                    && !state.layout_blocks.contains(&b.id)
+                    && state.is_descendant_of_any(&b.id, &focus_roots)
+            })
             .map(|b| b.id.clone())
+            .filter(|target| {
+                DragDropBlock {
+                    source: source.clone(),
+                    target: target.clone(),
+                }
+                .preconditions(state)
+                .is_good()
+            })
             .collect();
 
-        let drag_source: Option<EntityUri> = if !editable_block_ids.is_empty() {
-            Some(editable_block_ids[0].clone())
-        } else {
-            None
-        };
-        let drag_targets: Vec<EntityUri> = drag_source
-            .as_ref()
-            .map(|source| {
-                text_block_ids
-                    .iter()
-                    .filter(|id| {
-                        id != &source
-                            && !state.layout_blocks.contains(id)
-                            && state.is_descendant_of_any(id, &focus_roots)
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !DRAG_DROP_ENABLED || drag_source.is_none() || drag_targets.is_empty() {
-            return None;
-        }
-        let block_state = state.block_state.clone();
-        let source = drag_source.unwrap();
-        let valid_targets: Vec<EntityUri> = drag_targets
-            .into_iter()
-            .filter(|t| {
-                // Reject cycle: target descendant of source.
-                let mut current = t.clone();
-                for _ in 0..50 {
-                    let Some(b) = block_state.blocks.get(&current) else {
-                        return true;
-                    };
-                    if b.parent_id == source {
-                        return false;
-                    }
-                    if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
-                        return true;
-                    }
-                    current = b.parent_id.clone();
-                }
-                true
-            })
-            // Reject no-op: target already source's parent.
-            .filter(|t| {
-                block_state
-                    .blocks
-                    .get(&source)
-                    .map(|b| &b.parent_id != t)
-                    .unwrap_or(false)
-            })
-            .collect();
-        if valid_targets.is_empty() {
-            return None;
-        }
-        let source_clone = source.clone();
-        let strat = proptest::sample::select(valid_targets)
-            .prop_map(move |target| DragDropBlock {
-                source: source_clone.clone(),
-                target,
-            })
-            .boxed();
-        Some((1, strat))
+        check(!candidates.is_empty(), Reason::SourceNotRendered).map(|_| {
+            let source_clone = source.clone();
+            let strat = proptest::sample::select(candidates)
+                .prop_map(move |target| DragDropBlock {
+                    source: source_clone.clone(),
+                    target,
+                })
+                .boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for DragDropBlock {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        if !state.app_started || !state.is_properly_setup() {
-            return false;
-        }
-        if self.source == self.target {
-            return false;
-        }
-        let focused_in_main = state.focused_entity(holon_api::Region::Main);
-        if focused_in_main != Some(&self.source) {
-            return false;
-        }
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let is_text = |id: &EntityUri| {
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.is_properly_setup(), Reason::NotProperlySetup),
+            check(DRAG_DROP_ENABLED, Reason::DragDropDisabled),
+        ];
+
+        let focused_in_main = state.focused_entity(holon_api::Region::Main);
+        checks.push(check(
+            focused_in_main == Some(&self.source),
+            Reason::FocusedIsNotSelf,
+        ));
+        checks.push(check(self.source != self.target, Reason::NoOpParentMove));
+
+        checks.push(check(
             state
                 .block_state
                 .blocks
-                .get(id)
-                .is_some_and(|b| b.content_type == ContentType::Text)
-        };
-        if !is_text(&self.source) || !is_text(&self.target) {
-            return false;
-        }
-        if state.layout_blocks.contains(&self.source) || state.layout_blocks.contains(&self.target)
-        {
-            return false;
-        }
-        if !state.is_descendant_of_any(&self.source, &focus_roots)
-            || !state.is_descendant_of_any(&self.target, &focus_roots)
-        {
-            return false;
-        }
+                .get(&self.source)
+                .is_some_and(|b| b.content_type == ContentType::Text),
+            Reason::FocusedNotText,
+        ));
+        checks.push(check(
+            state
+                .block_state
+                .blocks
+                .get(&self.target)
+                .is_some_and(|b| b.content_type == ContentType::Text),
+            Reason::FocusedNotText,
+        ));
+        checks.push(check(
+            !state.layout_blocks.contains(&self.source),
+            Reason::FocusedInLayoutBlocks,
+        ));
+        checks.push(check(
+            !state.layout_blocks.contains(&self.target),
+            Reason::FocusedInLayoutBlocks,
+        ));
+        checks.push(check(
+            state.is_descendant_of_any(&self.source, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ));
+        checks.push(check(
+            state.is_descendant_of_any(&self.target, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ));
+
         // No-op: target is already source's parent.
-        if state
-            .block_state
-            .blocks
-            .get(&self.source)
-            .is_none_or(|b| &b.parent_id == &self.target)
-        {
-            return false;
-        }
+        checks.push(check(
+            state
+                .block_state
+                .blocks
+                .get(&self.source)
+                .is_some_and(|b| &b.parent_id != &self.target),
+            Reason::NoOpParentMove,
+        ));
+
         // Cycle: target is a descendant of source.
-        let mut singleton = std::collections::BTreeSet::new();
-        singleton.insert(self.source.clone());
-        if state.is_descendant_of_any(&self.target, &singleton) {
-            return false;
+        let mut current = self.target.clone();
+        let mut is_cycle = false;
+        for _ in 0..50 {
+            let Some(b) = state.block_state.blocks.get(&current) else {
+                break;
+            };
+            if b.parent_id == self.source {
+                is_cycle = true;
+                break;
+            }
+            if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
+                break;
+            }
+            current = b.parent_id.clone();
         }
-        true
+        checks.push(check(!is_cycle, Reason::CyclicParentMove));
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -190,7 +165,7 @@ impl E2ETransitionImpl for DragDropBlock {
         state.move_block(&self.source, self.target.clone(), None);
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_drag_drop_block(&self.source, &self.target).await;
     }
 

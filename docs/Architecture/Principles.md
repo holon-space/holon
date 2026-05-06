@@ -309,46 +309,95 @@ The frontend interprets this tree to create native UI components while preservin
 
 ## Storage Architecture
 
-### Unified Query Cache (Turso)
+### Authority + Projection (Layered Model)
 
-All data—regardless of source—flows into a **single Turso cache** for querying:
+Holon's data flow is layered. Each layer has one job:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    UNIFIED TURSO CACHE                          │
+│  Layer 4 — Chord ops + UI                                       │
+│    (multi-step ops, frontend interactions; reads cells, writes  │
+│     via OperationProvider OR cells)                             │
+└──────────────┬──────────────────────────────────┬───────────────┘
+               │ read                             │ write
+               ▼                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer 2 — Cells (reactive read primitive, in-memory)           │
+│    Cell<T> per (EntityUri, FieldPath); current() / signal() /   │
+│    set(); rich-op handles for text (Cell<String>)               │
+└──────────────┬──────────────────────────────────┬───────────────┘
+               │ project from                     │ dispatch to
+               ▼                                  ▼
+┌──────────────────────────────┐   ┌─────────────────────────────┐
+│  Layer 3 — Matviews / IVM    │   │  Authority (per entity type)│
+│    (Turso, derived,          │   │    Loro for blocks          │
+│     incrementally maintained)│   │    Todoist API for tasks    │
+│                              │   │    JIRA API for issues      │
+│    Query-shaped, durable     │   │    org files for docs       │
+└──────────────────────────────┘   └─────────────────────────────┘
+                  ▲                                │
+                  │                                │
+                  │  emits CDC / projection events │
+                  └────────────────────────────────┘
+                  │
+┌─────────────────┴───────────────────────────────────────────────┐
+│  Layer 1 — Event log (EventBus + Turso CDC + WAL)                │
+│    Durable, ordered, identity-bearing record of every change.   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Authority + Projection rule**: each entity type has exactly one *authority* (the system that can refuse a write). Turso is uniformly downstream — it never holds state the authority hasn't accepted. The UI never queries an authority directly; it always reads cells (Layer 2), which project from the authority through the event log (Layer 1) and matviews (Layer 3).
+
+### Unified Query Cache (Turso, projection only)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    UNIFIED TURSO CACHE (projection)             │
 │            (SQLite-compatible, single query surface)            │
 │                                                                 │
 │    PRQL/SQL queries run here against ALL data uniformly        │
-│    Operations modify data here, then sync to sources           │
+│    Writes flow Authority → Event Log → Turso projection        │
 └───────────────────┬─────────────────────────┬───────────────────┘
+                    ▲                         ▲
+            projects from               projects from
                     │                         │
-          syncs from/to              syncs from/to
-                    │                         │
-            ┌───────▼───────┐         ┌───────▼───────────┐
+            ┌───────┴───────┐         ┌───────┴───────────┐
             │  LORO CRDT    │         │  THIRD-PARTY      │
-            │               │         │  APIs             │
-            │  Source of    │         │                   │
-            │  truth for    │         │  Source of truth  │
-            │  owned data   │         │  for external     │
+            │  (authority   │         │  APIs             │
+            │   for blocks) │         │  (authorities for │
+            │               │         │   their entities) │
             └───────────────┘         └───────────────────┘
 ```
 
-**Key insight**: The UI never queries Loro or external APIs directly. Everything goes through the unified Turso cache. This enables:
+**Key insight**: The UI never queries Loro or external APIs directly. Everything goes through cells (Layer 2) backed by the unified Turso cache (Layer 3). This enables:
 - Single query language (PRQL/SQL) for all data
 - Consistent CDC stream for all changes
-- Uniform operation dispatch regardless of data source
+- Uniform reactive read primitive (`Cell<T>`) regardless of authority
 
 ### Source of Truth by Data Type
 
-| Data Type | Source of Truth | Sync Direction |
-|-----------|-----------------|----------------|
-| Owned blocks, links, properties | Loro CRDT | Loro → Turso (and Turso → Loro for edits) |
-| External system data (Todoist, JIRA, etc.) | External API | API → Turso (and Turso → API for operations) |
-| User metadata on external items | Loro CRDT | Loro → Turso |
-| AI embeddings | Generated on-device | Computed → Turso |
-| Pattern/conflict logs | Local only | Local Turso (not synced) |
+| Data Type | Authority | Turso Role |
+|-----------|-----------|------------|
+| Owned blocks (content, structure, metadata) | Loro CRDT | Projection only — never written directly |
+| External system data (Todoist, JIRA, etc.) | External API | Projection — populated by polling / webhooks |
+| User metadata on external items | Loro CRDT | Projection |
+| AI embeddings | Generated on-device | Projection (computed → Turso) |
+| Pattern/conflict logs | Local only | Stored locally (no upstream authority) |
 
-**Rationale**: CRDTs excel at collaborative editing of owned data. External systems are server-authoritative—we cache their data and queue operations, but don't pretend to own it.
+**Rationale**: CRDTs excel at collaborative editing of owned data. External systems are server-authoritative—we cache their data and queue operations, but don't pretend to own it. Either way, Turso is downstream of the authoritative system; the UI reads through cells, which read through Turso projections.
+
+### Reactive Read: Cell Registry
+
+Cells (`Cell<T>`) are the system's universal reactive read primitive. Each cell is identified by `(EntityUri, FieldPath)` and exposes:
+- `current() -> T` — synchronous read of the latest value
+- `signal() -> impl Signal<Item = T>` — reactive stream of updates
+- `set(T)` — write that dispatches via the entity's typed `CrudOperations` methods (NOT through `OperationDispatcher` — that would re-enter dispatch and double-log undo/trace)
+
+`MutableText` is `Cell<String>` with rich-op methods (`apply_text_op(TextOp)`, cursor anchors, `remote_deltas()`). Loro-backed text cells supply rich behaviour natively; LWW backings degrade gracefully to compute-then-replace.
+
+Per-entity-type cell registries hold the cells. `BlockCellRegistry` knows how to construct each block field's backing (Loro-meta-backed for `completed`/`collapsed`/etc., Loro-text-backed for `content`, LWW-scalar-backed in SqlOnly mode). Cells are `Weak`-keyed: held alive while consumers reference them; reaped when the last consumer drops.
+
+**Cells vs `Mutable<T>`**: `Cell<T>` is for entity field state (has identity, has authority, could be persisted/queried/synced). Per-VM `Mutable<T>` (FU-1 pattern) is for per-instance widget state (tree-item `expanded`, view-mode-switcher selection, focused_block) — same-id entities in different render slots need independent state. Genuinely-ephemeral state (cursor blink, hover, drag offset) stays raw `Mutable<T>` too.
 
 ### Plain-Text File Layer
 
@@ -400,6 +449,15 @@ This prevents inconsistency between cached data and sync position.
 
 ## Operation System Architecture
 
+Two complementary write surfaces, with a clear cut between them:
+
+| Path | Use case | Reflective? |
+|------|----------|-------------|
+| **Cells** (`cell.set(v)` / `cell.apply_text_op(op)`) | Single-field write where the caller already has the value (keychord toggles, edit-commit, optimistic UI). | No — typed call into `CrudOperations`. Lives at Layer 2. |
+| **OperationProvider / OperationDispatcher** | Multi-param ops, runtime-discovered ops, schema-introspectable ops (`move_block`, `split_block`, `embed_entity`, third-party ops, MCP, GraphQL). | Yes — `find_operations` discovers shape, params gathered from drag&drop / search / clipboard / etc. |
+
+Both paths share the same underlying typed methods on the entity's `CrudOperations` trait — cells are sugar at the chord-op layer, not a parallel write path. They emit the same events with the same origin/trace tagging.
+
 ### Trait-Based Operations
 
 Operations are defined via traits, not string-based dispatch:
@@ -431,6 +489,7 @@ The UI uses this to:
 - Show only applicable operations (based on available params)
 - Wire operation callbacks to widgets
 - Validate before dispatch
+- Discover operations from runtime-loaded third-party sources (the macro-reified shape is the only thing the UI needs to know about an op)
 
 ### Composite Operation Dispatch
 
@@ -440,10 +499,14 @@ The UI uses this to:
 OperationDispatcher
 ├── QueryableCache<TodoistDataSource, TodoistTask>
 ├── QueryableCache<JiraDataSource, JiraIssue>
-└── QueryableCache<InternalBlockSource, Block>
+└── LoroOperationProvider (authority for blocks)
 ```
 
-Operations are routed by `entity_name` to the appropriate provider.
+Operations are routed by `entity_name` to the appropriate provider. After the authority flip for blocks (Phase 2 of the Cells plan), `LoroOperationProvider` replaces `SqlOperationProvider` for the `block` entity — block writes go through Loro first, Turso projects via `LoroSyncController.on_loro_changed` + `SqlBlockProjector`.
+
+### Cells bypass the dispatcher (typed-method path)
+
+Cells dispatch through *typed* `CrudOperations` methods (`block_ops.set_field(id, field, v)`), NOT through `OperationDispatcher::execute_operation`. Inside a chord op, the chord op is already the dispatched operation; nesting another dispatch would double-log to `OperationLog`, duplicate the trace span, and fork the undo stack. The typed-method route gives cells the same `event_bus.emit` / origin tagging the dispatcher uses, without re-entering dispatch.
 
 ---
 

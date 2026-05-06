@@ -89,8 +89,9 @@ pub struct EditableTarget {
 
 /// Walk a row's view-model subtree looking for the first `editable_text`
 /// widget. `row_block_id` is the block ID from the parent row — used as
-/// fallback when the leaf `editable_text`'s own data doesn't carry an `id`
-/// (column-bound widgets only see the column value, not the full row).
+/// the source-of-id when the leaf `editable_text`'s own data doesn't
+/// carry an `id` (column-bound widgets only see the column value, not
+/// the full row).
 fn find_editable_target(
     node: &ReactiveViewModel,
     row_block_id: Option<&str>,
@@ -104,7 +105,7 @@ fn find_editable_target(
             .or_else(|| row_block_id.map(|s| s.to_string()))?;
         tracing::trace!(
             "[find_editable_target] row_id={from_row:?} entity_id={from_entity:?} \
-             fallback={row_block_id:?} → {block_id}"
+             row_id_arg={row_block_id:?} → {block_id}"
         );
         let field = node
             .prop_str("field")
@@ -312,6 +313,7 @@ pub fn render_view_model(
     match name.as_str() {
         "text" => render_text(node, ops, start_row, start_col, max_width),
         "editable_text" => render_editable_text(node, ctx, ops, start_row, start_col, max_width),
+        "rendered_text" => render_text(node, ops, start_row, start_col, max_width),
         "checkbox" => render_checkbox(node, ops, start_row, start_col),
         "badge" => render_badge(node, ops, start_row, start_col),
         "icon" => render_icon(node, ops, start_row, start_col),
@@ -658,7 +660,7 @@ fn render_text(
 }
 
 fn render_plain(
-    _node: &ReactiveViewModel,
+    _: &ReactiveViewModel,
     ops: &mut RenderOpIRVec,
     start_row: usize,
     start_col: usize,
@@ -1064,7 +1066,7 @@ fn render_collection_vertical(
     // `crates/holon-integration-tests/src/pbt/sut.rs` use that string as
     // the marker for "wrapper without content".) Tagging tree/table/outline
     // rows as `live_block` here would be a same-string-different-semantics
-    // conflation that surfaces as a B15 false positive whenever the VM
+    // conflation that surfaces as a vm-data-tracked-as-content false positive whenever the VM
     // emits only such rows.
     let register_as_blocks = matches!(kind, "tree" | "table" | "outline");
     for item in &items {

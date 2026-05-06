@@ -25,15 +25,32 @@ pub(crate) fn tag<E: gpui::IntoElement>(
     name: &'static str,
     el: E,
 ) -> AnyElement {
+    tag_with_entity_id(ctx, name, None, el)
+}
+
+/// Like `tag()`, but binds an `entity_id` on the tracker so PBT generators
+/// and other region-scoped consumers can locate this subtree via
+/// `BoundsRegistry::find_by_entity_id(...)`. Used by `live_block` to expose
+/// its block URI (e.g. `block:default-left-sidebar`) — `tag()` is unaware of
+/// block ids because the registry macro doesn't pass the node.
+pub(crate) fn tag_with_entity_id<E: gpui::IntoElement>(
+    ctx: &GpuiRenderContext,
+    name: &'static str,
+    entity_id: Option<&str>,
+    el: E,
+) -> AnyElement {
     let seq = ctx.bounds_registry.next_seq();
     let id = format!("{name}#{seq}");
-    crate::geometry::TransparentTracker::new(
+    let mut tracker = crate::geometry::TransparentTracker::new(
         id,
         name,
         ctx.bounds_registry.clone(),
         el.into_any_element(),
-    )
-    .into_any_element()
+    );
+    if let Some(eid) = entity_id {
+        tracker = tracker.with_entity_id(eid);
+    }
+    tracker.into_any_element()
 }
 
 /// Production layout chain for a scrollable list region.
@@ -260,7 +277,7 @@ fn get_or_create_reactive_shell(
     })
 }
 
-fn render_unsupported(name: &str, _ctx: &GpuiRenderContext) -> Div {
+fn render_unsupported(name: &str, _: &GpuiRenderContext) -> Div {
     div().child(format!("[unsupported: {name}]"))
 }
 

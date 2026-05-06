@@ -116,8 +116,26 @@ impl Module for EventInfraModule {
                     BlockSchemaModule.edge_fields(),
                 ));
 
-                Arc::new(SqlBlockOperations::new(sql_ops, block_cache))
-                    as Arc<dyn OperationProvider>
+                // Resolve the `BlockCellRegistry`. In Full mode (LoroModule
+                // loaded) this is Loro-aware; in SqlOnly mode it's a
+                // `BlockCellRegistry::sql_only()` that errors loudly on
+                // every `live_field` lookup (no editor in SqlOnly mode).
+                // Synthetic `MemStore` test impls bypass this entirely
+                // because they inherit the `BlockOperations::cells()`
+                // default of `None`.
+                let cell_registry: Arc<crate::sync::block_cell_registry::BlockCellRegistry> =
+                    match resolver
+                        .optional_resolve_async::<crate::sync::block_cell_registry::BlockCellRegistry>()
+                        .await
+                    {
+                        Some(arc) => arc.clone(),
+                        None => Arc::new(
+                            crate::sync::block_cell_registry::BlockCellRegistry::sql_only(),
+                        ),
+                    };
+                let block_ops =
+                    SqlBlockOperations::new(sql_ops, block_cache).with_cell_registry(cell_registry);
+                Arc::new(block_ops) as Arc<dyn OperationProvider>
             },
         ));
 

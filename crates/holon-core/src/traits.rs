@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::fractional_index::{gen_key_between, gen_n_keys, MAX_SORT_KEY_LENGTH};
-use holon_api::{Operation, OperationDescriptor, Value};
+use crate::cell_registry::EntityCellRegistryExt;
+use holon_api::{EntityUri, Operation, OperationDescriptor, Value};
 
 // Define Result type using Send + Sync for error
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -45,7 +45,9 @@ pub enum UndoAction {
 }
 
 impl UndoAction {
-    /// Convert to Option<Operation> for backward compatibility
+    /// Convert to Option<Operation>.
+    // ALLOW(compatibility): legitimate Option<Operation> bridge consumed by
+    // the macro-generated dispatcher; not a removable shim.
     pub fn into_option(self) -> Option<Operation> {
         match self {
             UndoAction::Undo(op) => Some(op),
@@ -140,7 +142,9 @@ impl OperationResult {
         }
     }
 
-    /// Backward compatibility during migration
+    // ALLOW(compatibility): bridge from a legacy UndoAction-shaped path
+    // still consumed by macro-generated code; deletion needs upstream
+    // macro work, not a one-line refactor.
     pub fn from_undo(undo: UndoAction) -> Self {
         Self {
             changes: Vec::new(),
@@ -243,10 +247,9 @@ pub trait TaskEntity: MaybeSendSync {
 ///
 /// Provides create, update, and delete operations. Changes are confirmed
 /// via ChangeNotifications streams, not return values.
-///
-/// **Note**: This trait is conceptually `CrudOperations` but is named
-/// `CrudOperations` for backward compatibility with macro-generated code.
-/// New code should refer to it as `CrudOperations` in documentation.
+// ALLOW(compatibility): the trait name is fixed by the macro-generated
+// dispatcher in holon-macros; renaming requires a coordinated macro +
+// trait change, not a one-line edit.
 #[holon_macros::operations_trait]
 #[async_trait]
 pub trait CrudOperations<T>: MaybeSendSync
@@ -457,27 +460,6 @@ where
 
         Ok(())
     }
-
-    /// Rebalance all siblings of a parent to create uniform spacing
-    async fn rebalance_siblings(&self, parent_id: Option<&str>) -> Result<()> {
-        let children: Vec<T> = if let Some(pid) = parent_id {
-            self.get_children(pid).await?
-        } else {
-            return Ok(());
-        };
-
-        let mut sorted_children: Vec<_> = children.into_iter().collect();
-        sorted_children.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
-
-        let new_keys = gen_n_keys(sorted_children.len())?;
-
-        for (child, new_key) in sorted_children.iter().zip(new_keys.iter()) {
-            self.set_field(child.id(), "sort_key", Value::String(new_key.clone()))
-                .await?;
-        }
-
-        Ok(())
-    }
 }
 
 /// Backward-compatible alias combining both query and maintenance helpers
@@ -485,6 +467,70 @@ pub trait BlockDataSourceHelpers<T>: BlockQueryHelpers<T> + BlockMaintenanceHelp
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
+}
+
+/// Read a block's content through the cell registry. Returns `None`
+/// when the registry is absent (synthetic test stores) or can't
+/// resolve the field (block not yet in the Loro tree, SqlOnly mode).
+/// Callers fall back to `T::content()` from the persistent store on
+/// `None`. The Loro-backed cell, when present, returns the
+/// post-keystroke text that the editor has been writing per-character —
+/// so chord ops like `split_block` operate on what the user sees, not
+/// the lagging SQL projection.
+fn read_content_via_cells(
+    registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
+    uri: &EntityUri,
+) -> Option<String> {
+    let reg = registry?;
+    let cell = reg.live_field::<String>(uri, "content").ok()?; // ALLOW(ok): expected fall-through when block not in Loro tree / SqlOnly mode
+    Some(cell.current())
+}
+
+/// Write a block's content through the cell registry. Returns `Ok(true)`
+/// when the cell-routed write landed; `Ok(false)` when no cell route
+/// exists (synthetic test stores, SqlOnly mode, block not in Loro tree).
+/// Caller falls back to `set_field` on `Ok(false)`.
+async fn write_content_via_cells(
+    registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
+    uri: &EntityUri,
+    new_value: String,
+) -> Result<bool> {
+    let Some(reg) = registry else {
+        return Ok(false);
+    };
+    // ALLOW(ok): same rationale as read_content_via_cells; cell-resolve
+    // errors degrade to the SQL set_field write path.
+    let Ok(cell) = reg.live_field::<String>(uri, "content") else {
+        return Ok(false);
+    };
+    cell.set(new_value)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+    Ok(true)
+}
+
+/// Authoritative block create through the cell registry. Routes
+/// `split_block`'s new-block create into Loro (tree.create + LoroText init
+/// + positional move). The outbound projector then emits the SQL INSERT
+/// tagged `EventOrigin::Loro`, which the inbound gate `EchoSuppress`es —
+/// the SQL-direct `BlockOperations::create` path tags events
+/// `EventOrigin::Other("sql")`, which the post-3.3-flip gate drops as an
+/// unmigrated chord-op write. Returns `Ok(false)` when no cell route is
+/// available (synthetic stores, SqlOnly mode); caller falls back to
+/// `BlockOperations::create`.
+async fn create_block_via_cells(
+    registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
+    parent_id: &EntityUri,
+    after_id: Option<&EntityUri>,
+    new_id: &EntityUri,
+    content: &str,
+) -> Result<bool> {
+    let Some(reg) = registry else {
+        return Ok(false);
+    };
+    reg.create_entity(parent_id, after_id, new_id, content)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
 
 /// Hierarchical structure operations (for any block-like entity)
@@ -498,6 +544,28 @@ pub trait BlockOperations<T>: BlockDataSourceHelpers<T>
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
+    /// Per-`(EntityUri, field)` reactive cell registry for this block
+    /// store. Default `None` keeps the synthetic in-memory test substrate
+    /// (`block_operations_tests.rs::MemStore`) working without rewriting:
+    /// chord ops fall through to `T::content()` whenever `cells()` returns
+    /// `None`. Production impls (`SqlBlockOperations` in Full mode)
+    /// override to return their DI-resolved registry so chord ops read
+    /// the live CRDT view of `block.content` instead of the lagging SQL
+    /// projection.
+    fn cells(&self) -> Option<&dyn crate::cell_registry::EntityCellRegistry> {
+        None
+    }
+
+    /// Block positional-intent provider — encapsulates the (Loro tree.mov
+    /// vs SqlOnly gen_key_between) split behind a typed API. Default
+    /// `None` keeps the synthetic in-memory test substrate working;
+    /// production impls override to return their wired ordering.
+    /// Chord ops (`move_to_position`, `split_block`, ...) require
+    /// `Some(_)` and panic if it's missing in a context that demands it.
+    fn ordering(&self) -> Option<&dyn crate::block_ordering::BlockOrdering> {
+        None
+    }
+
     /// Move block under its previous sibling (increase indentation).
     ///
     /// Delegates to [`move_block`] for the actual reparenting. The hand-rolled
@@ -536,6 +604,26 @@ where
             .await
     }
 
+    /// Position `id` under `parent_id`, immediately after `after_block_id`
+    /// (or first when `None`). Delegates to the impl's `BlockOrdering` —
+    /// see `crates/holon-core/src/block_ordering.rs`.
+    async fn move_to_position(
+        &self,
+        id: &str,
+        parent_id: &str,
+        after_block_id: Option<&str>,
+    ) -> Result<Vec<FieldDelta>> {
+        let uri = EntityUri::block(id);
+        let ordering = self.ordering().ok_or_else(|| {
+            anyhow::anyhow!(
+                "move_to_position requires a BlockOrdering — this BlockOperations \
+                 impl returned None from ordering()"
+            )
+        })?;
+        ordering.place(&uri, parent_id, after_block_id).await?;
+        Ok(Vec::new())
+    }
+
     /// Move block to different position (reorder within same parent or different parent)
     ///
     /// # Parameters
@@ -561,72 +649,14 @@ where
         let old_predecessor = self.get_prev_sibling(id).await?;
         let old_depth = block.depth();
 
-        // Query predecessor and successor sort_keys
-        let (prev_key, next_key): (Option<String>, Option<String>) = if after_block_id.is_none() {
-            // No after_block_id means "move to beginning" - insert before first child
-            let first_child: Option<T> = self.get_first_child(Some(parent_id)).await?;
-            let first_key = first_child.map(|c| c.sort_key().to_string());
-            (None, first_key)
-        } else {
-            // Insert after specific block
-            let maybe_after_block: Option<T> = self.get_by_id(after_block_id.unwrap()).await?;
-            let after_block: T =
-                maybe_after_block.ok_or_else(|| anyhow::anyhow!("Reference block not found"))?;
-            let prev_key = Some(after_block.sort_key().to_string());
-
-            // Find next sibling after the anchor block
-            let next_sibling: Option<T> = self.get_next_sibling(after_block_id.unwrap()).await?;
-            let next_key: Option<String> = next_sibling.map(|s: T| s.sort_key().to_string());
-            (prev_key, next_key)
-        };
-
-        // Generate new sort_key
-        let mut new_sort_key = gen_key_between(prev_key.as_deref(), next_key.as_deref())
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        // Check if rebalancing needed
-        if new_sort_key.len() > MAX_SORT_KEY_LENGTH {
-            self.rebalance_siblings(Some(parent_id)).await?;
-
-            // Re-query neighbors after rebalancing
-            let (prev_key, next_key): (Option<String>, Option<String>) = if after_block_id.is_none()
-            {
-                let first_child: Option<T> = self.get_first_child(Some(parent_id)).await?;
-                let first_key = first_child.map(|c| c.sort_key().to_string());
-                (None, first_key)
-            } else {
-                let maybe_after_block: Option<T> = self.get_by_id(after_block_id.unwrap()).await?;
-                let after_block: T = maybe_after_block
-                    .ok_or_else(|| anyhow::anyhow!("Reference block not found"))?;
-                let prev_key = Some(after_block.sort_key().to_string());
-                let next_sibling: Option<T> =
-                    self.get_next_sibling(after_block_id.unwrap()).await?;
-                let next_key: Option<String> = next_sibling.map(|s: T| s.sort_key().to_string());
-                (prev_key, next_key)
-            };
-
-            new_sort_key = gen_key_between(prev_key.as_deref(), next_key.as_deref())
-                .map_err(|e| anyhow::anyhow!(e))?;
-        }
-
-        // Calculate new depth based on parent
+        // Compute new depth for descendants' delta-update.
         let maybe_parent: Option<T> = self.get_by_id(parent_id).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
         let new_depth = parent.depth() + 1;
-
-        // Calculate depth delta for recursive updates
         let depth_delta = new_depth - old_depth;
 
-        // Update block atomically and collect FieldDeltas
-        let mut changes = Vec::new();
-        let parent_id_result = self
-            .set_field(id, "parent_id", Value::String(parent_id.to_string()))
-            .await?;
-        changes.extend(parent_id_result.changes);
-        let sort_key_result = self
-            .set_field(id, "sort_key", Value::String(new_sort_key))
-            .await?;
-        changes.extend(sort_key_result.changes);
+        // Position + depth update.
+        let mut changes = self.move_to_position(id, parent_id, after_block_id).await?;
         let depth_result = self
             .set_field(id, "depth", Value::Integer(new_depth))
             .await?;
@@ -706,10 +736,21 @@ where
     async fn split_block(&self, id: &str, position: i64) -> Result<OperationResult> {
         use uuid::Uuid;
 
+        eprintln!("[split_block-diag] id={id:?} position={position}");
         let maybe_block: Option<T> = self.get_by_id(id).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
 
-        let content = block.content();
+        // Prefer the live (Loro) view of the block's text when available
+        // through the cell registry; the per-keystroke writes that produced
+        // the cursor position the user sees may not have projected into
+        // `block.content()` (the SQL copy) yet. Falls through to the
+        // stored content when `cells()` is `None` (synthetic test stores)
+        // or when the cell registry can't resolve the field (SqlOnly mode,
+        // block not yet in Loro tree).
+        let split_uri = EntityUri::block(id);
+        let content_owned = read_content_via_cells(self.cells(), &split_uri)
+            .unwrap_or_else(|| block.content().to_string());
+        let content: &str = &content_owned;
 
         // Convert i64 to usize (validate it's non-negative and fits in usize)
         if position < 0 {
@@ -746,44 +787,112 @@ where
         // round-trip would silently miss this block.
         let new_block_id = format!("block:{}", Uuid::new_v4());
 
-        // Get next sibling's sort_key to position new block correctly
-        let next_sibling: Option<T> = self.get_next_sibling(id).await?;
-        let next_sort_key: Option<String> = next_sibling.map(|s: T| s.sort_key().to_string());
-
-        // Generate sort_key for new block (between current block and next sibling)
-        let new_sort_key = gen_key_between(Some(block.sort_key()), next_sort_key.as_deref())
-            .map_err(|e| anyhow::anyhow!(e))?;
-
         // Get current timestamp
         let now = chrono::Utc::now().timestamp_millis();
 
-        // Create new block using create method
-        let mut new_block_fields = HashMap::new();
-        new_block_fields.insert("id".to_string(), Value::String(new_block_id.clone()));
-        new_block_fields.insert("content".to_string(), Value::String(content_after));
-        new_block_fields.insert("parent_id".to_string(), {
-            if let Some(ref pid) = block.parent_id() {
-                Value::String(pid.to_string())
-            } else {
-                Value::Null
-            }
-        });
-        new_block_fields.insert("depth".to_string(), Value::Integer(block.depth()));
-        new_block_fields.insert("sort_key".to_string(), Value::String(new_sort_key));
-        new_block_fields.insert("created_at".to_string(), Value::Integer(now));
-        new_block_fields.insert("updated_at".to_string(), Value::Integer(now));
-        new_block_fields.insert("collapsed".to_string(), Value::Boolean(false));
-        new_block_fields.insert("completed".to_string(), Value::Boolean(false));
-        new_block_fields.insert("block_type".to_string(), Value::String("text".to_string()));
-
-        let (_new_block_id, create_result) = self.create(new_block_fields).await?;
-        let mut changes = create_result.changes;
-
-        // Update current block with truncated content
-        let content_result = self
-            .set_field(id, "content", Value::String(content_before))
+        // sort_key for the new block: delegate to BlockOrdering. Loro
+        // mode returns a placeholder (overwritten by apply_create reading
+        // position_after_block_id); SqlOnly mode returns a gen_key_between
+        // value to persist in the SQL `block.sort_key` column directly.
+        let parent_for_anchor = block
+            .parent_id()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "sentinel:no_parent".to_string());
+        let ordering = self.ordering().ok_or_else(|| {
+            anyhow::anyhow!(
+                "split_block requires a BlockOrdering — this BlockOperations impl \
+                 returned None from ordering()"
+            )
+        })?;
+        let new_sort_key = ordering
+            .new_child_anchor(&parent_for_anchor, Some(id))
             .await?;
-        changes.extend(content_result.changes);
+
+        // Route the new-block create through the cell registry when a Loro
+        // backing is available. The SQL-direct `self.create(...)` path
+        // publishes a `Created` event tagged `EventOrigin::Other("sql")`,
+        // which the post-Phase-3.3 inbound runtime gate drops as an
+        // unmigrated chord-op write — leaving Loro without the new block
+        // and the old block's SQL `content` column stuck on the
+        // pre-split value (the prefix-trim UPDATE then has nothing to
+        // race against, but the cell write also can't propagate because
+        // the projector sees inconsistent state). Routing through Loro
+        // first makes the outbound `LoroSyncController.on_loro_changed`
+        // the only SQL writer, with `EventOrigin::Loro` events that the
+        // gate correctly `EchoSuppress`es.
+        let parent_for_split = block
+            .parent_id()
+            .map(EntityUri::from_raw)
+            .unwrap_or_else(EntityUri::no_parent);
+        eprintln!(
+            "[split_block-diag] block.id={:?} block.parent_id={:?} parent_for_split={:?}",
+            block.id(),
+            block.parent_id(),
+            parent_for_split.as_str()
+        );
+        let new_block_uri = EntityUri::from_raw(&new_block_id);
+        let after_uri = EntityUri::block(id);
+        let wrote_create_via_cell = create_block_via_cells(
+            self.cells(),
+            &parent_for_split,
+            Some(&after_uri),
+            &new_block_uri,
+            &content_after,
+        )
+        .await?;
+
+        let mut changes = Vec::new();
+        if !wrote_create_via_cell {
+            // ALLOW(fallback): synthetic-store / SqlOnly mode has no Loro
+            // authority — the SQL `create` path is the only way to persist
+            // the new block. Disclosed and intentional.
+            let mut new_block_fields = HashMap::new();
+            new_block_fields.insert("id".to_string(), Value::String(new_block_id.clone()));
+            new_block_fields.insert("content".to_string(), Value::String(content_after));
+            new_block_fields.insert("parent_id".to_string(), {
+                if let Some(ref pid) = block.parent_id() {
+                    Value::String(pid.to_string())
+                } else {
+                    Value::Null
+                }
+            });
+            new_block_fields.insert("depth".to_string(), Value::Integer(block.depth()));
+            new_block_fields.insert("sort_key".to_string(), Value::String(new_sort_key));
+            // Positional intent for Full (Loro) mode. The literal key here
+            // must match `event_bus::POSITION_AFTER_BLOCK_ID_PARAM` over in the
+            // `holon` crate — we can't depend on it from `holon-core`, so the
+            // contract is duplicated as a string. `SqlOperationProvider::
+            // prepare_create` strips it from SQL fields and from the event
+            // payload, and lifts the value onto the typed
+            // `Event::position_after_block_id` field that `apply_create`
+            // reads.
+            new_block_fields.insert("after_block_id".to_string(), Value::String(id.to_string()));
+            new_block_fields.insert("created_at".to_string(), Value::Integer(now));
+            new_block_fields.insert("updated_at".to_string(), Value::Integer(now));
+            new_block_fields.insert("collapsed".to_string(), Value::Boolean(false));
+            new_block_fields.insert("completed".to_string(), Value::Boolean(false));
+            new_block_fields.insert("block_type".to_string(), Value::String("text".to_string()));
+
+            let (_new_block_id, create_result) = self.create(new_block_fields).await?;
+            changes.extend(create_result.changes);
+        }
+
+        // Update current block with truncated content. Prefer writing
+        // through the Loro CRDT layer (via the cell registry) when
+        // available so the `LoroSyncController.on_loro_changed` outbound
+        // projector becomes the single SQL writer for content. Drops
+        // through to a direct `set_field` write when no cell route exists
+        // (SqlOnly mode, synthetic in-memory test store, block not yet in
+        // Loro tree).
+        let content_before_for_cell = content_before.clone();
+        let wrote_via_cell =
+            write_content_via_cells(self.cells(), &split_uri, content_before_for_cell).await?;
+        if !wrote_via_cell {
+            let content_result = self
+                .set_field(id, "content", Value::String(content_before))
+                .await?;
+            changes.extend(content_result.changes);
+        }
         // TODO: Do we need this? self.set_field(id, "updated_at", Value::Integer(now))
         // TODO: Do we need this?     .await?;
 
@@ -842,7 +951,11 @@ where
             .get_by_id(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let block_content = block.content().to_string();
+        // Prefer the live (Loro) view via the cell registry; same reasoning
+        // as `split_block` — SQL `block.content` lags per-keystroke writes.
+        let join_block_uri = EntityUri::block(id);
+        let block_content = read_content_via_cells(self.cells(), &join_block_uri)
+            .unwrap_or_else(|| block.content().to_string());
         let block_id_str = block.id().to_string();
 
         // Pick merge target: prev sibling if any, else the parent.
@@ -859,75 +972,81 @@ where
                 .ok_or_else(|| anyhow::anyhow!("Cannot join: parent {parent_id} not found"))?
         };
 
-        let target_content = target.content().to_string();
+        let target_id_for_live = target.id().to_string();
+        let target_uri = EntityUri::block(&target_id_for_live);
+        let target_content = read_content_via_cells(self.cells(), &target_uri)
+            .unwrap_or_else(|| target.content().to_string());
         let join_offset = target_content.len();
         let new_content = format!("{}{}", target_content, block_content);
         let target_id = target.id().to_string();
 
+        let block_children: Vec<T> = self.get_children(&block_id_str).await?;
+
+        // Case-B refusal (Phase 3.5): joining a first-child block into its
+        // parent when it has children of its own would orphan or reposition
+        // the grandchildren. LogSeq refuses this action in the same shape;
+        // we mirror that here — Backspace at start of the first child with
+        // its own subtree is a no-op rather than a partial mutation.
+        if into_parent && !block_children.is_empty() {
+            return Ok(OperationResult::irreversible(vec![]));
+        }
+
         let mut changes = Vec::new();
 
-        // Re-parent children of `id` under `target_id`. Placement differs:
-        //   - prev-sibling path: append after target's existing children
-        //   - parent path: place at `id`'s old slot (before the remaining
-        //     siblings of `id` under `target`).
-        let block_children: Vec<T> = self.get_children(&block_id_str).await?;
-        if into_parent {
-            // Find the immediate next sibling of `id` under `target` (i.e.
-            // `id`'s former following sibling). Block's children's new
-            // sort_keys must lex-sort below that sibling's sort_key so they
-            // occupy `id`'s old slot. If there is no following sibling,
-            // pass `None` for the upper bound (sort to end).
-            let target_children_now: Vec<T> = self.get_children(&target_id).await?;
-            let next_sibling_sort_key: Option<String> = target_children_now
-                .iter()
-                .filter(|c| c.id() != block_id_str)
-                .find(|c| c.sort_key() > block.sort_key())
-                .map(|c| c.sort_key().to_string());
-            let mut last_sort_key: Option<String> = None;
-            for child in block_children.iter() {
-                let new_sort_key =
-                    gen_key_between(last_sort_key.as_deref(), next_sibling_sort_key.as_deref())
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                let pid_result = self
-                    .set_field(child.id(), "parent_id", Value::String(target_id.clone()))
-                    .await?;
-                changes.extend(pid_result.changes);
-                let sort_result = self
-                    .set_field(child.id(), "sort_key", Value::String(new_sort_key.clone()))
-                    .await?;
-                changes.extend(sort_result.changes);
-                last_sort_key = Some(new_sort_key);
-            }
-        } else {
-            // Prev-sibling path: append block's children after target's
-            // existing children. Same logic as the original implementation.
+        // Re-parent `id`'s children under `target_id`, appended after
+        // `target`'s existing children. Only the case-A branch (prev
+        // sibling exists) can reach this — the case-B-with-children
+        // branch is refused above.
+        //
+        // We thread `last_after_id` (a stable block id) LOCALLY across
+        // iterations instead of re-querying `target.children().last()` to
+        // sidestep the SQL projection race: in Full (Loro) mode each
+        // `move_to_position` commits to Loro synchronously, but the SQL
+        // projection lands asynchronously via the outbound projector, so
+        // a fresh `get_children(target_id)` mid-loop could miss the
+        // child that was just re-parented. Item 4 phase 3: each iteration
+        // calls `move_to_position(child, target, last_after_id)`, which
+        // in Loro mode routes to `write_position` → `update_block_position`
+        // (typed predecessor; no gen_key_between in the hot path) and in
+        // SqlOnly mode falls back to the legacy compute + paired
+        // `set_field` shape.
+        if !block_children.is_empty() {
             let target_children: Vec<T> = self.get_children(&target_id).await?;
-            let mut last_sort_key: Option<String> =
-                target_children.last().map(|c| c.sort_key().to_string());
+            let mut last_after_id: Option<String> =
+                target_children.last().map(|c| c.id().to_string());
             for child in block_children.iter() {
-                let new_sort_key = gen_key_between(last_sort_key.as_deref(), None)
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                let pid_result = self
-                    .set_field(child.id(), "parent_id", Value::String(target_id.clone()))
+                let move_changes = self
+                    .move_to_position(child.id(), &target_id, last_after_id.as_deref())
                     .await?;
-                changes.extend(pid_result.changes);
-                let sort_result = self
-                    .set_field(child.id(), "sort_key", Value::String(new_sort_key.clone()))
-                    .await?;
-                changes.extend(sort_result.changes);
-                last_sort_key = Some(new_sort_key);
+                changes.extend(move_changes);
+                last_after_id = Some(child.id().to_string());
             }
         }
 
-        // Append `id`'s content to the merge target.
-        let content_result = self
-            .set_field(&target_id, "content", Value::String(new_content))
-            .await?;
-        changes.extend(content_result.changes);
+        // Append `id`'s content to the merge target. Prefer writing
+        // through the Loro CRDT layer via the cell registry (single
+        // content writer); drop through to SQL `set_field` when no cell
+        // route exists.
+        let new_content_for_cell = new_content.clone();
+        let wrote_via_cell =
+            write_content_via_cells(self.cells(), &target_uri, new_content_for_cell).await?;
+        if !wrote_via_cell {
+            let content_result = self
+                .set_field(&target_id, "content", Value::String(new_content))
+                .await?;
+            changes.extend(content_result.changes);
+        }
 
         // Delete `id` (its children have already been re-parented).
         let delete_result = self.delete(&block_id_str).await?;
         changes.extend(delete_result.changes);
+
+        // Prune any cached cells for the now-deleted block so a same-id
+        // re-create within the same session can't observe a stale Cell
+        // wrapping an orphaned `LoroText` container.
+        if let Some(reg) = self.cells() {
+            reg.on_entity_deleted(&join_block_uri);
+        }
 
         // Follow-up: park the editor cursor on the merge target at the
         // join boundary, mirroring `split_block`'s editor_focus handoff.
@@ -1002,7 +1121,11 @@ where
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
 
-        let old_content = block.content().to_string();
+        // Prefer live (Loro) view via the cell registry to capture any
+        // pending in-memory edits.
+        let embed_uri = EntityUri::block(id);
+        let old_content = read_content_via_cells(self.cells(), &embed_uri)
+            .unwrap_or_else(|| block.content().to_string());
         let marker = format!("{{{{transclude:{target_uri}}}}}");
         let new_content = if old_content.is_empty() {
             marker
@@ -1010,13 +1133,22 @@ where
             format!("{old_content}\n{marker}")
         };
 
-        let result = self
-            .set_field(id, "content", Value::String(new_content))
-            .await?;
+        // Prefer the cell-routed write (Loro) and drop through to SQL
+        // `set_field` when no cell route exists.
+        let new_content_for_cell = new_content.clone();
+        let wrote_via_cell =
+            write_content_via_cells(self.cells(), &embed_uri, new_content_for_cell).await?;
+        let changes = if wrote_via_cell {
+            Vec::new()
+        } else {
+            self.set_field(id, "content", Value::String(new_content))
+                .await?
+                .changes
+        };
 
         use crate::__operations_crud_operations;
         Ok(OperationResult::new(
-            result.changes,
+            changes,
             __operations_crud_operations::set_field_op(
                 "placeholder", // Overwritten by OperationDispatcher post-execute (see operation_dispatcher.rs:504)
                 id,

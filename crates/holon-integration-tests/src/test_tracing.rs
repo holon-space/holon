@@ -377,7 +377,7 @@ pub struct TransitionMetrics {
     pub cdc_emission_count: usize,
 
     // ── PBT perf attribution (HOLON_PERF investigation) ──────────
-    /// Time spent inside the inv10 reactive.watch + drain block (sut.rs:2820).
+    /// Time spent inside the inv-viewmodel-snapshot reactive.watch + drain block (sut.rs:2820).
     pub inv10_watch_drain: Duration,
     /// Time spent inside `wait_for_org_files_stable` (called from both apply and check).
     pub wait_files_stable: Duration,

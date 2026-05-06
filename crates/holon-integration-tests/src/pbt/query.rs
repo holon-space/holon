@@ -128,12 +128,12 @@ impl TestQuery {
     }
 
     /// SQL truth-check variant: reads from `block_raw` (the write-side base
-    /// table) instead of the `block` matview. Used by inv3's lag classifier
+    /// table) instead of the `block` matview. Used by inv-watch-rows-match-ref's lag classifier
     /// to distinguish a CDC delivery race (matview state correct, stream
     /// stale) from a real write-pipeline divergence.
     ///
     /// `block` is a matview hydrated from `block_raw` + junction tables for
-    /// `tags`/`blocked_by`. For predicates that don't touch the hydrated
+    /// `tags`/`requires`. For predicates that don't touch the hydrated
     /// columns (and the watch in question filters on `content_type`), the
     /// IDs returned by `block_raw` and `block` are identical, so this is a
     /// safe truth source.

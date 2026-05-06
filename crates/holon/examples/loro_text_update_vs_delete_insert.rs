@@ -2,7 +2,7 @@
 //! minimal RGA ops), but test-peer `multi_peer::update_block` uses
 //! `delete(0, old_len) + insert(0, new)` (full rewrite). When concurrent
 //! edits merge, the two op patterns produce different RGA orderings —
-//! which manifests as an inv1 SQL/Loro divergence in the TUI PBT
+//! which manifests as an inv-backend-blocks-match-ref SQL/Loro divergence in the TUI PBT
 //! (`PROPTEST_SEED=3`).
 //!
 //! The PBT's reference model (`loro_merge_text` in

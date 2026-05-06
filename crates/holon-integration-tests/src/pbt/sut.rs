@@ -29,18 +29,16 @@ use crate::{
 
 use super::loro_sut::LoroSut;
 
-use holon_frontend::editable_text_provider::LoroDocTextResolver;
-
 use super::reference_state::ReferenceState;
 use super::state_machine::VariantRef;
 use super::types::*;
 
 /// True iff the VM contains a `LiveBlock` for `block_id` whose content
 /// recursively contains at least one widget node that is neither `Empty`
-/// nor `Loading`. Used by inv14c/B15 to skip wrappers whose inner profile
+/// nor `Loading`. Used by inv-frontend-bounds-rendered/vm-data-tracked-as-content to skip wrappers whose inner profile
 /// materialised as a placeholder (e.g. org-parsed blocks with
 /// `::src::N`/`::render::N` children that fall back to the empty default)
-/// — those aren't the "GPUI only materialised region wrappers" bug B15
+/// — those aren't the "GPUI only materialised region wrappers" bug vm-data-tracked-as-content
 /// is designed to catch, and panicking on them masks the real signal.
 fn live_block_has_substantive_content(vm: &holon_frontend::ViewModel, block_id: &str) -> bool {
     use holon_frontend::view_model::ViewKind;
@@ -90,13 +88,13 @@ fn live_block_has_substantive_content(vm: &holon_frontend::ViewModel, block_id: 
         None
     }
     // Default to `true` when the VM doesn't even contain a LiveBlock for
-    // this id. Filtering it out would silently weaken B15; let it fall
+    // this id. Filtering it out would silently weaken vm-data-tracked-as-content; let it fall
     // through to the original "no widget at all" warn/exemption path.
     find_and_check(vm, block_id).unwrap_or(true)
 }
 
 /// One row of the `focus_roots` matview. Mirrored into a `LiveData<FocusRoot>`
-/// so inv7/8 can iterate by region in Rust without a per-region SQL query.
+/// so inv-region-focus-roots-iter/8 can iterate by region in Rust without a per-region SQL query.
 #[derive(Clone, Debug)]
 struct FocusRoot {
     region: String,
@@ -184,7 +182,7 @@ mod leader_key_tests {
 }
 /// Build a `Block` from a SQL row that includes id/content/content_type/
 /// source_language/parent_id/properties (and optionally tags + org fields).
-/// Used both by inv1's SQL path and by the LiveData<Block> experiment so
+/// Used both by inv-backend-blocks-match-ref's SQL path and by the LiveData<Block> experiment so
 /// the two stay byte-for-byte equivalent.
 fn parse_block_row(row: &holon::storage::types::StorageEntity) -> Option<Block> {
     let id =
@@ -287,7 +285,7 @@ pub struct E2ESut<V: VariantMarker> {
     pub doc_uri_map: HashMap<EntityUri, EntityUri>,
     /// How UI mutations are dispatched. `None` before `start_app` creates the engine.
     /// Backend tests use `DirectUserDriver`; Flutter tests inject their own driver.
-    pub driver: Option<Box<dyn UserDriver>>,
+    pub driver: Option<Arc<dyn UserDriver>>,
     /// Reactive engine for root layout — kept alive across transitions.
     /// Uses RefCell because `check_invariants` receives `&self`.
     reactive_engine: RefCell<Option<Arc<holon_frontend::reactive::ReactiveEngine>>>,
@@ -299,12 +297,12 @@ pub struct E2ESut<V: VariantMarker> {
     /// Active only when Loro is enabled.
     loro_sut: Option<LoroSut>,
     /// Optional external frontend engine (e.g., GPUI's ReactiveEngine).
-    /// When set, inv14 checks the frontend's own ViewModel for errors.
+    /// When set, inv-frontend-engine checks the frontend's own ViewModel for errors.
     pub frontend_engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
-    /// When set, inv14 also checks that GPUI actually laid out the expected elements.
+    /// When set, inv-frontend-engine also checks that GPUI actually laid out the expected elements.
     pub frontend_geometry: Option<Box<dyn holon_frontend::geometry::GeometryProvider>>,
     /// Shared screenshot analysis — the GeometryDriver updates this after each
-    /// screenshot, and inv14 reads it to assert that the UI isn't visually empty.
+    /// screenshot, and inv-frontend-engine reads it to assert that the UI isn't visually empty.
     pub frontend_visual_state: Option<crate::ui_driver::VisualState>,
     /// Root layout block ID used by the ReactiveEngine — set during StartApp,
     /// used by `current_resolved_view_model()` and `current_reactive_tree()`.
@@ -430,6 +428,56 @@ impl<V: VariantMarker> Drop for E2ESut<V> {
                 total_duration,
             };
             eprintln!("[query-origin]\n{breakdown}");
+        }
+    }
+}
+
+impl<V: VariantMarker> E2ESut<V> {
+    /// After a transition that may have produced a new "split-suffix"
+    /// block (the SplitBlock chord op, or PressKey(Enter) which
+    /// dispatches `split_block` from the editor), associate every
+    /// unmapped `block::split-N` synthetic id in `ref_state` with the
+    /// corresponding real UUID surfaced in `db_rows`. Without this the
+    /// post-step `assert_blocks_equivalent` check sees prod-UUID vs
+    /// ref-synthetic-ID and fails on what is logically the same block.
+    fn map_unmapped_split_synthetic_ids(
+        &mut self,
+        ref_state: &ReferenceState,
+        db_rows: &[holon_api::widget_spec::DataRow],
+        label: &str,
+    ) {
+        let unmapped_synthetic: Vec<EntityUri> = ref_state
+            .block_state
+            .blocks
+            .keys()
+            .filter(|id| id.as_str().contains(":split-") && !self.doc_uri_map.contains_key(*id))
+            .cloned()
+            .collect();
+        if unmapped_synthetic.is_empty() {
+            return;
+        }
+
+        let known_real_ids: HashSet<String> = {
+            let mut ids: HashSet<String> =
+                self.doc_uri_map.values().map(|u| u.to_string()).collect();
+            for ref_id in ref_state.block_state.blocks.keys() {
+                if !self.doc_uri_map.contains_key(ref_id) && !ref_id.as_str().contains(":split-") {
+                    ids.insert(ref_id.to_string());
+                }
+            }
+            ids
+        };
+
+        let new_real_ids: Vec<String> = db_rows
+            .iter()
+            .filter_map(|row| row.get("id")?.as_string().map(|s| s.to_string()))
+            .filter(|id| !known_real_ids.contains(id))
+            .collect();
+
+        for (synthetic, real_id_str) in unmapped_synthetic.iter().zip(new_real_ids.iter()) {
+            let real_id = EntityUri::from_raw(real_id_str);
+            eprintln!("{label} Mapped {synthetic} → {real_id}");
+            self.doc_uri_map.insert(synthetic.clone(), real_id);
         }
     }
 }
@@ -740,18 +788,18 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .driver
             .as_ref()
             .expect("driver not installed — was start_app called?");
-        // Drive the real UI: clicking the LeftSidebar entry for
-        // `block_id` dispatches `navigation.focus(region: "main",
-        // block_id)` via the bound action, which the engine's intent
-        // handler at `reactive.rs:2237` mirrors into
-        // `ui_state.focused_block` and forwards to the SQL backend.
-        // No manual `set_focus` mirrors needed.
+        // Drive the real UI: clicking the LeftSidebar entry dispatches
+        // its bound `navigation.focus(region: "main", block_id)` action.
+        // `ReactiveEngineDriver::click_entity` shares GPUI's intent
+        // resolution: snapshot_resolved → find_click_intent_in_view_model
+        // → apply_intent. No driver-specific synthesis needed.
         driver
             .click_entity(resolved_id.as_str(), "left_sidebar")
             .await
             .unwrap_or_else(|e| {
                 panic!("[NavigateFocus] click_entity failed for sidebar entry {resolved_id}: {e:#}")
             });
+        self.ctx.drain_region_cdc_events().await;
         self.dump_nav_tables("after NavigateFocus").await;
     }
 
@@ -2053,9 +2101,15 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .driver
             .as_ref()
             .expect("driver not installed — was start_app called?");
-        let bound_intent = holon_frontend::focus_path::find_click_intent_in_view_model(
+        // Region-scoped lookup: production GPUI's click handler runs on a
+        // specific element in the clicked region, not across the whole tree.
+        // The same entity_id may appear in multiple regions (e.g. `block:journals`
+        // is both a LeftSidebar list item and a Main-panel doc) and bind
+        // different actions per region. See FU-15.
+        let bound_intent = holon_frontend::focus_path::find_click_intent_in_region(
             &resolved,
             resolved_id.as_str(),
+            region.as_str(),
         );
         // Dispatch policy:
         //  * GPUI variant (frontend_geometry.is_some()) — drive a
@@ -2134,10 +2188,53 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
     ) {
         tracing::trace!("[apply] SplitBlock: block={block_id} position={position}");
         let resolved_id = self.resolve_uri(block_id);
-        let mut extra_params = HashMap::new();
-        extra_params.insert("position".into(), Value::Integer(position as i64));
-        self.dispatch_block_op_via_chord("split_block", resolved_id.as_str(), extra_params)
-            .await;
+
+        // Real users press Enter, not Ctrl+x. The Enter handler at
+        // `editor_view.rs:543-575` is a capture_action that reads
+        // `input.read(cx).cursor()` from the live `InputState` and
+        // dispatches `split_block` directly — a separate code path
+        // from the bubble-phase chord resolver that `Ctrl+x` hits.
+        // Driving Enter exercises that production path.
+        self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|e| panic!("[SplitBlock] bounds unavailable for {resolved_id}: {e:#}"));
+        let driver = self.driver.as_ref().expect("driver not installed");
+        driver
+            .click_entity(resolved_id.as_str(), "main")
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[SplitBlock] click_entity failed for {resolved_id}: {e:#}")
+            });
+        // Fail loud if the click didn't move keyboard focus to the target
+        // editor. The Enter handler at `editor_view.rs:543-575` dispatches
+        // `split_block` against whichever block's editor owns focus when
+        // Enter fires — so a silent focus drift would have us splitting
+        // the wrong block. The previous `dispatch_block_op_via_chord`
+        // path bypassed this because it passed `id` as an explicit op
+        // param; Enter reads `input.read(cx).cursor()` and `row_id` from
+        // the focused editor.
+        self.wait_for_focus_to_match(resolved_id.as_str(), Duration::from_secs(1))
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[SplitBlock] click_entity did not focus {resolved_id} \
+                     before Enter — split would have hit the wrong block: {e:#}"
+                )
+            });
+        driver
+            .send_raw_keystroke("home", &[])
+            .await
+            .expect("[SplitBlock] home failed");
+        for _ in 0..position {
+            driver
+                .send_raw_keystroke("right", &[])
+                .await
+                .expect("[SplitBlock] right failed");
+        }
+        driver
+            .send_raw_keystroke("enter", &[])
+            .await
+            .expect("[SplitBlock] enter failed");
 
         let expected_count = Self::expected_content_block_count(ref_state);
         let expected_ids = self.expected_block_ids(ref_state);
@@ -2149,43 +2246,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             "[SplitBlock] Block count mismatch after split"
         );
 
-        let synthetic_id = ref_state
-            .block_state
-            .blocks
-            .keys()
-            .find(|id| id.as_str().contains(":split-") && !self.doc_uri_map.contains_key(*id))
-            .cloned()
-            .expect("[SplitBlock] No unmapped split block found in reference state");
-
-        let known_real_ids: HashSet<String> = {
-            let mut ids: HashSet<String> =
-                self.doc_uri_map.values().map(|u| u.to_string()).collect();
-            for ref_id in ref_state.block_state.blocks.keys() {
-                if !self.doc_uri_map.contains_key(ref_id) && !ref_id.as_str().contains(":split-") {
-                    ids.insert(ref_id.to_string());
-                }
-            }
-            ids
-        };
-
-        let real_id_str = db_rows
-            .iter()
-            .filter_map(|row| row.get("id")?.as_string().map(|s| s.to_string()))
-            .find(|id| !known_real_ids.contains(id))
-            .unwrap_or_else(|| {
-                panic!(
-                    "[SplitBlock] Could not find new block UUID in DB. \
-                     known_real_ids={known_real_ids:?}, db_ids={:?}",
-                    db_rows
-                        .iter()
-                        .filter_map(|r| r.get("id"))
-                        .collect::<Vec<_>>()
-                )
-            });
-
-        let real_id = EntityUri::from_raw(&real_id_str);
-        eprintln!("[SplitBlock] Mapped {synthetic_id} → {real_id}");
-        self.doc_uri_map.insert(synthetic_id, real_id);
+        self.map_unmapped_split_synthetic_ids(ref_state, &db_rows, "[SplitBlock]");
     }
 
     async fn apply_join_block(
@@ -2250,7 +2311,13 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         // fast-path) and printed a warning, which silently masked any
         // bug in the keyboard nav / Enter pipeline. Per CLAUDE.md
         // ("fail loud, never fake") let both errors propagate.
-        self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(1))
+        // 5s budget mirrors the other input-bearing call sites:
+        // `wait_for_entity_bounds` now polls for ~200ms, RPCs a scroll-
+        // into-view on the GPUI main thread (oneshot + layout + flush is
+        // 50–200ms), and keeps polling. The 1s budget that worked when
+        // generators only proposed visible candidates is too tight once
+        // offscreen-virtualized-list entities become legal targets.
+        self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
             .await
             .unwrap_or_else(|e| {
                 panic!("[FocusEditableText] bounds unavailable for {resolved_id}: {e:#}")
@@ -2301,7 +2368,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         }
     }
 
-    async fn apply_press_key(&mut self, chord: &holon_api::KeyChord) {
+    async fn apply_press_key(&mut self, chord: &holon_api::KeyChord, ref_state: &ReferenceState) {
         tracing::trace!("[apply] PressKey: chord={:?}", chord);
         let driver = self.driver.as_ref().expect("driver not installed");
         use holon_api::Key;
@@ -2327,6 +2394,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
                 _ => None,
             })
             .collect();
+        let has_enter = regulars.iter().any(|k| *k == "enter");
         let mod_refs: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
         for key in regulars {
             driver
@@ -2334,15 +2402,19 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
                 .await
                 .expect("PressKey: send_raw_keystroke failed");
         }
-    }
-
-    async fn apply_blur(&mut self) {
-        tracing::trace!("[apply] Blur");
-        let driver = self.driver.as_ref().expect("driver not installed");
-        driver
-            .send_raw_keystroke("escape", &[])
-            .await
-            .expect("Blur: escape failed");
+        // Enter dispatches `split_block`, which materializes a fresh
+        // UUID for the suffix block. Hand that back to the synthetic
+        // `block::split-N` slot the ref-state allocated, mirroring
+        // `apply_split_block`'s mapping step. Without this the next
+        // step's `assert_blocks_equivalent` compares prod-UUID against
+        // ref-synthetic-id and panics on what is logically the same
+        // block.
+        if has_enter {
+            let expected_ids = self.expected_block_ids(ref_state);
+            let timeout = std::time::Duration::from_secs(5);
+            let db_rows = self.wait_for_blocks_synced(&expected_ids, timeout).await;
+            self.map_unmapped_split_synthetic_ids(ref_state, &db_rows, "[PressKey-Enter]");
+        }
     }
 
     async fn apply_arrow_navigate(
@@ -2361,7 +2433,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         // production handler in `app_main.rs` (`advance_focus`) is
         // what walks selectables in response to arrow keys, so we
         // emit the keystrokes and let it do the work. If
-        // `predicted_focus` and `actual_focus` diverge, an inv15-style
+        // `predicted_focus` and `actual_focus` diverge, an inv-focus-matches-ref-style
         // assertion downstream catches it as a real bug instead of
         // forcing a match.
         let predicted_focus = ref_state
@@ -2538,6 +2610,61 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             }
         }
     }
+
+    async fn apply_pin_block(
+        &mut self,
+        region: holon_api::Region,
+        block_id: &holon_api::EntityUri,
+    ) {
+        let resolved_id = self.resolve_uri(block_id);
+        tracing::trace!(
+            "[apply] PinBlock: region={region:?} block={block_id} (resolved={resolved_id})"
+        );
+        let driver = self
+            .driver
+            .as_ref()
+            .expect("driver not installed — was start_app called?");
+        // Production binding is shift+click on a bullet — no leader chord
+        // exists. The headless PBT mirrors the dispatch faithfully via
+        // `synthetic_dispatch`. Architecture rule: the smell is
+        // `execute_op("navigation", ...)`, NOT `synthetic_dispatch`
+        // (`archlint/smells/focus.toml`).
+        let mut params = HashMap::new();
+        params.insert(
+            "region".to_string(),
+            Value::String(region.as_str().to_string()),
+        );
+        params.insert(
+            "block_id".to_string(),
+            Value::String(resolved_id.as_str().to_string()),
+        );
+        driver
+            .synthetic_dispatch("navigation", "focus_pin", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[PinBlock] synthetic_dispatch(navigation, focus_pin) failed: {e:#}")
+            });
+        self.ctx.drain_region_cdc_events().await;
+        self.dump_nav_tables("after PinBlock").await;
+    }
+
+    async fn apply_unpin_block(&mut self, history_id: i64) {
+        tracing::trace!("[apply] UnpinBlock: history_id={history_id}");
+        let driver = self
+            .driver
+            .as_ref()
+            .expect("driver not installed — was start_app called?");
+        let mut params = HashMap::new();
+        params.insert("history_id".to_string(), Value::Integer(history_id));
+        driver
+            .synthetic_dispatch("navigation", "close", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[UnpinBlock] synthetic_dispatch(navigation, close) failed: {e:#}")
+            });
+        self.ctx.drain_region_cdc_events().await;
+        self.dump_nav_tables("after UnpinBlock").await;
+    }
 }
 
 impl<V: VariantMarker> E2ESut<V> {
@@ -2580,7 +2707,7 @@ impl<V: VariantMarker> E2ESut<V> {
     /// so that `install_driver()` (called after StartApp) won't overwrite it.
     pub fn with_driver(
         runtime: Arc<tokio::runtime::Runtime>,
-        driver: Box<dyn UserDriver>,
+        driver: Arc<dyn UserDriver>,
     ) -> Result<Self> {
         Ok(Self {
             ctx: TestContext::new(runtime)?,
@@ -2616,17 +2743,23 @@ impl<V: VariantMarker> E2ESut<V> {
 
     /// Set up the mutation driver from the DI-resolved ReactiveEngine. Called after start_app.
     /// Uses the same dispatch path as GPUI (BuilderServices::dispatch_intent).
+    /// Also installs the same `Arc<dyn UserDriver>` into `live_driver()`
+    /// so PBT generators read observation verbs from the same medium.
     fn install_driver(&mut self) {
         if self.driver.is_some() {
             return; // respect pre-installed driver (e.g. FlutterUserDriver)
         }
-        if let Some(reactive) = self.ctx.reactive_engine.as_ref() {
-            self.driver = Some(Box::new(crate::ReactiveEngineDriver::new(reactive.clone())));
+        let driver: Arc<dyn UserDriver> = if let Some(reactive) = self.ctx.reactive_engine.as_ref()
+        {
+            Arc::new(crate::ReactiveEngineDriver::new(reactive.clone()))
         } else {
-            // Fallback for tests that don't use ReactiveEngine
+            // Tests without ReactiveEngine fall back to DirectUserDriver —
+            // its observation verbs return empty, which is correct for a
+            // backend-only PBT (no rendered UI to observe).
             let engine = self.test_ctx().engine().clone();
-            self.driver = Some(Box::new(DirectUserDriver::new(engine)));
-        }
+            Arc::new(DirectUserDriver::new(engine))
+        };
+        self.driver = Some(driver);
     }
 
     /// Snapshot the current root layout as a `ReactiveViewModel` — the input
@@ -2710,7 +2843,7 @@ impl<V: VariantMarker> E2ESut<V> {
             ),
             (
                 "focus_roots",
-                "SELECT region, block_id, root_id FROM focus_roots ORDER BY region, root_id",
+                "SELECT region, root_id, history_id FROM focus_roots ORDER BY region, history_id",
             ),
         ];
         for (name, sql) in probes {
@@ -2753,6 +2886,18 @@ impl<V: VariantMarker> E2ESut<V> {
         let render_id = format!("render-entity-{entity_id}");
         let selectable_id = format!("selectable-{entity_id}");
         let deadline = tokio::time::Instant::now() + timeout;
+        // After ~200 ms of polling without bounds, ask the driver to
+        // scroll the entity into view once. Sidebar items in a virtualized
+        // `gpui::list(...)` are not prepaint-ed outside the viewport, so
+        // their bounds never appear until the user scrolls — which under
+        // PBT we have to do explicitly. Block-mode panels prepaint every
+        // child regardless of viewport, so scroll is a no-op there. The
+        // RPC may also fail to find any virtualized list containing the
+        // entity (returns Ok(false) on the GPUI side, surfaces here as
+        // a benign success). In every case the polling loop is the
+        // authoritative failure signal.
+        let scroll_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let mut scrolled = false;
         loop {
             if geometry.element_info(&render_id).is_some()
                 || geometry.element_info(&selectable_id).is_some()
@@ -2760,13 +2905,24 @@ impl<V: VariantMarker> E2ESut<V> {
             {
                 return Ok(());
             }
+            if !scrolled && tokio::time::Instant::now() >= scroll_deadline {
+                scrolled = true;
+                if let Some(driver) = self.driver.as_ref() {
+                    if let Err(e) = driver.scroll_to_entity(entity_id).await {
+                        tracing::debug!(
+                            "wait_for_entity_bounds: scroll_to_entity({entity_id:?}) \
+                             returned Err — continuing to poll: {e:#}"
+                        );
+                    }
+                }
+            }
             if tokio::time::Instant::now() >= deadline {
                 anyhow::bail!(
                     "wait_for_entity_bounds: timed out after {timeout:?} waiting for \
                      bounds of entity {entity_id:?} — tried element ids \
                      {render_id:?}, {selectable_id:?}, and entity_id scan; element \
-                     was never rendered to BoundsRegistry, or bounds weren't promoted \
-                     staged → committed since the last render pass."
+                     was never rendered to BoundsRegistry (post-scroll), or bounds \
+                     weren't promoted staged → committed since the last render pass."
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2814,7 +2970,7 @@ impl<V: VariantMarker> E2ESut<V> {
         }
     }
 
-    /// Fully resolved ViewModel snapshot — uses the same path as inv10h:
+    /// Fully resolved ViewModel snapshot — uses the same path as inv-viewmodel-state-toggle-correct:
     /// `interpret_pure(render_expr, data_rows)` so that list/table items
     /// are populated from the data snapshot. Waits for the UiWatcher to
     /// deliver data rows if they haven't arrived yet.
@@ -2898,35 +3054,44 @@ impl<V: VariantMarker> E2ESut<V> {
 
         *self.reactive_engine.borrow_mut() = Some(reactive.clone());
 
-        // Wire MutableText provider backed by the test's global LoroDoc.
+        // Wire BlockCellRegistry backed by the test's global LoroDoc.
+        // Synchronously awaited (this fn is `async`) — the previous
+        // `tokio::spawn` left a race where atomic editor primitives ran
+        // before the registry landed, making `engine.editable_text(...)`
+        // return Err and silently dropping per-keystroke writes (see
+        // `crates/holon-frontend/src/headless_editor_mirror.rs`).
+        //
+        // Both the locally-created `reactive` engine AND the DI engine
+        // (`self.ctx.reactive_engine`, used by `ReactiveEngineDriver`)
+        // need the registry. The driver path is the one keystrokes go
+        // through; without wiring the DI engine, the headless mirror's
+        // `editable_text(...)` lookup returns `Err` and per-keystroke
+        // writes silently drop.
         if let Some(doc_store) = self.ctx.doc_store() {
-            let store_arc = doc_store.clone();
-            let _rt = tokio::runtime::Handle::current();
-            let reactive_clone = reactive.clone();
-            // Spawn the wiring on the runtime since get_global_doc is async
-            tokio::spawn(async move {
-                let store = store_arc.read().await;
-                match store.get_global_doc().await {
-                    Ok(collab) => {
-                        let doc = collab.doc();
-                        let resolver = Arc::new(LoroDocTextResolver { doc: doc.clone() });
-                        let provider = Arc::new(
-                            holon_frontend::editable_text_provider::LoroEditableTextProvider::new(
-                                resolver,
-                            ),
-                        );
-                        reactive_clone
-                            .editable_text_provider
+            let store = doc_store.read().await;
+            match store.get_global_doc().await {
+                Ok(collab) => {
+                    let registry = Arc::new(
+                        holon::sync::block_cell_registry::BlockCellRegistry::with_loro(collab),
+                    );
+                    reactive
+                        .block_cell_registry
+                        .lock()
+                        .unwrap()
+                        .replace(registry.clone());
+                    if let Some(di_engine) = self.ctx.reactive_engine.as_ref() {
+                        di_engine
+                            .block_cell_registry
                             .lock()
                             .unwrap()
-                            .replace(provider);
-                        eprintln!("[ensure_reactive_engine] MutableText provider wired");
+                            .replace(registry);
                     }
-                    Err(e) => {
-                        eprintln!("[ensure_reactive_engine] Failed to get global doc: {e}");
-                    }
+                    eprintln!("[ensure_reactive_engine] BlockCellRegistry wired");
                 }
-            });
+                Err(e) => {
+                    eprintln!("[ensure_reactive_engine] Failed to get global doc: {e}");
+                }
+            }
         }
 
         eprintln!("[ensure_reactive_engine] Created (data loads in background)");
@@ -3002,23 +3167,35 @@ impl<V: VariantMarker> E2ESut<V> {
     /// runs after the chord matches in production. `label` is used in
     /// panic messages.
     pub async fn send_leader_chord(&self, nav_op: &str, label: &str) {
-        let key = leader_key_for(nav_op);
         let driver = self
             .driver
             .as_ref()
             .unwrap_or_else(|| panic!("[{label}] driver not installed — was start_app called?"));
-        // Try the real-input path first (TUI native driver).
-        let raw_result = async {
-            driver.send_raw_keystroke(" ", &[]).await?;
-            driver.send_raw_keystroke(key, &[]).await
-        }
-        .await;
-        if raw_result.is_ok() {
+        // Native drivers (TUI/GPUI) route raw keystrokes through their real
+        // input pipeline, which performs key-chord resolution before any
+        // editor sees the keys. Send the leader key + chord key as raw
+        // keystrokes so the chord-resolver path is exercised end-to-end.
+        //
+        // Headless drivers (`ReactiveEngineDriver`, `DirectUserDriver`)
+        // route raw keystrokes straight into the focused editor's
+        // `MutableText` mirror — no chord resolution. Sending `SPC b`
+        // there would TYPE " b" into the focused block instead of
+        // dispatching `go_back`. Dispatch the navigation intent directly
+        // for those drivers.
+        if driver.dispatches_chords_via_raw_keystroke() {
+            let key = leader_key_for(nav_op);
+            driver
+                .send_raw_keystroke(" ", &[])
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] send_raw_keystroke(SPC) failed: {e:#}"));
+            driver
+                .send_raw_keystroke(key, &[])
+                .await
+                .unwrap_or_else(|e| panic!("[{label}] send_raw_keystroke({key:?}) failed: {e:#}"));
             return;
         }
-        // Fallback for headless drivers (ReactiveEngineDriver, DirectUserDriver):
-        // dispatch the navigation op directly. Region is hardcoded to
-        // "main" to mirror the TUI binding (only Main is generated by
+        // Headless: dispatch the navigation op directly. Region is hardcoded
+        // to "main" to mirror the TUI binding (only Main is generated by
         // NavigateHome/Back/Forward).
         let mut params = HashMap::new();
         params.insert("region".to_string(), Value::String("main".to_string()));
@@ -3026,9 +3203,7 @@ impl<V: VariantMarker> E2ESut<V> {
             .synthetic_dispatch("navigation", nav_op, params)
             .await
             .unwrap_or_else(|e| {
-                panic!(
-                    "[{label}] leader-chord fallback synthetic_dispatch(navigation, {nav_op}) failed: {e:#}"
-                )
+                panic!("[{label}] synthetic_dispatch(navigation, {nav_op}) failed: {e:#}")
             });
     }
 
@@ -3099,7 +3274,7 @@ impl<V: VariantMarker> E2ESut<V> {
     /// Lazy accessor for the CDC-driven `LiveData<Block>` mirroring the `block`
     /// matview. Built on first use because we need an async `watch_view` call and
     /// the SUT struct can't carry a started engine at construction time. The
-    /// matview hydrates `tags` (and `blocked_by`) from the junction tables, so
+    /// matview hydrates `tags` (and `requires`) from the junction tables, so
     /// rows are read directly into a fully-populated `Block`.
     async fn live_blocks(&self) -> Arc<holon::sync::LiveData<Block>> {
         if let Some(live) = self.live_blocks_cell.borrow().clone() {
@@ -3140,6 +3315,12 @@ impl<V: VariantMarker> E2ESut<V> {
         if let Some(live) = self.live_focus_roots_cell.borrow().clone() {
             return live;
         }
+        // `focus_roots` matview filters `block_id IS NOT NULL` at projection
+        // time as of nightscape@holon `aff40a84` (the IVM compound IS NOT NULL
+        // fix). Chained-matview CDC propagation is 1:1 with no spurious
+        // events for filtered rows (verified by
+        // `crates/holon/examples/turso_ivm_chained_matview_null_cdc.rs`).
+        // No watcher-level filter needed.
         let sql = "SELECT region, root_id FROM focus_roots";
         let watch = self
             .ctx
@@ -3198,10 +3379,10 @@ impl<V: VariantMarker> E2ESut<V> {
 
         // Drain both directions of the Loro mirror BEFORE sampling
         // `target_seq` in `assert_cdc_quiescent`. The original layout ran
-        // `wait_for_consumers` AFTER the inv16 assert, which let SQL writes
+        // `wait_for_consumers` AFTER the inv-editable-text-has-draggable assert, which let SQL writes
         // produced by inbound EventBus consumers (e.g. `LoroSyncController`'s
         // SQL→Loro path triggering an outbound Loro→SQL reconcile) commit
-        // *during* the inv16 grace window — looking like spurious churn
+        // *during* the inv-editable-text-has-draggable grace window — looking like spurious churn
         // when they're really just causally-related writes that haven't
         // settled yet.
         //
@@ -3213,31 +3394,36 @@ impl<V: VariantMarker> E2ESut<V> {
         // the cycle in 1–2 hops, so a single drain pair is enough.
         {
             use tracing::Instrument;
+            // Per-step settle barriers. Timeouts sized for Full+atomic-editor PBT runs
+            // where BulkExternalAdd produces bursts the loro consumer applies serially:
+            // 500ms wasn't enough to land all create events, leaving subsequent TypeChars
+            // dispatched against blocks not-yet-in-the-Loro-tree (silent-drop in
+            // `headless_editor_mirror.rs` because `editable_text(...)` returned Err).
             async {
                 tokio::task::yield_now().await;
                 self.ctx
-                    .wait_for_loro_quiescence(std::time::Duration::from_millis(500))
+                    .wait_for_loro_quiescence(std::time::Duration::from_secs(2))
                     .await;
                 self.ctx
                     .wait_for_consumers(
                         &["loro", "org", "cache"],
-                        std::time::Duration::from_millis(500),
+                        std::time::Duration::from_secs(5),
                     )
                     .await;
                 self.ctx
-                    .wait_for_loro_quiescence(std::time::Duration::from_millis(500))
+                    .wait_for_loro_quiescence(std::time::Duration::from_secs(2))
                     .await;
                 tokio::task::yield_now().await;
                 self.drain_cdc_events().await;
                 self.drain_region_cdc_events().await;
-                self.wait_for_live_data_mirrors(std::time::Duration::from_millis(500))
+                self.wait_for_live_data_mirrors(std::time::Duration::from_secs(2))
                     .await;
             }
             .instrument(tracing::info_span!("pbt.pre_inv16_settle"))
             .await;
         }
 
-        // inv16: After draining, no more CDC events should arrive.
+        // inv-editable-text-has-draggable: After draining, no more CDC events should arrive.
         {
             use tracing::Instrument;
             async {
@@ -3437,7 +3623,7 @@ impl<V: VariantMarker> E2ESut<V> {
         // ID-set truth check before the full block comparison: when
         // backend (live_blocks) and reference disagree, classify whether
         // it's a CDC delivery race (matview lagged a write) or a real
-        // pipeline bug. Same pattern as inv3 below — query `block_raw`
+        // pipeline bug. Same pattern as inv-watch-rows-match-ref below — query `block_raw`
         // (write-side base table) and compare ID sets.
         let backend_ids: HashSet<EntityUri> = backend_blocks_no_seed
             .iter()
@@ -3455,7 +3641,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 .await
                 .unwrap_or_else(|e| {
                     panic!(
-                        "[inv1 truth check] block_raw query failed\n\
+                        "[inv-backend-blocks-match-ref truth check] block_raw query failed\n\
                          error: {}",
                         e
                     )
@@ -3473,7 +3659,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 let missing: Vec<&EntityUri> = ref_ids.difference(&backend_ids).collect();
                 let spurious: Vec<&EntityUri> = backend_ids.difference(&ref_ids).collect();
                 eprintln!(
-                    "[inv1 WARN] live_blocks mirror lagged: backend has {} blocks, \
+                    "[inv-backend-blocks-match-ref WARN] live_blocks mirror lagged: backend has {} blocks, \
                      block_raw has {} (matches reference). Downgraded — Turso IVM CDC \
                      delivery race on the `block` matview → live_blocks mirror.\n\
                      Missing in live_blocks: {:?}\n\
@@ -3490,7 +3676,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 // *would* converge to. Falling through to assert_blocks_equivalent
                 // produces the canonical error message.
                 eprintln!(
-                    "[inv1 truth check] block_raw also disagrees with reference — \
+                    "[inv-backend-blocks-match-ref truth check] block_raw also disagrees with reference — \
                      real write/parse pipeline bug, not a CDC delivery race.\n\
                      Missing in block_raw: {:?}\n\
                      Spurious in block_raw: {:?}",
@@ -3630,7 +3816,7 @@ impl<V: VariantMarker> E2ESut<V> {
                     let truth_rows = match self.ctx.query_sql(&truth_sql).await {
                         Ok(rows) => rows,
                         Err(e) => panic!(
-                            "[inv3 truth check] block_raw query failed for watch '{}'\n\
+                            "[inv-watch-rows-match-ref truth check] block_raw query failed for watch '{}'\n\
                              sql: {}\n\
                              error: {}",
                             query_id, truth_sql, e
@@ -3650,7 +3836,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         let missing: Vec<&EntityUri> = expected_ids.difference(&ui_ids).collect();
                         let spurious: Vec<&EntityUri> = ui_ids.difference(&expected_ids).collect();
                         eprintln!(
-                            "[inv3 WARN] CDC stream lagged on ID set for watch '{}': \
+                            "[inv-watch-rows-match-ref WARN] CDC stream lagged on ID set for watch '{}': \
                              ui_model has {} blocks, block_raw has {} (matches expected). \
                              Downgraded — Turso IVM CDC delivery race.\n\
                              Missing in ui_model: {:?}\n\
@@ -3752,7 +3938,7 @@ impl<V: VariantMarker> E2ESut<V> {
                                     .map(|s| normalize_content(&s));
                                 if sql_val == expected_val {
                                     eprintln!(
-                                        "[inv3 WARN] CDC stream lagged for block '{}' field '{}' \
+                                        "[inv-watch-rows-match-ref WARN] CDC stream lagged for block '{}' field '{}' \
                                          in watch '{}': ui_model={:?}, sql={:?}, expected={:?} \
                                          (downgraded — Turso IVM CDC delivery race)",
                                         expected_id,
@@ -3821,7 +4007,7 @@ impl<V: VariantMarker> E2ESut<V> {
         );
 
         // 6. Structural integrity: no orphan blocks.
-        //    Skip when inv1 detected the live_blocks mirror is stale —
+        //    Skip when inv-backend-blocks-match-ref detected the live_blocks mirror is stale —
         //    the parent might just be missing from the lagged snapshot,
         //    not actually orphaned in the database.
         if !live_blocks_stale {
@@ -3917,17 +4103,103 @@ impl<V: VariantMarker> E2ESut<V> {
                     by_region.remove(region.as_str()).unwrap_or_default();
                 actual_ids.sort();
 
-                assert_eq!(
-                    actual_ids,
-                    expected_ids,
+                if actual_ids == expected_ids {
+                    continue;
+                }
+
+                // Truth check: query the `focus_roots` matview directly. If the
+                // matview agrees with the reference, the `LiveData<FocusRoot>`
+                // mirror lagged (CDC delivery race) — same downgrade pattern as
+                // inv-backend-blocks-match-ref. If the matview itself disagrees, it's a real IVM bug
+                // (e.g. UPDATE through the chained `block` matview not
+                // propagating, see split_block CDC-drop memory note).
+                let truth_sql = format!(
+                    "SELECT root_id FROM focus_roots WHERE region = '{}'",
+                    region.as_str()
+                );
+                let truth_rows = self.ctx.query_sql(&truth_sql).await.unwrap_or_else(|e| {
+                    panic!(
+                        "[inv-focus-roots truth check] focus_roots query failed\n\
+                         error: {}",
+                        e
+                    )
+                });
+                let mut truth_ids: Vec<EntityUri> = truth_rows
+                    .iter()
+                    .filter_map(|r| r.get("root_id").and_then(|v| v.as_string()))
+                    .map(|s| EntityUri::parse(s).expect("valid entity URI in focus_roots row"))
+                    .collect();
+                truth_ids.sort();
+
+                if truth_ids == expected_ids {
+                    eprintln!(
+                        "[inv-focus-roots WARN] Region '{}' LiveData<FocusRoot> mirror \
+                         lagged: matview has {} rows (matches reference), mirror has {}. \
+                         Downgraded — Turso IVM CDC delivery race on focus_roots → mirror.\n\
+                         Missing in mirror: {:?}\n\
+                         Spurious in mirror: {:?}",
+                        region.as_str(),
+                        truth_ids.len(),
+                        actual_ids.len(),
+                        truth_ids
+                            .iter()
+                            .filter(|id| !actual_ids.contains(id))
+                            .collect::<Vec<_>>(),
+                        actual_ids
+                            .iter()
+                            .filter(|id| !truth_ids.contains(id))
+                            .collect::<Vec<_>>(),
+                    );
+                    continue;
+                }
+
+                // Localize: which matview lost the row? Query the chain
+                // (block_raw → block matview → focus_roots matview) for the
+                // missing IDs so the panic pinpoints the dropping link.
+                let missing: Vec<EntityUri> = expected_ids
+                    .iter()
+                    .filter(|id| !truth_ids.contains(id))
+                    .cloned()
+                    .collect();
+                let mut chain_status: Vec<String> = Vec::new();
+                for id in &missing {
+                    let raw_sql = format!("SELECT id FROM block_raw WHERE id = '{}'", id.as_str());
+                    let raw_hit = self
+                        .ctx
+                        .query_sql(&raw_sql)
+                        .await
+                        .map(|r| !r.is_empty())
+                        .unwrap_or(false);
+                    let blk_sql = format!("SELECT id FROM block WHERE id = '{}'", id.as_str());
+                    let blk_hit = self
+                        .ctx
+                        .query_sql(&blk_sql)
+                        .await
+                        .map(|r| !r.is_empty())
+                        .unwrap_or(false);
+                    chain_status.push(format!(
+                        "{}: block_raw={} block={} focus_roots=false",
+                        id.as_str(),
+                        if raw_hit { "✓" } else { "✗" },
+                        if blk_hit { "✓" } else { "✗" }
+                    ));
+                }
+
+                panic!(
                     "Region '{}' focus_roots mismatch after navigation.\n\
                      Focus: {:?}\n\
-                     Expected IDs: {:?}\n\
-                     Actual IDs: {:?}",
+                     Expected IDs:   {:?}\n\
+                     Mirror IDs:     {:?}\n\
+                     Matview IDs:    {:?}\n\
+                     Chain status for missing rows:\n  {}\n\
+                     ↑ matview itself disagrees with reference — real Turso IVM bug, \
+                     not a CDC delivery race. Chain shows where the row gets dropped.",
                     region.as_str(),
                     ref_state.current_focus(*region),
                     expected_ids,
                     actual_ids,
+                    truth_ids,
+                    chain_status.join("\n  "),
                 );
             }
         }
@@ -3943,7 +4215,7 @@ impl<V: VariantMarker> E2ESut<V> {
 
             if !blocks_with_props.is_empty() {
                 // Read from block_raw (writable base table) — same matview-CDC
-                // race fix as inv10d (devlog/2026-05-05-110311.md). This query
+                // race fix as inv-viewmodel-root-matches-render-expr (devlog/2026-05-05-110311.md). This query
                 // only needs id + properties, both in block_raw.
                 let prql = "from block_raw | filter properties != null | select {id, properties}";
                 let query_result = self
@@ -4023,11 +4295,11 @@ impl<V: VariantMarker> E2ESut<V> {
                                 false
                             }
                             Ok(None) => {
-                                eprintln!("[inv10] Reactive stream closed, skipping");
+                                eprintln!("[inv-viewmodel-snapshot] Reactive stream closed, skipping");
                                 true
                             }
                             Err(_) => {
-                                eprintln!("[inv10] No data within 5s, using current state");
+                                eprintln!("[inv-viewmodel-snapshot] No data within 5s, using current state");
                                 false
                             }
                         }
@@ -4044,13 +4316,13 @@ impl<V: VariantMarker> E2ESut<V> {
 
                 if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading")
                 {
-                    eprintln!("[inv10] render_expr is still loading(), skipping");
+                    eprintln!("[inv-viewmodel-snapshot] render_expr is still loading(), skipping");
                     return;
                 }
 
                 if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "spacer")
                 {
-                    eprintln!("[inv10] Still placeholder (spacer), skipping");
+                    eprintln!("[inv-viewmodel-snapshot] Still placeholder (spacer), skipping");
                     return;
                 }
 
@@ -4076,13 +4348,13 @@ impl<V: VariantMarker> E2ESut<V> {
                             .or_else(|| e.downcast_ref::<&str>().copied())
                             .unwrap_or("unknown panic");
                         eprintln!(
-                            "[inv10] Shadow interpretation panicked: {msg} \
+                            "[inv-viewmodel-snapshot] Shadow interpretation panicked: {msg} \
                              (pre-existing bug, skipping structural assertions)"
                         );
                         return;
                     }
                 };
-                eprintln!("[inv10] ViewModel from ReactiveEngine snapshot");
+                eprintln!("[inv-viewmodel-snapshot] ViewModel from ReactiveEngine snapshot");
 
                 // 10a. Root widget must not be "error"
                 assert_ne!(
@@ -4095,7 +4367,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 // 10b. Entity IDs in tree
                 let tree_ids = display_tree.collect_entity_ids();
                 eprintln!(
-                    "[inv10] ViewModel: root='{}', {} entity IDs",
+                    "[inv-viewmodel-snapshot] ViewModel: root='{}', {} entity IDs",
                     display_tree.widget_name().unwrap_or("?"),
                     tree_ids.len(),
                 );
@@ -4105,7 +4377,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 assert_eq!(
                     error_count,
                     0,
-                    "[inv10c] {} error node(s) in ViewModel tree:\n{}",
+                    "[inv-viewmodel-no-error-widgets] {} error node(s) in ViewModel tree:\n{}",
                     error_count,
                     display_tree.pretty_print(0),
                 );
@@ -4130,7 +4402,7 @@ impl<V: VariantMarker> E2ESut<V> {
                                 == Some(expected_widget));
                     assert!(
                         matches_expected,
-                        "[inv10d] Root widget '{}' doesn't match render source '{}' \
+                        "[inv-viewmodel-root-matches-render-expr] Root widget '{}' doesn't match render source '{}' \
                          (root_id={})\n\
                          EXPECTED render expr (from ref_state.root_render_expr()): {}\n\
                          ACTUAL render expr (from engine.snapshot()): {}\n\
@@ -4149,7 +4421,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         display_tree.pretty_print(0),
                     );
                     eprintln!(
-                        "[inv10d] Root widget '{}' matches render expr '{}'",
+                        "[inv-viewmodel-root-matches-render-expr] Root widget '{}' matches render expr '{}'",
                         expected_widget,
                         expected_expr.to_rhai(),
                     );
@@ -4189,7 +4461,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         .collect();
                     assert!(
                         missing.is_empty(),
-                        "[inv10e] ViewModel has entity IDs not in query data.\n\
+                        "[inv-viewmodel-entity-ids-subset-of-data] ViewModel has entity IDs not in query data.\n\
                              Missing: {:?}\n\
                              Tree IDs ({}):\n  {:?}\n\
                              Data IDs ({}):\n  {:?}\n{}",
@@ -4201,7 +4473,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         display_tree.pretty_print(0),
                     );
                     eprintln!(
-                        "[inv10e] {} tree entity IDs are subset of {} data IDs",
+                        "[inv-viewmodel-entity-ids-subset-of-data] {} tree entity IDs are subset of {} data IDs",
                         tree_id_set.len(),
                         data_id_set.len(),
                     );
@@ -4247,7 +4519,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         );
                         assert!(
                             subset_result.is_subset,
-                            "[inv10f] Decompiled content doesn't match query data.\n\
+                            "[inv-viewmodel-decompiled-rows-match-query] Decompiled content doesn't match query data.\n\
                                  Rendered: {:?}\nExpected: {:?}\n\
                                  Missing: {:?}\nOut of order: {:?}\n\
                                  Render expr: {}\n{}",
@@ -4259,7 +4531,7 @@ impl<V: VariantMarker> E2ESut<V> {
                             display_tree.pretty_print(0),
                         );
                         eprintln!(
-                            "[inv10f] {} decompiled rows match expected (cols: {:?})",
+                            "[inv-viewmodel-decompiled-rows-match-query] {} decompiled rows match expected (cols: {:?})",
                             rendered_rows.len(),
                             visible_cols,
                         );
@@ -4272,13 +4544,13 @@ impl<V: VariantMarker> E2ESut<V> {
                 assert_eq!(
                     missing_triggers,
                     0,
-                    "[inv10g] {missing_triggers}/{total_with_ops} EditableText node(s) \
+                    "[inv-viewmodel-editable-text-triggers] {missing_triggers}/{total_with_ops} EditableText node(s) \
                          with operations are missing triggers.\n{}",
                     display_tree.pretty_print(0),
                 );
                 if total_with_ops > 0 {
                     eprintln!(
-                        "[inv10g] All {total_with_ops} EditableText node(s) with ops have triggers"
+                        "[inv-viewmodel-editable-text-triggers] All {total_with_ops} EditableText node(s) with ops have triggers"
                     );
                 }
 
@@ -4295,13 +4567,13 @@ impl<V: VariantMarker> E2ESut<V> {
                     {
                         assert_eq!(
                             field, "task_state",
-                            "[inv10h] unexpected field in StateToggle"
+                            "[inv-viewmodel-state-toggle-correct] unexpected field in StateToggle"
                         );
 
                         let block_id_str = toggle.row_id();
                         assert!(
                             block_id_str.is_some(),
-                            "[inv10h] StateToggle has no entity id!\n{}",
+                            "[inv-viewmodel-state-toggle-correct] StateToggle has no entity id!\n{}",
                             display_tree.pretty_print(0)
                         );
                         let block_id_str = block_id_str.unwrap();
@@ -4321,7 +4593,7 @@ impl<V: VariantMarker> E2ESut<V> {
                                 // Task blocks: full interactivity assertions
                                 assert!(
                                     !toggle.operations.is_empty(),
-                                    "[inv10h] StateToggle for {block_id_str} has no operations!\n{}",
+                                    "[inv-viewmodel-state-toggle-correct] StateToggle for {block_id_str} has no operations!\n{}",
                                     display_tree.pretty_print(0)
                                 );
 
@@ -4331,19 +4603,19 @@ impl<V: VariantMarker> E2ESut<V> {
                                         &toggle.operations
                                     )
                                     .is_some(),
-                                    "[inv10h] No set_field op for '{field}' on {block_id_str}"
+                                    "[inv-viewmodel-state-toggle-correct] No set_field op for '{field}' on {block_id_str}"
                                 );
 
                                 assert!(
                                     !states.is_empty(),
-                                    "[inv10h] StateToggle for {block_id_str} has empty states"
+                                    "[inv-viewmodel-state-toggle-correct] StateToggle for {block_id_str} has empty states"
                                 );
                             }
 
                             // Value/label assertions apply to all blocks (task or not)
                             assert_eq!(
                                 current, &expected_state,
-                                "[inv10h] StateToggle current '{current}' != \
+                                "[inv-viewmodel-state-toggle-correct] StateToggle current '{current}' != \
                                      reference '{expected_state}' for block {block_id}"
                             );
 
@@ -4351,7 +4623,7 @@ impl<V: VariantMarker> E2ESut<V> {
                                 holon_api::render_eval::state_display(current);
                             assert_eq!(
                                 label, expected_label,
-                                "[inv10h] StateToggle label '{label}' != \
+                                "[inv-viewmodel-state-toggle-correct] StateToggle label '{label}' != \
                                      expected '{expected_label}' for block {block_id}"
                             );
                         }
@@ -4359,7 +4631,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 }
                 if !toggle_nodes.is_empty() {
                     eprintln!(
-                        "[inv10h] {} StateToggle node(s) verified",
+                        "[inv-viewmodel-state-toggle-correct] {} StateToggle node(s) verified",
                         toggle_nodes.len()
                     );
                 }
@@ -4580,16 +4852,20 @@ impl<V: VariantMarker> E2ESut<V> {
                         // FIXME: display_tree must be obtained from
                         // wait_for_entity_in_resolved_view_model or similar
                         // before this invariant can meaningfully execute.
-                        // Blocked on inv10j wiring — see memory entry
+                        // Blocked on inv-viewmodel-tree-virtual-slots wiring — see memory entry
                         // pbt_zero_height_reproduction.md.
                         let _ = (found, without);
-                        eprintln!("[inv10j] SKIPPED — display_tree not wired in this scope");
+                        eprintln!(
+                            "[inv-viewmodel-tree-virtual-slots] SKIPPED — display_tree not wired in this scope"
+                        );
                         if found > 0 {
-                            eprintln!("[inv10j] Virtual child slot(s): {found} OK");
+                            eprintln!(
+                                "[inv-viewmodel-tree-virtual-slots] Virtual child slot(s): {found} OK"
+                            );
                         }
                         if without > 0 && found == 0 {
                             eprintln!(
-                                "[inv10j] WARNING: {without} tree collection(s) \
+                                "[inv-viewmodel-tree-virtual-slots] WARNING: {without} tree collection(s) \
                                  with no virtual child — creation_slot may be \
                                  inactive for this seed."
                             );
@@ -4662,7 +4938,7 @@ impl<V: VariantMarker> E2ESut<V> {
 
                     if !extra.is_empty() || !missing.is_empty() {
                         eprintln!(
-                            "[inv10i] IVM MATVIEW INCONSISTENCY DETECTED!\n\
+                            "[inv-matview-consistent-with-ref] IVM MATVIEW INCONSISTENCY DETECTED!\n\
                                  Data rows (from matview): {} IDs\n\
                                  Reference model: {} total blocks, {} expected visible\n\
                                  Extra in matview (stale/ghost): {:?}\n\
@@ -4680,29 +4956,29 @@ impl<V: VariantMarker> E2ESut<V> {
                     // The data sets are different levels of the rendering hierarchy.
                     if !extra.is_empty() {
                         eprintln!(
-                            "[inv10i] Matview has {} extra block IDs not in reference model: {:?}",
+                            "[inv-matview-consistent-with-ref] Matview has {} extra block IDs not in reference model: {:?}",
                             extra.len(),
                             extra,
                         );
                     }
-                    // TODO: Re-enable once inv10i compares region-specific data
+                    // TODO: Re-enable once inv-matview-consistent-with-ref compares region-specific data
                     // (not root layout data which is a different hierarchy level).
                     // if !missing.is_empty() {
                     //     eprintln!(
-                    //         "[inv10i] Matview is MISSING {} block IDs: {:?}",
+                    //         "[inv-matview-consistent-with-ref] Matview is MISSING {} block IDs: {:?}",
                     //         missing.len(), missing,
                     //     );
                     // }
                     if extra.is_empty() && missing.is_empty() {
                         eprintln!(
-                            "[inv10i] Matview data ({} rows) consistent with reference model",
+                            "[inv-matview-consistent-with-ref] Matview data ({} rows) consistent with reference model",
                             data_block_ids.len(),
                         );
                     }
                 }
             }
 
-            // ─── inv11/12/13: value-fn provider invariants ────────────────
+            // ─── inv-value-fn-provider-arg-variance/12/13: value-fn provider invariants ────────────────
             //
             // These invariants cover the `ReactiveRowProvider`s produced by
             // value functions (`focus_chain`, `ops_of`, `chain_ops`). The
@@ -4766,7 +5042,9 @@ impl<V: VariantMarker> E2ESut<V> {
                     .expect("spawn_blocking panicked");
 
                     let Some(tree1) = tree1 else {
-                        eprintln!("[inv11-13] first interpret panicked, skipping");
+                        eprintln!(
+                            "[inv-value-fn-provider-arg-variance-13] first interpret panicked, skipping"
+                        );
                         return;
                     };
 
@@ -4792,7 +5070,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         eprintln!("[inv_bar] bottom_dock count = {docks}");
                     }
 
-                    // inv11 — provider arg variance.
+                    // inv-value-fn-provider-arg-variance — provider arg variance.
                     //
                     // Only assert when the **active** render_expr (the one
                     // the reactive engine just interpreted) mentions
@@ -4822,7 +5100,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         );
                     }
 
-                    // inv12 — provider identity stability within one pass.
+                    // inv-value-fn-provider-identity — provider identity stability within one pass.
                     //
                     // Group by `(item_template_debug, rows_snapshot_len)` — a
                     // coarse but useful proxy for "same `(name, args)`".
@@ -4870,7 +5148,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         reuse_sites,
                     );
 
-                    // inv13 — no flicker across re-interpret.
+                    // inv-sql-budget — no flicker across re-interpret.
                     // Re-run interpretation; every cache_identity observed
                     // in pass-1 should still appear in pass-2 (Arcs persist
                     // because `ProviderCache` hands out the same Weak on
@@ -4954,7 +5232,7 @@ impl<V: VariantMarker> E2ESut<V> {
 
                         assert_eq!(
                             current, &expected,
-                            "[inv12] Intermediate ViewModel emission #{i} has wrong \
+                            "[inv-value-fn-provider-identity] Intermediate ViewModel emission #{i} has wrong \
                              StateToggle value for block {block_id}.\n\
                              Got '{current}', expected '{expected}'.\n\
                              This means the CDC enrichment pipeline produced incorrect \
@@ -4967,7 +5245,7 @@ impl<V: VariantMarker> E2ESut<V> {
             }
             if checked > 0 {
                 eprintln!(
-                    "[inv12] Verified {} StateToggle value(s) across {} intermediate ViewModel emissions",
+                    "[inv-value-fn-provider-identity] Verified {} StateToggle value(s) across {} intermediate ViewModel emissions",
                     checked,
                     emissions.len(),
                 );
@@ -5031,7 +5309,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 metrics.mark_processed_count,
             );
             eprintln!(
-                "[inv13] {key}: reads={}/{} writes={}/{} ddl={}/{} tol={} max_q={}ms wall={}ms spans={} \
+                "[inv-sql-budget] {key}: reads={}/{} writes={}/{} ddl={}/{} tol={} max_q={}ms wall={}ms spans={} \
                  rss={delta:+.1}MB (cum={cum:+.1}MB){render_summary}{cdc_summary}{perf_summary}",
                 metrics.sql_read_count,
                 expected.reads,
@@ -5075,13 +5353,13 @@ impl<V: VariantMarker> E2ESut<V> {
             for v in &violations {
                 match v {
                     super::transition_budgets::Violation::Warning(msg) => {
-                        eprintln!("[inv13 WARN] {msg}");
+                        eprintln!("[inv-sql-budget WARN] {msg}");
                     }
                     super::transition_budgets::Violation::Error(msg) => {
                         if enforce_budget {
-                            panic!("inv13: {msg}");
+                            panic!("inv-sql-budget: {msg}");
                         } else {
-                            eprintln!("[inv13 BUDGET OFF] {msg}");
+                            eprintln!("[inv-sql-budget BUDGET OFF] {msg}");
                         }
                     }
                 }
@@ -5090,7 +5368,7 @@ impl<V: VariantMarker> E2ESut<V> {
             // 13d. Duplicate SQL detection — warn about potential N+1 patterns
             if !metrics.duplicate_sql.is_empty() {
                 eprintln!(
-                    "[inv13 N+1] {key}: {} distinct SQL texts fired multiple times:",
+                    "[inv-sql-budget N+1] {key}: {} distinct SQL texts fired multiple times:",
                     metrics.duplicate_sql.len()
                 );
                 for (sql, count) in &metrics.duplicate_sql {
@@ -5104,11 +5382,11 @@ impl<V: VariantMarker> E2ESut<V> {
             // Detailed SQL breakdown (enabled by HOLON_PERF_DETAIL=1)
             if std::env::var("HOLON_PERF_DETAIL").is_ok() {
                 let breakdown = self.span_collector.sql_breakdown();
-                eprintln!("[inv13 DETAIL] {key}:\n{breakdown}");
+                eprintln!("[inv-sql-budget DETAIL] {key}:\n{breakdown}");
             }
         }
 
-        // ── inv14: Frontend engine ViewModel assertions ─────────
+        // ── inv-frontend-engine: Frontend engine ViewModel assertions ─────────
         //
         // When a frontend engine is installed (e.g., GPUI PBT), check that
         // the frontend's own ReactiveEngine produces a valid ViewModel.
@@ -5119,7 +5397,9 @@ impl<V: VariantMarker> E2ESut<V> {
             let rqr = fe_engine.ensure_watching(&root_uri);
 
             if rqr.is_loading() {
-                eprintln!("[inv14] Frontend engine still loading root layout — skipping");
+                eprintln!(
+                    "[inv-frontend-engine] Frontend engine still loading root layout — skipping"
+                );
             } else {
                 let vm = fe_engine.snapshot(&root_uri);
                 let root_kind = vm.widget_name().unwrap_or("?");
@@ -5128,7 +5408,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 assert_ne!(
                     root_kind,
                     "error",
-                    "[inv14a] Frontend root widget is Error: {:?}",
+                    "[inv-frontend-root-not-error] Frontend root widget is Error: {:?}",
                     vm.entity.get("error_message"),
                 );
 
@@ -5136,17 +5416,20 @@ impl<V: VariantMarker> E2ESut<V> {
                 let error_count = crate::display_assertions::count_error_nodes(&vm);
                 if error_count > 0 {
                     let summaries = crate::display_assertions::collect_error_node_summaries(&vm);
-                    eprintln!("[inv14b] {} Error widget(s) in ViewModel:", summaries.len());
+                    eprintln!(
+                        "[inv-frontend-no-error-widgets] {} Error widget(s) in ViewModel:",
+                        summaries.len()
+                    );
                     for s in &summaries {
                         eprintln!("    {s}");
                     }
                     crate::debug_pause::pause_on_fail(&format!(
-                        "inv14b — {error_count} Error widget(s); details above"
+                        "inv-frontend-no-error-widgets — {error_count} Error widget(s); details above"
                     ));
                 }
                 assert!(
                     error_count == 0,
-                    "[inv14b] Frontend ViewModel contains {error_count} Error widget(s)",
+                    "[inv-frontend-no-error-widgets] Frontend ViewModel contains {error_count} Error widget(s)",
                 );
 
                 // 14c: BoundsRegistry assertions — verify GPUI actually laid out elements
@@ -5262,31 +5545,37 @@ impl<V: VariantMarker> E2ESut<V> {
 
                         if let Some(roots) = children_of.get(&None) {
                             for root in roots {
-                                print_node(root, 0, &by_id, &children_of, "inv14 TREE");
+                                print_node(
+                                    root,
+                                    0,
+                                    &by_id,
+                                    &children_of,
+                                    "inv-frontend-engine TREE",
+                                );
                             }
                         }
                         if !orphans.is_empty() {
                             eprintln!(
-                                "[inv14 TREE] <orphan> ({} entries — parent_id refers to missing element)",
+                                "[inv-frontend-engine TREE] <orphan> ({} entries — parent_id refers to missing element)",
                                 orphans.len()
                             );
                             for id in &orphans {
-                                print_node(id, 1, &by_id, &children_of, "inv14 TREE");
+                                print_node(id, 1, &by_id, &children_of, "inv-frontend-engine TREE");
                             }
                         }
                     }
 
-                    // B1: At least 1 element rendered (warning — BoundsRegistry is
+                    // bounds-registry-not-empty: At least 1 element rendered (warning — BoundsRegistry is
                     // a layout-time snapshot; double-buffering means it can be
-                    // transiently empty during restarts and state changes. Use B18
+                    // transiently empty during restarts and state changes. Use not-visually-empty
                     // for authoritative empty-UI detection.)
                     if all_elements.is_empty() {
                         eprintln!(
-                            "[inv14c/B1 WARN] BoundsRegistry is empty — GPUI may not have rendered yet (check B18 for visual emptiness)",
+                            "[inv-frontend-bounds-rendered/bounds-registry-not-empty WARN] BoundsRegistry is empty — GPUI may not have rendered yet (check not-visually-empty for visual emptiness)",
                         );
                     }
 
-                    // B3: every tracked element's observed (w, h) must satisfy its
+                    // expected-size-satisfied: every tracked element's observed (w, h) must satisfy its
                     // declared `expected_size` bounds. Bounds default to "all Free"
                     // (= unconstrained), so widgets that don't opt in are skipped.
                     // The previous hard-coded `live_block` / `spacer` allowlist is
@@ -5307,12 +5596,12 @@ impl<V: VariantMarker> E2ESut<V> {
                             info.expected_size.check(info.width, info.height, &ctx)
                         {
                             panic!(
-                                "[inv14c/B3] Element '{el_id}' violates expected_size: {violation}\n  observed: {info:?}",
+                                "[inv-frontend-bounds-rendered/expected-size-satisfied] Element '{el_id}' violates expected_size: {violation}\n  observed: {info:?}",
                             );
                         }
                     }
 
-                    // B4: Entity IDs from ViewModel that have corresponding bounds (warning —
+                    // vm-entities-have-bounds: Entity IDs from ViewModel that have corresponding bounds (warning —
                     // uniform_list virtualizes, so not all ViewModel entities are rendered).
                     //
                     // Layout blocks (direct children of root-layout, e.g. default-main-panel)
@@ -5337,15 +5626,15 @@ impl<V: VariantMarker> E2ESut<V> {
                         }
                     }
 
-                    // B5: No error widgets rendered
+                    // no-error-widgets-rendered: No error widgets rendered
                     for (el_id, info) in &all_elements {
                         assert!(
                             info.widget_type != "error",
-                            "[inv14c/B5] BoundsRegistry contains error widget '{el_id}': {info:?}",
+                            "[inv-frontend-bounds-rendered/no-error-widgets-rendered] BoundsRegistry contains error widget '{el_id}': {info:?}",
                         );
                     }
 
-                    // B6: Widget type consistency (warning) — for entity IDs present in both
+                    // known-widget-type: Widget type consistency (warning) — for entity IDs present in both
                     // ViewModel and BoundsRegistry, the widget_type should be one of the
                     // known rendering wrappers.
                     for (el_id, info) in &all_elements {
@@ -5354,29 +5643,33 @@ impl<V: VariantMarker> E2ESut<V> {
                         {
                             let ok = matches!(
                                 info.widget_type.as_str(),
-                                "render_entity" | "live_block" | "editable_text" | "selectable"
+                                "render_entity"
+                                    | "live_block"
+                                    | "editable_text"
+                                    | "rendered_text"
+                                    | "selectable"
                             );
                             if !ok {
                                 eprintln!(
-                                    "[inv14c/B6] Element '{el_id}' entity={eid} has unexpected widget_type='{}'",
+                                    "[inv-frontend-bounds-rendered/known-widget-type] Element '{el_id}' entity={eid} has unexpected widget_type='{}'",
                                     info.widget_type,
                                 );
                             }
                         }
                     }
 
-                    // B7: Content presence (warning) — rendered elements with entity bindings
+                    // element-has-content: Content presence (warning) — rendered elements with entity bindings
                     // should have content when ViewModel says they do.
                     for (el_id, info) in &all_elements {
                         if !info.has_content {
                             eprintln!(
-                                "[inv14c/B7 WARN] Element '{el_id}' (widget_type='{}') has has_content=false",
+                                "[inv-frontend-bounds-rendered/element-has-content WARN] Element '{el_id}' (widget_type='{}') has has_content=false",
                                 info.widget_type,
                             );
                         }
                     }
 
-                    // B9: Y-order consistency — rendered elements that correspond to ViewModel
+                    // vm-y-order-and-contiguity: Y-order consistency — rendered elements that correspond to ViewModel
                     // entity IDs must appear in the same y-axis order and form a contiguous
                     // subsequence of the ViewModel's entity list.
                     //
@@ -5403,7 +5696,7 @@ impl<V: VariantMarker> E2ESut<V> {
                             let (_, id_b, y_b) = pair[1];
                             assert!(
                                 y_b >= y_a,
-                                "[inv14c/B9] Y-order violation: '{id_a}' at y={y_a:.0} appears before '{id_b}' at y={y_b:.0}",
+                                "[inv-frontend-bounds-rendered/vm-y-order-and-contiguity] Y-order violation: '{id_a}' at y={y_a:.0} appears before '{id_b}' at y={y_b:.0}",
                             );
                         }
 
@@ -5413,33 +5706,33 @@ impl<V: VariantMarker> E2ESut<V> {
                             let (idx_b, id_b, _) = pair[1];
                             assert!(
                                 idx_b == idx_a + 1,
-                                "[inv14c/B9] Non-contiguous rendering: '{id_a}' at VM index {idx_a} \
+                                "[inv-frontend-bounds-rendered/vm-y-order-and-contiguity] Non-contiguous rendering: '{id_a}' at VM index {idx_a} \
                                  and '{id_b}' at VM index {idx_b} — gap of {} entities",
                                 idx_b - idx_a - 1,
                             );
                         }
                     }
 
-                    // B10 and B18 are gated on the root layout being fully loaded.
+                    // non-wrapper-content-when-docs and not-visually-empty are gated on the root layout being fully loaded.
                     // When root_kind == "table", the render_expr matview hasn't delivered
                     // the columns() expression yet — the UI shows a loading/fallback state.
                     // Asserting on that transient state would be a false positive.
                     let layout_ready = root_kind != "table";
                     if !layout_ready {
                         eprintln!(
-                            "[inv14c] Root widget is '{}' (loading) — skipping B10/B18",
+                            "[inv-frontend-bounds-rendered] Root widget is '{}' (loading) — skipping non-wrapper-content-when-docs/not-visually-empty",
                             root_kind,
                         );
                     }
 
-                    // B10: Non-container content exists — when ref_state has user documents,
+                    // non-wrapper-content-when-docs: Non-container content exists — when ref_state has user documents,
                     // at least one tracked element must be a content widget (render_entity,
                     // editable_text, or selectable), NOT just a live_block wrapper.
                     //
-                    // Skip if BoundsRegistry is entirely empty — that's B1's concern and is
-                    // better detected via B18 (visual emptiness from screenshot), which knows
+                    // Skip if BoundsRegistry is entirely empty — that's bounds-registry-not-empty's concern and is
+                    // better detected via not-visually-empty (visual emptiness from screenshot), which knows
                     // how to distinguish transient empty state (restart/layout race) from a
-                    // truly broken render. Firing B10 on an empty registry produces a
+                    // truly broken render. Firing non-wrapper-content-when-docs on an empty registry produces a
                     // misleading error message ("only live_block wrappers") when in fact
                     // there are no elements at all.
                     if !ref_state.documents.is_empty() && layout_ready && !all_elements.is_empty() {
@@ -5448,7 +5741,7 @@ impl<V: VariantMarker> E2ESut<V> {
                             .any(|(_, info)| info.widget_type != "live_block");
                         assert!(
                             has_content_widget,
-                            "[inv14c/B10] ref_state has {} document(s) and BoundsRegistry has \
+                            "[inv-frontend-bounds-rendered/non-wrapper-content-when-docs] ref_state has {} document(s) and BoundsRegistry has \
                              {} elements, but all are live_block wrappers — no content widgets \
                              rendered",
                             ref_state.documents.len(),
@@ -5456,7 +5749,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         );
                     }
 
-                    // B18: Pixel-level empty UI detection — the ground truth for visible
+                    // not-visually-empty: Pixel-level empty UI detection — the ground truth for visible
                     // content. BoundsRegistry tracks layout, which can be wildly different
                     // from what's actually painted (clipped elements, stale entries, layout
                     // races). This invariant reads a recent screenshot's analysis and fails
@@ -5477,7 +5770,7 @@ impl<V: VariantMarker> E2ESut<V> {
                     // the UI IS rendering — xcap screenshots can be flaky
                     // when the window is briefly obscured or during GPU
                     // compositing. BoundsRegistry is the authoritative
-                    // layout ground truth; B18 is only a backup for the case
+                    // layout ground truth; not-visually-empty is only a backup for the case
                     // where layout runs but paint produces nothing visible.
                     let main_focused = ref_state
                         .focused_entity_id
@@ -5495,7 +5788,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         if let Some(analysis) = analysis {
                             assert!(
                                 analysis.content_fraction > min_content,
-                                "[inv14c/B18] UI is visually empty: content_fraction={:.4} < {:.4} \
+                                "[inv-frontend-bounds-rendered/not-visually-empty] UI is visually empty: content_fraction={:.4} < {:.4} \
                                      (ref_state has {} document(s), main_focused={main_focused}, bounds_empty=true)",
                                 analysis.content_fraction,
                                 min_content,
@@ -5504,7 +5797,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         }
                     }
 
-                    // B15: ViewModel data coverage — entity IDs emitted by the ViewModel
+                    // vm-data-tracked-as-content: ViewModel data coverage — entity IDs emitted by the ViewModel
                     // that are NOT top-level region wrappers represent real data
                     // (documents, tree rows, table rows). At least one of them must
                     // be tracked as a non-`live_block` content widget. Catches the
@@ -5543,7 +5836,7 @@ impl<V: VariantMarker> E2ESut<V> {
                             .count();
                         // True iff every data entity has *some* widget (live_block or
                         // otherwise). When all entities have at least a live_block but
-                        // none are content widgets, it's the original B15 bug.
+                        // none are content widgets, it's the original vm-data-tracked-as-content bug.
                         let all_entities_have_live_block = data_entity_ids
                             .iter()
                             .all(|eid| lookup_entity(eid).is_some());
@@ -5554,14 +5847,14 @@ impl<V: VariantMarker> E2ESut<V> {
                             && (has_loading || !all_entities_have_live_block)
                         {
                             eprintln!(
-                                "[inv14c/B15 WARN] {} data entity ID(s) not yet tracked as content widgets (loading={has_loading}, all_have_live_block={all_entities_have_live_block}): {:?}",
+                                "[inv-frontend-bounds-rendered/vm-data-tracked-as-content WARN] {} data entity ID(s) not yet tracked as content widgets (loading={has_loading}, all_have_live_block={all_entities_have_live_block}): {:?}",
                                 data_entity_ids.len(),
                                 &data_entity_ids[..data_entity_ids.len().min(5)],
                             );
                         } else {
                             assert!(
                                 content_match_count > 0,
-                                "[inv14c/B15] ViewModel has {} data entity ID(s) but none are tracked as content widgets (render_entity/editable_text/selectable): {:?}",
+                                "[inv-frontend-bounds-rendered/vm-data-tracked-as-content] ViewModel has {} data entity ID(s) but none are tracked as content widgets (render_entity/editable_text/selectable): {:?}",
                                 data_entity_ids.len(),
                                 &data_entity_ids[..data_entity_ids.len().min(5)],
                             );
@@ -5570,36 +5863,36 @@ impl<V: VariantMarker> E2ESut<V> {
 
                     // ── Future invariants (brainstormed, not yet implemented) ──
                     //
-                    // B11 — Widget type diversity: non-trivial UI should contain ≥ 2
+                    // widget-type-diverse — Widget type diversity: non-trivial UI should contain ≥ 2
                     //   distinct widget_type values in BoundsRegistry.
                     //
-                    // B12 — Data-aware containment: for each live_block wrapper whose
+                    // live-block-contains-content — Data-aware containment: for each live_block wrapper whose
                     //   ViewModel sub-tree has data rows > 0, assert that at least one
                     //   non-live_block tracked element's bounds are geometrically contained
                     //   within the live_block's bounds. Natural virtual-scrolling tolerance.
                     //
-                    // B13 — Region area sanity: for any live_block wrapper whose ViewModel
+                    // live-block-area-nonzero — Region area sanity: for any live_block wrapper whose ViewModel
                     //   sub-tree has data rows > 0, the wrapper's own area must be non-zero.
                     //   Catches "empty main panel when it shouldn't be empty".
                     //
-                    // B14 — Non-zero total content area: sum area of all non-live_block
+                    // total-content-area-nonzero — Non-zero total content area: sum area of all non-live_block
                     //   tracked elements; require > 0 (or some minimum). Weakest check,
-                    //   superseded by B10 but cheap.
+                    //   superseded by non-wrapper-content-when-docs but cheap.
                     //
-                    // B16 — Focus state invariant: if the reference model has a focused
+                    // focused-block-tracked — Focus state invariant: if the reference model has a focused
                     //   block, that block's entity_id must appear as a tracked element.
                     //
-                    // B17 — Cross-region span: tracked non-live_block elements should
+                    // content-spans-regions — Cross-region span: tracked non-live_block elements should
                     //   span ≥ 2 of the 3 regions when ref_state has documents AND
                     //   navigation focus. Uses geometric intersection with region bounds.
                     //
                     // Also considered: screen-size-based minimum element count, scroll
-                    //   position from GPUI's uniform_list. Rejected as brittle — B12/B13
+                    //   position from GPUI's uniform_list. Rejected as brittle — live-block-contains-content/live-block-area-nonzero
                     //   achieve the same goal via geometric containment without needing
                     //   scroll offsets or resolution-dependent thresholds.
 
                     eprintln!(
-                        "[inv14] Frontend: root='{root_kind}', {} entity IDs, {} elements, {} missing bounds, {} rendered in order",
+                        "[inv-frontend-engine] Frontend: root='{root_kind}', {} entity IDs, {} elements, {} missing bounds, {} rendered in order",
                         entity_ids.len(),
                         all_elements.len(),
                         missing.len(),
@@ -5607,14 +5900,14 @@ impl<V: VariantMarker> E2ESut<V> {
                     );
                     if !missing.is_empty() {
                         eprintln!(
-                            "[inv14 WARN] {} entity IDs have no BoundsRegistry entry: {:?}",
+                            "[inv-frontend-engine WARN] {} entity IDs have no BoundsRegistry entry: {:?}",
                             missing.len(),
                             &missing[..missing.len().min(5)],
                         );
                     }
                 } else {
                     eprintln!(
-                        "[inv14] Frontend ViewModel: root='{root_kind}', {} entity IDs (no geometry)",
+                        "[inv-frontend-engine] Frontend ViewModel: root='{root_kind}', {} entity IDs (no geometry)",
                         entity_ids.len(),
                     );
                 }
@@ -5622,7 +5915,7 @@ impl<V: VariantMarker> E2ESut<V> {
             fe_engine.unwatch(&root_uri);
         }
 
-        // ── inv16: Every focused editable text block has a Draggable ─
+        // ── inv-editable-text-has-draggable: Every focused editable text block has a Draggable ─
         //
         // Production wraps every block bullet in a `draggable` widget so
         // users can pick up the block and drop it elsewhere. If a future
@@ -5648,7 +5941,7 @@ impl<V: VariantMarker> E2ESut<V> {
         // catching the rest, the resolved tree legitimately mixes
         // wrapped and bare `editable_text` widgets — an "N editable_text
         // / N-1 draggable" pattern indistinguishable from the production
-        // drift inv16 was designed to catch.
+        // drift inv-editable-text-has-draggable was designed to catch.
         let inv16_engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>> =
             if ref_state.has_blocks_profile() {
                 None
@@ -5670,7 +5963,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 // to find draggables that live inside per-block render
                 // templates (block_profile.yaml's `column(row(draggable),...)`
                 // wrap). BFS over discovered nested block ids.
-                // inv16 is a *render-pipeline* invariant scoped to the
+                // inv-editable-text-has-draggable is a *render-pipeline* invariant scoped to the
                 // block_profile render path: when a tree's render produces
                 // *any* `draggable` wrappers (canonical block_profile signal),
                 // every `editable_text` in the same tree must be paired with
@@ -5721,7 +6014,7 @@ impl<V: VariantMarker> E2ESut<V> {
                                     tree_draggable.insert(id);
                                 }
                             }
-                            Some("editable_text") => {
+                            Some("editable_text") | Some("rendered_text") => {
                                 if let Some(id) = n.row_id() {
                                     tree_editable.insert(id);
                                 }
@@ -5762,7 +6055,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         ));
                     }
                     panic!(
-                        "[inv16] {n} editable_text widget(s) have no sibling \
+                        "[inv-editable-text-has-draggable] {n} editable_text widget(s) have no sibling \
                          Draggable carrying the same row_id — drag&drop \
                          would silently break for these blocks (production \
                          GPUI's draggable.rs short-circuits when row_id is \
@@ -5782,7 +6075,7 @@ impl<V: VariantMarker> E2ESut<V> {
             engine.unwatch(&root_uri);
         }
 
-        // ── inv15: Focus consistency ─────────────────────────────
+        // ── inv-focus-matches-ref: Focus consistency ─────────────────────────────
         // The engine's global `focused_block` mirror (written by the click
         // handler / `maybe_mirror_navigation_focus`) must match the reference
         // model's global `focused_block` after every focus-changing
@@ -5802,7 +6095,8 @@ impl<V: VariantMarker> E2ESut<V> {
         //     editor is open; the engine's global `focused_block` may or
         //     may not have been updated by the click handler — depends on
         //     whether the GPUI window had finished painting at click time.
-        //     The check resumes after `Blur` once `active_editor` clears.
+        //     The check resumes once `active_editor` clears (e.g. after
+        //     navigation away).
         //
         // The ref-state `focused_block` is unresolved-id-shaped (e.g.
         // `block:ref-doc-0`); the engine works with resolved UUIDs. The
@@ -5820,7 +6114,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 assert_eq!(
                     actual_uri.as_str(),
                     resolved_ref.as_str(),
-                    "[inv15] Global focus mismatch: reference model has {} \
+                    "[inv-focus-matches-ref] Global focus mismatch: reference model has {} \
                      (resolved: {}), but engine.focused_block() has {}",
                     ref_focused,
                     resolved_ref,
@@ -5832,20 +6126,23 @@ impl<V: VariantMarker> E2ESut<V> {
             // focus update happens on a signal loop and may lag.
         }
 
-        // ── inv-displayed-text: editable_text + text widgets show the SQL block content ─
+        // ── inv-displayed-text: editable_text + text widgets show the right string ─
         //
         // The on-screen string for any block-bound text widget (live
         // `InputState` value for `editable_text`, rendered prop for
-        // `text(col(...))`) must match the `content` of the corresponding
-        // block in the reference model. Catches UI-staleness regressions
-        // where SQL is correctly updated but the rendered widget never
-        // picks up the change — e.g. the post-`split_block` /
-        // post-`join_block` "stale prefix" bug where the original block
-        // keeps showing pre-split text.
+        // `text(col(...))`) must match what the user is currently editing
+        // (or `block.content` if no edit is in progress).
         //
-        // With MutableText, focused blocks are NOT skipped — the CRDT-backed
-        // editor commits keystrokes synchronously, so InputState and SQL stay
-        // in sync even while the user is typing.
+        // Empirically (devlog 2026-05-08-152913): MutableText updates the
+        // editor's live state but does NOT synchronously commit to
+        // `block.content` — the SQL row only catches up at blur / Enter /
+        // chord-commit. So while an editor is active on a block we compare
+        // against `active_editor.in_memory_content`; otherwise we compare
+        // against the committed `block.content`.
+        //
+        // This catches both real UI-staleness regressions (post-`split_block`
+        // stale prefix on InputState) and any divergence between the
+        // editor's view and the reference model's tracked in-memory state.
         if !nav_only && let Some(ref geometry) = self.frontend_geometry {
             // Build reverse map: real URI → synthetic ref-state key.
             // After SplitBlock, the ref state stores the new block under a
@@ -5860,7 +6157,10 @@ impl<V: VariantMarker> E2ESut<V> {
 
             let mut mismatches: Vec<String> = Vec::new();
             for (_el_id, info) in geometry.all_elements() {
-                if info.widget_type != "editable_text" && info.widget_type != "text" {
+                if info.widget_type != "editable_text"
+                    && info.widget_type != "rendered_text"
+                    && info.widget_type != "text"
+                {
                     continue;
                 }
                 let Some(ref displayed) = info.displayed_text else {
@@ -5885,10 +6185,38 @@ impl<V: VariantMarker> E2ESut<V> {
                 let Some(block) = block else {
                     continue;
                 };
-                let expected = block.content_text();
-                if displayed != expected {
+                // While an editor is active on this block, the on-screen
+                // string reflects the live `InputState` value, NOT the
+                // committed `block.content`. Verified empirically (seed 5,
+                // devlog 2026-05-08-..-pbt-empirical): MutableText writes
+                // to its CRDT and the InputState reflects that, but
+                // `block.content` only catches up at blur / Enter / etc.
+                // So while editing, compare against `in_memory_content`.
+                let expected: String = match &ref_state.active_editor {
+                    Some(active) if active.block_id == block.id => active.in_memory_content.clone(),
+                    _ => block.content_text().to_string(),
+                };
+                if displayed != &expected {
+                    // Tag each mismatch with where the divergence lives —
+                    // backend (engine snapshot also stale) vs GPUI render
+                    // layer (engine snapshot matches expected). The
+                    // diagnostic asks the same `ReactiveEngine` the GPUI
+                    // window is bound to, so it shows whether the engine
+                    // produced the right ViewModel and the render layer
+                    // dropped it, or whether the bug is upstream.
+                    let diag_label = self
+                        .frontend_engine
+                        .as_ref()
+                        .map(|engine| {
+                            crate::pbt::panic_diag::diagnose_displayed_text(
+                                engine, entity_id, displayed, &expected,
+                            )
+                            .as_label()
+                        })
+                        .unwrap_or_else(|| "no engine handle".into());
                     mismatches.push(format!(
-                        "  {widget}@block={entity_id}\n    on-screen: {:?}\n    expected:  {:?}",
+                        "  {widget}@block={entity_id}\n    on-screen: {:?}\n    \
+                         expected:  {:?}\n    [DIAG] {diag_label}",
                         displayed,
                         expected,
                         widget = info.widget_type,
@@ -5901,7 +6229,10 @@ impl<V: VariantMarker> E2ESut<V> {
                      The on-screen string diverged from the SQL block.content in the \
                      reference model — typical after split_block/join_block when the \
                      row's data signal fires but a rendered prop (editable_text \
-                     InputState, text col(...) snapshot) skips the update.\n{}",
+                     InputState, text col(...) snapshot) skips the update.\n\
+                     Per-line [DIAG] tag distinguishes backend (engine ViewModel \
+                     also stale) from GPUI render layer (engine snapshot matches \
+                     expected; render layer dropped the update).\n{}",
                 mismatches.len(),
                 mismatches.join("\n"),
             );
@@ -5944,9 +6275,9 @@ impl<V: VariantMarker> StateMachineTest for E2ESut<V> {
         transition: crate::pbt::transitions::E2ETransition,
     ) -> Self::SystemUnderTest {
         tracing::trace!(
-            "[apply] ref_state has {} blocks, transition: {:?}",
+            "[apply] ref_state has {} blocks, transition: {}",
             ref_state.block_state.blocks.len(),
-            std::mem::discriminant(&transition)
+            transition.variant_name()
         );
 
         state.last_transition = transition.clone();
@@ -6146,7 +6477,7 @@ impl<V: VariantMarker> E2ESut<V> {
                     // branch fires when the ref-model generated an abstract mutation
                     // with no corresponding user gesture — e.g., a direct `block::update`
                     // that a real user would produce by clicking into an editor and
-                    // typing. Burn-down for these lives in Step B6 of plan
+                    // typing. Burn-down for these lives in Step known-widget-type of plan
                     // `deep-humming-crane.md`: once `click_entity` + `type_text` cover
                     // the full editor flow, this fallback can be deleted.
                     eprintln!(
@@ -6238,7 +6569,7 @@ impl<V: VariantMarker> E2ESut<V> {
             // found in SQL.
             let resolved_block_id = self.resolve_uri(&block_id);
             // Read from block_raw — post-mutation spot-check needs synchronous
-            // visibility (same matview-CDC race fix as inv10d / #13).
+            // visibility (same matview-CDC race fix as inv-viewmodel-root-matches-render-expr / #13).
             let prql = format!(
                 "from block_raw | filter id == \"{}\" | select {{id, content, content_type, parent_id}}",
                 resolved_block_id

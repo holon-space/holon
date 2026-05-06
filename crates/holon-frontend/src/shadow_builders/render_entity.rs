@@ -5,7 +5,18 @@ holon_macros::widget_builder! {
     raw fn render_entity(ba: BA<'_>) -> ViewModel {
         match shared_render_entity_build(&ba) {
             crate::render_interpreter::RenderBlockResult::ProfileWidget { render, operations } => {
-                let ctx = ba.ctx.with_operations(operations, ba.services);
+                // Clear render-context flags before interpreting the variant's
+                // body. Flags (role, view_mode, embed_depth) describe HOW this
+                // entity should render; once `pick_active_variant` has
+                // selected the variant, the flags have done their job and
+                // descendants render as ordinary content. Without this reset
+                // a variant whose body recurses (nested render_entity / live_block)
+                // would re-evaluate variant conditions with the same flag and
+                // dispatch wrong (e.g., role=page_title leaking down).
+                let ctx = ba
+                    .ctx
+                    .without_flags()
+                    .with_operations(operations, ba.services);
                 let mut vm = (ba.interpret)(&render, &ctx);
                 // Attach the entity-level operations (e.g. indent/outdent/move_*
                 // / split_block for blocks) onto the produced ViewModel so

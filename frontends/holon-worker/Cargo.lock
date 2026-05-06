@@ -1875,6 +1875,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrous-di"
+version = "0.2.0"
+source = "git+https://github.com/nightscape/ferrous-di.git?branch=main#91c4198b3fceb8218006261162d4893e4eba0e3f"
+dependencies = [
+ "async-trait",
+ "tokio",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1922,15 +1931,6 @@ dependencies = [
 name = "fluxdi"
 version = "1.2.2"
 source = "git+https://github.com/holon-space/fluxdi?branch=dev#24b6eebb0f6ba4a490f555a353a2add909ffda58"
-dependencies = [
- "futures",
- "tokio",
-]
-
-[[package]]
-name = "fluxdi"
-version = "1.2.2"
-source = "git+https://github.com/nightscape/fluxdi.git?branch=dev#24b6eebb0f6ba4a490f555a353a2add909ffda58"
 dependencies = [
  "futures",
  "tokio",
@@ -2505,9 +2505,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
- "fluxdi 1.2.2 (git+https://github.com/holon-space/fluxdi?branch=dev)",
+ "fluxdi",
  "futures",
+ "futures-signals",
  "getrandom 0.3.4",
  "gql-parser",
  "gql-transform",
@@ -2559,6 +2561,7 @@ dependencies = [
  "chrono",
  "fluent-uri",
  "futures",
+ "futures-signals",
  "holon-engine",
  "holon-macros",
  "once_cell",
@@ -2631,7 +2634,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
- "fluxdi 1.2.2 (git+https://github.com/holon-space/fluxdi?branch=dev)",
+ "fluxdi",
  "futures",
  "futures-signals",
  "holon",
@@ -2642,6 +2645,7 @@ dependencies = [
  "holon-mcp-client",
  "holon-orgmode",
  "holon-todoist",
+ "loro",
  "memory-stats",
  "premortem",
  "serde",
@@ -2718,10 +2722,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "fluxdi 1.2.2 (git+https://github.com/holon-space/fluxdi?branch=dev)",
+ "fluxdi",
  "futures",
  "holon",
  "holon-api",
+ "holon-core",
  "holon-filesystem",
  "holon-macros",
  "holon-org-format",
@@ -2733,6 +2738,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
  "workspace-hack 0.1.0",
 ]
@@ -2744,7 +2750,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "fluxdi 1.2.2 (git+https://github.com/holon-space/fluxdi?branch=dev)",
+ "fluxdi",
  "futures",
  "holon",
  "holon-api",
@@ -3850,9 +3856,9 @@ dependencies = [
 
 [[package]]
 name = "loro"
-version = "1.10.8"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "362958777c7ed75d2e4c15c5c8974419e7ff977e7e1d5a98758a01af48d05b51"
+checksum = "e63def75cde167dbc652d21bc6f56e2dc44ce90a5332eb900c42c51ad0e5ed46"
 dependencies = [
  "enum-as-inner 0.6.1",
  "generic-btree",
@@ -3866,9 +3872,9 @@ dependencies = [
 
 [[package]]
 name = "loro-common"
-version = "1.10.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70363ea05a9c507fd9d58b65dc414bf515f636d69d8ab53e50ecbe8d27eef90c"
+checksum = "193e88dedf3bc07f3b25ec8bb609dd461349b26942e43933cb0f599bc09d9c5b"
 dependencies = [
  "arbitrary",
  "enum-as-inner 0.6.1",
@@ -3896,9 +3902,9 @@ dependencies = [
 
 [[package]]
 name = "loro-internal"
-version = "1.10.8"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5b521427fa7346ef7d9affd3cc7a6f3dc801c82feab45255cbc67603085f854"
+checksum = "8d42db22ea93c266d5b6ef09ba94af080b6a4d131942e9a28bfa6a218b312b5f"
 dependencies = [
  "append-only-bytes",
  "arref",
@@ -3943,9 +3949,9 @@ dependencies = [
 
 [[package]]
 name = "loro-kv-store"
-version = "1.10.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78beebc933a33c26495c9a98f05b38bc0a4c0a337ecfbd3146ce1f9437eec71f"
+checksum = "18853eed186c39e0b9d541a1f847161ad05bcf366c412068c9d257d5d981a9b5"
 dependencies = [
  "bytes",
  "ensure-cov",
@@ -4996,8 +5002,7 @@ dependencies = [
 [[package]]
 name = "orgize"
 version = "0.10.0-alpha.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b747231437c1d8e68355427250c167d3e4d94874727923511e4572b7f5fecd51"
+source = "git+https://github.com/holon-space/orgize.git?branch=holon#690e8e7a7f4a40023630aee7337e7b660c539840"
 dependencies = [
  "bytecount",
  "cfg-if",
@@ -9144,7 +9149,7 @@ dependencies = [
  "errno",
  "euclid",
  "fastrand",
- "fluxdi 1.2.2 (git+https://github.com/nightscape/fluxdi.git?branch=dev)",
+ "ferrous-di",
  "futures-channel",
  "futures-core",
  "futures-executor",

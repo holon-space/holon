@@ -562,7 +562,7 @@ pub fn count_error_nodes(node: &ViewModel) -> usize {
 }
 
 /// Collect a one-line summary of every Error node in the tree. Used by
-/// inv14b to surface the actual error messages without needing to dump
+/// inv-frontend-no-error-widgets to surface the actual error messages without needing to dump
 /// the full ViewModel.
 pub fn collect_error_node_summaries(node: &ViewModel) -> Vec<String> {
     let mut out = Vec::new();

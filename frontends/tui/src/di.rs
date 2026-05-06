@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use fluxdi::{Injector, Module, ModuleLifecycleFuture, Shared};
 
+use holon::sync::block_cell_registry::BlockCellRegistry;
 use holon_frontend::config::{HolonConfig, SessionConfig};
-use holon_frontend::editable_text_provider::LoroEditableTextProvider;
 use holon_frontend::frontend_module::FrontendInjectorExt;
 use holon_frontend::preferences::PrefKey;
 use holon_frontend::reactive::{
@@ -74,24 +74,20 @@ impl Module for TuiModule {
             let services: Arc<dyn BuilderServices> = engine.clone();
             slot.0.set(services.clone()).ok();
 
-            // Wire MutableText provider — resolved from DI (registered in
-            // FrontendInjectorExt::add_frontend when Loro is enabled).
-            match injector
-                .try_resolve_async::<LoroEditableTextProvider>()
-                .await
-            {
-                Ok(provider) => {
-                    engine
-                        .editable_text_provider
-                        .lock()
-                        .unwrap()
-                        .replace(provider);
-                    eprintln!("[TuiModule] MutableText provider wired via DI");
+            // Wire `BlockCellRegistry` (Loro-backed when LoroModule is
+            // loaded) into the ReactiveEngine so `BuilderServices::
+            // editable_text` resolves through `Cell<String>`. SqlOnly
+            // mode skips this — `editable_text` will return `Err` and
+            // editors will run without a CRDT-backed cell.
+            match injector.try_resolve_async::<BlockCellRegistry>().await {
+                Ok(registry) => {
+                    engine.block_cell_registry.lock().unwrap().replace(registry);
+                    eprintln!("[TuiModule] BlockCellRegistry wired via DI");
                 }
                 Err(_) => {
                     eprintln!(
-                        "[TuiModule] LoroEditableTextProvider not registered \
-                         — MutableText unavailable"
+                        "[TuiModule] BlockCellRegistry not registered \
+                         — editable_text unavailable in this session"
                     );
                 }
             }

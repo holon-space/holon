@@ -6,8 +6,10 @@
 //! `sut.rs:2282-2394` (SUT apply), and
 //! `transition_budgets.rs:190-196` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -18,7 +20,7 @@ use crate::pbt::transition_budgets::{
     ExpectedSql, JOURNAL_READS, NAV_DML_READS, REACTIVE_BASE, docs_tolerance,
 };
 
-use holon_api::{EntityUri, Region};
+use holon_api::{ContentType, EntityUri, Region};
 
 /// Click on a rendered block to focus it. When clicking in LeftSidebar,
 /// also pushes a navigation-history entry for Region::Main.
@@ -29,62 +31,99 @@ pub struct ClickBlock {
 }
 
 impl E2ETransitionFactory for ClickBlock {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started {
-            return None;
-        }
-        let regions = Region::ALL.to_vec();
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let main_unfocused = state.current_focus(Region::Main).is_none();
         let mut arms: Vec<(u32, BoxedStrategy<ClickBlock>)> = Vec::new();
-        for region in &regions {
-            // Skip RightSidebar while we stabilize the bug reproduction —
-            // its default PRQL is `from children`, which depends on a focus
-            // that the PBT's nav-state doesn't fully mirror in the production
-            // matview chain. Clicking ends up timing out waiting for content
-            // that never resolves. Re-enable once we either teach the ref
-            // model to seed RightSidebar focus correctly or extend the click
-            // path to handle non-clickable targets gracefully.
-            if *region == Region::RightSidebar {
-                continue;
-            }
-            let focusable = state.focusable_rendered_block_ids(*region);
-            if !focusable.is_empty() {
-                let r = *region;
-                let weight = if main_unfocused && *region == Region::LeftSidebar {
-                    12
-                } else {
-                    3
-                };
-                arms.push((
-                    weight,
-                    proptest::sample::select(focusable)
-                        .prop_map(move |block_id| ClickBlock {
-                            region: r,
-                            block_id,
-                        })
-                        .boxed(),
-                ));
-            }
+
+        // LeftSidebar candidates: the ref-predicted set of sidebar entities
+        // that production wraps in `selectable(navigation.focus(region=main))`.
+        // The default sidebar PRQL renders page blocks with non-special
+        // titles; the layout binds nav-focus on each row. Filtering here
+        // mirrors what the previous driver-based path (`entities_in_region`
+        // + click_intent_of) computed, but from pure ref state.
+        let sidebar_candidates: Vec<EntityUri> = state.predicted_sidebar_navigation_targets();
+        if !sidebar_candidates.is_empty() {
+            let weight = if main_unfocused { 12 } else { 3 };
+            arms.push((
+                weight,
+                proptest::sample::select(sidebar_candidates)
+                    .prop_map(|block_id| ClickBlock {
+                        region: Region::LeftSidebar,
+                        block_id,
+                    })
+                    .boxed(),
+            ));
         }
-        if arms.is_empty() {
-            return None;
+
+        // Main candidates: text blocks the user can edit (no bound click
+        // action — clicking places the editor cursor). `main_editable_descendants`
+        // already encodes content_type / non-page / non-layout / focusable
+        // / non-locked, which lines up with preconditions exactly.
+        let main_candidates: Vec<EntityUri> = state.main_editable_descendants();
+        if !main_candidates.is_empty() {
+            arms.push((
+                3,
+                proptest::sample::select(main_candidates)
+                    .prop_map(|block_id| ClickBlock {
+                        region: Region::Main,
+                        block_id,
+                    })
+                    .boxed(),
+            ));
         }
-        let strat = proptest::strategy::Union::new_weighted(arms).boxed();
-        Some((1, strat))
+
+        // RightSidebar still skipped — its default PRQL depends on a focus
+        // the PBT's nav-state doesn't mirror in the production matview
+        // chain, so clicks time out waiting for content that never
+        // resolves. Re-enable once that's untangled.
+
+        check(!arms.is_empty(), Reason::NoFocusableBlocks).map(|_| {
+            let strat = proptest::strategy::Union::new_weighted(arms).boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for ClickBlock {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started
-            && state.block_state.blocks.contains_key(&self.block_id)
-            && state.layout_blocks.is_focusable(&self.block_id)
-            && !state.focusable_rendered_block_ids(self.region).is_empty()
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        // Visibility / rendered-set membership is no longer a precondition.
+        // The driver's wait-for-bounds with scroll-into-view (sut.rs)
+        // covers "must be reachable on screen"; a real bug surfaces as
+        // the wait timeout, not as a precondition rejection. `is_focusable`
+        // / `!is_page` / `!layout_blocks` stay ref-state model facts.
+        let block = state.block_state.blocks.get(&self.block_id);
+        let mut checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(block.is_some(), Reason::FocusedBlockMissing),
+        ];
+        if let Some(b) = block {
+            checks.push(check(
+                b.content_type == ContentType::Text,
+                Reason::FocusedNotText,
+            ));
+        }
+        checks.push(check(
+            !state.layout_blocks.contains(&self.block_id),
+            Reason::FocusedInLayoutBlocks,
+        ));
+        checks.push(check(
+            state.layout_blocks.is_focusable(&self.block_id),
+            Reason::FocusedNotFocusable,
+        ));
+        checks.push(check(
+            block.is_some_and(|b| !b.is_page()),
+            Reason::FocusedIsPage,
+        ));
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         use crate::pbt::reference_state::NavigationHistory;
+        use crate::pbt::reference_state::OpenPinEntry;
         // The default LeftSidebar wraps each doc in a `selectable` whose
         // bound action is `navigation.focus(region: "main", block_id: col("id"))`.
         // Clicking it dispatches that intent, which the production
@@ -92,9 +131,10 @@ impl E2ETransitionImpl for ClickBlock {
         // region=Main. Mirror that here so `focus_roots` / `current_focus`
         // checks line up with the real backend after the click.
         //
-        // Other regions (Main, RightSidebar) don't have bound actions
-        // in the default layout — clicking just sets editor focus.
-        if self.region == Region::LeftSidebar {
+        // Other regions (Main, RightSidebar), AND sidebar clicks on
+        // entities the default sidebar PRQL does NOT render (so prod
+        // has no selectable bound), fall through to editor focus.
+        if state.predicts_navigation_focus(&self.block_id, self.region) {
             let history = state
                 .navigation_history
                 .entry(Region::Main)
@@ -102,6 +142,20 @@ impl E2ETransitionImpl for ClickBlock {
             history.entries.truncate(history.cursor + 1);
             history.entries.push(Some(self.block_id.clone()));
             history.cursor = history.entries.len() - 1;
+
+            // Same close-then-insert as NavigateFocus — see navigate_focus.rs
+            // for rationale.
+            let history_id = state.next_history_id;
+            state.next_history_id += 1;
+            let added_ts_logical = state.next_pin_ts;
+            state.next_pin_ts += 1;
+            let pins = state.open_pins.entry(Region::Main).or_default();
+            pins.clear();
+            pins.push(OpenPinEntry {
+                history_id,
+                block_id: Some(self.block_id.clone()),
+                added_ts_logical,
+            });
 
             state.focused_entity_id.remove(&Region::Main);
             state.focused_cursor.remove(&Region::Main);
@@ -124,7 +178,7 @@ impl E2ETransitionImpl for ClickBlock {
         }
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_click_block(self.region, &self.block_id).await;
     }
 

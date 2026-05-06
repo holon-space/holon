@@ -1,8 +1,8 @@
-// Should fire — bare "block" / "block_tags" / "task_blockers" literals.
+// Should fire — bare "block" / "block_tags" / "block_requires" literals.
 fn use_table_name() {
     let t1 = "block";
     let t2 = "block_tags";
-    let t3 = "task_blockers";
+    let t3 = "block_requires";
     let _ = (t1, t2, t3);
 }
 

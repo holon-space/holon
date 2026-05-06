@@ -8,10 +8,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -27,11 +29,7 @@ pub struct ToggleState {
 }
 
 impl E2ETransitionFactory for ToggleState {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started || state.current_focus(holon_api::Region::Main).is_none() {
-            return None;
-        }
-
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let owned_render_expr = state
             .main_panel_render_expr()
             .or_else(|| state.root_render_expr())
@@ -39,7 +37,7 @@ impl E2ETransitionFactory for ToggleState {
             .unwrap_or_else(super::super::reference_state::default_root_render_expr);
 
         let main_focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let text_block_ids: Vec<EntityUri> = state
+        let visible_text_block_ids: Vec<EntityUri> = state
             .block_state
             .blocks
             .values()
@@ -47,13 +45,9 @@ impl E2ETransitionFactory for ToggleState {
                 b.content_type == holon_api::ContentType::Text
                     && !b.is_page()
                     && !state.layout_blocks.contains(&b.id)
+                    && main_focus_roots.contains(&b.id)
             })
             .map(|b| b.id.clone())
-            .collect();
-        let visible_text_block_ids: Vec<EntityUri> = text_block_ids
-            .iter()
-            .filter(|id| main_focus_roots.contains(*id))
-            .cloned()
             .collect();
 
         let rows: Vec<holon_api::widget_spec::DataRow> = visible_text_block_ids
@@ -88,6 +82,14 @@ impl E2ETransitionFactory for ToggleState {
         };
         let pairs: Vec<(EntityUri, String)> = toggle_block_ids
             .iter()
+            .filter(|id| {
+                ToggleState {
+                    block_id: (*id).clone(),
+                    new_state: "".to_string(), // dummy for preconditions check
+                }
+                .preconditions(state)
+                .is_good()
+            })
             .flat_map(|id| {
                 let current_state = state
                     .block_state
@@ -105,32 +107,32 @@ impl E2ETransitionFactory for ToggleState {
             })
             .collect();
 
-        if pairs.is_empty() {
-            return None;
-        }
-
-        let strat = prop::sample::select(pairs)
-            .prop_map(|(block_id, new_state)| ToggleState {
-                block_id,
-                new_state,
-            })
-            .boxed();
-        Some((1, strat))
+        check(!pairs.is_empty(), Reason::NoTogglableStates).map(|_| {
+            let strat = prop::sample::select(pairs)
+                .prop_map(|(block_id, new_state)| ToggleState {
+                    block_id,
+                    new_state,
+                })
+                .boxed();
+            (1, strat)
+        })
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for ToggleState {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        state.app_started
-            && state.current_focus(holon_api::Region::Main).is_some()
-            // `region_predictable(Main)` rejects both custom/unparseable
-            // root layouts and layout-mutated panel render sources —
-            // either case produces rows with no entity binding, so
-            // `wait_for_entity_in_resolved_view_model` would time out.
-            && state.region_predictable(holon_api::Region::Main)
-            && focus_roots.contains(&self.block_id)
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                state.current_focus(holon_api::Region::Main).is_some(),
+                Reason::NoFocusInMain,
+            ),
+            check(
+                focus_roots.contains(&self.block_id),
+                Reason::FocusedNotDescendantOfFocusRoot,
+            ),
             // Layout headlines (in `layout_blocks.headline_ids`) define
             // their own render expression via a child render source.
             // Production renders the headline through that custom
@@ -139,14 +141,26 @@ impl E2ETransitionImpl for ToggleState {
             // resolved ViewModel, so ToggleState would time out.
             // EditViaViewModel/Indent/MoveUp etc. already exclude
             // layout blocks for the same reason.
-            && !state.layout_blocks.contains(&self.block_id)
+            check(
+                !state.layout_blocks.contains(&self.block_id),
+                Reason::FocusedInLayoutBlocks,
+            ),
             // A custom entity profile for `block` can replace the
             // default render with anything (e.g. just an
             // `editable_text`) — losing the state_toggle widget.
             // The reference state doesn't introspect the active
             // variant's widget set, so conservatively skip
             // ToggleState whenever a custom block profile is loaded.
-            && !state.has_blocks_profile()
+            check(
+                !state.has_blocks_profile(),
+                Reason::StateToggleNotApplicable,
+            ),
+        ];
+
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -165,7 +179,7 @@ impl E2ETransitionImpl for ToggleState {
         });
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_toggle_state(&self.block_id, &self.new_state)
             .await;
     }

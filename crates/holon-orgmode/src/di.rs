@@ -33,6 +33,7 @@ use holon::core::queryable_cache::QueryableCache;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
+use holon::sync::event_bus::EventOrigin;
 use holon::sync::event_bus::{EventBus, PublishErrorTracker};
 use holon::sync::{LoroBlockOperations, LoroDocumentStore, TursoEventBus};
 use holon::type_registry::TypeRegistry;
@@ -201,7 +202,7 @@ fn scan_org_files(dir: &std::path::Path) -> Vec<PathBuf> {
 /// BlockReader backed by `QueryableCache<Block>`.
 ///
 /// Reads bypass `cache.get_all()` because edge-typed fields like `tags`
-/// live in junction tables (`block_tags`, `task_blockers`) — a plain
+/// live in junction tables (`block_tags`, `block_requires`) — a plain
 /// `SELECT * FROM block` returns rows with `tags = []` and consumers like
 /// the org renderer silently drop the headline tag. Instead, every read
 /// goes through `load_all_blocks_with_hydration` which adds correlated
@@ -234,7 +235,7 @@ impl CacheBlockReader {
     /// transaction has already committed to `block_raw`, but the `block`
     /// matview may not yet reflect it. Reading the matview here renders a
     /// stale snapshot and writes a stale org file. Same race class as
-    /// inv10d (`block_with_query_source.sql` → `block_raw`); see
+    /// inv-viewmodel-root-matches-render-expr (`block_with_query_source.sql` → `block_raw`); see
     /// devlog/2026-05-05-110315.md.
     async fn load_all_blocks_with_hydration(&self) -> anyhow::Result<Vec<Block>> {
         let sql = format!(
@@ -415,9 +416,19 @@ impl DocumentManager for LiveDocumentManager {
         // INSERT OR IGNORE: only triggers on PK collision now that the
         // partial unique index on `(parent_id, name)` is gone. The
         // `create_lock` above is what prevents same-title duplicates.
+        // Tag the create event with `EventOrigin::Org` so the
+        // `LoroSyncController` inbound gate routes it to `Apply` instead of
+        // dropping it as a generic SQL-direct write. This page-creation flow
+        // is triggered by `OrgSyncController::on_file_changed`; semantically
+        // it's an Org-driven event.
         let result = self
             .command_bus
-            .execute_operation(&EntityName::new("block"), "create", params)
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "create",
+                params,
+                EventOrigin::Org,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -938,19 +949,31 @@ impl Module for OrgModeModule {
 
                             // Main loop: handle file changes and EventBus block events.
                             //
-                            // A periodic `poll_tick` backstops the notify-driven
-                            // `file_rx` path. FSEvents on macOS can coalesce or
-                            // drop events under load, which would otherwise leave
-                            // externally-edited files unprocessed (SQL stays at
-                            // old content, files disagree with DB). The poll
-                            // scans `last_projection` for disk/projection
-                            // mismatches and ingests them exactly like a
-                            // file-watcher delivery — so a missed FSEvent becomes
-                            // a latency blip rather than a correctness hole.
+                            // Two periodic tickers backstop the notify-driven
+                            // `file_rx` path:
+                            //
+                            // - `poll_tick` (100ms): re-stats every tracked
+                            //   `last_projection` entry. Cheap — short-circuited
+                            //   by an `(mtime, size)` signature so unchanged
+                            //   files don't read.
+                            // - `discovery_tick` (2s): walks the full tree via
+                            //   `scan_directory` to pick up files created during
+                            //   notify's unarmed window on macOS. Expensive
+                            //   (rebuilds `ignore::WalkBuilder` gitignore DFAs)
+                            //   so deliberately infrequent.
+                            //
+                            // Missed FSEvents now become a 100ms latency blip
+                            // for modifications and ≤2s for brand-new files.
                             let mut poll_tick = tokio::time::interval(
                                 tokio::time::Duration::from_millis(100),
                             );
                             poll_tick.set_missed_tick_behavior(
+                                tokio::time::MissedTickBehavior::Skip,
+                            );
+                            let mut discovery_tick = tokio::time::interval(
+                                tokio::time::Duration::from_secs(2),
+                            );
+                            discovery_tick.set_missed_tick_behavior(
                                 tokio::time::MissedTickBehavior::Skip,
                             );
                             // Coalesce mark_processed across bursty events; flushes
@@ -962,6 +985,21 @@ impl Module for OrgModeModule {
                             );
                             mark_flush_tick.set_missed_tick_behavior(
                                 tokio::time::MissedTickBehavior::Delay,
+                            );
+
+                            // Coalesce orphan-event full re-renders. Events that
+                            // lack routing_doc_uri (and whose payload parent_id
+                            // doesn't resolve via on_block_changed) used to trigger
+                            // re_render_all_tracked per event — O(events × tracked
+                            // files) IO + segment-chain lookups during bursty
+                            // initial scans. The flag is set in the event arm; a
+                            // 50ms ticker drains it with a single re-render pass.
+                            let mut pending_full_rerender = false;
+                            let mut rerender_flush_tick = tokio::time::interval(
+                                tokio::time::Duration::from_millis(50),
+                            );
+                            rerender_flush_tick.set_missed_tick_behavior(
+                                tokio::time::MissedTickBehavior::Skip,
                             );
                             loop {
                                 // Session-alive check: if the strong refs to
@@ -989,7 +1027,7 @@ impl Module for OrgModeModule {
                                         idle_signal_for_task.mark_progress();
                                     }
                                     _ = poll_tick.tick() => {
-                                        match controller.poll_external_changes().await {
+                                        match controller.poll_tracked_files().await {
                                             Ok(n) if n > 0 => {
                                                 tracing::debug!("[ORGSYNC_TRACE] poll ingested {} file(s)", n);
                                                 idle_signal_for_task.mark_progress();
@@ -997,7 +1035,20 @@ impl Module for OrgModeModule {
                                             Ok(_) => {}
                                             Err(e) => {
                                                 tracing::debug!("[ORGSYNC_TRACE] poll ERROR: {}", e);
-                                                error!("[OrgMode] poll_external_changes error: {}", e);
+                                                error!("[OrgMode] poll_tracked_files error: {}", e);
+                                            }
+                                        }
+                                    }
+                                    _ = discovery_tick.tick() => {
+                                        match controller.poll_new_files().await {
+                                            Ok(n) if n > 0 => {
+                                                tracing::debug!("[ORGSYNC_TRACE] discovery ingested {} new file(s)", n);
+                                                idle_signal_for_task.mark_progress();
+                                            }
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                tracing::debug!("[ORGSYNC_TRACE] discovery ERROR: {}", e);
+                                                error!("[OrgMode] poll_new_files error: {}", e);
                                             }
                                         }
                                     }
@@ -1020,13 +1071,11 @@ impl Module for OrgModeModule {
                                         async {
                                             let doc_ids = extract_doc_ids_from_event(&event);
                                             if doc_ids.is_empty() {
-                                                info!(
-                                                    "[OrgMode] Block event {} ({:?}) missing _routing_doc_uri — re-rendering all tracked files",
+                                                tracing::debug!(
+                                                    "[OrgMode] Block event {} ({:?}) missing routing_doc_uri — queued for batched re-render",
                                                     event.aggregate_id, event.event_kind,
                                                 );
-                                                if let Err(e) = controller.re_render_all_tracked().await {
-                                                    error!("[OrgMode] re_render_all_tracked error: {}", e);
-                                                }
+                                                pending_full_rerender = true;
                                             } else {
                                                 let mut any_routed = false;
                                                 for doc_id in &doc_ids {
@@ -1042,9 +1091,8 @@ impl Module for OrgModeModule {
                                                     }
                                                 }
                                                 if !any_routed {
-                                                    if let Err(e) = controller.re_render_all_tracked().await {
-                                                        error!("[OrgMode] re_render_all_tracked fallback error: {}", e); // ALLOW(fallback): disclosed re-render path when event lacked _routing_doc_uri (see line 1029 above)
-                                                    }
+                                                    // ALLOW(fallback): disclosed re-render path when event lacked routing_doc_uri
+                                                    pending_full_rerender = true;
                                                 }
                                             }
                                         }.instrument(span).await;
@@ -1058,6 +1106,12 @@ impl Module for OrgModeModule {
                                                 "[OrgMode] mark_processed_batch(org, {}) failed: {}",
                                                 ids.len(), e
                                             );
+                                        }
+                                    }
+                                    _ = rerender_flush_tick.tick(), if pending_full_rerender => {
+                                        pending_full_rerender = false;
+                                        if let Err(e) = controller.re_render_all_tracked().await {
+                                            error!("[OrgMode] re_render_all_tracked (debounced) error: {}", e);
                                         }
                                     }
                                 }
@@ -1096,18 +1150,18 @@ fn extract_doc_ids_from_event(event: &holon::sync::event_bus::Event) -> Vec<Enti
 
     match event.event_kind {
         EventKind::Created | EventKind::Updated | EventKind::Deleted | EventKind::FieldsChanged => {
-            // Check _routing_doc_uri first (set by prepare_update for routing
-            // without corrupting the block's actual parent_id)
-            if let Some(doc_uri) = event
-                .payload
-                .get(holon::sync::event_bus::ROUTING_DOC_URI_KEY)
-                .and_then(|v| v.as_str())
-            {
+            // Typed `Event::routing_doc_uri` field is the primary source —
+            // SqlOperationProvider sets it at the operation boundary so we
+            // don't have to hunt through `payload` for the underscore-prefixed
+            // hint.
+            if let Some(doc_uri) = event.routing_doc_uri.as_deref() {
                 if let Ok(uri) = holon_api::EntityUri::parse(doc_uri) {
                     doc_ids.insert(uri);
                 }
             }
-            // Fall back to parent_id in data (for create/delete events)
+            // Fall back to parent_id in data (for events lacking routing —
+            // e.g. Loro outbound batched creates that don't go through
+            // `find_document_uri` at the boundary).
             if doc_ids.is_empty() {
                 if let Some(data) = event.payload.get("data") {
                     if let Some(parent_id) = data.get("parent_id").and_then(|v| v.as_str()) {

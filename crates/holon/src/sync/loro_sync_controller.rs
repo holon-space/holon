@@ -47,7 +47,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{Context, Result};
@@ -85,6 +85,19 @@ pub struct LoroSyncController {
     last_synced: Arc<StdMutex<Frontiers>>,
     wake: Arc<Notify>,
     error_count: Arc<AtomicUsize>,
+    /// Phase 3.3 demotion gate. When `true` (default), non-Loro-origin
+    /// `block` CDC events get reflected into Loro via
+    /// `on_inbound_event_inner`. When `false`, those events are dropped
+    /// with a `warn` trace — the legacy SQL→Loro runtime path is off.
+    /// Flipped to `false` post-startup once the org parser's seed pass
+    /// has populated the tree.
+    /// Counters track post-disable activity for arch-test / observability:
+    /// `inbound_runtime_drop_count` increments when an event was dropped;
+    /// `inbound_runtime_applied_count` increments when one was applied
+    /// (regardless of the gate, so tests can compare).
+    inbound_runtime_enabled: Arc<AtomicBool>,
+    inbound_runtime_drop_count: Arc<AtomicUsize>,
+    inbound_runtime_applied_count: Arc<AtomicUsize>,
 }
 
 /// Lifetime handle returned by `start()`. Dropping it cancels the background
@@ -103,6 +116,10 @@ pub struct LoroSyncControllerHandle {
     error_count: Arc<AtomicUsize>,
     /// Allows tests to trigger a reconciliation cycle without mutating Loro.
     wake: Arc<Notify>,
+    /// Phase 3.3 gate handles (shared with the controller task).
+    inbound_runtime_enabled: Arc<AtomicBool>,
+    inbound_runtime_drop_count: Arc<AtomicUsize>,
+    inbound_runtime_applied_count: Arc<AtomicUsize>,
 }
 
 impl LoroSyncControllerHandle {
@@ -124,6 +141,47 @@ impl LoroSyncControllerHandle {
     pub fn wake(&self) {
         self.wake.notify_one();
     }
+
+    /// Phase 3.3: turn off the runtime SQL→Loro reflection path. After
+    /// startup seeding completes, the app should call this so subsequent
+    /// non-Loro-origin block events get dropped (with a `warn` trace and a
+    /// drop-count tick) instead of being re-applied to Loro. Loro is the
+    /// sole authority for block fields once Phase 2 has landed; the
+    /// inbound runtime path is dead weight that masks regressions.
+    pub fn disable_inbound_runtime(&self) {
+        self.inbound_runtime_enabled.store(false, Ordering::SeqCst);
+        info!(
+            "[LoroSyncController] inbound runtime path disabled (drops={}, applied={})",
+            self.inbound_runtime_drop_count.load(Ordering::SeqCst),
+            self.inbound_runtime_applied_count.load(Ordering::SeqCst),
+        );
+    }
+
+    /// Re-enable the inbound runtime path. Provided for symmetry; production
+    /// callers should not need this after Phase 3.3 completes.
+    pub fn enable_inbound_runtime(&self) {
+        self.inbound_runtime_enabled.store(true, Ordering::SeqCst);
+    }
+
+    /// `true` if non-Loro-origin block events are currently re-applied to
+    /// Loro. Default `true`; flipped by `disable_inbound_runtime`.
+    pub fn inbound_runtime_enabled(&self) -> bool {
+        self.inbound_runtime_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Number of non-Loro-origin block events the inbound runtime path has
+    /// dropped since `disable_inbound_runtime` was called. Stays `0` while
+    /// the gate is open.
+    pub fn inbound_runtime_drop_count(&self) -> usize {
+        self.inbound_runtime_drop_count.load(Ordering::SeqCst)
+    }
+
+    /// Number of non-Loro-origin block events the inbound runtime path has
+    /// applied to Loro. Increments on every `on_inbound_event_inner` call
+    /// regardless of the gate, so tests can compare drop vs applied counts.
+    pub fn inbound_runtime_applied_count(&self) -> usize {
+        self.inbound_runtime_applied_count.load(Ordering::SeqCst)
+    }
 }
 
 impl LoroSyncController {
@@ -143,6 +201,9 @@ impl LoroSyncController {
             last_synced: Arc::new(StdMutex::new(last_synced)),
             wake: Arc::new(Notify::new()),
             error_count: Arc::new(AtomicUsize::new(0)),
+            inbound_runtime_enabled: Arc::new(AtomicBool::new(true)),
+            inbound_runtime_drop_count: Arc::new(AtomicUsize::new(0)),
+            inbound_runtime_applied_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -190,6 +251,9 @@ impl LoroSyncController {
         let last_synced = self.last_synced.clone();
         let error_count = self.error_count.clone();
         let wake = self.wake.clone();
+        let inbound_runtime_enabled = self.inbound_runtime_enabled.clone();
+        let inbound_runtime_drop_count = self.inbound_runtime_drop_count.clone();
+        let inbound_runtime_applied_count = self.inbound_runtime_applied_count.clone();
 
         // (4) Spawn the main loop.
         let task = tokio::spawn(async move {
@@ -202,6 +266,9 @@ impl LoroSyncController {
             last_synced,
             error_count,
             wake,
+            inbound_runtime_enabled,
+            inbound_runtime_drop_count,
+            inbound_runtime_applied_count,
         })
     }
 
@@ -280,10 +347,27 @@ impl LoroSyncController {
     }
 
     async fn on_inbound_event_inner(&self, event: &Event) -> Result<()> {
-        // Echo suppression: skip events we published ourselves when
-        // translating the outbound direction.
-        if event.origin == EventOrigin::Loro {
-            return Ok(());
+        match inbound_event_decision(
+            &event.origin,
+            self.inbound_runtime_enabled.load(Ordering::SeqCst),
+        ) {
+            InboundEventDecision::EchoSuppress => return Ok(()),
+            InboundEventDecision::Drop => {
+                self.inbound_runtime_drop_count
+                    .fetch_add(1, Ordering::SeqCst);
+                warn!(
+                    "[LoroSyncController] inbound runtime path is disabled but received non-Loro \
+                     non-Org block event (kind={:?}, aggregate_id={}, origin={:?}); dropped. This \
+                     indicates an unmigrated SQL-direct block-write path that should route \
+                     through cells.",
+                    event.event_kind, event.aggregate_id, event.origin
+                );
+                return Ok(());
+            }
+            InboundEventDecision::Apply => {
+                self.inbound_runtime_applied_count
+                    .fetch_add(1, Ordering::SeqCst);
+            }
         }
 
         let backend = self.get_backend().await?;
@@ -311,8 +395,18 @@ impl LoroSyncController {
                     .get("data")
                     .ok_or_else(|| anyhow::anyhow!("Event payload missing 'data'"))?;
                 match event.event_kind {
-                    EventKind::Created => apply_create(&backend, data).await?,
-                    EventKind::Updated => apply_update_with_backend(&backend, data).await?,
+                    EventKind::Created => {
+                        apply_create(&backend, data, event.position_after_block_id.as_deref())
+                            .await?
+                    }
+                    EventKind::Updated => {
+                        apply_update_with_backend(
+                            &backend,
+                            data,
+                            event.position_after_block_id.as_deref(),
+                        )
+                        .await?
+                    }
                     EventKind::Deleted | EventKind::FieldsChanged => unreachable!(),
                 }
             }
@@ -497,6 +591,47 @@ pub(crate) fn is_empty_frontiers(f: &Frontiers) -> bool {
     f == &Frontiers::default()
 }
 
+/// Disposition of an inbound block event under the Phase 3.3 step 2 gate.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InboundEventDecision {
+    /// Echo from our own outbound projector — silently drop, don't count.
+    EchoSuppress,
+    /// Apply the event to Loro (legitimate runtime SQL→Loro reflection or
+    /// startup-seed before the gate flipped).
+    Apply,
+    /// Gate is off and origin isn't whitelisted — drop + count + warn.
+    Drop,
+}
+
+/// Pure helper that decides what to do with an inbound block event. Lives
+/// outside `LoroSyncController` so the gate semantics can be unit-tested
+/// without spinning up a full controller. Three rules, in priority order:
+///
+/// 1. `EventOrigin::Loro` → `EchoSuppress` (our own outbound write
+///    coming back through CDC).
+/// 2. `EventOrigin::Org` → `Apply` (file-watcher reflections from
+///    `OrgSyncController::on_file_changed`; whitelisted past the gate so
+///    runtime `.org` edits keep round-tripping into Loro).
+/// 3. Anything else: `Apply` when the gate is `enabled`, `Drop`
+///    otherwise. The gate is enabled at startup so the initial
+///    `seed_loro_from_persistent_store` replay (which arrives with
+///    `EventOrigin::Other("sql")`) gets applied; `loro_module.rs` flips
+///    it off post-seed so subsequent unrecognised sources are caught as
+///    likely chord-op SQL-direct bugs.
+pub(crate) fn inbound_event_decision(origin: &EventOrigin, enabled: bool) -> InboundEventDecision {
+    if origin == &EventOrigin::Loro {
+        return InboundEventDecision::EchoSuppress;
+    }
+    if origin == &EventOrigin::Org {
+        return InboundEventDecision::Apply;
+    }
+    if enabled {
+        InboundEventDecision::Apply
+    } else {
+        InboundEventDecision::Drop
+    }
+}
+
 // -- Block snapshot diff → command-bus ops ---------------------------------
 
 pub(crate) fn diff_snapshots_to_ops(
@@ -526,42 +661,22 @@ pub(crate) fn diff_snapshots_to_ops(
     // Updates (in both, but differ).
     //
     // Build a delta params map containing only fields that actually changed
-    // between old and new. This prevents Loro from overwriting SQL fields
-    // that a concurrent direct write (UI dispatch) has already advanced —
-    // if content didn't change in Loro, it simply won't be in the SET clause.
+    // between old and new. This prevents the outbound from overwriting SQL
+    // fields that didn't change in Loro — if content didn't change, it
+    // simply won't be in the SET clause.
     //
-    // When content DID change, embed the Loro "before" content as
-    // `_expected_content` so `SqlOperationProvider::prepare_update` can gate
-    // the UPDATE on SQL still matching. This prevents a stale outbound
-    // reconcile from regressing SQL (Bug #1).
+    // Phase 2 authority flip: ALL `_expected_*` watermark gating is gone.
+    // `SqlBlockOperations::set_field` routes block field writes through
+    // `BlockCellRegistry::write_field` (Loro), and the outbound projector
+    // is the only path that writes block columns to SQL. With one writer
+    // per field there's no concurrent direct SQL dispatch to regress
+    // against, so the compare-and-set guards are dead weight. The diff
+    // guard at the end of `prepare_update` (`AND (col1 IS NOT val1 OR
+    // …)`) still keeps no-op UPDATEs from firing spurious CDC.
     for (id, new_block) in after {
         if let Some(old_block) = before.get(id) {
             if blocks_differ(old_block, new_block) {
-                let mut params = block_diff_params(old_block, new_block);
-                if old_block.content != new_block.content {
-                    params.insert(
-                        "_expected_content".to_string(),
-                        Value::String(old_block.content.clone()),
-                    );
-                }
-                if old_block.parent_id != new_block.parent_id {
-                    params.insert(
-                        "_expected_parent_id".to_string(),
-                        Value::String(old_block.parent_id.to_string()),
-                    );
-                }
-                if old_block.marks != new_block.marks {
-                    // Stale outbound carrying pre-image marks must not stomp
-                    // a fresh local mark edit. Compare via canonical JSON
-                    // (`marks_to_json`) since SQL stores marks as a JSON
-                    // string. None → empty string sentinel so the WHERE
-                    // clause still gates on a stable value.
-                    let pre_image = match &old_block.marks {
-                        Some(marks) => holon_api::marks_to_json(marks),
-                        None => String::new(),
-                    };
-                    params.insert("_expected_marks".to_string(), Value::String(pre_image));
-                }
+                let params = block_diff_params(old_block, new_block);
                 tracing::trace!(
                     "[LORO_DIFF_TRACE] UPDATE id={} content_before={:?} content_after={:?}",
                     id,
@@ -657,6 +772,10 @@ pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
     };
     params.insert("created_at".to_string(), Value::Integer(created));
     params.insert("updated_at".to_string(), Value::Integer(now));
+    params.insert(
+        "sort_key".to_string(),
+        Value::String(block.sort_key.clone()),
+    );
 
     if !block.tags.is_empty() {
         let arr: Vec<Value> = block
@@ -750,6 +869,9 @@ fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
             params.insert("source_name".to_string(), Value::String(name.clone()));
         }
     }
+    if old.sort_key != new.sort_key {
+        params.insert("sort_key".to_string(), Value::String(new.sort_key.clone()));
+    }
     if old.properties_map() != new.properties_map() {
         for (k, v) in &new.properties {
             params.entry(k.clone()).or_insert_with(|| v.clone());
@@ -791,6 +913,7 @@ fn blocks_differ(a: &Block, b: &Block) -> bool {
         || a.source_language != b.source_language
         || a.source_name != b.source_name
         || a.tags != b.tags
+        || a.sort_key != b.sort_key
         || a.properties_map() != b.properties_map()
         || a.marks != b.marks
 }
@@ -892,6 +1015,19 @@ pub(crate) async fn apply_fields_changed(
             // depth is a derived field — the LoroTree encodes hierarchy
             // structurally, and depth is recomputed on outbound snapshot.
             // Skip writing it back into Loro to avoid drift.
+        } else if field_name == "sort_key" {
+            // Phase 3.4: sort_key lives in Loro's internal fractional index.
+            // The incoming SQL CDC value is a hex fractional-index hint
+            // (chord ops emit these via `gen_key_between`). We use it as a
+            // sibling-position lookup → `update_block_position`. Loro
+            // generates the resulting fractional index itself.
+            let sort_key_hint = new_value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("sort_key FieldsChanged value is not a string"))?;
+            backend
+                .apply_sort_key_hint(block_id, sort_key_hint)
+                .await
+                .map_err(|e| anyhow::anyhow!("apply_sort_key_hint failed: {}", e))?;
         } else if field_name != "content_type" && field_name != "source_language" {
             let val = match new_value {
                 serde_json::Value::String(s) => Value::String(s.clone()),
@@ -921,7 +1057,11 @@ pub(crate) async fn apply_fields_changed(
     Ok(())
 }
 
-async fn apply_create(backend: &LoroBackend, data: &serde_json::Value) -> Result<()> {
+async fn apply_create(
+    backend: &LoroBackend,
+    data: &serde_json::Value,
+    position_after_block_id: Option<&str>,
+) -> Result<()> {
     let block_id = json_str(data, "id")?;
 
     if backend.resolve_to_tree_id(block_id).await.is_some() {
@@ -929,7 +1069,7 @@ async fn apply_create(backend: &LoroBackend, data: &serde_json::Value) -> Result
             "[LoroSyncController] Block {} exists, updating instead",
             block_id
         );
-        return apply_update_with_backend(backend, data).await;
+        return apply_update_with_backend(backend, data, position_after_block_id).await;
     }
 
     let parent_id_raw = data
@@ -968,13 +1108,50 @@ async fn apply_create(backend: &LoroBackend, data: &serde_json::Value) -> Result
         backend.set_block_tags(created.id.as_str(), &tags).await?;
     }
 
+    // Typed positional intent. `Event::position_after_block_id` (set by
+    // `SqlOperationProvider::prepare_create` from the `after_block_id`
+    // param) names the predecessor sibling the new block should sit
+    // after. `create_block` already appended the node to the end of its
+    // parent's children; this `update_block_position` call is the
+    // `mov_after` half of the "create + mov_after" pair.
+    //
+    // ALLOW(fallback): disclosed dual path — the primary route is the
+    // typed `position_after_block_id`; the secondary route (interpret a
+    // `sort_key` from `data` as a sibling-scan hint via
+    // `apply_sort_key_hint`) exists for SQL-direct test writes that
+    // don't go through the OrgSync/chord-op producers. The sibling-scan
+    // hint path is known to disagree with caller intent when the hint's
+    // generator (e.g. `gen_n_keys` from the org parser) doesn't share a
+    // value space with Loro's auto-assigned fractional indices — every
+    // production producer therefore emits `after_block_id` (the typed
+    // field) and the scan path is dormant in practice.
+    if let Some(after_id) = position_after_block_id {
+        let parent_id_str = data
+            .get("parent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sentinel:no_parent");
+        backend
+            .update_block_position(created.id.as_str(), parent_id_str, Some(after_id))
+            .await
+            .map_err(|e| anyhow::anyhow!("apply_create: update_block_position: {}", e))?;
+    } else if let Some(sk) = data.get("sort_key").and_then(|v| v.as_str()) {
+        backend
+            .apply_sort_key_hint(created.id.as_str(), sk)
+            .await
+            .map_err(|e| anyhow::anyhow!("apply_create: apply_sort_key_hint: {}", e))?;
+    }
+
     apply_properties_from_json(backend, created.id.as_str(), data).await?;
 
     debug!("[LoroSyncController] Created {}", created.id);
     Ok(())
 }
 
-async fn apply_update_with_backend(backend: &LoroBackend, data: &serde_json::Value) -> Result<()> {
+async fn apply_update_with_backend(
+    backend: &LoroBackend,
+    data: &serde_json::Value,
+    position_after_block_id: Option<&str>,
+) -> Result<()> {
     let block_id = json_str(data, "id")?;
 
     if backend.resolve_to_tree_id(block_id).await.is_none() {
@@ -1009,6 +1186,43 @@ async fn apply_update_with_backend(backend: &LoroBackend, data: &serde_json::Val
                 .update_parent_id(block_id, new_parent_str.to_string())
                 .await
                 .map_err(|e| anyhow::anyhow!("update_parent_id failed: {}", e))?;
+        }
+    }
+
+    // Typed positional intent wins over the data's `sort_key` string. The
+    // typed field comes from the producer's `after_block_id` param (lifted
+    // by `SqlOperationProvider::publish_event`). When set, dispatch a
+    // `tree.mov_after` against the predecessor block_id directly — no
+    // sibling-scan, no generator-strategy mismatch. OrgSync emits this for
+    // every update, so re-canonicalised sort_keys (e.g. when a 2nd
+    // BulkExternalAdd grows the sibling set) no longer trigger the buggy
+    // hint-scan path.
+    //
+    // ALLOW(fallback): disclosed dual path. Primary: typed
+    // `position_after_block_id`. Fallback: interpret `data.sort_key` as a
+    // sibling-scan hint via `apply_sort_key_hint`. Kept for non-OrgSync
+    // SQL-direct test writes that don't emit `after_block_id`; the hint
+    // scan has known limits when caller hints live in a different
+    // generator space than Loro's auto-FIs.
+    if let Some(after_id) = position_after_block_id {
+        let parent_id_str = data
+            .get("parent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sentinel:no_parent");
+        backend
+            .update_block_position(block_id, parent_id_str, Some(after_id))
+            .await
+            .map_err(|e| anyhow::anyhow!("apply_update: update_block_position: {}", e))?;
+    } else if let Some(sk) = data.get("sort_key").and_then(|v| v.as_str()) {
+        let current = backend
+            .get_block(block_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("get_block({}) failed: {}", block_id, e))?;
+        if current.sort_key != sk {
+            backend
+                .apply_sort_key_hint(block_id, sk)
+                .await
+                .map_err(|e| anyhow::anyhow!("apply_update: apply_sort_key_hint: {}", e))?;
         }
     }
 
@@ -1122,7 +1336,7 @@ async fn apply_properties_from_json(
             Some(converted)
         }
         Some(serde_json::Value::String(s)) => {
-            serde_json::from_str::<HashMap<String, Value>>(s).ok()
+            serde_json::from_str::<HashMap<String, Value>>(s).ok() // ALLOW(ok): pre-existing inbound-apply tolerance for malformed properties JSON; tracked for fail-loud rework.
         }
         _ => None,
     };
@@ -1237,8 +1451,14 @@ mod marks_outbound_tests {
         assert!(!blocks_differ(&a, &b));
     }
 
+    // Phase 2 authority flip: `_expected_marks` watermark gating dropped
+    // alongside `_expected_parent_id` and `_expected_content`. The diff
+    // snapshot still emits new marks values when they change (asserted in
+    // `block_diff_params_emits_marks_when_changed` above); it just no
+    // longer adds compare-and-set guards because there's a single SQL
+    // writer (`on_loro_changed`) per field.
     #[test]
-    fn diff_snapshots_emits_expected_marks_guard_on_change() {
+    fn diff_snapshots_no_longer_emits_expected_marks_guard() {
         let mut before = HashMap::new();
         let mut after = HashMap::new();
 
@@ -1260,41 +1480,14 @@ mod marks_outbound_tests {
             .find(|(op, _)| op == "update")
             .expect("update op");
 
-        let expected = params
-            .get("_expected_marks")
-            .expect("_expected_marks present when marks changed");
-        let s = expected.as_string().expect("expected_marks is String");
-        let parsed: Vec<MarkSpan> = holon_api::marks_from_json(s).expect("parse pre-image");
-        assert_eq!(parsed, old_marks);
-
+        assert!(
+            !params.contains_key("_expected_marks"),
+            "watermark dropped post-authority-flip; got params: {params:?}"
+        );
         let new_val = params.get("marks").expect("new marks present");
         let s = new_val.as_string().expect("marks is String");
         let parsed: Vec<MarkSpan> = holon_api::marks_from_json(s).expect("parse new");
         assert_eq!(parsed, new_marks);
-    }
-
-    #[test]
-    fn diff_snapshots_uses_empty_sentinel_when_pre_image_was_none() {
-        let mut before = HashMap::new();
-        let mut after = HashMap::new();
-        let id = "block:b1".to_string();
-        before.insert(id.clone(), block_with_marks("hi", None));
-        after.insert(
-            id.clone(),
-            block_with_marks("hi", Some(vec![MarkSpan::new(0, 2, InlineMark::Bold)])),
-        );
-
-        let ops = diff_snapshots_to_ops(&before, &after);
-        let (_, params) = ops
-            .iter()
-            .find(|(op, _)| op == "update")
-            .expect("update op");
-
-        let expected = params
-            .get("_expected_marks")
-            .expect("_expected_marks present");
-        // Empty string sentinel signals "pre-image was None → SQL row had marks IS NULL".
-        assert_eq!(*expected, Value::String(String::new()));
     }
 
     // -- SQL→Loro inbound apply tests ----------------------------------------
@@ -1395,6 +1588,81 @@ mod marks_outbound_tests {
         assert!(
             msg.contains("marks FieldsChanged JSON parse error"),
             "expected loud parse error, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inbound_gate_tests {
+    //! Phase 3.3 step 2: pure-function tests for the inbound event gate.
+    //!
+    //! These cover the `inbound_event_decision` predicate used by
+    //! `on_inbound_event_inner`. End-to-end behavior (controller actually
+    //! drops a chord-op SQL event; controller actually applies an Org
+    //! event) is covered by the PBT suite (`general_e2e_pbt*`), which
+    //! exercises `WriteOrgFile` mid-test under the production gate-flip
+    //! configuration in `loro_module.rs`.
+
+    use super::*;
+
+    #[test]
+    fn loro_origin_is_echo_suppressed_regardless_of_gate() {
+        assert_eq!(
+            inbound_event_decision(&EventOrigin::Loro, true),
+            InboundEventDecision::EchoSuppress,
+        );
+        assert_eq!(
+            inbound_event_decision(&EventOrigin::Loro, false),
+            InboundEventDecision::EchoSuppress,
+        );
+    }
+
+    #[test]
+    fn org_origin_is_whitelisted_past_the_gate() {
+        assert_eq!(
+            inbound_event_decision(&EventOrigin::Org, true),
+            InboundEventDecision::Apply,
+        );
+        assert_eq!(
+            inbound_event_decision(&EventOrigin::Org, false),
+            InboundEventDecision::Apply,
+        );
+    }
+
+    #[test]
+    fn other_sql_origin_applies_when_gate_enabled() {
+        // Default origin from `SqlOperationProvider::publish_event` is
+        // `Other("sql")`. Pre-flip (startup seed in progress) this
+        // applies; that's how `seed_loro_from_persistent_store` events
+        // reach Loro.
+        let origin = EventOrigin::Other("sql".to_string());
+        assert_eq!(
+            inbound_event_decision(&origin, true),
+            InboundEventDecision::Apply,
+        );
+    }
+
+    #[test]
+    fn other_sql_origin_drops_when_gate_disabled() {
+        // Post-flip (chord ops should route through cells; any
+        // non-whitelisted SQL→Loro event is a regression).
+        let origin = EventOrigin::Other("sql".to_string());
+        assert_eq!(
+            inbound_event_decision(&origin, false),
+            InboundEventDecision::Drop,
+        );
+    }
+
+    #[test]
+    fn ui_and_todoist_origins_drop_when_gate_disabled() {
+        // Defensive: any non-Loro, non-Org origin gets dropped post-flip.
+        assert_eq!(
+            inbound_event_decision(&EventOrigin::Ui, false),
+            InboundEventDecision::Drop,
+        );
+        assert_eq!(
+            inbound_event_decision(&EventOrigin::Todoist, false),
+            InboundEventDecision::Drop,
         );
     }
 }

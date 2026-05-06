@@ -47,7 +47,7 @@ pub(crate) const LAYOUT_MUTATIONS_ENABLED: bool = true;
 /// Wiring complete (Apr 2026): block_profile draggable/drop_zone widgets
 /// now bind their `data` to the current row so `row_id()` returns the
 /// block's id. Headless `drop_entity` polls `block_contents` for both
-/// widgets to appear and bootstraps the router on first call. inv16 is
+/// widgets to appear and bootstraps the router on first call. inv-editable-text-has-draggable is
 /// a hard panic if any focus-tree text block lacks a Draggable wrapper.
 pub(crate) const DRAG_DROP_ENABLED: bool = true;
 
@@ -220,7 +220,14 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
         // each variant's precondition lives in `transitions/<name>.rs`.
         // VariantRef derefs to ReferenceState.
         use crate::pbt::transitions::E2ETransitionImpl;
-        transition.preconditions(state)
+        use validated::Validated;
+        match transition.preconditions(state) {
+            Validated::Good(()) => true,
+            Validated::Fail(reasons) => {
+                crate::pbt::validation::record_rejection(transition.variant_name(), &reasons);
+                false
+            }
+        }
     }
     fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
         use crate::pbt::transitions::E2ETransitionImpl;

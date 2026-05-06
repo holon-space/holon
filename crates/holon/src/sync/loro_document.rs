@@ -47,6 +47,18 @@ impl LoroDocument {
         &self.doc_id
     }
 
+    /// Wrap an already-constructed `Arc<LoroDoc>` into a `LoroDocument`.
+    /// Used by tests and `BlockCellRegistry::with_loro_doc` (test helper)
+    /// to share a doc that was set up directly via the loro crate.
+    pub fn from_existing(doc: Arc<LoroDoc>, doc_id: impl Into<String>) -> Self {
+        let peer_id = doc.peer_id();
+        Self {
+            doc,
+            peer_id,
+            doc_id: doc_id.into(),
+        }
+    }
+
     pub fn peer_id(&self) -> PeerID {
         self.peer_id
     }

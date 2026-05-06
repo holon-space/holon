@@ -708,6 +708,25 @@ impl OrgBlockExt for Block {
             }
         }
 
+        // `requires` is a typed Vec<String> on Block (edge field, hydrated from
+        // the block_requires junction) — the parser pulls it out of the drawer
+        // and the renderer must put it back. Stored values are `block:` URIs
+        // (added at parse boundary); strip the scheme on the way out so the
+        // org file keeps bare slugs (per docs/ORG_SYNTAX.md). Joined with
+        // spaces (org-edna convention).
+        if !self.requires.is_empty() {
+            let bare: Vec<String> = self
+                .requires
+                .iter()
+                .map(|r| {
+                    holon_api::EntityUri::parse(r)
+                        .map(|uri| uri.id().to_string())
+                        .unwrap_or_else(|_| r.clone())
+                })
+                .collect();
+            result.insert("REQUIRES".to_string(), bare.join(" "));
+        }
+
         result
     }
 

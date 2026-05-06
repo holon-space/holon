@@ -188,6 +188,48 @@ pub fn find_click_intent_in_view_model(
     walk(root, entity_id)
 }
 
+/// Region-scoped variant: only walk the subtree rooted at the clicked region's
+/// panel. Production GPUI's click handler runs on a specific element in a
+/// specific panel; the same entity_id can appear in multiple regions (e.g.
+/// `block:journals` shows up both in the LeftSidebar list AND in the Main
+/// panel when focused), and each region's wrapper may bind a different action.
+/// The unscoped variant returns the FIRST match in DFS order, which crosses
+/// region boundaries and breaks production parity.
+///
+/// Returns `None` for unknown regions or when the entity isn't reachable from
+/// the panel's subtree (matching production: a click on a region the user
+/// can't reach does nothing).
+pub fn find_click_intent_in_region(
+    root: &crate::view_model::ViewModel,
+    entity_id: &str,
+    region: &str,
+) -> Option<crate::operations::OperationIntent> {
+    let panel_id = match region {
+        "left_sidebar" => "block:default-left-sidebar",
+        "main" => "block:default-main-panel",
+        "right_sidebar" => "block:default-right-sidebar",
+        _ => return None,
+    };
+
+    fn find_panel<'a>(
+        node: &'a crate::view_model::ViewModel,
+        panel_id: &str,
+    ) -> Option<&'a crate::view_model::ViewModel> {
+        if node.entity_id() == Some(panel_id) {
+            return Some(node);
+        }
+        for child in node.children() {
+            if let Some(found) = find_panel(child, panel_id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let panel = find_panel(root, panel_id)?;
+    find_click_intent_in_view_model(panel, entity_id)
+}
+
 /// Build a `FocusPath` across block boundaries for the headless path.
 ///
 /// `live_block` nodes in the root tree have empty slots (content is populated
@@ -1071,7 +1113,9 @@ mod tests {
             descriptor: OperationDescriptor {
                 entity_name: EntityName::new("navigation"),
                 name: "focus".into(),
-                trigger: Some(Trigger::Click),
+                trigger: Some(Trigger::Click {
+                    modifiers: holon_api::ClickModifiers::none(),
+                }),
                 bound_params: StdHashMap::from([
                     ("region".into(), Value::String("main".into())),
                     ("block_id".into(), Value::String("doc:foo".into())),
@@ -1097,5 +1141,74 @@ mod tests {
 
         // Click on a non-existent entity → None.
         assert!(find_click_intent_oneshot(&tree, "doc:nope").is_none());
+    }
+
+    #[test]
+    fn find_click_intent_in_region_scopes_to_panel() {
+        // Same entity_id ("block:foo") appears in BOTH panels. Only the
+        // LeftSidebar's wrapper carries a click-bound nav.focus action;
+        // the Main panel wrapper has no operations. The unscoped walker
+        // returns the LeftSidebar action regardless of clicked region —
+        // we want the scoped walker to honor the region.
+        use crate::view_model::ViewModel;
+        use holon_api::render_types::{OperationDescriptor, OperationWiring, Trigger};
+        use holon_api::widget_spec::DataRow;
+        use holon_api::EntityName;
+
+        fn entity_row(id: &str) -> Arc<DataRow> {
+            Arc::new(StdHashMap::from([("id".into(), Value::String(id.into()))]))
+        }
+
+        let mut sidebar_item = ViewModel::element("table_row", entity_row("block:foo"), vec![]);
+        sidebar_item.operations.push(OperationWiring {
+            modified_param: String::new(),
+            descriptor: OperationDescriptor {
+                entity_name: EntityName::new("navigation"),
+                name: "focus".into(),
+                trigger: Some(Trigger::Click {
+                    modifiers: holon_api::ClickModifiers::none(),
+                }),
+                bound_params: StdHashMap::from([
+                    ("region".into(), Value::String("main".into())),
+                    ("block_id".into(), Value::String("block:foo".into())),
+                ]),
+                ..Default::default()
+            },
+        });
+
+        let main_item = ViewModel::element("table_row", entity_row("block:foo"), vec![]);
+
+        // Build the layout: columns(panel(left_sidebar), panel(main_panel)).
+        // The panel wrappers are `live_block` nodes whose entity_id matches
+        // the panel's well-known id.
+        let left_panel = ViewModel::live_block(
+            "block:default-left-sidebar",
+            ViewModel::collection("list", vec![sidebar_item]),
+        );
+        let main_panel = ViewModel::live_block(
+            "block:default-main-panel",
+            ViewModel::collection("column", vec![main_item]),
+        );
+        let root = ViewModel::layout("columns", vec![left_panel, main_panel]);
+
+        // LeftSidebar click on block:foo → fires the bound nav.focus.
+        let left_intent = find_click_intent_in_region(&root, "block:foo", "left_sidebar")
+            .expect("left_sidebar click on block:foo should yield an intent");
+        assert_eq!(left_intent.entity_name.as_str(), "navigation");
+        assert_eq!(left_intent.op_name, "focus");
+
+        // Main click on the same block:foo → no bound action in the Main
+        // panel's subtree. Returns None; production would fall through to
+        // editor_focus.
+        assert!(
+            find_click_intent_in_region(&root, "block:foo", "main").is_none(),
+            "Main click on block:foo must NOT pick up the LeftSidebar's bound action"
+        );
+
+        // Unknown region → None (defensive).
+        assert!(find_click_intent_in_region(&root, "block:foo", "bogus_region").is_none());
+
+        // Entity not in any panel's subtree → None.
+        assert!(find_click_intent_in_region(&root, "block:never", "left_sidebar").is_none());
     }
 }

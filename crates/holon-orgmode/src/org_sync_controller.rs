@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result};
 use holon::core::datasource::OperationProvider;
+use holon::sync::event_bus::EventOrigin;
 use holon::sync::CanonicalPath;
 use holon_api::block::Block;
 use holon_api::{EntityName, EntityUri, Value};
@@ -34,6 +35,13 @@ pub struct OrgSyncController {
     /// Uses CanonicalPath to resolve macOS /var → /private/var symlinks,
     /// so scan_org_files and file watcher events match the same key.
     last_projection: HashMap<CanonicalPath, String>,
+
+    /// Cheap dirty-check signature `(mtime, size)` per tracked path. Used by
+    /// `poll_external_changes` to skip the expensive `read_to_string` when
+    /// `stat()` shows the file hasn't changed since we last looked. Updated
+    /// after every read so subsequent polls compare against the post-read
+    /// state. A missing entry forces a full read (treats the path as dirty).
+    disk_signatures: HashMap<CanonicalPath, (std::time::SystemTime, u64)>,
 
     /// Reads blocks by document ID.
     block_reader: Arc<dyn BlockReader>,
@@ -104,6 +112,7 @@ impl OrgSyncController {
         let root_dir = CanonicalPath::new(&root_dir).into_path_buf();
         Self {
             last_projection: HashMap::new(),
+            disk_signatures: HashMap::new(),
             block_reader,
             command_bus,
             doc_manager,
@@ -360,6 +369,45 @@ impl OrgSyncController {
         // Creates (in document order so parents before children).
         // Blocks that already exist under a different document are re-parented
         // via "update" instead of "create" (INSERT OR IGNORE would silently skip them).
+        //
+        // For each new block we attach the typed positional intent
+        // `after_block_id = <previous sibling in file under same parent>`,
+        // tracked in `last_block_per_parent` as we walk `new_blocks_vec`
+        // (which is in DFS document order). The predecessor may be an
+        // existing block (already in old_blocks, already in Loro) or a
+        // freshly-created block earlier in this batch — both work, because
+        // `LoroSyncController` processes Created events serially, so the
+        // predecessor is in the tree by the time `apply_create` resolves
+        // the position.
+        //
+        // Without this, the inbound CDC path fell back to a sort_key
+        // sibling-scan that compared the org parser's `gen_n_keys` values
+        // against Loro's auto-assigned fractional indices — two
+        // generation strategies that don't share a value space, so the
+        // scan picked the wrong predecessor (or none) and collapsed
+        // children to the front of the list. See Phase 3.7 / the Stage 2
+        // cleanup devlog for the empirical confirmation.
+        // Walk in document order, tracking the predecessor under each parent
+        // as we go. Existing blocks anchor the position of subsequent new
+        // siblings, so the cursor advances for every block — not just the
+        // new ones. Records each block's predecessor (or `None` for "first
+        // child") in `predecessors`; both the creates pass below and the
+        // updates pass further down look it up to attach the typed
+        // `after_block_id` param.
+        let mut last_block_per_parent: HashMap<EntityUri, EntityUri> = HashMap::new();
+        let mut predecessors: HashMap<EntityUri, Option<EntityUri>> = HashMap::new();
+        for block in &new_blocks_vec {
+            let parent_id = if block.parent_id == new_parse.document.id {
+                &document_uri
+            } else {
+                &block.parent_id
+            };
+            let pred = last_block_per_parent.get(parent_id).cloned();
+            predecessors.insert(block.id.clone(), pred);
+            last_block_per_parent.insert(parent_id.clone(), block.id.clone());
+        }
+
+        // Creates pass.
         for block in &new_blocks_vec {
             if !old_blocks.contains_key(&block.id) {
                 let parent_id = if block.parent_id == new_parse.document.id {
@@ -367,7 +415,13 @@ impl OrgSyncController {
                 } else {
                     &block.parent_id
                 };
-                let params = build_block_params(block, parent_id, &document_uri);
+                let mut params = build_block_params(block, parent_id, &document_uri);
+                if let Some(Some(prev)) = predecessors.get(&block.id) {
+                    params.insert(
+                        holon::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.to_string(),
+                        Value::String(prev.to_string()),
+                    );
+                }
                 let op = if conflict_ids.contains(&block.id) {
                     "update"
                 } else {
@@ -392,8 +446,23 @@ impl OrgSyncController {
             created_ids,
         );
 
-        // Updates
-        for (id, new_block) in &new_blocks {
+        // Updates pass. Existing blocks may have moved within their parent's
+        // children list (e.g. when a 2nd BulkExternalAdd grows the sibling
+        // set, every sibling's `gen_n_keys`-assigned sort_key gets
+        // re-canonicalised). Inject the typed `after_block_id` here too so
+        // `apply_update_with_backend` can `tree.mov_after` against the
+        // file's predecessor instead of relying on the sort_key sibling-scan
+        // — same gen-strategy-mismatch concern as creates.
+        //
+        // Iterate `new_blocks_vec` (document order), NOT `new_blocks`
+        // (HashMap, non-deterministic). Update events get applied
+        // sequentially by `LoroSyncController`, and each `tree.mov_after`
+        // depends on the *current* tree state at apply time. If updates
+        // arrived in HashMap order, a later sibling could mov_after its
+        // predecessor *before* the predecessor itself had been moved,
+        // scrambling the children list.
+        for new_block in &new_blocks_vec {
+            let id = &new_block.id;
             if let Some(old_block) = old_blocks.get(id) {
                 if blocks_differ(old_block, new_block) {
                     let parent_id = if new_block.parent_id == new_parse.document.id {
@@ -401,7 +470,13 @@ impl OrgSyncController {
                     } else {
                         &new_block.parent_id
                     };
-                    let params = build_block_params(new_block, parent_id, &document_uri);
+                    let mut params = build_block_params(new_block, parent_id, &document_uri);
+                    if let Some(Some(prev)) = predecessors.get(id) {
+                        params.insert(
+                            holon::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.to_string(),
+                            Value::String(prev.to_string()),
+                        );
+                    }
                     operations.push(("update".to_string(), params));
                 }
             }
@@ -417,11 +492,16 @@ impl OrgSyncController {
             }
         }
 
-        // Execute all operations as a single batch (one transaction + one event batch)
+        // Execute all operations as a single batch (one transaction + one event batch).
+        // Tagged `EventOrigin::Org` so `LoroSyncController`'s inbound runtime gate
+        // (Phase 3.3 step 2) recognises file-watcher reflections as a legitimate
+        // post-startup SQL→Loro source and lets them through after the gate is
+        // flipped off. Untagged ("sql") events would be dropped as suspected
+        // chord-op SQL-direct writes.
         let expected_block_count = new_blocks.len();
         if !operations.is_empty() {
             self.command_bus
-                .execute_batch(&EntityName::new("block"), operations)
+                .execute_batch_with_origin(&EntityName::new("block"), operations, EventOrigin::Org)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -634,10 +714,17 @@ impl OrgSyncController {
     /// ingested (0 if everything was already in sync).
     #[tracing::instrument(skip(self), name = "org.poll_external_changes")]
     pub async fn poll_external_changes(&mut self) -> Result<usize> {
-        let mut ingested = 0;
+        let mut ingested = self.poll_tracked_files().await?;
+        ingested += self.poll_new_files().await?;
+        Ok(ingested)
+    }
 
-        // Phase A: re-check every path we already know about (modifications,
-        // deletions). Echo-suppressed: skipped when disk == last_projection.
+    /// Phase A: re-check every path we already track for modifications or
+    /// deletions. Echo-suppressed by `last_projection`; further short-circuited
+    /// by a `(mtime, size)` signature so unchanged files don't cost a read.
+    #[tracing::instrument(skip(self), name = "org.poll_tracked_files")]
+    pub async fn poll_tracked_files(&mut self) -> Result<usize> {
+        let mut ingested = 0;
         let keys: Vec<(CanonicalPath, PathBuf)> = self
             .last_projection
             .iter()
@@ -645,6 +732,27 @@ impl OrgSyncController {
             .collect();
 
         for (canonical, path) in keys {
+            // Cheap dirty check: stat() the file and compare (mtime, size)
+            // against the cached signature. Avoids the per-tick full-file
+            // read_to_string for every tracked org file (~38 files at 10Hz
+            // dominated idle CPU before this).
+            let meta = match tokio::fs::metadata(&path).await {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("[poll_external_changes] Cannot stat {}", path.display())
+                    });
+                }
+            };
+            let sig = (
+                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                meta.len(),
+            );
+            if self.disk_signatures.get(&canonical) == Some(&sig) {
+                continue;
+            }
+
             let disk_content = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -654,6 +762,11 @@ impl OrgSyncController {
                     });
                 }
             };
+            // Stamp signature *before* the diff so the next poll skips this
+            // path even if the content matches last_projection (echo) — only
+            // a fresh mtime/size change re-enters the read path.
+            self.disk_signatures.insert(canonical.clone(), sig);
+
             let last = self
                 .last_projection
                 .get(&canonical)
@@ -669,25 +782,33 @@ impl OrgSyncController {
             }
         }
 
-        // Phase B: walk the tree and discover NEW files (paths not yet in
-        // last_projection). This makes the poll path safe as a sole detector
-        // during the unarmed window of `notify`'s recursive watch on macOS,
-        // where `notify::watch(dir, Recursive)` can take 9+ s to register.
-        // Without this, files created during that window are invisible.
+        Ok(ingested)
+    }
+
+    /// Phase B: walk the tree and discover NEW files (paths not yet in
+    /// `last_projection`). Backstops `notify`'s recursive watcher during its
+    /// unarmed window on macOS (`notify::watch(dir, Recursive)` can take 9+s
+    /// to register, leaving files created during that window invisible).
+    ///
+    /// Each call rebuilds `ignore::WalkBuilder` (gitignore regex DFAs), which
+    /// is non-trivial — call sites should tick this much less often than the
+    /// cheap `poll_tracked_files` path.
+    #[tracing::instrument(skip(self), name = "org.poll_new_files")]
+    pub async fn poll_new_files(&mut self) -> Result<usize> {
+        let mut ingested = 0;
         let root_dir = self.root_dir.clone();
         let entries = crate::file_watcher::scan_directory(&root_dir);
         for path in entries.files {
             let canonical = CanonicalPath::new(&path);
             if !self.last_projection.contains_key(&canonical) {
                 info!(
-                    "[OrgSyncController] poll_external_changes: discovered new file {}",
+                    "[OrgSyncController] poll_new_files: discovered new file {}",
                     path.display()
                 );
                 self.on_file_changed(&path).await?;
                 ingested += 1;
             }
         }
-
         Ok(ingested)
     }
 
@@ -740,8 +861,10 @@ impl OrgSyncController {
                 Ok(None) => {
                     // Path was tracked but no document entity exists (e.g.
                     // empty file was registered before the skip-empty guard).
-                    // Log once at warn and continue — don't fail the batch.
-                    warn!(
+                    // Downgraded to debug: re_render_all_tracked is now
+                    // debounced and runs on every burst, so warn-level would
+                    // flood the log on every initial scan.
+                    debug!(
                         "[re_render_all_tracked] No document found for path {} (segments: {:?}) — skipping",
                         path.display(),
                         segment_refs

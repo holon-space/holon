@@ -2,10 +2,11 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::block_ordering::BlockOrdering;
     use crate::fractional_index::gen_key_between;
     use crate::traits::*;
     use async_trait::async_trait;
-    use holon_api::Value;
+    use holon_api::{EntityUri, Value};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -136,7 +137,7 @@ mod tests {
                     .to_string(),
                 depth: fields.get("depth").and_then(|v| v.as_i64()).unwrap_or(0),
                 content: fields
-                    .get("title")
+                    .get("content")
                     .and_then(|v| v.as_string())
                     .unwrap_or("")
                     .to_string(),
@@ -151,10 +152,141 @@ mod tests {
         }
     }
 
-    impl BlockQueryHelpers<TestBlock> for MemStore {}
+    #[async_trait]
+    impl BlockQueryHelpers<TestBlock> for MemStore {
+        async fn get_prev_sibling(&self, block_id: &str) -> Result<Option<TestBlock>> {
+            match <Self as BlockOrdering>::prev_sibling(self, block_id).await? {
+                Some(id) => self.get_by_id(&id).await,
+                None => Ok(None),
+            }
+        }
+
+        async fn get_next_sibling(&self, block_id: &str) -> Result<Option<TestBlock>> {
+            match <Self as BlockOrdering>::next_sibling(self, block_id).await? {
+                Some(id) => self.get_by_id(&id).await,
+                None => Ok(None),
+            }
+        }
+
+        async fn get_first_child(&self, parent_id: Option<&str>) -> Result<Option<TestBlock>> {
+            let Some(pid) = parent_id else {
+                return Ok(None);
+            };
+            match <Self as BlockOrdering>::first_child(self, pid).await? {
+                Some(id) => self.get_by_id(&id).await,
+                None => Ok(None),
+            }
+        }
+
+        async fn get_last_child(&self, parent_id: Option<&str>) -> Result<Option<TestBlock>> {
+            let Some(pid) = parent_id else {
+                return Ok(None);
+            };
+            match <Self as BlockOrdering>::last_child(self, pid).await? {
+                Some(id) => self.get_by_id(&id).await,
+                None => Ok(None),
+            }
+        }
+    }
     impl BlockMaintenanceHelpers<TestBlock> for MemStore {}
     impl BlockDataSourceHelpers<TestBlock> for MemStore {}
-    impl BlockOperations<TestBlock> for MemStore {}
+    impl BlockOperations<TestBlock> for MemStore {
+        fn ordering(&self) -> Option<&dyn BlockOrdering> {
+            Some(self as &dyn BlockOrdering)
+        }
+    }
+
+    #[async_trait]
+    impl BlockOrdering for MemStore {
+        async fn place(
+            &self,
+            uri: &EntityUri,
+            parent_id: &str,
+            after_id: Option<&str>,
+        ) -> Result<()> {
+            let new_sort_key = self.new_child_anchor(parent_id, after_id).await?;
+            let id = uri.id();
+            let mut blocks = self.blocks.lock().unwrap();
+            let block = blocks
+                .iter_mut()
+                .find(|b| b.id == id)
+                .ok_or_else(|| anyhow::anyhow!("MemStore::place: block {id} not found"))?;
+            block.parent_id = Some(parent_id.to_string());
+            block.sort_key = new_sort_key;
+            Ok(())
+        }
+
+        async fn new_child_anchor(
+            &self,
+            parent_id: &str,
+            after_id: Option<&str>,
+        ) -> Result<String> {
+            let (prev_key, next_key) = match after_id {
+                None => {
+                    let first = self.sorted_children(parent_id).into_iter().next();
+                    (None, first.map(|b| b.sort_key))
+                }
+                Some(after) => {
+                    let after_block = self
+                        .get(after)
+                        .ok_or_else(|| anyhow::anyhow!("MemStore: after block {after} missing"))?;
+                    let after_parent = after_block.parent_id.clone().unwrap_or_default();
+                    let next_sib = self
+                        .sorted_children(&after_parent)
+                        .into_iter()
+                        .find(|b| b.sort_key > after_block.sort_key);
+                    (Some(after_block.sort_key), next_sib.map(|b| b.sort_key))
+                }
+            };
+            gen_key_between(prev_key.as_deref(), next_key.as_deref())
+                .map_err(|e| format!("{e:#}").into())
+        }
+
+        async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
+            let block = self
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("prev_sibling: block {id} missing"))?;
+            let Some(parent_id) = block.parent_id.as_deref() else {
+                return Ok(None);
+            };
+            Ok(self
+                .sorted_children(parent_id)
+                .into_iter()
+                .filter(|b| b.sort_key < block.sort_key)
+                .last()
+                .map(|b| b.id))
+        }
+
+        async fn next_sibling(&self, id: &str) -> Result<Option<String>> {
+            let block = self
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("next_sibling: block {id} missing"))?;
+            let Some(parent_id) = block.parent_id.as_deref() else {
+                return Ok(None);
+            };
+            Ok(self
+                .sorted_children(parent_id)
+                .into_iter()
+                .find(|b| b.sort_key > block.sort_key)
+                .map(|b| b.id))
+        }
+
+        async fn first_child(&self, parent_id: &str) -> Result<Option<String>> {
+            Ok(self
+                .sorted_children(parent_id)
+                .into_iter()
+                .next()
+                .map(|b| b.id))
+        }
+
+        async fn last_child(&self, parent_id: &str) -> Result<Option<String>> {
+            Ok(self
+                .sorted_children(parent_id)
+                .into_iter()
+                .last()
+                .map(|b| b.id))
+        }
+    }
 
     fn insert_block(store: &MemStore, id: &str, parent_id: Option<&str>, prev_key: Option<&str>) {
         let sort_key = gen_key_between(prev_key, None).unwrap();
@@ -466,18 +598,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_block_into_parent_reparents_grandchildren_to_old_slot() {
+    async fn join_block_into_parent_with_grandchildren_is_refused() {
+        // Phase 3.5: matches LogSeq's behavior — a first-child block with
+        // its own subtree cannot be joined into its parent (Backspace at
+        // the start of `A` is a no-op when `A` has children). Previously
+        // we re-parented grandchildren to A's slot; now we refuse.
+        //
         // Layout:
         //   P (content "parent ")
         //     A (content "child")  <- first child, has its own children X, Y
         //       X (content "x")
         //       Y (content "y")
         //     B (content "sib")
-        // After `join_block("A", 0)`:
-        //   P (content "parent child")
-        //     X (content "x")  <- now first child of P, occupying A's slot
-        //     Y (content "y")
-        //     B (content "sib")
+        // After `join_block("A", 0)`: unchanged.
         let store = MemStore::new();
         store.insert(TestBlock {
             id: "P".to_string(),
@@ -519,15 +652,22 @@ mod tests {
 
         store.join_block("A", 0).await.unwrap();
 
+        // Parent content unchanged, A still alive, grandchildren still
+        // under A — nothing moved.
         let p = store.get("P").unwrap();
-        assert_eq!(p.content, "parent child");
-        assert!(store.get("A").is_none());
-
-        let children = store.sorted_children("P");
+        assert_eq!(p.content, "parent ");
+        assert!(store.get("A").is_some(), "A must remain present");
+        let p_children = store.sorted_children("P");
         assert_eq!(
-            children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            vec!["X", "Y", "B"],
-            "X and Y should occupy A's old slot before B"
+            p_children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B"],
+            "A and B remain as P's children in original order"
+        );
+        let a_children = store.sorted_children("A");
+        assert_eq!(
+            a_children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["X", "Y"],
+            "X and Y remain under A"
         );
     }
 

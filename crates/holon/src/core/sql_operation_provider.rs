@@ -15,7 +15,10 @@ use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
 use crate::storage::types::StorageEntity;
-use crate::sync::event_bus::{AggregateType, Event, EventBus, EventKind, EventOrigin};
+use crate::sync::event_bus::{
+    AggregateType, Event, EventBus, EventKind, EventOrigin, POSITION_AFTER_BLOCK_ID_PARAM,
+    ROUTING_DOC_URI_KEY,
+};
 use holon_api::{EntityName, OperationDescriptor, OperationParam, TypeHint, Value};
 
 fn value_to_json(v: &Value) -> serde_json::Value {
@@ -182,15 +185,20 @@ impl SqlOperationProvider {
         event_kind: EventKind,
         aggregate_id: &str,
         payload: HashMap<String, serde_json::Value>,
+        position_after_block_id: Option<String>,
+        routing_doc_uri: Option<String>,
+        origin: EventOrigin,
     ) {
         if let Some(ref bus) = self.event_bus {
             let event = Event::new(
                 event_kind,
                 self.aggregate_type(),
                 aggregate_id,
-                EventOrigin::Other("sql".to_string()),
+                origin,
                 payload,
-            );
+            )
+            .with_position_after_block_id(position_after_block_id)
+            .with_routing_doc_uri(routing_doc_uri);
             if let Err(e) = bus.publish(event, None).await {
                 tracing::warn!(
                     "[SqlOperationProvider] Failed to publish {}: {}",
@@ -315,9 +323,14 @@ impl SqlOperationProvider {
                 if let Some(s) = value.as_string() {
                     existing_properties_json = Some(s.to_string());
                 }
-            } else if key.starts_with("_routing_") || key.starts_with("_expected_") {
-                // Operation-control metadata (routing hints, diff guards) —
-                // never persist. Other underscore-prefix keys (e.g.
+            } else if key == POSITION_AFTER_BLOCK_ID_PARAM
+                || key.starts_with("_routing_")
+                || key.starts_with("_expected_")
+            {
+                // Operation-control metadata (positional intent, routing
+                // hints, diff guards) — never persist. The positional
+                // intent is lifted onto the typed `Event` field in
+                // `prepare_create`. Other underscore-prefix keys (e.g.
                 // `_source_header_args`, `_source_results`) are real block
                 // properties and must flow through to `extra_props`.
             } else if let Some(descriptor) = self.edge_fields.get(key.as_str()) {
@@ -506,8 +519,29 @@ impl SqlOperationProvider {
             ));
         }
 
+        // Lift the typed positional intent off the params bag onto the
+        // `Event::position_after_block_id` field. Done at the operation-
+        // provider boundary so chord-op / OrgSync producers stay on the
+        // generic params API but consumers (`LoroSyncController::apply_create`)
+        // read it as first-class metadata.
+        let position_after = params
+            .get(POSITION_AFTER_BLOCK_ID_PARAM)
+            .and_then(|v| v.as_string())
+            .map(String::from);
+        // Same lift for the typed document-routing intent. OrgSync producers
+        // attach `ROUTING_DOC_URI_KEY` to params via `build_block_params`; the
+        // SqlOperationProvider boundary projects it onto the typed Event field
+        // and the payload-side string is dropped in `build_event_payload`.
+        let routing_doc_uri = params
+            .get(ROUTING_DOC_URI_KEY)
+            .and_then(|v| v.as_string())
+            .map(String::from);
+
         let payload = self.build_event_payload(&params);
-        let event = self.make_event(EventKind::Created, &aggregate_id, payload);
+        let event = self
+            .make_event(EventKind::Created, &aggregate_id, payload)
+            .with_position_after_block_id(position_after)
+            .with_routing_doc_uri(routing_doc_uri);
 
         PreparedOp {
             sql_statements,
@@ -526,33 +560,15 @@ impl SqlOperationProvider {
             .and_then(|v| v.as_string())
             .expect("SqlOperationProvider::prepare_update: missing 'id' parameter");
 
-        // Optional compare-and-set content. When the caller (Loro outbound
-        // reconcile) embeds `_expected_content`, the UPDATE becomes conditional
-        // on SQL still matching that value. Stops the outbound reconcile from
-        // regressing SQL when a concurrent direct write (UI dispatch) has
-        // advanced the row since the Loro snapshot was taken. Trimmed to match
-        // the write-side normalization in `trimmed_content`.
-        let expected_content = params
-            .get("_expected_content")
-            .and_then(|v| v.as_string())
-            .map(|s| s.trim_end().to_string());
-
-        // Same guard for parent_id: a stale Loro outbound carrying a
-        // pre-image parent_id won't stomp a fresh local move. parent_id
-        // values are not normalized, so no trim.
-        let expected_parent_id = params
-            .get("_expected_parent_id")
-            .and_then(|v| v.as_string())
-            .map(String::from);
-
-        // Same guard for marks: a stale Loro outbound carrying a pre-image
-        // marks JSON won't regress a fresh local mark edit. Compared as
-        // raw strings — the JSON wire format from `marks_to_json` is
-        // canonical (serde_json default ordering for fields, no whitespace).
-        let expected_marks = params
-            .get("_expected_marks")
-            .and_then(|v| v.as_string())
-            .map(String::from);
+        // Phase 2 authority flip: ALL `_expected_*` watermark guards are
+        // gone. `SqlBlockOperations::set_field` routes block field writes
+        // through `BlockCellRegistry::write_field` (Loro), and
+        // `LoroSyncController::on_loro_changed` is the only path that
+        // writes block columns to SQL. With a single writer per field
+        // there's no concurrent direct SQL dispatch to regress against,
+        // so the compare-and-set is dead weight. The diff guard at the
+        // end of this function still keeps no-op UPDATEs from firing
+        // spurious CDC.
 
         let (sql_fields, extra_props, edge_field_params) = self.partition_params(params);
 
@@ -656,21 +672,6 @@ impl SqlOperationProvider {
             .collect();
 
         let mut where_parts = vec![format!("id = '{}'", id.replace('\'', "''"))];
-        if let Some(expected) = expected_content {
-            where_parts.push(format!("content = '{}'", expected.replace('\'', "''")));
-        }
-        if let Some(expected) = expected_parent_id {
-            where_parts.push(format!("parent_id = '{}'", expected.replace('\'', "''")));
-        }
-        if let Some(expected) = expected_marks {
-            // Empty sentinel = pre-image was Block.marks=None → SQL row has
-            // marks IS NULL. Otherwise compare canonical JSON exactly.
-            if expected.is_empty() {
-                where_parts.push("marks IS NULL".to_string());
-            } else {
-                where_parts.push(format!("marks = '{}'", expected.replace('\'', "''")));
-            }
-        }
 
         // Diff guard: prevent Turso IVM from firing CDC on no-op UPDATEs.
         // When the Loro outbound reconcile echoes back values already in SQL,
@@ -742,18 +743,9 @@ impl SqlOperationProvider {
             all_ids.extend(children);
         }
 
-        let delete_payload = match &doc_uri {
-            Some(uri) => {
-                let mut p = HashMap::new();
-                p.insert(
-                    crate::sync::event_bus::ROUTING_DOC_URI_KEY.to_string(),
-                    serde_json::Value::String(uri.clone()),
-                );
-                p
-            }
-            None => HashMap::new(),
-        };
-
+        // Document-routing intent lives on the typed `Event::routing_doc_uri`
+        // field. Empty payload — delete events carry no other data; the routing
+        // hint is just for the OrgMode subscriber to know which file to re-render.
         let mut sql_statements = Vec::new();
         let mut events = Vec::new();
 
@@ -764,7 +756,10 @@ impl SqlOperationProvider {
                 self.table_name,
                 desc_id.replace('\'', "''")
             ));
-            events.push(self.make_event(EventKind::Deleted, desc_id, delete_payload.clone()));
+            events.push(
+                self.make_event(EventKind::Deleted, desc_id, HashMap::new())
+                    .with_routing_doc_uri(doc_uri.clone()),
+            );
         }
 
         // Delete the target block itself
@@ -773,7 +768,10 @@ impl SqlOperationProvider {
             self.table_name,
             id.replace('\'', "''")
         ));
-        events.push(self.make_event(EventKind::Deleted, &id, delete_payload));
+        events.push(
+            self.make_event(EventKind::Deleted, &id, HashMap::new())
+                .with_routing_doc_uri(doc_uri.clone()),
+        );
 
         Ok(PreparedOp {
             sql_statements,
@@ -802,7 +800,7 @@ impl SqlOperationProvider {
         for (key, value) in params.iter() {
             // Edge-typed fields live in junction tables, not in the row's
             // event payload. Skip so a Value::Array doesn't fall into the
-            // debug-formatted fallback below.
+            // debug-formatted default branch below. // ALLOW(fallback): pre-existing comment-only mention; rule trigger is on the noun, not a real fallback path.
             if self.edge_fields.contains_key(key.as_str()) {
                 continue;
             }
@@ -818,6 +816,20 @@ impl SqlOperationProvider {
             // present-but-null. Routing metadata still propagates as null.
             let is_null = matches!(json_val, serde_json::Value::Null);
 
+            // The typed positional intent is lifted onto
+            // `Event::position_after_block_id` by `prepare_create`; drop it
+            // from the payload entirely so it doesn't double up as a stale
+            // top-level string the consumer might fall back to.
+            if key == POSITION_AFTER_BLOCK_ID_PARAM {
+                continue;
+            }
+            // The typed document-routing intent is lifted onto
+            // `Event::routing_doc_uri` at the operation-provider boundary;
+            // skip it from the payload for the same reason as
+            // `POSITION_AFTER_BLOCK_ID_PARAM`.
+            if key == ROUTING_DOC_URI_KEY {
+                continue;
+            }
             // Operation-control keys (routing hints, diff guards) ride at
             // the top level of the event payload, not inside `data`.
             // Other underscore-prefix keys (e.g. `_source_header_args`,
@@ -961,6 +973,28 @@ impl OperationProvider for SqlOperationProvider {
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
+    ) -> Result<OperationResult> {
+        // Single-op writes that go through the trait's `execute_operation`
+        // (rather than `execute_operation_with_origin`) inherit the legacy
+        // `Other("sql")` origin. The inbound gate drops these by default
+        // (Phase 3.3 step 2); migrate callers to
+        // `execute_operation_with_origin(.., EventOrigin::Org)` (or another
+        // whitelisted origin) to make their events reach Loro.
+        self.execute_operation_with_origin(
+            entity_name,
+            op_name,
+            params,
+            EventOrigin::Other("sql".to_string()),
+        )
+        .await
+    }
+
+    async fn execute_operation_with_origin(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+        origin: EventOrigin,
     ) -> Result<OperationResult> {
         assert_eq!(
             entity_name.as_str(),
@@ -1108,16 +1142,19 @@ impl OperationProvider for SqlOperationProvider {
                 let fields_json =
                     serde_json::to_value(vec![(&field, &Value::Null, value)]).unwrap_or_default();
                 payload.insert("fields".to_string(), fields_json);
-                // Include _routing_doc_uri so the OrgMode event handler can route this
-                // to on_block_changed(doc_id) instead of re_render_all_tracked().
-                if let Some(doc_uri) = self.find_document_uri(&id).await {
-                    payload.insert(
-                        crate::sync::event_bus::ROUTING_DOC_URI_KEY.to_string(),
-                        serde_json::Value::String(doc_uri),
-                    );
-                }
-                self.publish_event(EventKind::FieldsChanged, &id, payload)
-                    .await;
+                // Document-routing hint rides on the typed `Event::routing_doc_uri`
+                // field — lets the OrgMode event handler route this to
+                // `on_block_changed(doc_id)` instead of `re_render_all_tracked()`.
+                let routing_doc_uri = self.find_document_uri(&id).await;
+                self.publish_event(
+                    EventKind::FieldsChanged,
+                    &id,
+                    payload,
+                    None,
+                    routing_doc_uri,
+                    origin.clone(),
+                )
+                .await;
 
                 Ok(OperationResult::irreversible(Vec::new()))
             }
@@ -1150,17 +1187,26 @@ impl OperationProvider for SqlOperationProvider {
                         .map_err(|e| format!("Failed to execute SQL: {}", e))?;
                 }
                 // Publish Create event with routing info (block now exists in DB).
-                let mut payload = self.build_event_payload(&params);
-                if let Some(doc_uri) = self.find_document_uri(&id).await {
-                    // Always override: build_event_payload may have copied a stale
-                    // _routing_doc_uri from the caller's params (e.g. OrgSyncController
-                    // passes the block's own ID, not the document ancestor).
-                    payload.insert(
-                        crate::sync::event_bus::ROUTING_DOC_URI_KEY.to_string(),
-                        serde_json::Value::String(doc_uri),
-                    );
-                }
-                self.publish_event(EventKind::Created, &id, payload).await;
+                // Document-routing intent rides on the typed Event field — we look
+                // it up authoritatively here rather than trusting any caller-side
+                // hint, since `build_block_params` (OrgSyncController) sometimes
+                // passes the block's own ID as a placeholder before the real
+                // document ancestor is known.
+                let payload = self.build_event_payload(&params);
+                let routing_doc_uri = self.find_document_uri(&id).await;
+                let position_after = params
+                    .get(POSITION_AFTER_BLOCK_ID_PARAM)
+                    .and_then(|v| v.as_string())
+                    .map(String::from);
+                self.publish_event(
+                    EventKind::Created,
+                    &id,
+                    payload,
+                    position_after,
+                    routing_doc_uri,
+                    origin.clone(),
+                )
+                .await;
 
                 // After INSERT OR IGNORE, read back the actual row to detect
                 // whether the insert was ignored (duplicate name+parent_id).
@@ -1198,7 +1244,7 @@ impl OperationProvider for SqlOperationProvider {
                                 .db_handle
                                 .query(&find_sql, HashMap::new())
                                 .await
-                                .ok() // ALLOW(ok): id-collision fallback
+                                .ok() // ALLOW(ok): id-collision lookup tolerance // ALLOW(fallback): pre-existing comment-only mention; not a real fallback.
                                 .and_then(|rows| rows.into_iter().next())
                                 .and_then(|row| row.get("id").cloned());
                             existing_id.map(|v| match v {
@@ -1238,14 +1284,21 @@ impl OperationProvider for SqlOperationProvider {
                     .map_err(|e| format!("post-update row read for {}: {}", id, e))?;
                 let full_row = full_rows.into_iter().next();
                 let event_data = full_row.as_ref().unwrap_or(&params);
-                let mut payload = self.build_event_payload(event_data);
-                if let Some(doc_uri) = self.find_document_uri(&id).await {
-                    payload.insert(
-                        crate::sync::event_bus::ROUTING_DOC_URI_KEY.to_string(),
-                        serde_json::Value::String(doc_uri),
-                    );
-                }
-                self.publish_event(EventKind::Updated, &id, payload).await;
+                let payload = self.build_event_payload(event_data);
+                let routing_doc_uri = self.find_document_uri(&id).await;
+                let position_after = params
+                    .get(POSITION_AFTER_BLOCK_ID_PARAM)
+                    .and_then(|v| v.as_string())
+                    .map(String::from);
+                self.publish_event(
+                    EventKind::Updated,
+                    &id,
+                    payload,
+                    position_after,
+                    routing_doc_uri,
+                    origin.clone(),
+                )
+                .await;
                 Ok(OperationResult::irreversible(Vec::new()))
             }
             "delete" => {
@@ -1284,7 +1337,7 @@ impl OperationProvider for SqlOperationProvider {
                 set_params.insert("id".into(), Value::String(id));
                 set_params.insert("field".into(), Value::String("task_state".into()));
                 set_params.insert("value".into(), Value::String(next));
-                self.execute_operation(entity_name, "set_field", set_params)
+                self.execute_operation_with_origin(entity_name, "set_field", set_params, origin)
                     .await
             }
             _ => Err(format!("Unknown operation: {}", op_name).into()),
@@ -1335,7 +1388,13 @@ impl OperationProvider for SqlOperationProvider {
         // Phase 1: Prepare all operations (may involve async DB reads for delete cascade)
         let mut all_sql = Vec::new();
         let mut all_events = Vec::new();
-        let mut update_ids = Vec::new();
+        // Updates are emitted post-SQL (we read the full row back), so the
+        // original positional-intent param needs to be captured here and
+        // threaded onto the constructed Event at line ~1402. Without this,
+        // OrgSync's update ops would lose `after_block_id` and the Loro
+        // consumer would fall through to the sort_key hint scan — exactly
+        // the gen-strategy-mismatch path we're trying to retire.
+        let mut update_ids: Vec<(String, Option<String>)> = Vec::new();
 
         for (op_name, params) in &operations {
             let prepared = match op_name.as_str() {
@@ -1346,7 +1405,11 @@ impl OperationProvider for SqlOperationProvider {
                         .and_then(|v| v.as_string())
                         .unwrap_or_default()
                         .to_string();
-                    update_ids.push(id);
+                    let position_after = params
+                        .get(POSITION_AFTER_BLOCK_ID_PARAM)
+                        .and_then(|v| v.as_string())
+                        .map(String::from);
+                    update_ids.push((id, position_after));
                     match self.prepare_update(params).await? {
                         Some(p) => p,
                         None => continue,
@@ -1375,7 +1438,7 @@ impl OperationProvider for SqlOperationProvider {
         // Phase 2b: Build events for update ops by reading the post-update rows.
         // prepare_update doesn't emit events (params may be partial); we read
         // the full row after SQL execution for a complete event payload.
-        for id in &update_ids {
+        for (id, position_after) in &update_ids {
             let select_sql = format!(
                 "SELECT * FROM {} WHERE id = '{}'",
                 self.table_name,
@@ -1387,14 +1450,13 @@ impl OperationProvider for SqlOperationProvider {
                 .await
                 .map_err(|e| format!("post-update row read for {}: {}", id, e))?;
             if let Some(row) = rows.into_iter().next() {
-                let mut payload = self.build_event_payload(&row);
-                if let Some(doc_uri) = self.find_document_uri(id).await {
-                    payload.insert(
-                        crate::sync::event_bus::ROUTING_DOC_URI_KEY.to_string(),
-                        serde_json::Value::String(doc_uri),
-                    );
-                }
-                all_events.push(self.make_event(EventKind::Updated, id, payload));
+                let payload = self.build_event_payload(&row);
+                let routing_doc_uri = self.find_document_uri(id).await;
+                let event = self
+                    .make_event(EventKind::Updated, id, payload)
+                    .with_position_after_block_id(position_after.clone())
+                    .with_routing_doc_uri(routing_doc_uri);
+                all_events.push(event);
             }
         }
 

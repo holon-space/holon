@@ -1,4 +1,4 @@
-//! Tree walker for value-fn provider invariants (inv11/inv12/inv13).
+//! Tree walker for value-fn provider invariants (inv-value-fn-provider-arg-variance/inv-value-fn-provider-identity/inv-sql-budget).
 //!
 //! Walks a `ReactiveViewModel` and surfaces every `Reactive` node that is
 //! backed by a live `ReactiveRowProvider` — the providers produced by
@@ -18,7 +18,7 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 /// the backing provider; same Arc → same identity. `item_template` is
 /// the per-row render expression, useful for grouping providers by the
 /// template that produced them. `rows_snapshot_len` records how many
-/// rows the provider currently carries — lets inv11 assert "provider
+/// rows the provider currently carries — lets inv-value-fn-provider-arg-variance assert "provider
 /// for URI A produced rows ≠ provider for URI B".
 pub struct ProviderEntry {
     pub cache_identity: u64,
@@ -66,7 +66,7 @@ fn walk(node: &ReactiveViewModel, out: &mut Vec<ProviderEntry>) {
 
 /// Compact, cache-key-friendly string for a `RenderExpr`. Using the
 /// `Debug` impl directly keeps this alignment-free and good enough for
-/// grouping identical templates in inv12.
+/// grouping identical templates in inv-value-fn-provider-identity.
 fn render_expr_shape(expr: &RenderExpr) -> String {
     format!("{expr:?}")
 }
@@ -103,7 +103,7 @@ pub fn count_bottom_docks(node: &ReactiveViewModel) -> usize {
 }
 
 /// Return `true` when `expr` (or any of its sub-exprs) is a
-/// `FunctionCall` with the given name. Used by inv11 to pick render
+/// `FunctionCall` with the given name. Used by inv-value-fn-provider-arg-variance to pick render
 /// expressions that drive `focus_chain()` / `ops_of()` / `chain_ops()`
 /// without having to re-parse the Rhai source.
 pub fn rhai_mentions(expr: &RenderExpr, fn_name: &str) -> bool {

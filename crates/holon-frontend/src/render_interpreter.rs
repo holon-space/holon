@@ -235,6 +235,16 @@ impl<W> RenderInterpreter<W> {
                     ctx,
                 };
                 let resolved = resolve_args_with(args, ctx.row(), &binding);
+                // `live_block(id, #{role: "page_title", ...})` — second
+                // positional Object arg becomes ctx.flags for the resolved
+                // block's variant dispatch. AST stays shape-stable; flags
+                // are consumed by `pick_active_variant`, never serialized.
+                if name == "live_block" {
+                    if let Some(holon_api::Value::Object(map)) = resolved.positional.get(1) {
+                        let child_ctx = ctx.with_flags(map.clone());
+                        return self.dispatch(name, &resolved, &child_ctx, services, &interpret_fn);
+                    }
+                }
                 self.dispatch(name, &resolved, ctx, services, &interpret_fn)
             }
             RenderExpr::ColumnRef { name } => {
@@ -327,6 +337,7 @@ pub fn is_props_only_widget(widget_name: &str) -> bool {
             | "checkbox"
             | "spacer"
             | "editable_text"
+            | "rendered_text"
             | "state_toggle"
             | "source_block"
             | "source_editor"
@@ -362,6 +373,7 @@ pub fn resolve_props(
     };
 
     // Dummy interpret closure — props_only builders never recurse.
+    // ALLOW(unused_param): closure conforms to existing builder fn-pointer shape; both args are required by signature
     let noop_interpret = |_e: &RenderExpr, _c: &RenderContext| -> ReactiveViewModel {
         ReactiveViewModel::from_widget("_unreachable", HashMap::new())
     };
@@ -378,6 +390,7 @@ pub fn resolve_props(
         return props;
     }
 
+    // ALLOW(fallback): two-level dispatch — fast path then full interpret; both succeed deterministically
     // Fallback for raw builders: full interpret, extract props.
     let fresh = services.interpret(expr, &ctx);
     fresh.props.get_cloned()
@@ -402,9 +415,14 @@ pub fn shared_col_build<W>(ba: &BuilderArgs<'_, W>) -> Vec<W> {
 /// `tree` builder: interprets rows as a hierarchical tree using `parent_id` and `sortkey`.
 ///
 /// Uses `OutlineTree` to build parent-child relationships, then walks depth-first.
-/// Returns `Vec<(W, usize)>` — each widget paired with its nesting depth.
-/// Frontends wrap each `(widget, depth)` in their own indentation container.
-pub fn shared_tree_build<W: WithEntity>(ba: &BuilderArgs<'_, W>) -> Vec<(W, usize)> {
+/// Returns `Vec<(W, usize, HashMap<String, Value>)>` — each widget paired with
+/// its nesting depth and the per-row rule-override map (empty when no rules
+/// matched). Frontends wrap each `(widget, depth, overrides)` in their own
+/// indentation container, threading overrides into tree_item chrome props
+/// (show_bullet, show_chevron, ...).
+pub fn shared_tree_build<W: WithEntity>(
+    ba: &BuilderArgs<'_, W>,
+) -> Vec<(W, usize, HashMap<String, holon_api::Value>)> {
     let template = ba
         .args
         .get_template("item_template")
@@ -416,7 +434,7 @@ pub fn shared_tree_build<W: WithEntity>(ba: &BuilderArgs<'_, W>) -> Vec<(W, usiz
 
     let rows = &ba.ctx.data_rows;
     if rows.is_empty() {
-        return vec![((ba.interpret)(tmpl, ba.ctx), 0)];
+        return vec![((ba.interpret)(tmpl, ba.ctx), 0, HashMap::new())];
     }
 
     let parent_id_col = ba
@@ -431,18 +449,37 @@ pub fn shared_tree_build<W: WithEntity>(ba: &BuilderArgs<'_, W>) -> Vec<(W, usiz
         .and_then(column_ref_name)
         .unwrap_or("sort_key");
 
+    // Optional `rules:` arg — see `crate::row_pipeline::parse_rules_arg`.
+    // Tree's positional context injects `level` and `depth` (synonyms) so
+    // predicates can match `eq("level", 0)` for root rows or `gt("depth", 1)`
+    // for deeply-nested rows.
+    let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
+
     let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col);
     tree.walk_depth_first(|resolved_row, depth| {
-        let row_ctx = ba.ctx.with_row(Arc::clone(resolved_row));
+        // Tree adjusts `ctx.depth` before the pipeline applies, so child
+        // builders see the cumulative depth (parent's + tree's own).
+        // `with_row` is done here (not via `apply_full_row_pipeline`) because
+        // tree intentionally skips profile/ops wiring at the tree-row level —
+        // tree items typically wrap content via `live_block`/`render_entity`
+        // which resolve their own profile downstream.
         let row_ctx = RenderContext {
-            depth: row_ctx.depth + depth,
-            ..row_ctx
+            depth: ba.ctx.depth + depth,
+            ..ba.ctx.with_row(Arc::clone(resolved_row))
         };
-        let mut node = (ba.interpret)(tmpl, &row_ctx);
-        // Attach entity data to the outermost node so navigators and
-        // tree_item wrappers can find the entity_id directly.
-        node.attach_entity(Arc::clone(resolved_row));
-        (node, depth)
+        let positional = HashMap::from([
+            ("level".to_string(), holon_api::Value::Integer(depth as i64)),
+            ("depth".to_string(), holon_api::Value::Integer(depth as i64)),
+        ]);
+        let (node, overrides) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
+            row_ctx,
+            tmpl,
+            &rules,
+            resolved_row,
+            positional,
+            |expr, ctx| (ba.interpret)(expr, ctx),
+        );
+        (node, depth, overrides)
     })
 }
 
@@ -474,6 +511,16 @@ pub fn shared_live_block_build<W>(ba: &BuilderArgs<'_, W>) -> Result<W, String> 
     let deeper = ba.ctx.deeper_query();
 
     let (render_expr, data_rows) = ba.services.get_block_data(&block_id);
+    // Flags from the live_block call site (e.g. `live_block(id, #{role:
+    // "page_title"})`) sit on `ba.ctx` and propagate to the resolved
+    // render via deeper.with_data_rows. The first render_entity inside
+    // `render_expr` reads them in pick_active_variant and then clears
+    // them on the variant body's ctx (see shadow_builders/render_entity.rs).
+    // That render_entity boundary is the load-bearing scope; live_block
+    // doesn't itself clear flags, so a non-render_entity `render_expr`
+    // (e.g. `column(row(...))`) propagates flags through the whole
+    // subtree — harmless because no consumer reads them on those
+    // widgets.
     let child_ctx = deeper.with_data_rows(data_rows);
     Ok((ba.interpret)(&render_expr, &child_ctx))
 }
@@ -688,6 +735,7 @@ fn pick_active_variant(
     };
 
     // Merge container-query allocation AFTER services.ui_state so per-subtree
+    // ALLOW(fallback): describing the global-viewport merge in UiState
     // refinement shadows any global viewport fallback stored in UiState.
     if let Some(space) = ctx.available_space {
         ui_state.insert(
@@ -710,6 +758,13 @@ fn pick_active_variant(
             "scale_factor".to_string(),
             holon_api::Value::Float(space.scale_factor as f64),
         );
+    }
+
+    // Merge render-context flags so variant conditions can dispatch on them.
+    // Well-known flags: `role`, `view_mode`, `embed_depth`. Set by
+    // `live_block(id, #{role: ...})` or tree builder rule evaluation.
+    for (k, v) in &ctx.flags {
+        ui_state.insert(k.clone(), v.clone());
     }
 
     // Find first variant whose condition matches

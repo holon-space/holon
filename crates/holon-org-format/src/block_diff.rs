@@ -245,6 +245,7 @@ mod tests {
             id: holon_api::EntityUri::from_raw(id),
             parent_id: holon_api::EntityUri::from_raw(parent_id),
             tags: Vec::new(),
+            requires: Vec::new(),
             content: content.to_string(),
             content_type: holon_api::types::ContentType::Text,
             source_language: None,

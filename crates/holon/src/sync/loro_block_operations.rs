@@ -56,7 +56,7 @@ impl LoroBlockOperations {
     }
 
     /// Get the global backend (single LoroDoc for all blocks).
-    async fn get_backend(&self, _doc_id: &str) -> Result<LoroBackend> {
+    async fn get_backend(&self, _: &str) -> Result<LoroBackend> {
         let store = self.doc_store.read().await;
         let collab_doc = store
             .get_global_doc()
@@ -66,13 +66,13 @@ impl LoroBlockOperations {
     }
 
     /// Find the backend containing a block (always the global backend).
-    async fn find_doc_for_block(&self, _block_id: &str) -> Result<(String, LoroBackend)> {
+    async fn find_doc_for_block(&self, _: &str) -> Result<(String, LoroBackend)> {
         let backend = self.get_backend("").await?;
         Ok((backend.doc_id().to_string(), backend))
     }
 
     /// Save the global document after modification.
-    async fn save_doc(&self, _doc_path: &str) -> Result<()> {
+    async fn save_doc(&self, _: &str) -> Result<()> {
         let store = self.doc_store.read().await;
         store.save_all().await?;
         Ok(())

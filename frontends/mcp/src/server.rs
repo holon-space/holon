@@ -81,6 +81,15 @@ pub enum InteractionEvent {
         delta: (f32, f32),
         modifiers: Vec<String>,
     },
+    /// Scroll a virtualized list (e.g. the LeftSidebar) so the named entity
+    /// is in the viewport, then notify and flush. This is NOT a raw
+    /// platform-input event — the GPUI handler looks up the relevant
+    /// `ReactiveShell::list_state_handle()` and calls
+    /// `scroll_to_reveal_item(ix)`. Block-mode panels (Main) need no
+    /// scroll: every rendered entity already has bounds recorded during
+    /// prepaint, viewport or not. Used by `wait_for_entity_bounds` after
+    /// a short polling window when bounds haven't appeared yet.
+    ScrollEntityIntoView { entity_id: String },
 }
 
 /// Result of dispatching an interaction event through the GPUI window.
@@ -239,7 +248,9 @@ impl ServerHandler for HolonMcpServer {
 
     async fn complete(
         &self,
+        // ALLOW(unused_param): trait signature
         _request: CompleteRequestParam,
+        // ALLOW(unused_param): trait signature
         _ctx: RequestContext<RoleServer>,
     ) -> Result<CompleteResult, McpError> {
         // Return empty completions - we don't provide argument completions yet

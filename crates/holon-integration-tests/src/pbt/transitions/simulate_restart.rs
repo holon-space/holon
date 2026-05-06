@@ -8,10 +8,12 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
@@ -22,22 +24,30 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance}
 pub struct SimulateRestart;
 
 impl E2ETransitionFactory for SimulateRestart {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started || state.block_state.blocks.is_empty() {
-            return None;
-        }
-
-        Some((1, Just(SimulateRestart).boxed()))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        SimulateRestart
+            .preconditions(state)
+            .map(|()| (1, Just(SimulateRestart).boxed()))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for SimulateRestart {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && !state.block_state.blocks.is_empty()
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(
+                !state.block_state.blocks.is_empty(),
+                Reason::BlockStateEmpty,
+            ),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _state: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut ReferenceState) {
         // SimulateRestart doesn't change reference state - blocks should be preserved.
         // The SUT will clear last_projection and trigger file re-processing.
     }

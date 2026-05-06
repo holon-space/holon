@@ -20,7 +20,7 @@ pub fn build(name: &str, args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
         "render_entity" => build_render_entity(args, ctx),
         "live_block" => build_live_block(args, ctx),
         "selectable" => build_selectable(args, ctx),
-        "editable_text" => build_editable_text(args, ctx),
+        "editable_text" | "rendered_text" => build_editable_text(args, ctx),
         "table" => build_table(args, ctx),
         "tree" => build_tree(args, ctx),
         "block" | "outline" | "checkbox" | "badge" | "block_operations" | "pie_menu"
@@ -59,7 +59,7 @@ pub fn build(name: &str, args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
     }
 }
 
-fn build_text(args: &ResolvedArgs, _ctx: &RenderContext) -> AnyView {
+fn build_text(args: &ResolvedArgs, _: &RenderContext) -> AnyView {
     let content = args
         .get_positional_string(0)
         .map(|s| s.to_string())
@@ -214,7 +214,7 @@ fn build_selectable(args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
     }
 }
 
-fn build_editable_text(args: &ResolvedArgs, _ctx: &RenderContext) -> AnyView {
+fn build_editable_text(args: &ResolvedArgs, _: &RenderContext) -> AnyView {
     let content: String = args
         .get_positional_string(0)
         .or(args.get_string("content"))
@@ -343,7 +343,7 @@ fn build_live_query(args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
     build_prql_query(query, context_id, ctx)
 }
 
-fn build_render_entity(_args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
+fn build_render_entity(_: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
     let content_type = ctx
         .row()
         .get("content_type")
@@ -397,7 +397,7 @@ fn build_render_entity(_args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
     }
 }
 
-fn build_live_block(_args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
+fn build_live_block(_: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
     let block_id = match ctx.row().get("id").and_then(|v| v.as_string()) {
         Some(id) => id.to_string(),
         None => {

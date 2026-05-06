@@ -131,7 +131,7 @@ async fn run_stdio_server(
     engine: std::sync::Arc<holon::api::backend_engine::BackendEngine>,
     debug: std::sync::Arc<DebugServices>,
 ) -> Result<()> {
-    let server = HolonMcpServer::new(Some(engine), debug, None);
+    let server = HolonMcpServer::with_type_registry(Some(engine), None, debug, None);
     use rmcp::transport::stdio;
     let running = server.serve(stdio()).await?;
 
@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
     if std::env::var("HOLON_BROWSER_RELAY_URL").is_ok() {
         let relay_port: u16 = std::env::var("RELAY_PORT")
             .ok()
-            .and_then(|s| s.parse().ok())
+            .and_then(|s| s.parse().ok()) // ALLOW(ok): non-critical env var parse
             .unwrap_or(3002);
         let bind_address: std::net::SocketAddr = ([127, 0, 0, 1], relay_port).into();
         let cancellation_token = tokio_util::sync::CancellationToken::new();
@@ -366,8 +366,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
     let config_dir = holon_frontend::config::resolve_config_dir(None);
-    let session_config =
-        holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
+    let session_config = holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive());
 
     let orgmode_root_for_debug = holon_config.orgmode.root_directory.clone();
 

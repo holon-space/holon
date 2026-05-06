@@ -19,8 +19,6 @@ members = [
     "frontends/tui",
     "frontends/mcp",
     "frontends/gpui",
-    "frontends/waterui",
-    "frontends/ply",
     "tools",
     "workspace-hack",
     "experiments/lorotree-spike",
@@ -43,6 +41,10 @@ exclude = [
     # dioxus-web targets wasm32 only; web-sys/js-sys are not available on native
     # so cargo check --workspace would fail. Build via `trunk build` instead.
     "frontends/dioxus-web",
+    # waterkit-screen (transitive via waterui) uses CGWindowListCreateImage,
+    # which is obsoleted in macOS 15+ (Xcode 26 SDK). Build via the ply-specific
+    # toolchain when needed; excluded from --workspace check.
+    "frontends/ply",
 ]
 resolver = "2"
 

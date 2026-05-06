@@ -8,11 +8,13 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::peer_ops::PeerBlock;
 use crate::pbt::reference_state::{PeerRefState, ReferenceState};
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::validation::{Reason, check};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -22,21 +24,26 @@ use crate::pbt::transition_budgets::ExpectedSql;
 pub struct AddPeer;
 
 impl E2ETransitionFactory for AddPeer {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if !state.app_started || !state.variant.enable_loro {
-            return None;
-        }
-        if state.peers.len() >= 3 {
-            return None;
-        }
-        Some((1, Just(AddPeer).boxed()))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let instance = AddPeer;
+        instance
+            .preconditions(state)
+            .map(|_| (1, Just(instance).boxed()))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for AddPeer {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        state.app_started && state.variant.enable_loro && state.peers.len() < 3
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(state.app_started, Reason::AppNotStarted),
+            check(state.variant.enable_loro, Reason::LoroRequiredForPeers),
+            check(state.peers.len() < 3, Reason::PeerLimitReached),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -87,12 +94,12 @@ impl E2ETransitionImpl for AddPeer {
         });
     }
 
-    async fn apply_to_sut(&self, _ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_add_peer().await;
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // AddPeer: export_snapshot triggers ~5 SQL reads (store persistence).
         // Others: async CDC drain from previous transitions can land here.
         ExpectedSql {

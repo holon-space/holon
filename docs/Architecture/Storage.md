@@ -12,22 +12,88 @@
            ┌───────────────┴───────────────┐
            ▼                               ▼
 ┌─────────────────────┐         ┌─────────────────────────┐
+│  Cell Registry      │         │   Cell Registry         │
+│  (Todoist)          │         │   (Block)               │
+│  Cell<T> per field  │         │   Cell<T> per field     │
+└─────────────────────┘         └─────────────────────────┘
+           │                               │
+           ▼                               ▼
+┌─────────────────────┐         ┌─────────────────────────┐
 │  QueryableCache<T>  │         │   QueryableCache<T>     │
 │  (Todoist tasks)    │         │   (Blocks / Org files)  │
+│  + matview reads    │         │   + matview reads       │
 └─────────────────────┘         └─────────────────────────┘
            │                               │
            ▼                               ▼
 ┌─────────────────────┐         ┌─────────────────────────┐
 │   TursoBackend      │         │     TursoBackend        │
-│   (SQLite cache)    │         │     (SQLite cache)      │
+│   (SQLite           │         │     (SQLite             │
+│    projection)      │         │      projection)        │
 └─────────────────────┘         └─────────────────────────┘
+           ▲                               ▲
            │                               │
-           ▼                               ▼
+   projects from                    projects from
+           │                               │
 ┌─────────────────────┐         ┌─────────────────────────┐
-│  TodoistSyncProvider│         │  OrgSyncController      │
-│  (API sync)         │         │  (File watching)        │
+│   Todoist API       │         │   Loro CRDT             │
+│   (authority)       │         │   (authority for blocks)│
 └─────────────────────┘         └─────────────────────────┘
+                                            ▲
+                                            │
+                                  ┌─────────┴────────────┐
+                                  │  OrgSyncController   │
+                                  │  (file watcher,      │
+                                  │   feeds Loro)        │
+                                  └──────────────────────┘
 ```
+
+The **Cell Registry** layer (added in 2026-05) gives the UI and chord ops a unified reactive read primitive over storage. Cells project from authorities through the event log + matview projection; writes through cells flow back to the authority via typed `CrudOperations` methods.
+
+### Cell Registry — reactive read primitive
+
+A `Cell<T>` is a reactive container for one entity field, keyed by `(EntityUri, FieldPath)`. Each cell exposes:
+
+- `current() -> T` — synchronous read of the latest authority-confirmed value
+- `signal() -> impl Signal<Item = T>` — reactive stream of updates
+- `set(T)` — write that dispatches via the entity's typed `CrudOperations` methods (NOT through `OperationDispatcher` — see [Operations](Operations.md))
+
+**Location**: `crates/holon-core/src/cell.rs`, `crates/holon-core/src/cell_registry.rs`
+
+```rust
+pub struct Cell<T> {
+    inner: Arc<dyn CellBacking<T>>,
+}
+
+pub trait CellBacking<T>: Send + Sync {
+    fn current(&self) -> T;
+    fn signal(&self) -> BoxStream<'static, T>;
+    fn apply_replace(&self, v: T) -> BoxFuture<'static, Result<()>>;
+    fn as_text_backing(&self) -> Option<&dyn TextCellBacking> { None }
+}
+
+pub trait TextCellBacking: CellBacking<String> {
+    fn apply_text_op(&self, op: TextOp) -> Result<()>;
+    fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> CursorAnchor;
+    fn resolve_cursor(&self, anchor: &CursorAnchor) -> usize;
+    fn remote_deltas(&self) -> BoxStream<'static, TextDelta>;
+}
+```
+
+**Per-entity registries**: each entity-type DI module wires its own `EntityCellRegistry` impl as a sibling to its `OperationProvider`. `BlockCellRegistry` maps each block field's name to a backing constructor (e.g. `content` → `LoroTextCellBacking`, `completed` → `LoroMetaCellBacking<bool>`, etc. in Full mode; LWW backings for SqlOnly). The top-level `CellRegistryDispatcher` (lands when a second entity type registers cells; YAGNI for one) routes by `EntityUri` scheme.
+
+**Cell backings (one per protocol)**:
+
+| Backing | Authority for | Read | Write |
+|---------|---------------|------|-------|
+| `LoroTextCellBacking` | block.content (rich text) | `LoroText::to_string()` | `LoroText::insert/delete/update` + commit |
+| `LoroMetaCellBacking<T>` | block scalar fields (completed, collapsed, …) | `meta.get(field)` on tree node | `meta.insert(field, v)` + commit |
+| `LoroTreeParent/PositionCellBacking` | block.parent_id, block.sort_key | tree-node parent / position | `tree.move_to` / `tree.move_after` |
+| `LwwTextCellBacking` | tests / SqlOnly text fields | entity cache | `CrudOperations::set_field` (debounced) |
+| `LwwScalarBacking<T>` | tests / SqlOnly scalar fields | entity cache | `CrudOperations::set_field` |
+
+**Cell lifetime**: cells are `Weak`-keyed in the registry. They live while at least one consumer holds an `Arc<Cell<T>>`; when the last `Arc` drops, the registry's `Weak` upgrade fails on next lookup and a fresh cell is constructed. Chord-op `delete` paths invoke `EntityCellRegistry::on_entity_deleted(uri)` proactively so a same-id re-create can't observe a stale cell wrapping an orphaned Loro container.
+
+**`Cell<T>` vs raw `Mutable<T>`**: cells are for entity field state (has identity, has authority, could be persisted/queried/synced). Per-VM `Mutable<T>` (FU-1 pattern) for per-instance widget state stays — same-id rows in different render slots need independent state. Genuinely-ephemeral state (cursor blink, hover, drag offset) also stays raw `Mutable<T>`. See [UI](UI.md).
 
 ### QueryableCache
 

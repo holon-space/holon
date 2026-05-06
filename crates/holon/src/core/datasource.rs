@@ -6,10 +6,9 @@
 //! - Changes flow via ChangeNotifications streams from SyncProviders to Caches
 //! - QueryableCache wraps datasources and implements both read and write traits
 //!
-//! # WASM Compatibility
-//! On WASM, futures are often !Send (because they wrap JS promises).
-//! Therefore, we use `MaybeSendSync` trait alias and `#[async_trait(?Send)]`
-//! to relax thread-safety requirements on WASM builds.
+//! On WASM, futures are often !Send (because they wrap JS promises). // ALLOW(compatibility): genuine WASM-vs-native target distinction, not a removable shim
+//! `MaybeSendSync` and `#[async_trait(?Send)]` relax thread-safety
+//! requirements so a single trait definition compiles on both targets.
 
 use async_trait::async_trait;
 use holon_api::EntityName;
@@ -174,9 +173,28 @@ pub trait OperationProvider: Send + Sync {
         &self,
         entity_name: &EntityName,
         operations: Vec<(String, StorageEntity)>,
-        _origin: crate::sync::event_bus::EventOrigin,
+        _: crate::sync::event_bus::EventOrigin,
     ) -> Result<Vec<OperationResult>> {
         self.execute_batch(entity_name, operations).await
+    }
+
+    /// Execute a single operation and tag the resulting event with a specific
+    /// `EventOrigin`. The single-op analogue of `execute_batch_with_origin`.
+    ///
+    /// Default implementation ignores the origin and delegates to
+    /// `execute_operation`. Implementations that publish events should
+    /// override this to thread `origin` into event construction so the
+    /// `LoroSyncController` inbound gate can apply or drop based on the
+    /// caller's actual origin instead of the hardcoded
+    /// `EventOrigin::Other("sql")`.
+    async fn execute_operation_with_origin(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+        _: crate::sync::event_bus::EventOrigin,
+    ) -> Result<OperationResult> {
+        self.execute_operation(entity_name, op_name, params).await
     }
 
     /// Get the last created entity ID (if any)
@@ -293,7 +311,7 @@ pub trait SyncableProvider: Send + Sync {
     ///
     /// # Arguments
     /// * `changes` - Field-level changes from the operation
-    async fn sync_changes(&self, _changes: &[FieldDelta]) -> Result<()> {
+    async fn sync_changes(&self, _: &[FieldDelta]) -> Result<()> {
         self.sync(StreamPosition::Beginning).await?;
         Ok(())
     }

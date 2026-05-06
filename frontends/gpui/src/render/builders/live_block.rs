@@ -34,7 +34,22 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // forced style (width: 100%, flex_grow: 1) is calibrated for small content
     // widgets inside column-flex lists; wrapping a whole region (row-flex child)
     // causes the wrapper to collapse to height=0 and clips all region content.
-    entity.into_any_element()
+    //
+    // For PANEL containers (`block:default-*` — the LeftSidebar / Main /
+    // RightSidebar wrappers), we ALSO wrap in a layout-transparent tracker
+    // that binds the block_id as `entity_id`. This lets PBT region queries
+    // locate the panel by URI in `BoundsRegistry`. We deliberately DON'T do
+    // this for non-panel live_blocks because invariants like
+    // `vm-data-tracked-as-content` (sut.rs:5820) rely on `find_by_entity_id`
+    // returning the CONTENT widget (rendered_text / render_entity /
+    // selectable) for a block, not its live_block wrapper. The invariant
+    // already excludes `block:default-*` ids from the same check (sut.rs:5791),
+    // so the convention is consistent.
+    if bid.starts_with("block:default-") {
+        super::tag_with_entity_id(ctx, "live_block", Some(&bid), entity)
+    } else {
+        entity.into_any_element()
+    }
 }
 
 fn get_or_create_live_block(

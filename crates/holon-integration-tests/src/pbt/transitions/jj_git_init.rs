@@ -6,8 +6,10 @@
 //! `sut.rs:691-700` (SUT apply), and
 //! `transition_budgets.rs:116-125` (expected SQL).
 
+use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
@@ -21,29 +23,25 @@ use crate::pbt::transition_budgets::ExpectedSql;
 pub struct JjGitInit;
 
 impl E2ETransitionFactory for JjGitInit {
-    fn weighted_generator(state: &ReferenceState) -> Option<(u32, BoxedStrategy<Self>)> {
-        if state.app_started {
-            return None;
-        }
-
-        let vcs_weight = if !state.git_initialized && !state.jj_initialized {
-            1
-        } else {
-            0
-        };
-
-        if vcs_weight == 0 || state.jj_initialized {
-            return None;
-        }
-
-        Some((vcs_weight, Just(JjGitInit).boxed()))
+    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        JjGitInit
+            .preconditions(state)
+            .map(|_| (1, Just(JjGitInit).boxed()))
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for JjGitInit {
-    fn preconditions(&self, state: &ReferenceState) -> bool {
-        !state.app_started && !state.jj_initialized
+    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(!state.app_started, Reason::AppAlreadyStarted),
+            check(!state.git_initialized, Reason::VcsAlreadyInitialized),
+            check(!state.jj_initialized, Reason::VcsAlreadyInitialized),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
@@ -51,12 +49,12 @@ impl E2ETransitionImpl for JjGitInit {
         state.git_initialized = true; // jj git init also creates .git
     }
 
-    async fn apply_to_sut(&self, _state: &ReferenceState, sut: &mut dyn SutHandle) {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
         sut.apply_jj_git_init().await;
     }
 
     #[cfg(feature = "otel-testing")]
-    fn expected_sql(&self, _state: &ReferenceState) -> ExpectedSql {
+    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,
             writes: 0,

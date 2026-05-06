@@ -93,6 +93,30 @@ struct ReplayArgs {
     /// Start consistency checks from this statement number
     #[arg(long, default_value_t = 0)]
     check_from: usize,
+    /// With `--check-after-each`, keep running past the first inconsistency
+    /// instead of bailing. Useful for finding *every* place a matview goes
+    /// stale, not just the earliest detection point.
+    #[arg(long)]
+    no_break_on_inconsistency: bool,
+    /// Track an `id` across one or more tables/matviews after every DML.
+    /// Format: `<table>=<id>` or just `<id>` (defaults to `block_raw,block`).
+    /// Repeat for multiple ids (e.g. `--track-id block:abc --track-id block:def`).
+    /// On every change in presence the tool prints
+    /// `[stmt_idx] track block_raw=✓ block=✗`. Use this to pinpoint the
+    /// exact statement that drops a row from a chained matview.
+    #[arg(long = "track-id", value_name = "[TABLE=]ID")]
+    track_id: Vec<String>,
+    /// Stop the replay after this many SQL statements have been processed.
+    /// Used by the minimizer to cap individual candidates that aren't
+    /// reproducing the crash, so they don't grind through the full trace.
+    #[arg(long, value_name = "N")]
+    max_stmts: Option<usize>,
+    /// Stop the replay after this many wall-clock seconds. Used by the
+    /// minimizer as a safety budget per candidate. The replay still runs
+    /// the final consistency check on what it processed so the verdict
+    /// reflects partial progress.
+    #[arg(long, value_name = "SECS")]
+    max_secs: Option<u64>,
 }
 
 #[derive(clap::Args)]
@@ -113,7 +137,22 @@ struct MinimizeArgs {
 enum Directive {
     SetChangeCallback,
     Wait(u64),
-    Sql { tag: String, sql: String },
+    Sql {
+        tag: String,
+        sql: String,
+    },
+    /// Self-checking assertion. Parsed from lines like
+    /// `-- ?ASSERT ROW-EXISTS block "block:abc"` or
+    /// `-- ?ASSERT ROW-COUNT block 17`.
+    /// Failure exits non-zero; success is silent unless `verbose=true`.
+    Assert(AssertKind),
+}
+
+#[derive(Debug, Clone)]
+enum AssertKind {
+    RowExists { table: String, id: String },
+    RowAbsent { table: String, id: String },
+    RowCount { table: String, count: i64 },
 }
 
 // ─── Extraction (ported from extract-sql-trace.py) ──────────────────────────
@@ -513,6 +552,21 @@ fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
             continue;
         }
 
+        if let Some(rest) = line.strip_prefix("-- ?ASSERT ") {
+            if let Some((tag, sql)) = current_sql.take() {
+                directives.push(Directive::Sql { tag, sql });
+            }
+            // Forms:
+            //   ROW-EXISTS <table> '<id>'   (single-quoted id; quoted to allow spaces)
+            //   ROW-ABSENT <table> '<id>'
+            //   ROW-COUNT  <table> <n>
+            // Permissive whitespace; quotes optional for ids without spaces.
+            let kind = parse_assert_directive(rest)
+                .with_context(|| format!("Failed to parse `-- ?ASSERT {rest}`"))?;
+            directives.push(Directive::Assert(kind));
+            continue;
+        }
+
         if line.starts_with("-- [") {
             if let Some((tag, sql)) = current_sql.take() {
                 directives.push(Directive::Sql { tag, sql });
@@ -626,82 +680,218 @@ async fn check_matview_consistency(
             None => continue,
         };
 
-        let mv_count = match count_rows(conn, &format!("SELECT count(*) FROM {name}")).await {
-            Ok(c) => c,
-            Err(e) => {
-                let msg = format!("[{step_label}] ERROR querying matview {name}: {e}");
-                println!("!!! {msg}");
-                inconsistencies.push(msg);
-                continue;
-            }
-        };
-
-        let raw_count = match count_rows(conn, &format!("SELECT count(*) FROM ({select_sql})"))
-            .await
-        {
-            Ok(c) => c,
-            Err(_) => {
-                let tmp_name = format!("_check_{name}");
-                let create_sql =
-                    format!("CREATE MATERIALIZED VIEW IF NOT EXISTS {tmp_name} AS {select_sql}");
-                match conn.execute(&create_sql, ()).await {
-                    Ok(_) => {
-                        let c = count_rows(conn, &format!("SELECT count(*) FROM {tmp_name}"))
-                            .await
-                            .unwrap_or(-1);
-                        let _ = conn
-                            .execute(&format!("DROP VIEW IF EXISTS {tmp_name}"), ())
-                            .await;
-                        c
-                    }
-                    Err(e) => {
-                        let msg =
-                            format!("[{step_label}] ERROR re-evaluating {name} (both paths): {e}");
-                        println!("!!! {msg}");
-                        inconsistencies.push(msg);
-                        continue;
-                    }
-                }
-            }
-        };
-
-        if mv_count != raw_count {
-            let msg = format!(
-                "[{step_label}] INCONSISTENCY in {name}: matview={mv_count} rows, raw={raw_count} rows"
-            );
+        // Build a fresh re-evaluation matview alongside the live one. We
+        // can't compare against `(<select_sql>)` directly: many holon
+        // matviews chain off other matviews, and `(SELECT … FROM block …)`
+        // forces the planner to re-plan the inner query without the IVM
+        // engine's bookkeeping, which can fail or pick a different code
+        // path. A second materialized view replays through the same
+        // pipeline, so any divergence is incremental-state drift, not a
+        // planner artifact.
+        let tmp_name = format!("_diff_check_{name}");
+        let create_sql =
+            format!("CREATE MATERIALIZED VIEW IF NOT EXISTS {tmp_name} AS {select_sql}");
+        if let Err(e) = conn.execute(&create_sql, ()).await {
+            let msg = format!("[{step_label}] ERROR re-evaluating {name} (CREATE): {e}");
             println!("!!! {msg}");
             inconsistencies.push(msg);
-            has_data_mismatch = true;
+            continue;
+        }
 
-            let tmp_name = format!("_diff_check_{name}");
-            let _ = conn
-                .execute(
-                    &format!("CREATE MATERIALIZED VIEW IF NOT EXISTS {tmp_name} AS {select_sql}"),
-                    (),
+        let mv_only = count_rows(
+            conn,
+            &format!("SELECT count(*) FROM (SELECT * FROM {name} EXCEPT SELECT * FROM {tmp_name})"),
+        )
+        .await;
+        let src_only = count_rows(
+            conn,
+            &format!("SELECT count(*) FROM (SELECT * FROM {tmp_name} EXCEPT SELECT * FROM {name})"),
+        )
+        .await;
+
+        match (mv_only, src_only) {
+            (Ok(0), Ok(0)) => {
+                // Consistent — no row-level drift.
+            }
+            (Ok(extra), Ok(missing)) if extra == 0 && missing == 0 => {
+                // (Defensive — already covered above, kept for clarity.)
+            }
+            (Ok(extra), Ok(missing)) => {
+                let mv_count = count_rows(conn, &format!("SELECT count(*) FROM {name}"))
+                    .await
+                    .unwrap_or(-1);
+                let src_count = count_rows(conn, &format!("SELECT count(*) FROM {tmp_name}"))
+                    .await
+                    .unwrap_or(-1);
+                let msg = format!(
+                    "[{step_label}] INCONSISTENCY in {name}: matview={mv_count}, fresh={src_count}, \
+                     extra={extra} missing={missing} rows"
+                );
+                println!("!!! {msg}");
+                inconsistencies.push(msg);
+                has_data_mismatch = true;
+
+                let _ = print_query(
+                    conn,
+                    &format!("{name}: EXTRA rows in matview (not in fresh)"),
+                    &format!("SELECT * FROM {name} EXCEPT SELECT * FROM {tmp_name}"),
                 )
                 .await;
-            let _ = print_query(
-                conn,
-                &format!("{name}: EXTRA rows in matview (not in fresh)"),
-                &format!("SELECT * FROM {name} EXCEPT SELECT * FROM {tmp_name}"),
-            )
-            .await;
-            let _ = print_query(
-                conn,
-                &format!("{name}: MISSING rows (in fresh but not matview)"),
-                &format!("SELECT * FROM {tmp_name} EXCEPT SELECT * FROM {name}"),
-            )
-            .await;
-            let _ = conn
-                .execute(&format!("DROP VIEW IF EXISTS {tmp_name}"), ())
+                let _ = print_query(
+                    conn,
+                    &format!("{name}: MISSING rows (in fresh but not matview)"),
+                    &format!("SELECT * FROM {tmp_name} EXCEPT SELECT * FROM {name}"),
+                )
                 .await;
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                let msg = format!("[{step_label}] ERROR diffing {name}: {e}");
+                println!("!!! {msg}");
+                inconsistencies.push(msg);
+            }
         }
+
+        let _ = conn
+            .execute(&format!("DROP VIEW IF EXISTS {tmp_name}"), ())
+            .await;
     }
 
     Ok(ConsistencyResult {
         inconsistencies,
         has_data_mismatch,
     })
+}
+
+/// Tracker spec parsed from `--track-id <[TABLE=]ID>` flags.
+#[derive(Debug, Clone)]
+struct IdTracker {
+    id: String,
+    tables: Vec<String>,
+}
+
+fn parse_track_id_args(raw: &[String]) -> Vec<IdTracker> {
+    raw.iter()
+        .map(|spec| match spec.split_once('=') {
+            Some((tables, id)) => IdTracker {
+                id: id.to_string(),
+                tables: tables.split(',').map(|s| s.trim().to_string()).collect(),
+            },
+            None => IdTracker {
+                id: spec.clone(),
+                tables: vec!["block_raw".into(), "block".into()],
+            },
+        })
+        .collect()
+}
+
+/// Probe each tracker's tables for `id` presence; print a one-line
+/// status whenever the presence vector changes from the previous probe.
+/// Intentionally lightweight (one indexed lookup per table) so it's
+/// cheap enough to run after every DML in a long replay.
+async fn probe_trackers(
+    conn: &turso::Connection,
+    trackers: &[IdTracker],
+    prev: &mut [Option<Vec<bool>>],
+    stmt_idx: usize,
+    sql_preview: &str,
+) {
+    for (tracker, prev_slot) in trackers.iter().zip(prev.iter_mut()) {
+        let mut current = Vec::with_capacity(tracker.tables.len());
+        for table in &tracker.tables {
+            let sql = format!("SELECT 1 FROM {table} WHERE id = '{}'", tracker.id);
+            let hit = match conn.query(&sql, ()).await {
+                Ok(mut rows) => rows.next().await.map(|r| r.is_some()).unwrap_or(false),
+                Err(_) => false,
+            };
+            current.push(hit);
+        }
+        let changed = match prev_slot {
+            None => true,
+            Some(prev) => prev != &current,
+        };
+        if changed {
+            let parts: Vec<String> = tracker
+                .tables
+                .iter()
+                .zip(current.iter())
+                .map(|(t, hit)| format!("{t}={}", if *hit { "✓" } else { "✗" }))
+                .collect();
+            println!(
+                "[{stmt_idx}] track id={} {}  (after: {sql_preview})",
+                tracker.id,
+                parts.join(" "),
+            );
+            *prev_slot = Some(current);
+        }
+    }
+}
+
+fn parse_assert_directive(rest: &str) -> anyhow::Result<AssertKind> {
+    let rest = rest.trim();
+    let (verb, tail) = rest
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| anyhow::anyhow!("expected `<VERB> <args>`, got `{rest}`"))?;
+    let tail = tail.trim();
+    let (table, value) = tail
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| anyhow::anyhow!("expected `<table> <value>`, got `{tail}`"))?;
+    let table = table.trim().to_string();
+    let value = value.trim();
+
+    let strip_quotes = |s: &str| -> String {
+        s.strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(s)
+            .to_string()
+    };
+
+    match verb.to_ascii_uppercase().as_str() {
+        "ROW-EXISTS" => Ok(AssertKind::RowExists {
+            table,
+            id: strip_quotes(value),
+        }),
+        "ROW-ABSENT" => Ok(AssertKind::RowAbsent {
+            table,
+            id: strip_quotes(value),
+        }),
+        "ROW-COUNT" => {
+            let count = value
+                .parse::<i64>()
+                .with_context(|| format!("ROW-COUNT expects integer, got `{value}`"))?;
+            Ok(AssertKind::RowCount { table, count })
+        }
+        other => Err(anyhow::anyhow!(
+            "unknown assertion verb `{other}` (expected ROW-EXISTS / ROW-ABSENT / ROW-COUNT)"
+        )),
+    }
+}
+
+fn describe_assertion(kind: &AssertKind) -> String {
+    match kind {
+        AssertKind::RowExists { table, id } => format!("ROW-EXISTS {table} '{id}'"),
+        AssertKind::RowAbsent { table, id } => format!("ROW-ABSENT {table} '{id}'"),
+        AssertKind::RowCount { table, count } => format!("ROW-COUNT {table} {count}"),
+    }
+}
+
+async fn run_assertion(conn: &turso::Connection, kind: &AssertKind) -> anyhow::Result<bool> {
+    match kind {
+        AssertKind::RowExists { table, id } => {
+            let sql = format!("SELECT 1 FROM {table} WHERE id = '{id}'");
+            let mut rows = conn.query(&sql, ()).await?;
+            Ok(rows.next().await?.is_some())
+        }
+        AssertKind::RowAbsent { table, id } => {
+            let sql = format!("SELECT 1 FROM {table} WHERE id = '{id}'");
+            let mut rows = conn.query(&sql, ()).await?;
+            Ok(rows.next().await?.is_none())
+        }
+        AssertKind::RowCount { table, count } => {
+            let actual = count_rows(conn, &format!("SELECT count(*) FROM {table}")).await?;
+            Ok(actual == *count)
+        }
+    }
 }
 
 async fn count_rows(conn: &turso::Connection, sql: &str) -> anyhow::Result<i64> {
@@ -716,14 +906,19 @@ async fn count_rows(conn: &turso::Connection, sql: &str) -> anyhow::Result<i64> 
 async fn print_query(conn: &turso::Connection, label: &str, sql: &str) -> anyhow::Result<()> {
     println!("  {label}:");
     let mut rows = conn.query(sql, ()).await?;
+    let col_count = rows.column_count();
     let mut row_count = 0;
     while let Some(row) = rows.next().await? {
-        let mut parts = Vec::new();
-        for i in 0..20 {
-            match row.get::<String>(i) {
-                Ok(val) => parts.push(val),
-                Err(_) => break,
-            }
+        let mut parts = Vec::with_capacity(col_count);
+        for i in 0..col_count {
+            parts.push(match row.get_value(i) {
+                Ok(turso::Value::Null) => "NULL".to_string(),
+                Ok(turso::Value::Integer(n)) => n.to_string(),
+                Ok(turso::Value::Real(f)) => f.to_string(),
+                Ok(turso::Value::Text(s)) => s,
+                Ok(turso::Value::Blob(b)) => format!("<blob {} B>", b.len()),
+                Err(e) => format!("<err: {e}>"),
+            });
         }
         println!("    {}", parts.join(" | "));
         row_count += 1;
@@ -769,8 +964,33 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     let mut all_inconsistencies: Vec<String> = Vec::new();
     let mut has_data_mismatch = false;
     let mut stmt_idx = 0;
+    let replay_start = std::time::Instant::now();
+    let mut hit_max_stmts = false;
+    let mut hit_max_secs = false;
+
+    // Per-id tracker state: (id, [table_a, table_b, ...]) → previous presence
+    // vector. We only print on transitions to keep the output manageable.
+    let trackers = parse_track_id_args(&args.track_id);
+    if !trackers.is_empty() {
+        println!("  Tracking ids: {trackers:?}\n");
+    }
+    let mut tracker_prev: Vec<Option<Vec<bool>>> = vec![None; trackers.len()];
 
     for directive in &directives {
+        if let Some(max) = args.max_secs {
+            if replay_start.elapsed().as_secs() >= max {
+                hit_max_secs = true;
+                println!("\n!!! max-secs ({max}) reached at stmt {stmt_idx}; bailing out");
+                break;
+            }
+        }
+        if let Some(max) = args.max_stmts {
+            if stmt_idx >= max {
+                hit_max_stmts = true;
+                println!("\n!!! max-stmts ({max}) reached; bailing out");
+                break;
+            }
+        }
         match directive {
             Directive::SetChangeCallback => {
                 if cdc_registered {
@@ -878,6 +1098,11 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
                     }
                 }
 
+                if !trackers.is_empty() && is_dml {
+                    let preview: String = sql.chars().take(60).collect();
+                    probe_trackers(&conn, &trackers, &mut tracker_prev, stmt_idx, &preview).await;
+                }
+
                 if args.check_after_each && is_dml && stmt_idx >= args.check_from {
                     let matview_names = extract_matview_names(&executed_sqls);
                     if !matview_names.is_empty() {
@@ -885,14 +1110,39 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
                         let result =
                             check_matview_consistency(&conn, &matview_names, &label).await?;
                         if result.has_data_mismatch {
+                            let was_first = !has_data_mismatch;
                             has_data_mismatch = true;
                             all_inconsistencies.extend(result.inconsistencies);
-                            println!("\n=== BUG REPRODUCED at statement {stmt_idx}! ===");
-                            let sql_preview: String = sql.chars().take(200).collect();
-                            println!("    SQL: {sql_preview}");
-                            println!();
-                            break;
+                            if was_first {
+                                println!("\n=== BUG REPRODUCED at statement {stmt_idx}! ===");
+                                let sql_preview: String = sql.chars().take(200).collect();
+                                println!("    SQL: {sql_preview}");
+                                println!();
+                            }
+                            if !args.no_break_on_inconsistency {
+                                break;
+                            }
                         }
+                    }
+                }
+            }
+            Directive::Assert(kind) => {
+                let result = run_assertion(&conn, kind).await;
+                match result {
+                    Ok(true) => {
+                        println!("[assert] OK: {}", describe_assertion(kind));
+                    }
+                    Ok(false) => {
+                        let msg = format!("FAIL: {}", describe_assertion(kind));
+                        println!("!!! [assert] {msg}");
+                        all_inconsistencies.push(msg);
+                        has_data_mismatch = true;
+                    }
+                    Err(e) => {
+                        let msg =
+                            format!("ERROR running assertion {}: {e}", describe_assertion(kind));
+                        println!("!!! [assert] {msg}");
+                        all_inconsistencies.push(msg);
                     }
                 }
             }
@@ -911,6 +1161,12 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     println!("  Statements executed: {stmt_idx}");
     println!("  CDC events total: {}", cdc_count.load(Ordering::SeqCst));
     println!("  Issues found: {}", all_inconsistencies.len());
+    if hit_max_stmts {
+        println!("  Budget: max-stmts hit (partial replay)");
+    }
+    if hit_max_secs {
+        println!("  Budget: max-secs hit (partial replay)");
+    }
 
     if has_data_mismatch {
         println!("\n  VERDICT: IVM BUG REPRODUCED!");
@@ -932,31 +1188,119 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
 
 // ─── Minimizer ──────────────────────────────────────────────────────────────────
 
-fn crashes_with_subprocess(directives: &[Directive], crash_pattern: &str) -> bool {
+/// Subprocess wall-clock budget for a single minimization candidate. Hit
+/// regularly when the candidate doesn't reproduce — without it ddmin would
+/// wait for a 3985-stmt replay to finish naturally. With it the worst case
+/// per candidate is bounded, and the stream-and-kill path below makes the
+/// good case (candidate does reproduce) finish ~as fast as the crash
+/// pattern first appears in stdout.
+const MINIMIZE_CANDIDATE_MAX_SECS: u64 = 120;
+
+fn crashes_with_subprocess(
+    directives: &[Directive],
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> bool {
     let tmp_path = "/tmp/turso-minimize-candidate.sql";
     write_directives(tmp_path, directives).unwrap();
 
-    let exe = std::env::current_exe().unwrap();
-    let output = std::process::Command::new(exe)
-        .arg("replay")
-        .arg(tmp_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
+    // The caller decides whether per-DML matview diffing is necessary based
+    // on a probe of the full trace (see `probe_needs_per_stmt_check`):
+    //   - panic-style patterns / FINAL-detectable matview drift -> false
+    //     (subprocess runs plain replay; pattern is caught at FINAL or by panic)
+    //   - intermittent mid-trace drift that self-heals -> true
+    //     (subprocess runs --check-after-each --no-break-on-inconsistency, slow)
+    //
+    // For matview bugs that persist to the end of the trace this is a 100×+
+    // speedup per candidate; a 5554-stmt minimization that was 1h/candidate
+    // becomes ~5-8s/candidate. We deliberately omit --check-from: the
+    // minimizer mutates positions by removing statements, so a fixed offset
+    // would skip checks that have shifted earlier.
 
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            stdout.contains(crash_pattern) || stderr.contains(crash_pattern)
-        }
-        Err(_) => false,
+    let exe = std::env::current_exe().unwrap();
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("replay").arg(tmp_path);
+    if needs_per_stmt_check {
+        cmd.arg("--check-after-each")
+            .arg("--no-break-on-inconsistency");
     }
+    cmd.arg("--max-secs")
+        .arg(MINIMIZE_CANDIDATE_MAX_SECS.to_string());
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let stdout = child.stdout.take().expect("stdout was set to piped");
+    let stderr = child.stderr.take().expect("stderr was set to piped");
+    let needle = crash_pattern.to_string();
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+
+    fn spawn_scanner<R: std::io::Read + Send + 'static>(
+        reader: R,
+        needle: String,
+        tx: std::sync::mpsc::Sender<bool>,
+    ) {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let buf = std::io::BufReader::new(reader);
+            for line in buf.lines().flatten() {
+                if line.contains(&needle) {
+                    let _ = tx.send(true);
+                    return;
+                }
+            }
+            let _ = tx.send(false);
+        });
+    }
+    spawn_scanner(stdout, needle.clone(), tx.clone());
+    spawn_scanner(stderr, needle, tx.clone());
+    // Drop our own sender so `recv` returns Disconnected once both scanners exit.
+    drop(tx);
+
+    // Hard ceiling slightly past the subprocess's own --max-secs, so we
+    // always see the subprocess's bail-out output before reaping.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(MINIMIZE_CANDIDATE_MAX_SECS + 10);
+    let mut found = false;
+    let mut scanners_done = 0;
+    while scanners_done < 2 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining.min(std::time::Duration::from_millis(500))) {
+            Ok(true) => {
+                found = true;
+                break;
+            }
+            Ok(false) => {
+                scanners_done += 1;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // If the child has already exited, both scanners should drain
+                // and report shortly; loop back and recv again.
+                if let Ok(Some(_)) = child.try_wait() {
+                    // give the scanners one more poll cycle before bailing
+                    continue;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    found
 }
 
 fn is_structural(d: &Directive) -> bool {
     match d {
         Directive::SetChangeCallback => true,
+        Directive::Assert(_) => true,
         Directive::Wait(_) => false,
         Directive::Sql { sql, .. } => {
             let upper = sql.trim().to_uppercase();
@@ -975,6 +1319,8 @@ fn detect_crash_pattern(directives: &[Directive]) -> String {
     let output = std::process::Command::new(exe)
         .arg("replay")
         .arg(tmp_path)
+        .arg("--check-after-each")
+        .arg("--no-break-on-inconsistency")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -982,6 +1328,20 @@ fn detect_crash_pattern(directives: &[Directive]) -> String {
 
     let combined = String::from_utf8_lossy(&output.stdout).to_string()
         + &String::from_utf8_lossy(&output.stderr);
+
+    // Prefer matview-inconsistency markers — these are why we're minimizing in
+    // the first place when chasing IVM bugs. Pick the first INCONSISTENCY line
+    // and use the table name as the pattern so the minimizer locks onto the
+    // matview that drifted.
+    for line in combined.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("INCONSISTENCY in ") {
+            if let Some(name) = rest.split(':').next() {
+                let pattern = format!("INCONSISTENCY in {name}");
+                println!("  Detected crash pattern: {pattern}");
+                return pattern;
+            }
+        }
+    }
 
     for (i, line) in combined.lines().enumerate() {
         if line.contains("panicked at") {
@@ -1021,12 +1381,17 @@ fn extract_table_name(sql: &str) -> Option<String> {
     None
 }
 
-fn try_remove(kept: &[Directive], i: usize, crash_pattern: &str) -> Option<Vec<Directive>> {
+fn try_remove(
+    kept: &[Directive],
+    i: usize,
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> Option<Vec<Directive>> {
     let mut candidate: Vec<Directive> = Vec::with_capacity(kept.len() - 1);
     candidate.extend(kept[..i].iter().cloned());
     candidate.extend(kept[i + 1..].iter().cloned());
 
-    if crashes_with_subprocess(&candidate, crash_pattern) {
+    if crashes_with_subprocess(&candidate, crash_pattern, needs_per_stmt_check) {
         Some(candidate)
     } else {
         None
@@ -1037,6 +1402,7 @@ fn try_remove_batch(
     kept: &[Directive],
     indices: &[usize],
     crash_pattern: &str,
+    needs_per_stmt_check: bool,
 ) -> Option<Vec<Directive>> {
     let skip: std::collections::HashSet<usize> = indices.iter().copied().collect();
     let candidate: Vec<Directive> = kept
@@ -1046,10 +1412,41 @@ fn try_remove_batch(
         .map(|(_, d)| d.clone())
         .collect();
 
-    if crashes_with_subprocess(&candidate, crash_pattern) {
+    if crashes_with_subprocess(&candidate, crash_pattern, needs_per_stmt_check) {
         Some(candidate)
     } else {
         None
+    }
+}
+
+/// Decide whether the minimizer's per-candidate subprocess needs
+/// `--check-after-each` (per-DML matview diff). Probes by running the full
+/// directives once *without* the per-DML check; if the crash pattern still
+/// appears (panic surfaces in stderr, or `[FINAL] INCONSISTENCY` lands in
+/// stdout), the FINAL check is sufficient and every later candidate can skip
+/// the O(N²) per-DML diff. This is what unblocks ~5500-stmt minimizations
+/// that were taking ~1h/candidate with the per-DML diff on.
+fn probe_needs_per_stmt_check(directives: &[Directive], crash_pattern: &str) -> bool {
+    let panic_like = crash_pattern.contains("panicked")
+        || crash_pattern.contains("multiset went negative")
+        || crash_pattern.contains("invalid state")
+        || crash_pattern.contains("Uninitialized");
+    if panic_like {
+        return false;
+    }
+
+    println!(
+        "--- Probing: does FINAL-only replay catch '{crash_pattern}'? (skipping --check-after-each) ---"
+    );
+    let fast_works = crashes_with_subprocess(directives, crash_pattern, false);
+    if fast_works {
+        println!("  Yes — using fast subprocess for all candidates.\n");
+        false
+    } else {
+        println!(
+            "  No — falling back to --check-after-each (slow). Pattern only surfaces mid-replay.\n"
+        );
+        true
     }
 }
 
@@ -1079,6 +1476,10 @@ fn write_directives(path: &str, directives: &[Directive]) -> anyhow::Result<()> 
                 writeln!(f, "{sql};")?;
                 writeln!(f)?;
             }
+            Directive::Assert(kind) => {
+                writeln!(f, "-- ?ASSERT {}", describe_assertion(kind))?;
+                writeln!(f)?;
+            }
         }
     }
     Ok(())
@@ -1099,6 +1500,8 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
     println!("=== Minimizer: {total} directives ===");
     println!("  Crash pattern: {crash_pattern}\n");
 
+    let needs_per_stmt_check = probe_needs_per_stmt_check(&directives, &crash_pattern);
+
     // Phase 1: Binary search for minimal prefix
     println!("--- Phase 1: Find minimal prefix ---");
     let mut lo: usize = 1;
@@ -1107,7 +1510,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
     while lo < hi {
         let mid = (lo + hi) / 2;
         print!("  Prefix [{mid}/{total}]... ");
-        if crashes_with_subprocess(&directives[..mid], &crash_pattern) {
+        if crashes_with_subprocess(&directives[..mid], &crash_pattern, needs_per_stmt_check) {
             println!("CRASHES");
             hi = mid;
         } else {
@@ -1195,7 +1598,9 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
                 indices.last().unwrap()
             );
 
-            if let Some(candidate) = try_remove_batch(&kept, indices, &crash_pattern) {
+            if let Some(candidate) =
+                try_remove_batch(&kept, indices, &crash_pattern, needs_per_stmt_check)
+            {
                 println!("REMOVED all {} stmts", indices.len());
                 removed += indices.len();
                 kept = candidate;
@@ -1236,7 +1641,9 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
                     kept.len()
                 );
 
-                if let Some(candidate) = try_remove_batch(&kept, &indices, &crash_pattern) {
+                if let Some(candidate) =
+                    try_remove_batch(&kept, &indices, &crash_pattern, needs_per_stmt_check)
+                {
                     println!("REMOVED {} stmts", indices.len());
                     removed += indices.len();
                     kept = candidate;
@@ -1273,7 +1680,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         let preview = directive_preview(&kept[i]);
         print!("  [{i}/{}] remove: {preview}... ", kept.len());
 
-        if let Some(candidate) = try_remove(&kept, i, &crash_pattern) {
+        if let Some(candidate) = try_remove(&kept, i, &crash_pattern, needs_per_stmt_check) {
             println!("REMOVED");
             kept = candidate;
             removed += 1;
@@ -1337,7 +1744,9 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         if !batch_indices.is_empty() {
             let mut all_indices = batch_indices.clone();
             all_indices.push(i);
-            if let Some(candidate) = try_remove_batch(&kept, &all_indices, &crash_pattern) {
+            if let Some(candidate) =
+                try_remove_batch(&kept, &all_indices, &crash_pattern, needs_per_stmt_check)
+            {
                 println!("REMOVED (+ {} dependents)", batch_indices.len());
                 removed += all_indices.len();
                 kept = candidate;
@@ -1346,7 +1755,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         }
 
         if !did_remove {
-            if let Some(candidate) = try_remove(&kept, i, &crash_pattern) {
+            if let Some(candidate) = try_remove(&kept, i, &crash_pattern, needs_per_stmt_check) {
                 println!("REMOVED");
                 kept = candidate;
                 removed += 1;
@@ -1386,7 +1795,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         let preview = directive_preview(&kept[i]);
         print!("  [{i}/{}] remove: {preview}... ", kept.len());
 
-        if let Some(candidate) = try_remove(&kept, i, &crash_pattern) {
+        if let Some(candidate) = try_remove(&kept, i, &crash_pattern, needs_per_stmt_check) {
             println!("REMOVED");
             kept = candidate;
             removed += 1;
@@ -1421,6 +1830,10 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
             Directive::Sql { tag, sql } => {
                 println!("-- [{tag}]");
                 println!("{sql};");
+                println!();
+            }
+            Directive::Assert(kind) => {
+                println!("-- ?ASSERT {}", describe_assertion(kind));
                 println!();
             }
         }
