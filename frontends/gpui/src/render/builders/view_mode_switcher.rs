@@ -39,11 +39,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // each a JSON-serialized RenderExpr. Reconstruct the mode → expr map.
     let mode_templates: std::collections::HashMap<String, holon_api::render_types::RenderExpr> = {
         let props = node.props.lock_ref();
+        // ALLOW(filter_map_ok): malformed tmpl_ props are non-fatal reconstruction skips
         props
             .iter()
             .filter_map(|(k, v)| {
                 let mode_key = k.strip_prefix("tmpl_")?;
                 if let holon_api::Value::String(s) = v {
+                    // ALLOW(ok): see ALLOW(filter_map_ok) above — same rationale
                     serde_json::from_str::<holon_api::render_types::RenderExpr>(s)
                         .ok()
                         .map(|expr| (mode_key.to_string(), expr))
@@ -129,6 +131,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                         }
                     }
 
+                    // ALLOW(fallback): pre-existing fast-path / full-rebuild structure; not a hidden-failure fallback
                     // Fallback: full rebuild (cross-variant or no collection)
                     if let Some(ref ctx) = captured_ctx {
                         let content = services.interpret(new_expr, ctx);

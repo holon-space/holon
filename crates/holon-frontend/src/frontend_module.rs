@@ -312,37 +312,42 @@ impl FrontendInjectorExt for Injector {
                 ))
                 .await;
 
-                // Wait for orgmode readiness — errors propagate (never swallowed)
+                // Wait for orgmode readiness, then resolve the Loro sync
+                // controller. The Loro controller's factory runs
+                // `seed_loro_from_persistent_store`, which mirrors every row
+                // in the `block` table into Loro — so it must wait until the
+                // OrgMode initial scan has populated SQL. Otherwise the
+                // mirror sees an incomplete table and later share/accept ops
+                // fail with "block X not found in Loro tree".
+                //
+                // Production (`wait_for_ready=false`): spawn this in the
+                // background so the window paints immediately and data
+                // streams in via the reactive layer.
+                // Tests (`wait_for_ready=true`): await before returning so
+                // assertions see fully-seeded state.
                 #[cfg(not(target_arch = "wasm32"))]
-                async {
-                    if wait_for_ready {
-                        if let Some(ref signal) = ready_signal {
+                {
+                    let resolver_bg = resolver.clone();
+                    let ready_signal_bg = ready_signal.clone();
+                    let post_ready_work = async move {
+                        if let Some(signal) = ready_signal_bg {
                             signal.wait_ready().await.expect("OrgMode startup failed");
                         }
+                        let _ = resolver_bg
+                            .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                            .await;
+                    }
+                    .instrument(tracing::info_span!(
+                        "di.factory.FrontendSession.post_ready",
+                        wait_for_ready = wait_for_ready
+                    ));
+
+                    if wait_for_ready {
+                        post_ready_work.await;
+                    } else {
+                        tokio::spawn(post_ready_work);
                     }
                 }
-                .instrument(tracing::info_span!(
-                    "di.factory.FrontendSession.wait_for_orgmode_ready",
-                    wait_for_ready = wait_for_ready
-                ))
-                .await;
-
-                // Resolve the Loro sync controller AFTER `seed_default_layout`
-                // AND OrgMode readiness. The controller's factory runs
-                // `seed_loro_from_persistent_store`, which mirrors every row in
-                // the `block` table into Loro. If this resolve happens before
-                // those two phases complete, the mirror sees an incomplete table
-                // and later share/accept ops fail with
-                // "block X not found in Loro tree".
-                let _ = async {
-                    resolver
-                        .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
-                        .await
-                }
-                .instrument(tracing::info_span!(
-                    "di.factory.FrontendSession.resolve_loro_sync"
-                ))
-                .await;
 
                 let config_dir_val = resolver.resolve::<ConfigDir>();
                 let theme_registry = resolver.resolve::<theme::ThemeRegistry>();
@@ -402,12 +407,14 @@ impl FrontendInjectorExt for Injector {
             let interpreter = resolver
                 .resolve::<crate::render_interpreter::RenderInterpreter<crate::ReactiveViewModel>>(
                 );
+            let services_slot = resolver.resolve::<crate::reactive::BuilderServicesSlot>();
             let f = interpret.0.clone();
             Shared::new(crate::reactive::ReactiveEngine::new(
                 session,
                 tokio::runtime::Handle::current(),
                 interpreter,
                 move |expr, rows| f(expr, rows),
+                services_slot.0.clone(),
             ))
         }));
 

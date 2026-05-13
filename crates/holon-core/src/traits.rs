@@ -733,12 +733,21 @@ where
     /// * `id` - Block ID to split
     /// * `position` - Character position to split at (as i64, will be converted to usize)
     #[holon_macros::affects("content")]
-    async fn split_block(&self, id: &str, position: i64) -> Result<OperationResult> {
+    async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         use uuid::Uuid;
 
-        eprintln!("[split_block-diag] id={id:?} position={position}");
-        let maybe_block: Option<T> = self.get_by_id(id).await?;
+        let id_str = id.as_str();
+        let maybe_block: Option<T> = self.get_by_id(id_str).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+
+        // Page blocks have null `parent_id` (the visible `__document_root__`
+        // parent is added by hydration, not stored in SQL). Splitting them
+        // would orphan the new block under `sentinel:no_parent` and is
+        // semantically meaningless — Enter on a Page should never split
+        // the Page itself.
+        if block.is_page() {
+            return Err(anyhow::anyhow!("Refusing to split Page block {id_str}").into());
+        }
 
         // Prefer the live (Loro) view of the block's text when available
         // through the cell registry; the per-keystroke writes that produced
@@ -747,7 +756,7 @@ where
         // stored content when `cells()` is `None` (synthetic test stores)
         // or when the cell registry can't resolve the field (SqlOnly mode,
         // block not yet in Loro tree).
-        let split_uri = EntityUri::block(id);
+        let split_uri = id.clone();
         let content_owned = read_content_via_cells(self.cells(), &split_uri)
             .unwrap_or_else(|| block.content().to_string());
         let content: &str = &content_owned;
@@ -805,7 +814,7 @@ where
             )
         })?;
         let new_sort_key = ordering
-            .new_child_anchor(&parent_for_anchor, Some(id))
+            .new_child_anchor(&parent_for_anchor, Some(id_str))
             .await?;
 
         // Route the new-block create through the cell registry when a Loro
@@ -824,14 +833,8 @@ where
             .parent_id()
             .map(EntityUri::from_raw)
             .unwrap_or_else(EntityUri::no_parent);
-        eprintln!(
-            "[split_block-diag] block.id={:?} block.parent_id={:?} parent_for_split={:?}",
-            block.id(),
-            block.parent_id(),
-            parent_for_split.as_str()
-        );
         let new_block_uri = EntityUri::from_raw(&new_block_id);
-        let after_uri = EntityUri::block(id);
+        let after_uri = id.clone();
         let wrote_create_via_cell = create_block_via_cells(
             self.cells(),
             &parent_for_split,
@@ -840,6 +843,14 @@ where
             &content_after,
         )
         .await?;
+
+        eprintln!(
+            "[split_block-diag] new_block_id={} parent={} after={} wrote_create_via_cell={}",
+            new_block_id,
+            parent_for_split.as_str(),
+            after_uri.as_str(),
+            wrote_create_via_cell,
+        );
 
         let mut changes = Vec::new();
         if !wrote_create_via_cell {
@@ -866,7 +877,10 @@ where
             // payload, and lifts the value onto the typed
             // `Event::position_after_block_id` field that `apply_create`
             // reads.
-            new_block_fields.insert("after_block_id".to_string(), Value::String(id.to_string()));
+            new_block_fields.insert(
+                "after_block_id".to_string(),
+                Value::String(id_str.to_string()),
+            );
             new_block_fields.insert("created_at".to_string(), Value::Integer(now));
             new_block_fields.insert("updated_at".to_string(), Value::Integer(now));
             new_block_fields.insert("collapsed".to_string(), Value::Boolean(false));
@@ -889,11 +903,11 @@ where
             write_content_via_cells(self.cells(), &split_uri, content_before_for_cell).await?;
         if !wrote_via_cell {
             let content_result = self
-                .set_field(id, "content", Value::String(content_before))
+                .set_field(id_str, "content", Value::String(content_before))
                 .await?;
             changes.extend(content_result.changes);
         }
-        // TODO: Do we need this? self.set_field(id, "updated_at", Value::Integer(now))
+        // TODO: Do we need this? self.set_field(id_str, "updated_at", Value::Integer(now))
         // TODO: Do we need this?     .await?;
 
         // Follow-up: move editor cursor to the new block at position 0.

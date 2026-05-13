@@ -297,17 +297,92 @@ pub fn generate_org_file_content_with_keywords(
             (filename, content)
         });
 
+    // Shared-tree mount: a headline with `:share-role: mount` and
+    // `:shared-tree-id: <uuid>` in its property drawer, plus 1–3 children
+    // that carry the same `:shared-tree-id:`. This shape exists in
+    // production (see `crates/holon/src/sync/shared_tree.rs`,
+    // `crates/holon/src/sync/loro_share_backend.rs`) but is otherwise
+    // unreachable from the PBT — no transition creates a mount node,
+    // and the regular-file generator above never emits drawer keys
+    // outside `:ID:` / `:TODO:` / etc.
+    //
+    // Why this generator exists: the May-2026 loop on
+    // `Phase 6: Flow Optimization.org` was a render-fixed-point
+    // violation specific to mount-node ingestion (the SQL row for the
+    // mount block was missing the `ID` property, sort_keys on tied
+    // siblings drifted, and the renderer's output disagreed with the
+    // disk file — feeding the FSEvent → on_file_changed loop). Without
+    // this generator the bug class can't be surfaced by
+    // `inv-org-render-fixed-point`.
+    let shared_tree_mount_file = (
+        "[a-z_]+_[0-9]+\\.org",
+        "[A-Z][a-z][a-zA-Z0-9 ]{0,15}", // mount headline
+        "[a-z0-9-]+",                   // mount block id
+        "[a-z0-9-]+",                   // shared-tree-id
+        prop_vec(("[A-Z][a-z][a-zA-Z0-9 ]{0,19}", "[a-z0-9-]+"), 1..=3),
+    )
+        .prop_map(|(filename, mount_headline, mount_id, tree_id, children)| {
+            let doc_uri = EntityUri::block("gen-placeholder");
+            let mount_uri = EntityUri::block(&mount_id);
+
+            let mut mount = Block::new_text(mount_uri.clone(), doc_uri.clone(), &mount_headline);
+            mount.set_property("ID", Value::String(mount_id.clone()));
+            mount.set_property("share-role", Value::String("mount".to_string()));
+            mount.set_property("shared-tree-id", Value::String(tree_id.clone()));
+
+            let mut blocks = vec![mount];
+            for (headline, id) in children {
+                let mut child =
+                    Block::new_text(EntityUri::block(&id), mount_uri.clone(), &headline);
+                child.set_property("ID", Value::String(id.clone()));
+                child.set_property("shared-tree-id", Value::String(tree_id.clone()));
+                blocks.push(child);
+            }
+
+            let content = OrgRenderer::render_entitys(
+                &blocks,
+                Path::new(&filename),
+                &EntityUri::block("gen-placeholder"),
+            );
+            (filename, content)
+        });
+
+    // Shared-tree mount files are gated by `HOLON_PBT_SHARED_TREE_MOUNT=1`.
+    // The reference model doesn't yet track `share-role` / `shared-tree-id`
+    // properties or the mount-children-belong-to-mount hierarchy, so leaving
+    // the generator on by default makes `assert_blocks_equivalent` (Backend
+    // diverged from reference) fail on every run that hits this branch.
+    // Flip the env var to actively hunt mount-shape regressions (e.g. the
+    // May-2026 `Phase 6: Flow Optimization` loop class); leave it off to
+    // keep CI green.
+    let mount_enabled = std::env::var("HOLON_PBT_SHARED_TREE_MOUNT").ok().as_deref() == Some("1");
+
     if allow_index_override {
-        prop_oneof![
-            3 => regular_file,
-            2 => index_file_prql,
-            1 => index_file_gql,
-            1 => index_file_gql_varlen,
-            1 => index_file_sql,
-            1 => index_file_tree,
-            1 => file_with_profile,
-        ]
-        .boxed()
+        if mount_enabled {
+            prop_oneof![
+                3 => regular_file,
+                2 => index_file_prql,
+                1 => index_file_gql,
+                1 => index_file_gql_varlen,
+                1 => index_file_sql,
+                1 => index_file_tree,
+                1 => file_with_profile,
+                2 => shared_tree_mount_file,
+            ]
+            .boxed()
+        } else {
+            let _ = shared_tree_mount_file; // hold onto strategy without firing
+            prop_oneof![
+                3 => regular_file,
+                2 => index_file_prql,
+                1 => index_file_gql,
+                1 => index_file_gql_varlen,
+                1 => index_file_sql,
+                1 => index_file_tree,
+                1 => file_with_profile,
+            ]
+            .boxed()
+        }
     } else {
         // Profile-bearing files override the default block entity profile,
         // and the test's profile YAMLs render just `row(editable_text(...))`

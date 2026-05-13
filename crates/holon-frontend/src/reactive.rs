@@ -47,6 +47,21 @@ pub trait BuilderServices: Send + Sync {
     /// reactive pipeline — no caller ever touches `RenderInterpreter` directly.
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel;
 
+    /// Return an owned handle to this services instance.
+    ///
+    /// Needed by widgets that capture services for deferred interpretation
+    /// (lazy slots, suspendable subscriptions). Implementors that participate
+    /// in lazy-materialisation paths override this; the default panics so
+    /// non-participating stubs (test, headless) fail loud if accidentally
+    /// driven through such a path.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        unimplemented!(
+            "clone_arc not implemented for this BuilderServices impl; \
+             only services that drive lazy widgets (expand_toggle, tabs, \
+             view_mode_switcher) need to override this"
+        )
+    }
+
     /// Get the current (RenderExpr, Vec<Arc<DataRow>>) for a block, ensuring a watcher is running.
     fn get_block_data(&self, id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>);
 
@@ -85,6 +100,16 @@ pub trait BuilderServices: Send + Sync {
 
     /// Look up widget state by block ID.
     fn widget_state(&self, id: &str) -> WidgetState;
+
+    /// Set a widget's `open` field. Used by self-rendering toggle widgets
+    /// (`drawer`, `collapse_toggle`) so the click handler doesn't have to
+    /// reach into `FrontendSession` directly. Default impl panics — every
+    /// real `BuilderServices` impl must override; the stub providers
+    /// (`StubBuilderServices`, ref-state mock) override it as a no-op.
+    fn set_widget_open(&self, id: &str, open: bool) {
+        let _ = (id, open);
+        unimplemented!("BuilderServices::set_widget_open");
+    }
 
     /// Fire-and-forget operation dispatch.
     ///
@@ -978,6 +1003,10 @@ pub struct ReactiveEngine {
     /// it. Set by frontend DI factories that want CRDT-backed editors.
     pub block_cell_registry:
         Mutex<Option<Arc<holon::sync::block_cell_registry::BlockCellRegistry>>>,
+    /// Shared slot used to recover an owned `Arc<dyn BuilderServices>` from
+    /// inside `&self` methods. Populated by the owning frontend right after
+    /// the engine is wrapped in an Arc; `clone_arc()` reads it.
+    pub services_slot: Arc<std::sync::OnceLock<Arc<dyn BuilderServices>>>,
 }
 
 impl ReactiveEngine {
@@ -986,6 +1015,7 @@ impl ReactiveEngine {
         runtime_handle: tokio::runtime::Handle,
         interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
         interpret_fn: impl Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        services_slot: Arc<std::sync::OnceLock<Arc<dyn BuilderServices>>>,
     ) -> Self {
         use holon_api::input_types::Key;
 
@@ -1031,6 +1061,7 @@ impl ReactiveEngine {
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
             editor_cursor: Mutex::new(None),
             block_cell_registry: Mutex::new(None),
+            services_slot,
         }
     }
 
@@ -1689,6 +1720,13 @@ impl BuilderServices for ReactiveEngine {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        self.services_slot
+            .get()
+            .expect("services_slot not yet populated — frontend bootstrap must call services_slot.set(engine.clone()) before any lazy-widget interpretation")
+            .clone()
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(%id))]
     fn get_block_data(&self, id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         let results = self.ensure_watching(id);
@@ -1746,6 +1784,10 @@ impl BuilderServices for ReactiveEngine {
 
     fn widget_state(&self, id: &str) -> WidgetState {
         self.session.widget_state(id)
+    }
+
+    fn set_widget_open(&self, id: &str, open: bool) {
+        self.session.set_widget_open(id, open);
     }
 
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
@@ -1873,6 +1915,7 @@ impl BuilderServices for ReactiveEngine {
     }
 
     fn set_focus(&self, block_id: Option<EntityUri>) {
+        // ALLOW(direct_focus_mutation): this IS the legitimate BuilderServices::set_focus setter.
         self.ui_state.set_focus(block_id);
     }
 
@@ -2020,6 +2063,10 @@ impl BuilderServices for HeadlessBuilderServices {
         WidgetState::default()
     }
 
+    fn set_widget_open(&self, _: &str, _: bool) {
+        // Headless services have no UI to toggle.
+    }
+
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
         tracing::warn!(
             "HeadlessBuilderServices.dispatch_intent({}.{}) — no-op in headless mode",
@@ -2141,6 +2188,10 @@ impl BuilderServices for StubBuilderServices {
         WidgetState::default()
     }
 
+    fn set_widget_open(&self, _: &str, _: bool) {
+        // Stub services don't persist widget state.
+    }
+
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
         tracing::info!(
             "StubBuilderServices.dispatch_intent({}.{}) — no-op in stub mode",
@@ -2251,8 +2302,10 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
                 .get("block_id")
                 .and_then(|v| v.as_string())
                 .map(|s| EntityUri::from_raw(s));
+            // ALLOW(direct_focus_mutation): mirror of navigation.focus into UiState for value-fn graph; intentional, see surrounding comment.
             ui_state.set_focus(block_id);
         }
+        // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for value-fn graph.
         "go_home" => ui_state.set_focus(None),
         // `go_back` / `go_forward` would require reading
         // `navigation_history` to know the target — leave them alone

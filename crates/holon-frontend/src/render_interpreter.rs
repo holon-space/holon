@@ -767,12 +767,32 @@ fn pick_active_variant(
         ui_state.insert(k.clone(), v.clone());
     }
 
-    // Find first variant whose condition matches
-    for variant in &profile.variants {
+    // Find first variant whose condition matches. Emit one tracing line per
+    // resolution so PBT runs (and live diagnostics) can show which variant
+    // won for each entity and why — turns "block X rendered as the wrong
+    // widget" from a guessing game into a one-line read.
+    for (idx, variant) in profile.variants.iter().enumerate() {
         if variant.condition.evaluate(&ui_state) {
+            tracing::trace!(
+                target: "profile",
+                "[profile] {block_id_repr} variant_idx={idx} condition={cond:?} → MATCH",
+                block_id_repr = block_id
+                    .as_ref()
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| "<no-id>".into()),
+                cond = &variant.condition,
+            );
             return variant.render.clone();
         }
     }
+    tracing::trace!(
+        target: "profile",
+        "[profile] {block_id_repr} no variant matched → default render",
+        block_id_repr = block_id
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "<no-id>".into()),
+    );
 
     profile.render.clone()
 }

@@ -26,6 +26,11 @@ fn main() -> Result<()> {
 
     let widgets = holon_gpui::render_supported_widgets();
     let (holon_config, session_config, config_dir, locked) = cli::build_session(widgets)?;
+    // Production: don't block window paint on the OrgMode initial scan.
+    // The FrontendSession factory spawns the wait + Loro seed in the
+    // background; the reactive layer fills in data as it arrives. Tests
+    // override this via `SessionConfig` to wait_for_ready=true.
+    let session_config = session_config.without_wait();
 
     let runtime = tokio::runtime::Runtime::new()?;
 
@@ -38,7 +43,7 @@ fn main() -> Result<()> {
             config_dir,
             locked_keys: locked,
         });
-        let timeout = std::time::Duration::from_secs(60);
+        let timeout = std::time::Duration::from_secs(180);
         tokio::time::timeout(timeout, app.bootstrap())
             .await
             .map_err(|_| anyhow::anyhow!("Bootstrap timed out after {timeout:?}"))?
@@ -53,31 +58,10 @@ fn main() -> Result<()> {
     let engine = injector.resolve::<ReactiveEngine>();
     let debug = injector.resolve::<DebugServices>();
 
-    // Force the Loro sync controller to start. Its provider factory also
-    // runs `seed_loro_from_persistent_store`, which mirrors every row in
-    // the `block` table into the global Loro doc — without this, blocks
-    // created by `seed_default_layout` (which bypasses the
-    // `OperationProvider`) never reach Loro and ops like `share_subtree`
-    // fail with "block X not found in Loro tree".
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    match runtime.block_on(async {
-        injector
-            .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
-            .await
-    }) {
-        Ok(_handle) => {
-            tracing::info!(
-                "[startup] LoroSyncControllerHandle resolved — Loro seeded + controller running"
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                "[startup] LoroSyncControllerHandle resolve failed — Loro will be out of sync \
-                 with SQL; share/accept ops on seeded blocks will fail"
-            );
-        }
-    }
+    // LoroSyncControllerHandle is resolved by the FrontendSession factory
+    // in a background task that awaits OrgMode readiness first. We don't
+    // block on it here — the window opens immediately and Loro seeding
+    // happens concurrently with the first frames.
 
     let rt_handle = runtime.handle().clone();
 

@@ -437,6 +437,34 @@ impl EditorView {
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
         if focused_block_now.as_ref() == Some(&row_uri) {
             window.focus(&input.read(cx).focus_handle(cx), cx);
+            // Place the cursor at end-of-text on first mount and force
+            // the blink cursor visible in one go.
+            //
+            // Two problems being solved here:
+            //   1. Initial offset: the click handler in
+            //      `rendered_text` dispatches `editor_focus` with
+            //      `cursor_offset = content.len()`, but the SQL write
+            //      → CDC echo only reaches the
+            //      `watch_editor_cursor` subscription a frame or two
+            //      after the editor mounts. The editor's first paint
+            //      would otherwise show the cursor at `InputState`'s
+            //      default offset 0 (before the first character) and
+            //      jump to the end once the CDC echo lands.
+            //   2. Blink visibility: `BlinkCursor::new` starts with
+            //      `visible: false`; the `on_focus` observer toggles
+            //      to true but only on the next frame, so the first
+            //      paint renders an invisible cursor that pops in
+            //      after 500 ms.
+            //
+            // `set_cursor_position` → `move_to` calls
+            // `pause_blink_cursor` (sets `visible = true; paused = true`
+            // synchronously) AND moves the cursor — both in one call.
+            // If the eventual CDC echo carries a different offset, the
+            // `_cursor_subscription` handler corrects it.
+            input.update(cx, |state, cx| {
+                let end = state.text().offset_to_position(state.text().len());
+                state.set_cursor_position(end, window, cx);
+            });
         }
 
         Self {
@@ -508,12 +536,28 @@ impl Render for EditorView {
                 let services = self.services.clone();
                 let row_id = self.row_id.clone();
                 move |_: &Enter, window, cx: &mut App| {
+                    // Two layered guards keep Enter on a Page-level editor
+                    // from acting on behalf of a focused child:
+                    //   1. only the editor whose own InputState owns
+                    //      keyboard focus runs the capture body, and
+                    //   2. the operation targets `services.focused_block()`
+                    //      (UiState's notion of focus), not this editor's
+                    //      own `row_id` — so even if the capture fires on a
+                    //      shared/ancestor editor, the split lands on the
+                    //      logically focused leaf.
+                    if !input.read(cx).focus_handle(cx).is_focused(window) {
+                        return;
+                    }
+                    let target_id = services
+                        .focused_block()
+                        .map(|u| u.as_str().to_string())
+                        .unwrap_or_else(|| row_id.clone());
                     // Cmd+Enter → dispatch cycle_task_state.
                     // GPUI's action system captures Enter before on_key_down fires,
                     // so we handle the keychord here directly.
                     if window.modifiers().platform {
                         let mut params = std::collections::HashMap::new();
-                        params.insert("id".into(), holon_api::Value::String(row_id.clone()));
+                        params.insert("id".into(), holon_api::Value::String(target_id.clone()));
                         services.dispatch_intent(holon_frontend::operations::OperationIntent::new(
                             "block".into(),
                             "cycle_task_state".into(),
@@ -575,12 +619,8 @@ impl Render for EditorView {
                             // Dispatch split_block directly, matching the
                             // Tab → indent / Shift+Tab → outdent pattern below.
                             let cursor_byte = input.read(cx).cursor();
-                            eprintln!(
-                                "[editor-enter-diag] dispatching split_block row_id={:?} cursor_byte={}",
-                                row_id, cursor_byte
-                            );
                             let mut params = std::collections::HashMap::new();
-                            params.insert("id".into(), holon_api::Value::String(row_id.clone()));
+                            params.insert("id".into(), holon_api::Value::String(target_id.clone()));
                             params.insert(
                                 "position".into(),
                                 holon_api::Value::Integer(cursor_byte as i64),

@@ -66,9 +66,11 @@ pub trait GeometryProvider: Send + Sync {
 
     /// Find any tracked element whose `entity_id` matches.
     ///
-    /// Used as a last-resort fallback in click-target lookup when the
-    /// canonical `render-entity-{id}` / `selectable-{id}` el_ids miss —
-    /// e.g. a builder that `tracked()`'d under a non-standard prefix.
+    /// ALLOW(fallback): documented last-resort lookup chain — `click_entity`
+    /// tries canonical el_id prefixes first; this scans `all_elements` only
+    /// when a builder `tracked()`'d under a non-standard prefix.
+    /// Used as a last-resort lookup in click-target resolution when the
+    /// canonical `render-entity-{id}` / `selectable-{id}` el_ids miss.
     fn find_by_entity_id(&self, entity_id: &str) -> Option<ElementInfo> {
         self.all_elements()
             .into_iter()
@@ -85,6 +87,14 @@ pub trait GeometryProvider: Send + Sync {
 #[derive(Clone, Default)]
 pub struct SharedBoundsRegistry {
     inner: Arc<RwLock<HashMap<String, ElementInfo>>>,
+    /// Inter-pass stability tracker — survives `clear()`. Maps
+    /// `(widget_type, entity_id)` to the last `el_id` seen for that pair.
+    /// When a pair appears under a *different* el_id in a later pass, GPUI
+    /// drops any registered click handler from the previous render — a
+    /// silent-handler-loss class of bug that's nearly invisible from logs.
+    /// We emit a one-shot warning per migration so the next render exposes
+    /// the instability before tests start blaming "click didn't fire."
+    historical: Arc<RwLock<HashMap<(String, String), String>>>,
 }
 
 impl SharedBoundsRegistry {
@@ -92,12 +102,40 @@ impl SharedBoundsRegistry {
         Self::default()
     }
 
-    /// Record element metadata after layout.
+    /// Record element metadata after layout. Emits a warning on widget-id
+    /// instability (same widget_type+entity_id pair previously seen under a
+    /// different `el_id`) — see the `historical` field doc for why.
     pub fn record(&self, id: String, info: ElementInfo) {
+        if let Some(eid) = info.entity_id.as_deref() {
+            let key = (info.widget_type.clone(), eid.to_string());
+            let mut hist = self.historical.write().unwrap();
+            match hist.get(&key) {
+                Some(prev) if prev != &id => {
+                    tracing::warn!(
+                        target: "geometry.stability",
+                        "widget-id instability: widget_type={:?} entity_id={:?} \
+                         previous el_id={:?} new el_id={:?} — \
+                         GPUI handlers registered on the previous element are now orphaned",
+                        info.widget_type, eid, prev, id,
+                    );
+                    eprintln!(
+                        "[geometry.stability WARN] widget_type={:?} entity_id={:?} \
+                         previous el_id={:?} new el_id={:?}",
+                        info.widget_type, eid, prev, id,
+                    );
+                    hist.insert(key, id.clone());
+                }
+                Some(_) => { /* stable — same el_id */ }
+                None => {
+                    hist.insert(key, id.clone());
+                }
+            }
+        }
         self.inner.write().unwrap().insert(id, info);
     }
 
     /// Clear all recorded elements (call at the start of each render pass).
+    /// Does NOT clear the inter-pass `historical` tracker.
     pub fn clear(&self) {
         self.inner.write().unwrap().clear();
     }
@@ -241,4 +279,25 @@ impl crate::size_expectation::EvalCtx for ProviderEvalCtx {
 /// dispatch. Stable across renders: same `(block_id, mode)` → same string.
 pub fn vms_button_id_for(block_id: &str, mode: &str) -> String {
     format!("vms_button::{block_id}::{mode}")
+}
+
+/// Canonical element-id for a drawer's open/close toggle area.
+///
+/// The drawer builder must tag its clickable toggle widget with this
+/// string. The layout PBT's `ToggleDrawer` transition synthesises a
+/// click on this id via `UserDriver::click_entity`, the same way a real
+/// user would tap the toggle.
+pub fn drawer_toggle_id_for(block_id: &str) -> String {
+    format!("drawer_toggle::{block_id}")
+}
+
+/// Canonical element-id for an outline/tree row's expand chevron.
+///
+/// The frontend's `expand_toggle` builder must tag its clickable chevron
+/// with this string in the bounds registry. The layout PBT's
+/// `ToggleCollapse` transition clicks this id to flip the row's
+/// `expanded` `Mutable<bool>`, exercising the same path a real user's
+/// chevron tap would.
+pub fn expand_toggle_id_for(target_id: &str) -> String {
+    format!("expand_toggle::{target_id}")
 }

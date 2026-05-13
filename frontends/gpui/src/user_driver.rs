@@ -104,6 +104,60 @@ impl GpuiUserDriver {
             .map(|info| info.center())
     }
 
+    /// All BoundsRegistry elements whose recorded bounds contain `(px, py)`,
+    /// ordered topmost-first by ascending area (smallest containing = most
+    /// nested = visually on top in a normal layout).
+    ///
+    /// Returns up to `limit` (id, entity_id, widget_type, area) tuples.
+    /// Used by `click_entity` to surface "the click coords are inside three
+    /// overlapping elements; the topmost is X not the target Y" rather than
+    /// letting the click silently activate the wrong handler.
+    fn hit_test(
+        &self,
+        px: f32,
+        py: f32,
+        limit: usize,
+    ) -> Vec<(String, Option<String>, String, f32)> {
+        let mut hits: Vec<_> = self
+            .geometry
+            .all_elements()
+            .into_iter()
+            .filter(|(_, info)| {
+                px >= info.x
+                    && px <= info.x + info.width
+                    && py >= info.y
+                    && py <= info.y + info.height
+            })
+            .map(|(id, info)| {
+                (
+                    id,
+                    info.entity_id.clone(),
+                    info.widget_type.clone(),
+                    info.area(),
+                )
+            })
+            .collect();
+        // Sort by area ascending (smallest = most-nested = visually on top).
+        // Tie-break: prefer elements that carry an entity_id, so a wrapper
+        // widget registered with the same bounds as its `entity_id`-bearing
+        // child does not shadow the child in the hit-test. Without this,
+        // `editable_text#N` (entity_id=None) and `editable-text-block:…-content`
+        // (entity_id=Some) share identical bounds and the wrapper non-
+        // deterministically wins, sending clicks to a handler that can't
+        // identify the target block (PBT seed=42 step 11).
+        hits.sort_by(|a, b| {
+            a.3.partial_cmp(&b.3)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| match (a.1.is_some(), b.1.is_some()) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => std::cmp::Ordering::Equal,
+                })
+        });
+        hits.truncate(limit);
+        hits
+    }
+
     /// Fail-loud bounds lookup used by the user-verb methods. Returns an
     /// error with enough context for test authors to understand whether
     /// the element was never rendered or simply hasn't been promoted from
@@ -146,6 +200,40 @@ impl UserDriver for GpuiUserDriver {
     #[tracing::instrument(skip(self), name = "GpuiUserDriver.click_entity", fields(%entity_id))]
     async fn click_entity(&self, entity_id: &str, _: &str) -> Result<()> {
         let (cx, cy) = self.require_element_center(entity_id, "click_entity")?;
+        // Hit-test BEFORE dispatching so the log captures the layout the
+        // synthetic MouseDown will see. The topmost (smallest containing)
+        // element is logged first; up to 4 candidates total. If the topmost
+        // entity_id doesn't match the requested entity, we have a bounds /
+        // overlap / focus-trap problem — much more actionable than "focus
+        // didn't change 1 s after the click."
+        let candidates = self.hit_test(cx, cy, 4);
+        if candidates.is_empty() {
+            tracing::warn!(
+                "[ui-event] click_entity({entity_id:?}) coords=({cx:.1},{cy:.1}) — \
+                 hit-test found NO containing element in BoundsRegistry"
+            );
+        } else {
+            let summary: Vec<String> = candidates
+                .iter()
+                .map(|(id, eid, w, a)| format!("{id} entity_id={eid:?} widget={w} area={a:.0}"))
+                .collect();
+            tracing::info!(
+                "[ui-event] click_entity({entity_id:?}) coords=({cx:.1},{cy:.1}) topmost: {}",
+                summary.join(" | ")
+            );
+            eprintln!(
+                "[ui-event] click_entity({entity_id:?}) coords=({cx:.1},{cy:.1}) topmost: {}",
+                summary.join(" | ")
+            );
+            let topmost_entity = candidates.first().and_then(|(_, eid, _, _)| eid.as_deref());
+            if topmost_entity != Some(entity_id) {
+                eprintln!(
+                    "[ui-event] click_entity({entity_id:?}) WARN: topmost element entity_id \
+                     is {:?}, not {entity_id:?} — click may activate the topmost handler instead",
+                    topmost_entity
+                );
+            }
+        }
         self.dispatch_event(InteractionEvent::MouseClick {
             position: (cx, cy),
             button: "left".into(),

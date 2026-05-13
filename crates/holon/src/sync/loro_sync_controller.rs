@@ -462,11 +462,25 @@ impl LoroSyncController {
         let ops = diff_snapshots_to_ops(&before, &after);
 
         if !ops.is_empty() {
-            debug!(
-                "[LoroSyncController] outbound reconcile: before={} after={} ops={}",
+            // Surface the aggregate_ids of each outbound op so we can
+            // bisect Loro-create → block_raw-write drops by grepping the
+            // log for the failing block id.
+            let op_summary: Vec<String> = ops
+                .iter()
+                .map(|(op_name, params)| {
+                    let id = params
+                        .get("id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("<no-id>");
+                    format!("{}:{}", op_name, id)
+                })
+                .collect();
+            eprintln!(
+                "[LoroSyncController OUTBOUND] before={} after={} ops={} aggregate_ids={:?}",
                 before.len(),
                 after.len(),
-                ops.len()
+                ops.len(),
+                op_summary,
             );
             self.command_bus
                 .execute_batch_with_origin(&EntityName::new("block"), ops, EventOrigin::Loro)
@@ -1114,17 +1128,6 @@ async fn apply_create(
     // after. `create_block` already appended the node to the end of its
     // parent's children; this `update_block_position` call is the
     // `mov_after` half of the "create + mov_after" pair.
-    //
-    // ALLOW(fallback): disclosed dual path — the primary route is the
-    // typed `position_after_block_id`; the secondary route (interpret a
-    // `sort_key` from `data` as a sibling-scan hint via
-    // `apply_sort_key_hint`) exists for SQL-direct test writes that
-    // don't go through the OrgSync/chord-op producers. The sibling-scan
-    // hint path is known to disagree with caller intent when the hint's
-    // generator (e.g. `gen_n_keys` from the org parser) doesn't share a
-    // value space with Loro's auto-assigned fractional indices — every
-    // production producer therefore emits `after_block_id` (the typed
-    // field) and the scan path is dormant in practice.
     if let Some(after_id) = position_after_block_id {
         let parent_id_str = data
             .get("parent_id")
@@ -1134,11 +1137,6 @@ async fn apply_create(
             .update_block_position(created.id.as_str(), parent_id_str, Some(after_id))
             .await
             .map_err(|e| anyhow::anyhow!("apply_create: update_block_position: {}", e))?;
-    } else if let Some(sk) = data.get("sort_key").and_then(|v| v.as_str()) {
-        backend
-            .apply_sort_key_hint(created.id.as_str(), sk)
-            .await
-            .map_err(|e| anyhow::anyhow!("apply_create: apply_sort_key_hint: {}", e))?;
     }
 
     apply_properties_from_json(backend, created.id.as_str(), data).await?;
@@ -1189,21 +1187,12 @@ async fn apply_update_with_backend(
         }
     }
 
-    // Typed positional intent wins over the data's `sort_key` string. The
-    // typed field comes from the producer's `after_block_id` param (lifted
-    // by `SqlOperationProvider::publish_event`). When set, dispatch a
-    // `tree.mov_after` against the predecessor block_id directly — no
-    // sibling-scan, no generator-strategy mismatch. OrgSync emits this for
-    // every update, so re-canonicalised sort_keys (e.g. when a 2nd
-    // BulkExternalAdd grows the sibling set) no longer trigger the buggy
-    // hint-scan path.
-    //
-    // ALLOW(fallback): disclosed dual path. Primary: typed
-    // `position_after_block_id`. Fallback: interpret `data.sort_key` as a
-    // sibling-scan hint via `apply_sort_key_hint`. Kept for non-OrgSync
-    // SQL-direct test writes that don't emit `after_block_id`; the hint
-    // scan has known limits when caller hints live in a different
-    // generator space than Loro's auto-FIs.
+    // Typed positional intent. The typed field comes from the producer's
+    // `after_block_id` param (lifted by `SqlOperationProvider::publish_event`).
+    // When set, dispatch a `tree.mov_after` against the predecessor block_id
+    // directly. OrgSync emits this for every update, so re-canonicalised
+    // sort_keys (e.g. when a 2nd BulkExternalAdd grows the sibling set) are
+    // applied via Loro's tree mov, not via SQL string comparison.
     if let Some(after_id) = position_after_block_id {
         let parent_id_str = data
             .get("parent_id")
@@ -1213,17 +1202,6 @@ async fn apply_update_with_backend(
             .update_block_position(block_id, parent_id_str, Some(after_id))
             .await
             .map_err(|e| anyhow::anyhow!("apply_update: update_block_position: {}", e))?;
-    } else if let Some(sk) = data.get("sort_key").and_then(|v| v.as_str()) {
-        let current = backend
-            .get_block(block_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("get_block({}) failed: {}", block_id, e))?;
-        if current.sort_key != sk {
-            backend
-                .apply_sort_key_hint(block_id, sk)
-                .await
-                .map_err(|e| anyhow::anyhow!("apply_update: apply_sort_key_hint: {}", e))?;
-        }
     }
 
     apply_properties_from_json(backend, block_id, data).await?;

@@ -4,6 +4,8 @@
 //! reused by other test harnesses (e.g. Flutter FFI PBT).
 
 pub mod generators;
+pub mod invariants;
+pub mod layout_bridge;
 pub mod loro_sut;
 pub mod loro_sync;
 pub mod panic_diag;

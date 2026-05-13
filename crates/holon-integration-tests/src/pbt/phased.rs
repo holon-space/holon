@@ -26,6 +26,12 @@ pub struct PbtReadyContext {
     pub session: Arc<holon_frontend::FrontendSession>,
     pub reactive_engine: Arc<holon_frontend::reactive::ReactiveEngine>,
     pub runtime_handle: tokio::runtime::Handle,
+    /// DI-resolved `DebugServices`, populated by
+    /// `holon_mcp::di::DebugServicesPopulatorModule` registered in the
+    /// test environment's injector. Threaded into the embedded MCP so
+    /// inspection tools (`inspect_loro_blocks`, `diff_loro_sql`, etc.)
+    /// work during PBT pauses.
+    pub debug_services: Arc<holon_mcp::server::DebugServices>,
 }
 
 /// Result returned by the `on_ready` callback.
@@ -539,6 +545,7 @@ pub fn store_phase_state(state: PbtPhaseState) {
 /// Runs all pre-startup transitions + StartApp, installs DirectUserDriver.
 /// Returns a summary string. The state is stored in `PBT_PHASE_STATE`.
 pub async fn pbt_setup(num_steps: u32) -> anyhow::Result<String> {
+    crate::debug_pause::install_panic_pause_hook();
     let runtime = create_runtime();
     pbt_setup_with_runtime(num_steps, runtime).await
 }
@@ -897,6 +904,8 @@ pub fn run_pbt_with_driver_sync_callback(
     }
     let _histogram_guard = PrintHistogramOnDrop;
 
+    crate::debug_pause::install_panic_pause_hook();
+
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
 
     let mut runner = create_runner()?;
@@ -921,6 +930,11 @@ pub fn run_pbt_with_driver_sync_callback(
             .clone()
             .expect("ReactiveEngine not initialized after StartApp"),
         runtime_handle: runtime.handle().clone(),
+        debug_services: sut
+            .ctx
+            .debug_services()
+            .cloned()
+            .expect("DebugServices not populated — start_app() should have populated it"),
     };
     let ready_result = on_ready(&ctx);
     let (custom_driver, frontend_engine, frontend_geometry, frontend_visual_state) =
@@ -977,6 +991,7 @@ pub fn run_pbt_with_driver_sync_callback(
 /// All proptest strategy generation happens OUTSIDE `block_on` to prevent
 /// `ReferenceState`'s internal `Arc<Runtime>` from being dropped in an async context.
 pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
+    crate::debug_pause::install_panic_pause_hook();
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
 
     let mut runner = create_runner()?;

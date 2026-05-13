@@ -158,28 +158,28 @@ pub trait UiDriver: Send + Sync {
 
     /// Capture a screenshot of the current state, optionally highlighting an element.
     /// Default implementation does nothing.
-    fn screenshot(&mut self, _label: &str, _highlight_element: Option<&str>) {}
+    fn screenshot(&mut self, _: &str, _: Option<&str>) {}
 
     /// Capture a screenshot with a translucent overlay (action banner +
     /// pass/fail badge + optional assertion text). Default implementation
-    /// falls back to `screenshot()` so non-overlay-aware drivers still work.
+    /// delegates to `screenshot()` so non-overlay-aware drivers still work.
     fn screenshot_overlay(
         &mut self,
         label: &str,
-        _phase: Phase,
+        _: Phase,
         highlight_element: Option<&str>,
-        _overlay: &Overlay,
+        _: &Overlay,
     ) {
         self.screenshot(label, highlight_element);
     }
 
     /// Click on an element to focus it. Returns true if element was found and clicked.
-    async fn click_element(&mut self, _id: &str) -> bool {
+    async fn click_element(&mut self, _: &str) -> bool {
         false
     }
 
     /// Send an arrow key for cross-block navigation.
-    async fn send_arrow(&mut self, _direction: NavDirection) {}
+    async fn send_arrow(&mut self, _: NavDirection) {}
 }
 
 // ──── FFI-only driver ────
@@ -189,12 +189,7 @@ pub struct FfiDriver;
 
 #[async_trait::async_trait]
 impl UiDriver for FfiDriver {
-    async fn try_ui_interaction(
-        &mut self,
-        _entity: &str,
-        _op: &str,
-        _params: &HashMap<String, Value>,
-    ) -> bool {
+    async fn try_ui_interaction(&mut self, _: &str, _: &str, _: &HashMap<String, Value>) -> bool {
         false
     }
 
@@ -226,6 +221,12 @@ struct ScreenshotConfig {
     /// Joined in `Drop` so the test process doesn't exit before the
     /// last screenshots hit disk.
     pending_saves: Vec<std::thread::JoinHandle<()>>,
+    /// One JSONL line per `capture_internal` call: step number, phase,
+    /// label, timestamp, and the list of (entity_id, widget_type) the
+    /// BoundsRegistry currently holds. Co-located with screenshots so
+    /// PBT replay can step through `cat replay.jsonl | jq` alongside
+    /// `step-NNN-*.png`. Opened lazily on first write.
+    replay_jsonl: Option<std::fs::File>,
 }
 
 impl Drop for ScreenshotConfig {
@@ -254,6 +255,7 @@ impl GeometryDriver {
             dir,
             step_counter: 0,
             pending_saves: Vec::new(),
+            replay_jsonl: None,
         });
         self
     }
@@ -322,6 +324,43 @@ impl GeometryDriver {
         };
         let final_path = config.dir.join(&filename);
 
+        // Replay JSONL: one line per capture, co-located with screenshots
+        // so PBT post-mortems can step through state without re-running.
+        // Captures the live BoundsRegistry view at the moment of capture
+        // — `entity_id → widget_type` for every tracked element. Open
+        // lazily; one append per step. Errors are swallowed silently as
+        // this is a best-effort diagnostic, not a test signal.
+        {
+            use std::io::Write;
+            let entities: Vec<(String, String)> = self
+                .geometry
+                .all_elements()
+                .into_iter()
+                .filter_map(|(_, info)| info.entity_id.map(|eid| (eid, info.widget_type)))
+                .collect();
+            let phase_str = phase.map(|p| p.as_str()).unwrap_or("solo");
+            let entities_json: String = entities
+                .iter()
+                .map(|(eid, wt)| format!("[{:?},{:?}]", eid, wt))
+                .collect::<Vec<_>>()
+                .join(",");
+            let line = format!(
+                "{{\"ts_ms\":{millis},\"step\":{step},\"phase\":{:?},\"label\":{:?},\"png\":{:?},\"entities\":[{entities_json}]}}\n",
+                phase_str, label, filename,
+            );
+            if config.replay_jsonl.is_none() {
+                let path = config.dir.join("replay.jsonl");
+                config.replay_jsonl = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .ok();
+            }
+            if let Some(f) = config.replay_jsonl.as_mut() {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+
         let captured = config.backend.capture()?;
         let info = highlight_element.and_then(|id| self.geometry.element_info(id));
 
@@ -363,6 +402,17 @@ impl GeometryDriver {
             );
         });
         config.pending_saves.push(handle);
+
+        // Bound-layer artifacts: SVG diagram + structural dump named after
+        // the PNG (sans extension) so PBT failures can be inspected in three
+        // ways — pixels, vector geometry, and a tree dump — without
+        // re-running the test.
+        #[cfg(feature = "pbt")]
+        {
+            let basename = filename.strip_suffix(".png").unwrap_or(&filename);
+            let snap = holon_layout_testing::snapshot::snapshot_from_provider(&*self.geometry);
+            holon_layout_testing::snapshot::write_artifacts(&snap, &config.dir, basename);
+        }
 
         if let Some(info) = &info {
             eprintln!(

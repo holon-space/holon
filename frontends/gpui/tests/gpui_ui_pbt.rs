@@ -40,6 +40,7 @@ struct GpuiLaunchContext {
     session: Arc<holon_frontend::FrontendSession>,
     reactive_engine: Arc<holon_frontend::reactive::ReactiveEngine>,
     runtime_handle: tokio::runtime::Handle,
+    debug_services: Arc<holon_mcp::server::DebugServices>,
 }
 
 fn main() {
@@ -120,6 +121,7 @@ fn main() {
                         session: pbt_ctx.session.clone(),
                         reactive_engine: pbt_ctx.reactive_engine.clone(),
                         runtime_handle: pbt_ctx.runtime_handle.clone(),
+                        debug_services: pbt_ctx.debug_services.clone(),
                     })
                     .expect("failed to send context to main thread");
 
@@ -190,6 +192,7 @@ fn main() {
         &launch_ctx.runtime_handle,
         &launch_ctx.session,
         &launch_ctx.reactive_engine,
+        launch_ctx.debug_services.clone(),
         "PBT_MCP_PORT",
         "gpui_ui_pbt",
     );

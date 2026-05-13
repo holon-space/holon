@@ -121,19 +121,28 @@ pub fn try_start_embedded_mcp(
     runtime: &tokio::runtime::Handle,
     session: &Arc<FrontendSession>,
     reactive_engine: &Arc<ReactiveEngine>,
+    debug: Arc<holon_mcp::server::DebugServices>,
     env_var: &str,
     label: &str,
 ) {
-    let Ok(port_str) = std::env::var(env_var) else {
+    // PBT_PAUSE_SECONDS forces the MCP server up on a known port
+    // (MCP_PAUSE_PORT) so external tools can attach during a panic
+    // pause — overrides whatever `env_var` is configured to.
+    let port: Option<u16> = if crate::debug_pause::pause_enabled() {
+        Some(crate::debug_pause::MCP_PAUSE_PORT)
+    } else {
+        std::env::var(env_var).ok().map(|s| {
+            s.parse()
+                .unwrap_or_else(|e| panic!("{env_var} must be a u16: {e}"))
+        })
+    };
+    let Some(port) = port else {
         return;
     };
-    let port: u16 = port_str
-        .parse()
-        .unwrap_or_else(|e| panic!("{env_var} must be a u16: {e}"));
     let engine = Some(session.engine().clone());
     let services: Arc<dyn BuilderServices> = reactive_engine.clone();
     let _guard = runtime.enter();
-    holon_mcp::di::start_embedded_mcp_server(engine, Some(services), port);
+    holon_mcp::di::start_embedded_mcp_server_with_debug(engine, Some(services), port, debug);
     eprintln!("[{label}] MCP server starting on port {port}");
     std::thread::sleep(Duration::from_secs(2));
     eprintln!("[{label}] MCP server should be ready on port {port}");

@@ -71,6 +71,14 @@ impl E2ETransitionImpl for StartApp {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.app_started = true;
 
+        // Default layout boots both sidebars as open drawers — mirror that in ref state.
+        state
+            .drawer_open
+            .insert("block:default-left-sidebar".to_string(), true);
+        state
+            .drawer_open
+            .insert("block:default-right-sidebar".to_string(), true);
+
         // The production system always seeds default layout blocks on first startup.
         let default_doc_uri = EntityUri::no_parent();
         {

@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 holon-api = { workspace = true }
 holon-frontend = { workspace = true }
+holon-pbt-core = { path = "../holon-pbt-core" }
+validated = "1.0"
 tokio = { workspace = true }
 proptest = { workspace = true }
 futures = { workspace = true }

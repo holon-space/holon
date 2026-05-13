@@ -91,6 +91,7 @@ impl<'a> BlockDomain<'a> {
             }
         }
 
+        // ALLOW(fallback): pre-existing comment-only — block_id used as path when block_with_path lookup races
         // Block not in block_with_path yet - use block_id as fallback path
         Ok(format!("/{}", block_id))
     }
@@ -170,8 +171,6 @@ impl<'a> BlockDomain<'a> {
     /// `collection` section provides the default + variant render expressions.
     /// Wraps them in a `view_mode_switcher` widget so frontends can switch layouts.
     fn collection_render_from_profile(&self, entity_uri: &holon_api::EntityUri) -> RenderExpr {
-        use holon_api::render_types::Arg;
-
         let variants = self.engine.profile_resolver().resolve_collection_variants();
 
         tracing::info!(
@@ -190,54 +189,7 @@ impl<'a> BlockDomain<'a> {
             };
         }
 
-        // If only one variant (the Always default), use it directly — no switcher needed
-        if variants.len() == 1 {
-            return resolve_virtual_parent(variants[0].render.clone(), &entity_uri.to_string());
-        }
-
-        // Build a view_mode_switcher with entity_uri + mode_* template args
-        let mut args = Vec::new();
-
-        // entity_uri so each collection has independent view mode state
-        args.push(Arg {
-            name: Some("entity_uri".to_string()),
-            value: RenderExpr::Literal {
-                value: holon_api::Value::String(entity_uri.to_string()),
-            },
-        });
-
-        // modes JSON
-        let modes_json = serde_json::to_string(
-            &variants
-                .iter()
-                .map(|v| {
-                    serde_json::json!({
-                        "name": v.name,
-                        "icon": collection_icon_for(&v.name),
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
-
-        args.push(Arg {
-            name: Some("modes".to_string()),
-            value: RenderExpr::Literal {
-                value: holon_api::Value::String(modes_json),
-            },
-        });
-
-        for variant in &variants {
-            args.push(Arg {
-                name: Some(format!("mode_{}", variant.name)),
-                value: resolve_virtual_parent(variant.render.clone(), &entity_uri.to_string()),
-            });
-        }
-
-        RenderExpr::FunctionCall {
-            name: "view_mode_switcher".to_string(),
-            args,
-        }
+        view_mode_switcher_from_variants(entity_uri, &variants)
     }
 
     /// Add a `source` mode to a query-source block's render expression.
@@ -311,6 +263,7 @@ impl<'a> BlockDomain<'a> {
         Self::wrap_with_outer_switcher(block_id, result_expr, mode_source_expr)
     }
 
+    // ALLOW(fallback): pre-existing comment-only — outer-wrap path when inner expr isn't a VMS
     /// Fallback for when the inner expression isn't a `view_mode_switcher`:
     /// wrap with a 2-mode (result, source) switcher. The `#qsrc` URI fragment
     /// keeps the wrap's state separate from any inner per-entity state.
@@ -428,6 +381,234 @@ fn collection_icon_for(name: &str) -> &'static str {
         "table_view" | "table" => "table",
         "board_view" | "board" => "kanban",
         _ => "tree",
+    }
+}
+
+/// Build a `view_mode_switcher` `RenderExpr` from a list of collection
+/// variants.
+///
+/// `variants` arrive sorted by priority-descending — the order the profile
+/// resolver uses for *condition* resolution (highest priority condition
+/// checked first). That order is wrong for picking a VMS *default*: the
+/// unconditional `Predicate::Always` variant (the default that wins when
+/// nothing else matches) ends up last. The shadow builder's "default =
+/// first mode in JSON" rule then defaults to a conditional variant.
+///
+/// We emit an explicit `default_mode` arg pointing at the unconditional
+/// variant when one exists, so the frontend doesn't have to guess.
+/// Caller invariant: `variants` is non-empty.
+pub(crate) fn view_mode_switcher_from_variants(
+    entity_uri: &holon_api::EntityUri,
+    variants: &[holon_api::render_types::RenderVariant],
+) -> RenderExpr {
+    use holon_api::predicate::Predicate;
+    use holon_api::render_types::Arg;
+
+    assert!(
+        !variants.is_empty(),
+        "view_mode_switcher_from_variants requires at least one variant"
+    );
+
+    // Single variant → unwrap; no switcher needed.
+    if variants.len() == 1 {
+        return resolve_virtual_parent(variants[0].render.clone(), &entity_uri.to_string());
+    }
+
+    let default_mode = variants
+        .iter()
+        .find(|v| v.condition == Predicate::Always)
+        .map(|v| v.name.clone());
+
+    let mut args = Vec::new();
+    args.push(Arg {
+        name: Some("entity_uri".to_string()),
+        value: RenderExpr::Literal {
+            value: Value::String(entity_uri.to_string()),
+        },
+    });
+
+    let modes_json = serde_json::to_string(
+        &variants
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "name": v.name,
+                    "icon": collection_icon_for(&v.name),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string());
+
+    args.push(Arg {
+        name: Some("modes".to_string()),
+        value: RenderExpr::Literal {
+            value: Value::String(modes_json),
+        },
+    });
+
+    if let Some(name) = default_mode {
+        args.push(Arg {
+            name: Some("default_mode".to_string()),
+            value: RenderExpr::Literal {
+                value: Value::String(name),
+            },
+        });
+    }
+
+    for variant in variants {
+        args.push(Arg {
+            name: Some(format!("mode_{}", variant.name)),
+            value: resolve_virtual_parent(variant.render.clone(), &entity_uri.to_string()),
+        });
+    }
+
+    RenderExpr::FunctionCall {
+        name: "view_mode_switcher".to_string(),
+        args,
+    }
+}
+
+#[cfg(test)]
+mod view_mode_switcher_from_variants_tests {
+    use super::*;
+    use holon_api::EntityUri;
+    use holon_api::predicate::Predicate;
+    use holon_api::render_types::RenderVariant;
+
+    fn variant(name: &str, condition: Predicate) -> RenderVariant {
+        RenderVariant {
+            name: name.to_string(),
+            render: RenderExpr::FunctionCall {
+                name: name.to_string(),
+                args: vec![],
+            },
+            operations: vec![],
+            condition,
+        }
+    }
+
+    fn modes_json(expr: &RenderExpr) -> String {
+        let RenderExpr::FunctionCall { args, .. } = expr else {
+            panic!("expected FunctionCall");
+        };
+        for a in args {
+            if a.name.as_deref() == Some("modes") {
+                if let RenderExpr::Literal {
+                    value: Value::String(s),
+                } = &a.value
+                {
+                    return s.clone();
+                }
+            }
+        }
+        panic!("missing `modes` arg");
+    }
+
+    fn arg_str(expr: &RenderExpr, name: &str) -> Option<String> {
+        let RenderExpr::FunctionCall { args, .. } = expr else {
+            return None;
+        };
+        for a in args {
+            if a.name.as_deref() == Some(name) {
+                if let RenderExpr::Literal {
+                    value: Value::String(s),
+                } = &a.value
+                {
+                    return Some(s.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Pins the production bug-class. Mirrors `collection_profile.yaml`:
+    /// `tree_view` is the unconditional default (priority 0); `table_view`
+    /// and `board_view` are conditional (priority 1). The resolver hands
+    /// us variants priority-desc, so the unconditional default arrives
+    /// LAST. Without `default_mode`, the shadow builder would pick
+    /// `modes[0]` (`table_view`) — exactly the "list shown first when
+    /// outline should default" symptom.
+    #[test]
+    fn default_mode_points_at_unconditional_variant_not_first_in_priority_order() {
+        let uri = EntityUri::from_raw("block:collection-1");
+        let variants = vec![
+            variant(
+                "table_view",
+                Predicate::Eq {
+                    field: "view_mode".to_string(),
+                    value: Value::String("table".to_string()),
+                },
+            ),
+            variant(
+                "board_view",
+                Predicate::Eq {
+                    field: "view_mode".to_string(),
+                    value: Value::String("board".to_string()),
+                },
+            ),
+            variant("tree_view", Predicate::Always),
+        ];
+
+        let expr = view_mode_switcher_from_variants(&uri, &variants);
+
+        assert_eq!(
+            arg_str(&expr, "default_mode").as_deref(),
+            Some("tree_view"),
+            "VMS must pick the unconditional `Always` variant as default, \
+             not whichever conditional variant happens to be at modes[0]"
+        );
+        // The modes JSON keeps priority-desc order so other consumers
+        // (icon row layout) see a stable shape.
+        let mj = modes_json(&expr);
+        let first_name = mj
+            .split("\"name\":\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        assert_eq!(
+            first_name, "table_view",
+            "modes JSON order should be preserved as-supplied; the fix is \
+             a separate `default_mode` arg, not a reorder"
+        );
+    }
+
+    #[test]
+    fn single_variant_unwraps_to_inner_expr_no_switcher() {
+        let uri = EntityUri::from_raw("block:collection-2");
+        let variants = vec![variant("tree_view", Predicate::Always)];
+        let expr = view_mode_switcher_from_variants(&uri, &variants);
+        let RenderExpr::FunctionCall { name, .. } = &expr else {
+            panic!("expected FunctionCall");
+        };
+        assert_eq!(name, "tree_view");
+    }
+
+    #[test]
+    fn no_unconditional_variant_omits_default_mode_arg() {
+        let uri = EntityUri::from_raw("block:collection-3");
+        let variants = vec![
+            variant(
+                "table_view",
+                Predicate::Eq {
+                    field: "view_mode".to_string(),
+                    value: Value::String("table".to_string()),
+                },
+            ),
+            variant(
+                "board_view",
+                Predicate::Eq {
+                    field: "view_mode".to_string(),
+                    value: Value::String("board".to_string()),
+                },
+            ),
+        ];
+        let expr = view_mode_switcher_from_variants(&uri, &variants);
+        assert!(
+            arg_str(&expr, "default_mode").is_none(),
+            "no Always variant → no default_mode arg; frontend falls back \
+             to modes[0] (existing behavior, no regression for this shape)"
+        );
     }
 }
 

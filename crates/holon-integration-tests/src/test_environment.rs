@@ -46,6 +46,19 @@ pub enum LoroCorruptionType {
     InvalidHeader,
 }
 
+/// Resolve the DI-registered `DebugServices` and pre-populate its
+/// optional fields (`loro_doc_store`) from other DI services. Mirrors
+/// what `holon_mcp::di::DebugServicesPopulatorModule` does for
+/// module-using consumers — the test path runs it inline because the
+/// `extra_resolve` callback is the natural post-`on_start` hook.
+fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server::DebugServices> {
+    let debug = injector.resolve::<holon_mcp::server::DebugServices>();
+    if let Ok(ops) = injector.try_resolve::<holon::sync::LoroBlockOperations>() {
+        debug.loro_doc_store.set(ops.shared_doc_store()).ok();
+    }
+    debug
+}
+
 /// Test environment with optional running application.
 ///
 /// Supports two phases:
@@ -63,6 +76,12 @@ pub struct TestEnvironment {
 
     /// Loro doc store, resolved from DI (None when Loro is disabled)
     loro_doc_store: Option<Arc<RwLock<LoroDocumentStore>>>,
+
+    /// MCP DebugServices, resolved from DI and pre-populated via
+    /// [`populate_debug_services`]. Threaded into the embedded MCP
+    /// server (`try_start_embedded_mcp`) so inspection tools work in
+    /// PBTs.
+    debug_services: Option<Arc<holon_mcp::server::DebugServices>>,
 
     /// Loro sync controller handle, resolved from DI (None when Loro is disabled).
     /// Used by `wait_for_loro_quiescence` to poll until the controller has
@@ -279,54 +298,63 @@ impl TestEnvironmentBuilder {
             session_config = session_config.with_todoist_fake();
         }
 
-        let (session, (doc_store, reactive_engine, sync_handle, idle_signal, event_bus)) =
-            FrontendSession::new_from_config_with_di(
-                holon_config,
-                session_config,
-                config_dir,
-                std::collections::HashSet::new(),
-                |injector| {
-                    use holon_frontend::reactive::{
-                        BuilderServicesSlot, RenderInterpreterInjectorExt,
-                    };
-                    let slot = injector.resolve::<BuilderServicesSlot>();
-                    injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                        slot.0.clone(),
-                    ));
-                    Ok(())
-                },
-                move |injector| {
-                    use holon_frontend::reactive::{
-                        BuilderServices, BuilderServicesSlot, ReactiveEngine,
-                    };
-                    let engine = injector.resolve::<ReactiveEngine>();
-                    let slot = injector.resolve::<BuilderServicesSlot>();
-                    let services: Arc<dyn BuilderServices> = engine.clone();
-                    slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+        let (
+            session,
+            (doc_store, reactive_engine, sync_handle, idle_signal, event_bus, debug_services),
+        ) = FrontendSession::new_from_config_with_di(
+            holon_config,
+            session_config,
+            config_dir,
+            std::collections::HashSet::new(),
+            |injector| {
+                use holon_frontend::reactive::{BuilderServicesSlot, RenderInterpreterInjectorExt};
+                let slot = injector.resolve::<BuilderServicesSlot>();
+                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
+                    slot.0.clone(),
+                ));
+                holon_mcp::di::register_debug_services(injector);
+                Ok(())
+            },
+            move |injector| {
+                use holon_frontend::reactive::{
+                    BuilderServices, BuilderServicesSlot, ReactiveEngine,
+                };
+                let engine = injector.resolve::<ReactiveEngine>();
+                let slot = injector.resolve::<BuilderServicesSlot>();
+                let services: Arc<dyn BuilderServices> = engine.clone();
+                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
 
-                    let doc_store = if enable_loro {
-                        injector
-                            .try_resolve::<LoroDocumentStore>()
-                            .ok() // ALLOW(ok): optional DI service
-                            .map(|store| Arc::new(RwLock::new((*store).clone())))
-                    } else {
-                        None
-                    };
-                    let sync_handle = if enable_loro {
-                        injector
-                            .try_resolve::<holon::sync::LoroSyncControllerHandle>()
-                            .ok()
-                    } else {
-                        None
-                    };
-                    let idle_signal = injector
-                        .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                        .ok();
-                    let event_bus = injector.try_resolve::<holon::sync::TursoEventBus>().ok();
-                    (doc_store, engine, sync_handle, idle_signal, event_bus)
-                },
-            )
-            .await?;
+                let doc_store = if enable_loro {
+                    injector
+                        .try_resolve::<LoroDocumentStore>()
+                        .ok() // ALLOW(ok): optional DI service
+                        .map(|store| Arc::new(RwLock::new((*store).clone())))
+                } else {
+                    None
+                };
+                let sync_handle = if enable_loro {
+                    injector
+                        .try_resolve::<holon::sync::LoroSyncControllerHandle>()
+                        .ok()
+                } else {
+                    None
+                };
+                let idle_signal = injector
+                    .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                    .ok();
+                let event_bus = injector.try_resolve::<holon::sync::TursoEventBus>().ok();
+                let debug_services = populate_debug_services(injector);
+                (
+                    doc_store,
+                    engine,
+                    sync_handle,
+                    idle_signal,
+                    event_bus,
+                    debug_services,
+                )
+            },
+        )
+        .await?;
 
         // Tests need deterministic state — wait for CDC event propagation
         if settle_delay_ms > 0 {
@@ -342,6 +370,7 @@ impl TestEnvironmentBuilder {
             runtime,
             session: Some(session),
             loro_doc_store: doc_store,
+            debug_services: Some(debug_services),
             loro_sync_handle: sync_handle,
             reactive_engine: Some(reactive_engine),
             org_sync_idle: idle_signal,
@@ -382,6 +411,7 @@ impl TestEnvironment {
             runtime,
             session: None,
             loro_doc_store: None,
+            debug_services: None,
             loro_sync_handle: None,
             reactive_engine: None,
             org_sync_idle: None,
@@ -529,59 +559,69 @@ impl TestEnvironment {
         }
 
         let enable_loro = self.enable_loro;
-        let (session, (doc_store, reactive_engine, sync_handle, idle_signal, event_bus)) =
-            FrontendSession::new_from_config_with_di(
-                holon_config,
-                session_config,
-                config_dir,
-                std::collections::HashSet::new(),
-                |injector| {
-                    use holon_frontend::reactive::{
-                        BuilderServicesSlot, RenderInterpreterInjectorExt,
-                    };
-                    let slot = injector.resolve::<BuilderServicesSlot>();
-                    injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                        slot.0.clone(),
-                    ));
-                    Ok(())
-                },
-                move |injector| {
-                    use holon_frontend::reactive::{
-                        BuilderServices, BuilderServicesSlot, ReactiveEngine,
-                    };
-                    let engine = injector.resolve::<ReactiveEngine>();
-                    let slot = injector.resolve::<BuilderServicesSlot>();
-                    let services: Arc<dyn BuilderServices> = engine.clone();
-                    slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+        let (
+            session,
+            (doc_store, reactive_engine, sync_handle, idle_signal, event_bus, debug_services),
+        ) = FrontendSession::new_from_config_with_di(
+            holon_config,
+            session_config,
+            config_dir,
+            std::collections::HashSet::new(),
+            |injector| {
+                use holon_frontend::reactive::{BuilderServicesSlot, RenderInterpreterInjectorExt};
+                let slot = injector.resolve::<BuilderServicesSlot>();
+                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
+                    slot.0.clone(),
+                ));
+                holon_mcp::di::register_debug_services(injector);
+                Ok(())
+            },
+            move |injector| {
+                use holon_frontend::reactive::{
+                    BuilderServices, BuilderServicesSlot, ReactiveEngine,
+                };
+                let engine = injector.resolve::<ReactiveEngine>();
+                let slot = injector.resolve::<BuilderServicesSlot>();
+                let services: Arc<dyn BuilderServices> = engine.clone();
+                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
 
-                    let doc_store = if enable_loro {
-                        injector
-                            .try_resolve::<LoroDocumentStore>()
-                            .ok() // ALLOW(ok): optional DI service
-                            .map(|store| Arc::new(RwLock::new((*store).clone())))
-                    } else {
-                        None
-                    };
-                    let sync_handle = if enable_loro {
-                        injector
-                            .try_resolve::<holon::sync::LoroSyncControllerHandle>()
-                            .ok()
-                    } else {
-                        None
-                    };
-                    let idle_signal = injector
-                        .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                        .ok();
-                    let event_bus = injector.try_resolve::<holon::sync::TursoEventBus>().ok();
-                    (doc_store, engine, sync_handle, idle_signal, event_bus)
-                },
-            )
-            .await?;
+                let doc_store = if enable_loro {
+                    injector
+                        .try_resolve::<LoroDocumentStore>()
+                        .ok() // ALLOW(ok): optional DI service
+                        .map(|store| Arc::new(RwLock::new((*store).clone())))
+                } else {
+                    None
+                };
+                let sync_handle = if enable_loro {
+                    injector
+                        .try_resolve::<holon::sync::LoroSyncControllerHandle>()
+                        .ok()
+                } else {
+                    None
+                };
+                let idle_signal = injector
+                    .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                    .ok();
+                let event_bus = injector.try_resolve::<holon::sync::TursoEventBus>().ok();
+                let debug_services = populate_debug_services(injector);
+                (
+                    doc_store,
+                    engine,
+                    sync_handle,
+                    idle_signal,
+                    event_bus,
+                    debug_services,
+                )
+            },
+        )
+        .await?;
 
         let ctx = E2ETestContext::from_engine(session.engine().clone());
 
         self.session = Some(session);
         self.loro_doc_store = doc_store;
+        self.debug_services = Some(debug_services);
         self.loro_sync_handle = sync_handle;
         self.reactive_engine = Some(reactive_engine);
         self.org_sync_idle = idle_signal;
@@ -645,6 +685,12 @@ impl TestEnvironment {
     /// Returns None when Loro is disabled.
     pub fn doc_store(&self) -> Option<&Arc<RwLock<LoroDocumentStore>>> {
         self.loro_doc_store.as_ref()
+    }
+
+    /// DI-resolved + populated `DebugServices` for the embedded MCP
+    /// server. `None` before `start_app()` runs.
+    pub fn debug_services(&self) -> Option<&Arc<holon_mcp::server::DebugServices>> {
+        self.debug_services.as_ref()
     }
 
     /// Number of errors logged by the `LoroSyncController` since startup.
@@ -1487,11 +1533,6 @@ impl TestEnvironment {
             for (source, seq, summary) in &spurious_dump {
                 eprintln!("    [{source} seq={seq}] {summary}");
             }
-            crate::debug_pause::pause_on_fail(&format!(
-                "inv-editable-text-has-draggable CDC quiescence violation — spurious events after seq watermark \
-                 {target_seq}: {:?}",
-                spurious,
-            ));
         }
 
         assert!(
@@ -1529,6 +1570,82 @@ impl TestEnvironment {
         }
 
         Ok(all_blocks)
+    }
+
+    /// Render each tracked org file from the current SQL state and return
+    /// `{file_path: (disk_bytes, rendered_bytes)}`. Mirrors the path that
+    /// `OrgSyncController::render_file_by_doc_id` takes during
+    /// `re_render_all_tracked`, but does not write to disk — the result is
+    /// what `re_render_all_tracked` *would* write next.
+    ///
+    /// The render-fixed-point invariant (`inv-org-render-fixed-point`)
+    /// asserts `disk_bytes == rendered_bytes` for every entry. That is the
+    /// bytes-level contract `OrgSyncController`'s echo suppression depends
+    /// on: any divergence means the next `on_block_changed`-driven
+    /// re-render will write a different file, FSEvent will fire, and
+    /// `on_file_changed` will reprocess — the loop class observed on the
+    /// `Phase 6: Flow Optimization.org` shared-tree mount file (May 2026).
+    pub async fn snapshot_org_render_pairs(&self) -> Result<HashMap<PathBuf, (String, String)>> {
+        use holon_orgmode::org_renderer::OrgRenderer;
+
+        // Hydrate every block from `block_raw` the same way
+        // `CacheBlockReader::load_all_blocks_with_hydration` does — same
+        // query, same column set, same `tags` correlated subquery — so the
+        // rendered output here matches what the controller would produce.
+        let sql = "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, \
+                   b.content_type, b.source_language, b.source_name, \
+                   b.properties, b.marks, b.collapsed, b.completed, \
+                   b.block_type, b.created_at, b.updated_at, \
+                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags \
+                   FROM block_raw b";
+        let rows = self.query_sql(sql).await?;
+        let all_blocks: Vec<Block> = rows
+            .into_iter()
+            .map(|row| {
+                Block::try_from(row).map_err(|e| anyhow::anyhow!("Block::try_from failed: {e}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut out = HashMap::new();
+        for (doc_uri, file_path) in &self.documents {
+            let doc_block = match all_blocks.iter().find(|b| &b.id == doc_uri) {
+                Some(b) => b.clone(),
+                // Doc not yet projected — controller hasn't created the row
+                // (e.g. WriteOrgFile precedes startup ingest). Skip rather
+                // than panic; the post-startup invariant pass will catch it.
+                None => continue,
+            };
+
+            let mut descendants: Vec<Block> = Vec::new();
+            let mut frontier: HashSet<String> = HashSet::new();
+            frontier.insert(doc_uri.to_string());
+            loop {
+                let mut next: HashSet<String> = HashSet::new();
+                let mut found = false;
+                for b in &all_blocks {
+                    if frontier.contains(b.parent_id.as_str())
+                        && !descendants.iter().any(|x| x.id == b.id)
+                    {
+                        if b.is_page() {
+                            continue;
+                        }
+                        next.insert(b.id.to_string());
+                        descendants.push(b.clone());
+                        found = true;
+                    }
+                }
+                if !found {
+                    break;
+                }
+                frontier = next;
+            }
+
+            let rendered =
+                OrgRenderer::render_document(&doc_block, &descendants, file_path, &doc_block.id);
+            let disk = tokio::fs::read_to_string(file_path).await?;
+            out.insert(file_path.clone(), (disk, rendered));
+        }
+        Ok(out)
     }
 
     /// Set up a CDC-driven region watch that tracks `focus_roots JOIN block`.

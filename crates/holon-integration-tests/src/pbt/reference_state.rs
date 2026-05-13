@@ -355,6 +355,13 @@ pub struct ReferenceState {
     ///   touch `closed_at`, so this map is unchanged.
     pub open_pins: HashMap<Region, Vec<OpenPinEntry>>,
 
+    /// Block URIs whose `expand_toggle` widget is currently expanded. Empty
+    /// at startup — every toggle defaults collapsed. Mutated by
+    /// `ExpandToggle` (insert) and `ToggleCollapse` (remove) transitions.
+    /// Only meaningful for blocks whose render expression contains an
+    /// `expand_toggle` function call; non-toggle blocks are never present.
+    pub expanded_toggles: std::collections::HashSet<EntityUri>,
+
     /// Mirrors SQLite's `navigation_history.id AUTOINCREMENT` counter.
     /// Bumped on every INSERT (not on UPDATE-only paths like the move-to-top
     /// `update_pin_timestamp.sql`). PBT relies on this to align with the
@@ -449,6 +456,12 @@ pub struct ReferenceState {
     /// style adaptive weighting in `transitions()` — e.g. boost MoveCursor /
     /// TypeChars / PressKey weights right after a FocusEditableText.
     pub last_transition_kind: Option<&'static str>,
+
+    /// Open/closed state per drawer (keyed by drawer block_id, e.g.
+    /// `"block:default-left-sidebar"`). Mirrors the production
+    /// `widget_open` table. Default layout's two sidebars start open
+    /// after `apply_start_app`. Mutated by `ToggleDrawer`.
+    pub drawer_open: HashMap<String, bool>,
 }
 
 /// Reference state for a Loro-only peer.
@@ -607,6 +620,7 @@ impl ReferenceState {
             current_view: "all".to_string(),
             navigation_history: HashMap::new(),
             open_pins: HashMap::new(),
+            expanded_toggles: std::collections::HashSet::new(),
             next_history_id: 1,
             next_pin_ts: 1,
             focused_entity_id: HashMap::new(),
@@ -631,6 +645,7 @@ impl ReferenceState {
             interpreter,
             active_editor: None,
             last_transition_kind: None,
+            drawer_open: HashMap::new(),
         }
     }
 
@@ -1061,6 +1076,18 @@ impl ReferenceState {
                 .then_with(|| a.id.cmp(&b.id))
         });
         children
+    }
+
+    /// Predicted ordered child ids of `parent_id`. Mirrors what
+    /// `BlockOrdering::children(parent_id)` should return on the live
+    /// side. The encoding-free child-id list is the contract — both
+    /// sides produce a `Vec<EntityUri>`, no `sort_key` / `sequence`
+    /// strings cross the boundary.
+    pub fn children_of(&self, parent_id: &EntityUri) -> Vec<EntityUri> {
+        self.sorted_children_of(parent_id)
+            .into_iter()
+            .map(|b| b.id.clone())
+            .collect()
     }
 
     /// Previous sibling of block_id (same parent, immediately before in sequence order).

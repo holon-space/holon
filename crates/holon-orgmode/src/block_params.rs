@@ -119,15 +119,16 @@ pub fn build_block_params(
 
     params.insert("sequence".to_string(), Value::Integer(block.sequence()));
 
-    // Without this, every block reaches SQL with the default `sort_key='a0'`
-    // because `build_block_params` is the choke point for OrgSyncController
-    // CREATE / UPDATE batches. Sibling collisions on `'a0'` then break
-    // `BlockOperations::get_prev_sibling` (filter `sort_key < block.sort_key`
-    // is empty) and `gen_key_between` for `move_block` / `outdent`.
-    params.insert(
-        "sort_key".to_string(),
-        Value::String(block.sort_key.clone()),
-    );
+    // sort_key is intentionally NOT emitted here. The org parser's
+    // `gen_n_keys` value used to land in SQL via this map and competed
+    // with Loro's auto-assigned fractional index — two generators in
+    // disjoint string spaces, producing the seed=42 SplitBlock ordering
+    // panic (devlog 2026-05-14). The single authoritative writer is
+    // now `LoroSyncController::on_loro_changed`, which projects
+    // `tree.fractional_index(node)` to SQL via the UPSERT in
+    // `SqlOperationProvider::prepare_create`. Position intent enters
+    // the system via `after_block_id` (lifted to `Event::position_after_block_id`
+    // by the SQL provider boundary) and drives `tree.mov_after`.
 
     // Include org drawer properties (flat in block.properties)
     let id = block

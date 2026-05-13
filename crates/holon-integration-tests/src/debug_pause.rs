@@ -1,69 +1,62 @@
 //! Env-var-driven pause hooks for live inspection of running PBT tests.
 //!
-//! When a PBT (especially `gpui_ui_pbt`) trips an invariant, the test
-//! process panics and the GPUI window — and with it the embedded
-//! `holon` MCP server — tears down. By that point the live DB and CDC
-//! state that produced the failure are gone. These hooks let the
-//! caller hold the process open at chosen moments so an external tool
-//! (the `holon` MCP server, a debugger, or a sqlite client) can attach
-//! and inspect.
+//! When a PBT trips an invariant, the test process panics and the
+//! embedded `holon` MCP server tears down with it. By that point the
+//! live DB and CDC state that produced the failure are gone. These
+//! hooks let the caller hold the process open at chosen moments so an
+//! external tool (the `holon` MCP server, a debugger, or a sqlite
+//! client) can attach and inspect.
 //!
-//! Three knobs, each independent:
+//! Three knobs:
 //!
-//! - `PBT_PAUSE_ON_FAIL=1` — sleep right before a failing assertion
-//!   panics. Wire-in points are the test code paths that own the
-//!   panic; today: [`crate::test_environment::TestEnvironment::
-//!   assert_cdc_quiescent`].
-//! - `PBT_PAUSE_BEFORE_STEP=N` — sleep immediately before applying
-//!   transition N (1-based, matches the `[pbt_step] Step N/M` log
-//!   line). Useful with a debugger to set breakpoints just before
-//!   the operation fires.
-//! - `PBT_PAUSE_AFTER_STEP=N` — sleep immediately after the
-//!   transition's invariants are checked.
+//! - `PBT_PAUSE_SECONDS=<n>` — master switch. When set:
+//!   * installs a global panic hook that sleeps `n` seconds before any
+//!     panic propagates (so the MCP server stays alive)
+//!   * forces the embedded MCP server to start on
+//!     [`MCP_PAUSE_PORT`] (8528) regardless of `PBT_MCP_PORT`
+//!   When unset, both are no-ops.
+//! - `PBT_PAUSE_BEFORE_STEP=N` — sleep before applying transition N
+//!   (1-based, matches the `[pbt_step] Step N/M` log line).
+//! - `PBT_PAUSE_AFTER_STEP=N` — sleep after the transition's
+//!   invariants are checked.
 //!
-//! `PBT_PAUSE_SECONDS=<n>` (default 900s = 15 min) controls the
-//! pause duration for all three. Send SIGINT to abort early.
-//!
-//! All three are no-ops when their env var is unset, so it's safe to
-//! leave the hook calls in place permanently.
+//! Send SIGINT to abort the sleep early.
 
+use std::sync::Once;
 use std::time::Duration;
 
-const DEFAULT_PAUSE_SECONDS: u64 = 900;
+/// Port the embedded MCP server is forced to bind when
+/// `PBT_PAUSE_SECONDS` is set. Distinct from the external MCP proxy
+/// (which would conflict on its own listening port).
+pub const MCP_PAUSE_PORT: u16 = 8528;
 
-fn pause_seconds() -> u64 {
-    std::env::var("PBT_PAUSE_SECONDS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_PAUSE_SECONDS)
+static PANIC_HOOK_INSTALLED: Once = Once::new();
+
+/// True iff `PBT_PAUSE_SECONDS` is set in the environment. Treated as
+/// the master switch for all panic/MCP pause behavior.
+pub fn pause_enabled() -> bool {
+    std::env::var_os("PBT_PAUSE_SECONDS").is_some()
+}
+
+/// Pause duration. Returns `None` when the master switch is off.
+pub fn pause_seconds() -> Option<u64> {
+    std::env::var("PBT_PAUSE_SECONDS").ok()?.parse::<u64>().ok()
 }
 
 fn sleep_with_banner(header: &str, body: &str) {
-    let secs = pause_seconds();
+    let Some(secs) = pause_seconds() else {
+        return;
+    };
     let pid = std::process::id();
     eprintln!(
         "\n═══════════════════════════════════════════════════════════════════\n\
          [{header}] {body}\n\
          PID: {pid}    Sleeping: {secs}s    SIGINT aborts.\n\
-         Connect via the holon MCP server, attach a debugger, or open the\n\
-         test sqlite DB to inspect live state.\n\
-         Set PBT_PAUSE_SECONDS=<n> to override the pause duration.\n\
+         Connect via the holon MCP server (port {MCP_PAUSE_PORT}), \
+         attach a debugger, or open the test sqlite DB to inspect live state.\n\
          ═══════════════════════════════════════════════════════════════════\n"
     );
     std::thread::sleep(Duration::from_secs(secs));
-}
-
-/// Pause if `PBT_PAUSE_ON_FAIL` is set. Call right before a failing
-/// assertion's panic so the live process state remains inspectable.
-///
-/// `reason` is a short human description of which assertion is about
-/// to fail — it goes into the banner so a passer-by sees what they're
-/// inspecting.
-pub fn pause_on_fail(reason: &str) {
-    if std::env::var_os("PBT_PAUSE_ON_FAIL").is_none() {
-        return;
-    }
-    sleep_with_banner("PBT_PAUSE_ON_FAIL", reason);
 }
 
 /// Pause before step `step_index` (1-based) if `PBT_PAUSE_BEFORE_STEP`
@@ -81,6 +74,39 @@ pub fn pause_before_step(step_index: u32, transition_name: &str) {
 /// matches.
 pub fn pause_after_step(step_index: u32, transition_name: &str) {
     pause_at_step("PBT_PAUSE_AFTER_STEP", step_index, "after", transition_name);
+}
+
+/// Install a global panic hook that sleeps when `PBT_PAUSE_SECONDS` is
+/// set, so the embedded MCP server (and any other in-process
+/// inspectors) stay alive long enough for an external agent to attach.
+/// The previous hook is invoked after the sleep so chrome-trace
+/// flushing, default backtraces, etc. still run.
+///
+/// Idempotent — safe to call from every PBT entrypoint.
+pub fn install_panic_pause_hook() {
+    if !pause_enabled() {
+        return;
+    }
+    PANIC_HOOK_INSTALLED.call_once(|| {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let reason = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown location>".to_string());
+            sleep_with_banner(
+                "PBT_PAUSE_SECONDS (panic hook)",
+                &format!("panic at {location}: {reason}"),
+            );
+            prev_hook(info);
+        }));
+    });
 }
 
 fn pause_at_step(var: &str, step_index: u32, when: &str, transition_name: &str) {

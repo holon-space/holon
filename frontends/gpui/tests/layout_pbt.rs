@@ -72,15 +72,11 @@ fn run_scenario_gpui(cx: &mut TestAppContext, scenario: &Scenario) -> Result<(),
     holon_layout_testing::run_scenario(scenario, |input| {
         let mut cx = cx_cell.borrow_mut();
         match input {
-            StepInput::Mount {
-                vm,
-                blocks,
-                drawer_states,
-            } => {
+            StepInput::Mount { vm, blocks, state } => {
                 // Drop any prior session, flush close work, open a new window.
                 session = None;
                 cx.run_until_parked();
-                let s = GpuiScenarioSession::open(*cx, vm, blocks, drawer_states, window_size);
+                let s = GpuiScenarioSession::open(*cx, vm, blocks, state, window_size);
                 let snap = s.snapshot();
                 session = Some(s);
                 snap
@@ -162,29 +158,22 @@ fn live_block_inside_tree_item_has_nonzero_height(cx: &mut TestAppContext) {
         holon_layout_testing::run_scenario(&scenario, |input| {
             let mut cx = cx_cell2.borrow_mut();
             match input {
-                StepInput::Mount {
-                    vm,
-                    blocks,
-                    drawer_states,
-                } => {
+                StepInput::Mount { vm, blocks, state } => {
                     session = None;
                     cx.run_until_parked();
                     let s = support::GpuiScenarioSession::open(
                         *cx,
                         vm,
                         blocks,
-                        drawer_states,
+                        state,
                         fixture_window_size(),
                     );
                     let snap = s.snapshot();
-
-                    let svg = snap.to_svg();
-                    let path = svg_dir.join(format!("case_{case_idx}.svg"));
-                    std::fs::write(&path, &svg).ok();
-                    let dump = snap.structural_dump();
-                    let dump_path = svg_dir.join(format!("case_{case_idx}.txt"));
-                    std::fs::write(&dump_path, &dump).ok();
-
+                    holon_layout_testing::snapshot::write_artifacts(
+                        &snap,
+                        &svg_dir,
+                        &format!("case_{case_idx}"),
+                    );
                     session = Some(s);
                     snap
                 }
@@ -241,7 +230,7 @@ fn streaming_collection_data_arrival(cx: &mut TestAppContext) {
         cx,
         scenario.materialize(),
         scenario.block_registrations(),
-        std::collections::HashMap::new(),
+        holon_layout_testing::SceneState::default(),
         fixture_window_size(),
     );
     let snap_a = session.snapshot();
@@ -254,9 +243,11 @@ fn streaming_collection_data_arrival(cx: &mut TestAppContext) {
     for h in &bp.handles {
         session.apply_action(
             cx,
-            &holon_layout_testing::UiInteraction::DeliverBlockContent {
-                block_id: h.block_id.clone(),
-            },
+            &holon_layout_testing::UiInteraction::DeliverBlockContent(
+                holon_layout_testing::DeliverBlockContent {
+                    block_id: h.block_id.clone(),
+                },
+            ),
         );
     }
     let snap_b = session.snapshot();
@@ -362,7 +353,7 @@ fn live_block_self_reference_no_infinite_construction(cx: &mut TestAppContext) {
         cx,
         root_vm,
         blocks,
-        std::collections::HashMap::new(),
+        holon_layout_testing::SceneState::default(),
         fixture_window_size(),
     );
     let elapsed = start.elapsed();
@@ -393,6 +384,173 @@ fn live_block_self_reference_no_infinite_construction(cx: &mut TestAppContext) {
     assert!(
         live_block_count < 16,
         "{live_block_count} live_block widgets in snapshot — cycle prevention is leaking. Dump:\n{dump}",
+    );
+}
+
+// ── Lazy slot materialisation on expand_toggle ───────────────────────
+//
+// Pins the contract of `LazyReactiveSlot` end-to-end through GPUI:
+//
+//   * Mount an expand_toggle whose `lazy_slot` thunk increments an
+//     atomic counter and returns a text widget with a distinctive
+//     marker. While the gate is closed, the thunk must NOT fire and
+//     the marker must NOT appear in the render snapshot.
+//   * Flip the gate true and resettle. The thunk fires exactly once;
+//     the marker appears.
+//   * Flip the gate false → marker disappears (the GPUI builder's
+//     `if is_expanded` branch hides it) but the cache is preserved —
+//     counter stays at 1.
+//   * Flip the gate true again → marker reappears; counter still at 1
+//     (cache hit, no re-fire).
+//
+// Failure modes this catches (mutation-tested on 2026-05-15):
+//   * `materialize_if_gated` ignoring the gate
+//     → "thunk fired before gate opened — laziness broken" (Phase 1).
+//   * Cache not stored on first materialisation
+//     → "thunk re-fired on re-expand — cache not preserved" (Phase 4).
+//   * GPUI builder dropping the `lazy_slot.materialize_if_gated()` call
+//     → "thunk did not fire on first expand — materialise_if_gated broken"
+//       (Phase 2). The GPUI render path is what triggers the thunk; if the
+//       builder never asks, nothing fires.
+//   * Off-by-one in the text-count check would be caught by Phase 2's
+//     `expected 2 text widgets (header + body) after expand` assertion.
+
+#[gpui::test]
+fn lazy_slot_expand_toggle_materialises_on_first_expand_and_caches(cx: &mut TestAppContext) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use futures_signals::signal::Mutable;
+    use holon_api::{render_types::RenderExpr, Value};
+    use holon_frontend::reactive_view_model::{LazyReactiveSlot, ReactiveViewModel};
+
+    const HEADER_MARKER: &str = "EXPAND_TOGGLE_HEADER_MARKER";
+    const BODY_MARKER: &str = "EXPAND_TOGGLE_BODY_MARKER";
+
+    // Counting thunk: a successful materialisation increments
+    // `thunk_count` and returns a text VM whose displayed text contains
+    // BODY_MARKER. Probing the snapshot for BODY_MARKER tells us whether
+    // GPUI actually rendered the materialised content.
+    let thunk_count = Arc::new(AtomicUsize::new(0));
+    let counter_for_thunk = thunk_count.clone();
+    let thunk: Arc<dyn Fn() -> ReactiveViewModel + Send + Sync> = Arc::new(move || {
+        counter_for_thunk.fetch_add(1, Ordering::SeqCst);
+        ReactiveViewModel::text(BODY_MARKER)
+    });
+
+    let gate = Mutable::new(false);
+    let lazy_slot = LazyReactiveSlot::new(gate.read_only(), thunk);
+
+    // Construct an `expand_toggle` VM by hand. We don't go through the
+    // shadow builder because it would need a real `BuilderServices`
+    // implementing `clone_arc()`; the test only needs to validate the
+    // VM → snapshot → GPUI render path, not the builder pipeline.
+    let header_child = Arc::new(ReactiveViewModel::text(HEADER_MARKER));
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "target_id".to_string(),
+        Value::String("test-target".to_string()),
+    );
+
+    let expand_toggle_vm = Arc::new(ReactiveViewModel {
+        expr: futures_signals::signal::Mutable::new(RenderExpr::FunctionCall {
+            name: "expand_toggle".to_string(),
+            args: vec![],
+        }),
+        children: vec![header_child],
+        expanded: Some(gate.clone()),
+        lazy_slot: Some(lazy_slot),
+        props: futures_signals::signal::Mutable::new(props),
+        ..Default::default()
+    });
+
+    let window_size = fixture_window_size();
+    let session = support::GpuiScenarioSession::open(
+        cx,
+        expand_toggle_vm,
+        vec![],
+        holon_layout_testing::SceneState::default(),
+        window_size,
+    );
+
+    // ── Phase 1: collapsed ─────────────────────────────────────────────
+    // Gate closed, no materialisation has been demanded yet.
+    assert_eq!(
+        thunk_count.load(Ordering::SeqCst),
+        0,
+        "thunk fired before gate opened — laziness broken"
+    );
+    let snap_collapsed = session.snapshot();
+    // The plain `text` GPUI builder only records `displayed_text` for
+    // row-bound `field: "content"` cells. Static-label texts (which is
+    // what `ReactiveViewModel::text(...)` produces) are still tracked
+    // as `widget_type == "text"` but with `displayed_text == None`. So
+    // we count "text" entries directly: header-only → 1, header+body → 2.
+    let text_count = |snap: &holon_layout_testing::snapshot::BoundsSnapshot| -> usize {
+        snap.entries
+            .iter()
+            .filter(|(_, info)| info.widget_type == "text")
+            .count()
+    };
+    let _ = (HEADER_MARKER, BODY_MARKER); // kept for failure-message context
+
+    assert_eq!(
+        text_count(&snap_collapsed),
+        1,
+        "expected 1 text widget (header only) while collapsed, got {}. dump:\n{}",
+        text_count(&snap_collapsed),
+        snap_collapsed.structural_dump()
+    );
+
+    // ── Phase 2: first expand ──────────────────────────────────────────
+    gate.set(true);
+    session.notify_and_settle(cx);
+    assert_eq!(
+        thunk_count.load(Ordering::SeqCst),
+        1,
+        "thunk did not fire on first expand — materialise_if_gated broken"
+    );
+    let snap_expanded = session.snapshot();
+    assert_eq!(
+        text_count(&snap_expanded),
+        2,
+        "expected 2 text widgets (header + body) after expand, got {}. dump:\n{}",
+        text_count(&snap_expanded),
+        snap_expanded.structural_dump()
+    );
+
+    // ── Phase 3: collapse again, cache preserved ───────────────────────
+    gate.set(false);
+    session.notify_and_settle(cx);
+    assert_eq!(
+        thunk_count.load(Ordering::SeqCst),
+        1,
+        "thunk re-fired or cache evicted on collapse"
+    );
+    let snap_collapsed_again = session.snapshot();
+    assert_eq!(
+        text_count(&snap_collapsed_again),
+        1,
+        "expected 1 text widget (body hidden) after collapse, got {}. dump:\n{}",
+        text_count(&snap_collapsed_again),
+        snap_collapsed_again.structural_dump()
+    );
+
+    // ── Phase 4: re-expand, cache hit ──────────────────────────────────
+    gate.set(true);
+    session.notify_and_settle(cx);
+    assert_eq!(
+        thunk_count.load(Ordering::SeqCst),
+        1,
+        "thunk re-fired on re-expand — cache not preserved across gate toggle"
+    );
+    let snap_reexpanded = session.snapshot();
+    assert_eq!(
+        text_count(&snap_reexpanded),
+        2,
+        "expected 2 text widgets after re-expand (cache hit), got {}. dump:\n{}",
+        text_count(&snap_reexpanded),
+        snap_reexpanded.structural_dump()
     );
 }
 

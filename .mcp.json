@@ -16,6 +16,15 @@
       "env": {
         "HOLON_ACTOR_STATS": "5"
       }
+    },
+    "holon-live": {
+      "type": "stdio",
+      "command": "mcp-rust-proxy",
+      "args": [
+        "--config",
+        "/Users/martin/Workspaces/pkm/holon/mcp-proxy.yaml",
+        "--stdio"
+      ]
     }
   }
 }

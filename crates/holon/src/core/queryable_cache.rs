@@ -974,7 +974,7 @@ where
 {
     async fn watch_changes_since(
         &self,
-        _position: StreamPosition,
+        _: StreamPosition,
     ) -> Pin<Box<dyn Stream<Item = std::result::Result<Vec<Change<StorageEntity>>, ApiError>> + Send>>
     {
         // IMPORTANT: No auto-sync here - caller must sync first
@@ -983,7 +983,9 @@ where
         let type_def = self.type_def.clone();
         let table_name = type_def.name.clone();
 
-        // Subscribe to CDC broadcast and bridge to mpsc for Stream compatibility
+        // Subscribe to CDC broadcast and bridge to mpsc to fit the Stream trait.
+        // ALLOW(compatibility): the trait the bridge targets is named Stream; this
+        // is plain English usage, not a back-compat shim.
         let mut broadcast_rx = self.db_handle.subscribe_row_changes();
         let (tx, rx) = tokio::sync::mpsc::channel(1024);
         tokio::spawn(async move {
@@ -1369,24 +1371,37 @@ mod tests {
 /// for trace context propagation. The column stores JSON-serialized `ChangeOrigin`
 /// which allows CDC callbacks to read trace context from each row.
 fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> String {
-    let mut columns = Vec::new();
+    // Mirror `TypeDefinition::to_create_table_sql`: when multiple fields are
+    // flagged `primary_key`, emit a table-level `PRIMARY KEY (a, b, …)`
+    // clause and skip the inline form. SQLite otherwise rejects with
+    // "table has more than one primary key".
+    let pk_count = type_def.fields.iter().filter(|f| f.primary_key).count();
+    let inline_pk = pk_count == 1;
 
+    let mut columns = Vec::new();
     for field in &type_def.fields {
         let mut col = format!("{} {}", field.name, field.sql_type);
-
-        if field.primary_key {
+        if field.primary_key && inline_pk {
             col.push_str(" PRIMARY KEY");
         }
-
         if !field.nullable {
             col.push_str(" NOT NULL");
         }
-
         columns.push(col);
     }
 
     // Add _change_origin column for trace context propagation
     columns.push(format!("{} TEXT", CHANGE_ORIGIN_COLUMN));
+
+    if pk_count >= 2 {
+        let pk_cols: Vec<&str> = type_def
+            .fields
+            .iter()
+            .filter(|f| f.primary_key)
+            .map(|f| f.name.as_str())
+            .collect();
+        columns.push(format!("PRIMARY KEY ({})", pk_cols.join(", ")));
+    }
 
     format!(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",

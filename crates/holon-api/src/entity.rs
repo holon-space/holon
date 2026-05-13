@@ -320,12 +320,19 @@ impl TypeDefinition {
             "Cannot generate CREATE TABLE for type '{}' with no fields.",
             self.name
         );
+        // SQLite forbids multiple inline `PRIMARY KEY` annotations — when 2+
+        // fields are flagged we emit a table-level `PRIMARY KEY (a, b, …)`
+        // clause and skip the inline form. The single-PK case keeps inline so
+        // `REFERENCES` (for id-link tables) still attaches to the right column.
+        let pk_count = self.fields.iter().filter(|f| f.primary_key).count();
+        let inline_pk = pk_count == 1;
+
         let columns: Vec<String> = self
             .fields
             .iter()
             .map(|f| {
                 let mut col = format!("{} {}", f.name, f.sql_type);
-                if f.primary_key {
+                if f.primary_key && inline_pk {
                     col.push_str(" PRIMARY KEY");
                     if let Some(ref target) = self.id_references {
                         col.push_str(&format!(" REFERENCES \"{target}\"(id)"));
@@ -342,10 +349,20 @@ impl TypeDefinition {
             })
             .collect();
 
+        let mut body = columns.join(",\n  ");
+        if pk_count >= 2 {
+            let pk_cols: Vec<&str> = self
+                .fields
+                .iter()
+                .filter(|f| f.primary_key)
+                .map(|f| f.name.as_str())
+                .collect();
+            body.push_str(&format!(",\n  PRIMARY KEY ({})", pk_cols.join(", ")));
+        }
+
         format!(
             "CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)",
-            self.name,
-            columns.join(",\n  ")
+            self.name, body
         )
     }
 
@@ -570,4 +587,60 @@ pub struct GraphEdgeDef {
     pub target_table: String,
     /// Target table's ID column
     pub target_id_column: String,
+}
+
+#[cfg(test)]
+mod create_table_sql_tests {
+    use super::*;
+
+    #[test]
+    fn composite_primary_key_emits_table_level_clause() {
+        let td = TypeDefinition {
+            name: "gh_issue".to_string(),
+            graph_label: None,
+            primary_key: "owner".to_string(),
+            fields: vec![
+                FieldSchema::new("owner", "TEXT").primary_key(),
+                FieldSchema::new("repo", "TEXT").primary_key(),
+                FieldSchema::new("number", "INTEGER").primary_key(),
+                FieldSchema::new("title", "TEXT"),
+            ],
+            id_references: None,
+            profile_variants: vec![],
+            default_lifetime: FieldLifetime::default(),
+            source: TypeSource::default(),
+        };
+        let sql = td.to_create_table_sql();
+        // Inline PRIMARY KEY annotations would have made SQLite reject this DDL
+        // with "table has more than one primary key" — the table-level clause
+        // is the only legal form.
+        assert!(
+            !sql.contains("owner TEXT PRIMARY KEY"),
+            "inline PK leaked: {sql}"
+        );
+        assert!(
+            sql.contains("PRIMARY KEY (owner, repo, number)"),
+            "expected composite PK clause; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn single_primary_key_keeps_inline_form() {
+        let td = TypeDefinition {
+            name: "single".to_string(),
+            graph_label: None,
+            primary_key: "id".to_string(),
+            fields: vec![
+                FieldSchema::new("id", "TEXT").primary_key(),
+                FieldSchema::new("name", "TEXT"),
+            ],
+            id_references: None,
+            profile_variants: vec![],
+            default_lifetime: FieldLifetime::default(),
+            source: TypeSource::default(),
+        };
+        let sql = td.to_create_table_sql();
+        assert!(sql.contains("id TEXT PRIMARY KEY"), "got: {sql}");
+        assert!(!sql.contains("PRIMARY KEY (id)"), "got: {sql}");
+    }
 }

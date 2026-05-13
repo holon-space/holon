@@ -4,6 +4,10 @@
 //! - `test_sync_block_change_to_file`: in-memory mutation → on_block_changed → file → parse → assert
 //! - `test_sync_file_change_to_blocks`: org text mutation → on_file_changed → store → assert
 //!
+//! Requires the `di` feature (org_sync_controller is only compiled with it).
+
+#![cfg(feature = "di")]
+//!
 //! Uses mock implementations of BlockReader, OperationProvider, and DocumentManager.
 
 use anyhow::Result;
@@ -14,6 +18,8 @@ use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::types::{ContentType, Priority, Tags, TaskState, Timestamp};
 use holon_api::{EntityName, Value};
+use holon_core::block_ordering::BlockOrdering;
+use holon_core::traits::Result as BlockOrderingResult;
 use holon_orgmode::models::{OrgBlockExt, DEFAULT_ACTIVE_KEYWORDS, DEFAULT_DONE_KEYWORDS};
 use holon_orgmode::org_renderer::OrgRenderer;
 use holon_orgmode::org_sync_controller::OrgSyncController;
@@ -22,7 +28,7 @@ use holon_orgmode::traits::{BlockReader, DocumentManager};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
 // ============================================================================
@@ -312,6 +318,70 @@ impl DocumentManager for MockDocumentManager {
 }
 
 // ============================================================================
+// Stub BlockOrdering for tests
+// ============================================================================
+
+/// Records `place()` calls for assertions. All other methods panic because
+/// the existing PBT paths don't exercise positional reads.
+struct StubBlockOrdering {
+    pub calls: Mutex<Vec<(EntityUri, String, Option<String>)>>,
+}
+
+impl StubBlockOrdering {
+    fn new() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl BlockOrdering for StubBlockOrdering {
+    async fn place(
+        &self,
+        uri: &EntityUri,
+        parent_id: &str,
+        after_id: Option<&str>,
+    ) -> BlockOrderingResult<()> {
+        self.calls.lock().unwrap().push((
+            uri.clone(),
+            parent_id.to_string(),
+            after_id.map(str::to_string),
+        ));
+        Ok(())
+    }
+
+    async fn new_child_anchor(&self, _: &str, _: Option<&str>) -> BlockOrderingResult<String> {
+        unimplemented!("stub BlockOrdering: only place() is exercised by this test")
+    }
+
+    async fn prev_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        // Return None so the misalignment check in on_file_changed treats every
+        // block as first-child — safe for tests that don't assert order.
+        Ok(None)
+    }
+
+    async fn next_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        unimplemented!("stub BlockOrdering: only place() is exercised by this test")
+    }
+
+    async fn first_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        unimplemented!("stub BlockOrdering: only place() is exercised by this test")
+    }
+
+    async fn last_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        unimplemented!("stub BlockOrdering: only place() is exercised by this test")
+    }
+
+    async fn children(&self, _: &str) -> BlockOrderingResult<Vec<String>> {
+        // Return empty so the misalignment check treats all blocks as misaligned
+        // (they'll call place() once each). Tests that assert place() call count
+        // should reflect this.
+        Ok(vec![])
+    }
+}
+
+// ============================================================================
 // Normalized comparison
 // ============================================================================
 
@@ -409,43 +479,101 @@ struct TestFixture {
     controller: OrgSyncController,
     root_dir: PathBuf,
     doc_id: EntityUri,
-    doc_name: String,
+    /// Path segments from `root_dir` to the file (excluding the `.org` extension).
+    /// Length 1 = flat `root_dir/<seg>.org`; length N = `root_dir/<seg0>/.../<segN-1>.org`.
+    doc_path_segments: Vec<String>,
+    doc_manager: Arc<MockDocumentManager>,
 }
 
 impl TestFixture {
     fn new(temp_dir: &std::path::Path) -> Self {
+        Self::new_with(temp_dir, vec!["test".to_string()], true)
+    }
+
+    /// Generalized constructor. `path_segments` are the directory chain and
+    /// filename stem; `pre_seed_doc` controls whether the leaf doc is inserted
+    /// into `doc_manager` before any `on_file_changed` call (when false, the
+    /// controller's new-doc creation path is exercised — including the
+    /// directory chain → parent_id mapping).
+    fn new_with(
+        temp_dir: &std::path::Path,
+        path_segments: Vec<String>,
+        pre_seed_doc: bool,
+    ) -> Self {
+        assert!(
+            !path_segments.is_empty(),
+            "path_segments must contain at least one segment"
+        );
         let store = Arc::new(InMemoryBlockStore::new());
         let op_provider = Arc::new(MockOperationProvider {
             store: store.clone(),
         });
         let doc_manager = Arc::new(MockDocumentManager::new());
 
-        let root_dir = temp_dir.to_path_buf();
+        // Canonicalize so fixture-built paths match what OrgSyncController
+        // stores internally (macOS: /var → /private/var symlink resolution).
+        let root_dir = temp_dir
+            .canonicalize()
+            .unwrap_or_else(|_| temp_dir.to_path_buf());
+        let ordering = Arc::new(StubBlockOrdering::new());
         let controller = OrgSyncController::new(
             store.clone(),
             op_provider,
             doc_manager.clone(),
             root_dir.clone(),
+            ordering,
         );
 
         let doc_id = EntityUri::block_random();
-        let doc_name = "test".to_string();
 
-        let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), doc_name.clone());
-        doc.set_page(true);
-        doc_manager.add_document(doc);
+        if pre_seed_doc {
+            // Pre-seed the full directory chain — intermediate Pages with
+            // fresh IDs and the leaf at `doc_id`. Reflects the production
+            // invariant that a doc only enters `doc_manager` via a prior
+            // ingest, which always honors the path → parent chain. Seeding
+            // just the leaf with `parent=no_parent` would set up an
+            // inconsistent fixture and mask whether on_file_changed
+            // preserves the invariant.
+            let mut current_parent = EntityUri::no_parent();
+            let n = path_segments.len();
+            for (idx, seg) in path_segments.iter().enumerate() {
+                let id = if idx == n - 1 {
+                    doc_id.clone()
+                } else {
+                    EntityUri::block_random()
+                };
+                let mut doc = Block::new_text(id.clone(), current_parent.clone(), seg.clone());
+                doc.set_page(true);
+                doc_manager.add_document(doc);
+                current_parent = id;
+            }
+        }
 
         TestFixture {
             store,
             controller,
             root_dir,
             doc_id,
-            doc_name,
+            doc_path_segments: path_segments,
+            doc_manager,
         }
     }
 
     fn file_path(&self) -> PathBuf {
-        self.root_dir.join(format!("{}.org", self.doc_name))
+        let mut p = self.root_dir.clone();
+        let n = self.doc_path_segments.len();
+        for seg in &self.doc_path_segments[..n - 1] {
+            p = p.join(seg);
+        }
+        p.join(format!("{}.org", self.doc_path_segments[n - 1]))
+    }
+
+    /// Create parent directories on disk so a write to `file_path()` succeeds
+    /// even for nested-path fixtures.
+    async fn ensure_parent_dirs(&self) {
+        if let Some(parent) = self.file_path().parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
     }
 
     fn seed_blocks(&self, blocks: &[Block]) {
@@ -484,6 +612,28 @@ fn valid_timestamp() -> impl Strategy<Value = String> {
         Just("<2024-06-20 Thu 14:00>".to_string()),
         Just("<2024-12-31 Tue 09:30>".to_string()),
     ]
+}
+
+/// Filename- and Page-title-safe path segment: ASCII alphanumerics only, no
+/// spaces or path separators. Used as both the directory name and the
+/// matching Page title (which `path_to_name_chain` derives from the path).
+fn path_segment() -> impl Strategy<Value = String> {
+    "[a-zA-Z][a-zA-Z0-9]{0,15}"
+}
+
+/// 1..=3 segment directory chain ending at the `.org` file stem. Segments
+/// within a chain are made unique so a single `(parent, title)` lookup in
+/// `MockDocumentManager` is unambiguous when walking the chain — the
+/// production code handles dupes per-parent, but distinct names keep the
+/// invariant check readable in shrunk counterexamples.
+fn path_chain_strategy() -> impl Strategy<Value = Vec<String>> {
+    prop::collection::vec(path_segment(), 1..=3).prop_filter(
+        "path segments within a chain must be distinct",
+        |segs| {
+            let unique: BTreeSet<&String> = segs.iter().collect();
+            unique.len() == segs.len()
+        },
+    )
 }
 
 // -- BlockMutation: applied to blocks before on_block_changed ----------------
@@ -1093,11 +1243,16 @@ proptest! {
     fn test_sync_file_change_to_blocks(
         variant in 0..3u8,
         mutation in text_mutation_strategy(),
+        path_segments in path_chain_strategy(),
+        inject_id_directive in any::<bool>(),
+        pre_seed_doc in any::<bool>(),
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let temp_dir = tempfile::tempdir().unwrap();
-            let mut fixture = TestFixture::new(temp_dir.path());
+            let mut fixture =
+                TestFixture::new_with(temp_dir.path(), path_segments.clone(), pre_seed_doc);
+            fixture.ensure_parent_dirs().await;
 
             // Generate + stabilize baseline
             let raw_blocks = generate_baseline_blocks(&fixture.doc_id, variant);
@@ -1108,8 +1263,16 @@ proptest! {
             fixture.seed_blocks(&baseline);
             fixture.controller.initialize().await.expect("initialize must succeed");
 
-            let initial_org =
+            // OrgRenderer doesn't emit `#+ID:` at the file head, so we splice it
+            // in when the generator picks `inject_id_directive`. Combined with
+            // `pre_seed_doc == false`, this exercises the on_file_changed
+            // branch that creates a new Page from a bare `#+ID:` — the one
+            // that must honor the directory chain for `parent_id`.
+            let mut initial_org =
                 OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id);
+            if inject_id_directive {
+                initial_org = format!("#+ID: {}\n{}", fixture.doc_id.id(), initial_org);
+            }
             tokio::fs::write(&fixture.file_path(), &initial_org)
                 .await
                 .unwrap();
@@ -1119,6 +1282,49 @@ proptest! {
                 .on_file_changed(&fixture.file_path())
                 .await
                 .unwrap();
+
+            // After first ingest, every directory segment in the path chain
+            // must exist as a Page block with the expected parent. This holds
+            // regardless of which branch (`Some(Some)`, `Some(None)`, `None`)
+            // the controller took — the directory layout dictates the Page
+            // tree, not the presence of `#+ID:` or a pre-seed.
+            let chain: Vec<&str> = path_segments.iter().map(String::as_str).collect();
+            let mut expected_parent = EntityUri::no_parent();
+            for (depth, seg) in chain.iter().enumerate() {
+                let found = fixture
+                    .doc_manager
+                    .find_by_parent_and_name(&expected_parent, seg)
+                    .await
+                    .unwrap();
+                prop_assert!(
+                    found.is_some(),
+                    "Page chain broken at depth {}: no Page named {:?} under parent {:?} \
+                     (segments={:?}, inject_id_directive={}, pre_seed_doc={})",
+                    depth, seg, expected_parent, path_segments, inject_id_directive, pre_seed_doc
+                );
+                let doc = found.unwrap();
+                prop_assert!(
+                    doc.is_page(),
+                    "doc {:?} at depth {} must carry the Page tag",
+                    seg, depth
+                );
+                prop_assert_eq!(
+                    &doc.parent_id, &expected_parent,
+                    "parent_id mismatch for {:?} at depth {} \
+                     (segments={:?}, inject_id_directive={}, pre_seed_doc={})",
+                    seg, depth, path_segments, inject_id_directive, pre_seed_doc
+                );
+                expected_parent = doc.id.clone();
+            }
+
+            // Skip mutation phase if the baseline has no headlines (every
+            // mutation variant in `text_mutation_strategy` targets a headline
+            // via `headlines[idx % headlines.len()]`, which panics on empty).
+            // The page-chain assertions above have already exercised the
+            // ingest path, which is what these new generator dimensions test.
+            if find_headlines(&initial_org).is_empty() {
+                return Ok::<(), TestCaseError>(());
+            }
 
             // Apply text mutation to org file
             let mutated_org = match apply_text_mutation(&initial_org, &mutation) {
@@ -1274,5 +1480,266 @@ mod find_foreign_blocks_tests {
             .await
             .unwrap();
         assert!(conflicts.is_empty());
+    }
+}
+
+// ============================================================================
+// Test 7: OrgSyncController::on_file_changed ordering replay
+// ============================================================================
+
+#[cfg(test)]
+mod ordering_replay_tests {
+    use super::*;
+
+    /// A configurable stub that returns specific live children for given parents,
+    /// and records every `place()` call for assertion.
+    struct ConfigurableOrderingStub {
+        /// Maps parent_id → ordered list of child ids representing the LIVE order.
+        live_order: std::collections::HashMap<String, Vec<String>>,
+        pub calls: Mutex<Vec<(EntityUri, String, Option<String>)>>,
+    }
+
+    impl ConfigurableOrderingStub {
+        fn new(live_order: std::collections::HashMap<String, Vec<String>>) -> Self {
+            Self {
+                live_order,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlockOrdering for ConfigurableOrderingStub {
+        async fn place(
+            &self,
+            uri: &EntityUri,
+            parent_id: &str,
+            after_id: Option<&str>,
+        ) -> BlockOrderingResult<()> {
+            self.calls.lock().unwrap().push((
+                uri.clone(),
+                parent_id.to_string(),
+                after_id.map(str::to_string),
+            ));
+            Ok(())
+        }
+
+        async fn new_child_anchor(&self, _: &str, _: Option<&str>) -> BlockOrderingResult<String> {
+            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+        }
+
+        async fn prev_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+            Ok(None)
+        }
+
+        async fn next_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+        }
+
+        async fn first_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+        }
+
+        async fn last_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+        }
+
+        async fn children(&self, parent_id: &str) -> BlockOrderingResult<Vec<String>> {
+            Ok(self.live_order.get(parent_id).cloned().unwrap_or_default())
+        }
+    }
+
+    fn build_controller_with_ordering(
+        temp_dir: &std::path::Path,
+        ordering: Arc<dyn BlockOrdering>,
+    ) -> (
+        Arc<InMemoryBlockStore>,
+        Arc<MockDocumentManager>,
+        OrgSyncController,
+        EntityUri,
+        PathBuf,
+    ) {
+        build_controller_with_ordering_and_doc_id(temp_dir, ordering, EntityUri::block_random())
+    }
+
+    fn build_controller_with_ordering_and_doc_id(
+        temp_dir: &std::path::Path,
+        ordering: Arc<dyn BlockOrdering>,
+        doc_id: EntityUri,
+    ) -> (
+        Arc<InMemoryBlockStore>,
+        Arc<MockDocumentManager>,
+        OrgSyncController,
+        EntityUri,
+        PathBuf,
+    ) {
+        let store = Arc::new(InMemoryBlockStore::new());
+        let op_provider = Arc::new(MockOperationProvider {
+            store: store.clone(),
+        });
+        let doc_manager = Arc::new(MockDocumentManager::new());
+
+        let root_dir = temp_dir.to_path_buf();
+        let controller = OrgSyncController::new(
+            store.clone(),
+            op_provider,
+            doc_manager.clone(),
+            root_dir.clone(),
+            ordering,
+        );
+
+        let doc_name = "order-test".to_string();
+
+        let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), doc_name.clone());
+        doc.set_page(true);
+        doc_manager.add_document(doc);
+
+        let file_path = root_dir.join(format!("{doc_name}.org"));
+        (store, doc_manager, controller, doc_id, file_path)
+    }
+
+    /// Test 7a: file order matches live order → place() is never called.
+    #[tokio::test]
+    async fn ordering_replay_skips_place_when_order_matches() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Disk org file has two children: alpha then beta.
+        let org_content = "\
+* alpha
+* beta
+";
+
+        // Live order also has alpha before beta.
+        // The controller uses the block's bare id (UUID) for the children list.
+        // Use a single-block org file with a stable :ID: property so the parser
+        // reuses the same block UUID across both on_file_changed calls.
+        // Both controllers use the same doc_id so the live_order key matches.
+        let stable_block_uuid = uuid::Uuid::new_v4().to_string();
+        let single_block_org =
+            format!("* only block\n:PROPERTIES:\n:ID: {stable_block_uuid}\n:END:\n");
+        let doc_id = EntityUri::block_random();
+
+        // First pass: empty live_order → place() will be called (one block).
+        let ordering_first = Arc::new(ConfigurableOrderingStub::new(
+            std::collections::HashMap::new(),
+        ));
+        let (store, _doc_mgr, mut controller, _, file_path) =
+            build_controller_with_ordering_and_doc_id(
+                temp_dir.path(),
+                ordering_first,
+                doc_id.clone(),
+            );
+
+        controller.initialize().await.expect("initialize");
+        tokio::fs::write(&file_path, &single_block_org)
+            .await
+            .unwrap();
+        // Canonicalize after writing (macOS: /var → /private/var symlink).
+        let canonical_path = file_path.canonicalize().expect("canonicalize file_path");
+        controller
+            .on_file_changed(&canonical_path)
+            .await
+            .expect("first on_file_changed");
+
+        let stored_blocks = store.get_all_blocks(doc_id.as_str());
+        assert_eq!(
+            stored_blocks.len(),
+            1,
+            "should have one block after first parse"
+        );
+        let block_id = stored_blocks[0].id.id().to_string();
+
+        // Second pass: live_order already contains the parsed block → disk order
+        // matches live order → place() must NOT be called.
+        let mut live_order = std::collections::HashMap::new();
+        live_order.insert(doc_id.id().to_string(), vec![block_id.clone()]);
+        let ordering_second = Arc::new(ConfigurableOrderingStub::new(live_order));
+        let (store2, _doc_mgr2, mut controller2, _, file_path2) =
+            build_controller_with_ordering_and_doc_id(
+                temp_dir.path(),
+                ordering_second.clone(),
+                doc_id.clone(),
+            );
+        // Pre-seed the store so the parse sees an existing block → UPDATE path.
+        store2.seed_blocks(doc_id.as_str(), vec![stored_blocks[0].clone()]);
+
+        controller2.initialize().await.expect("initialize2");
+        tokio::fs::write(&file_path2, &single_block_org)
+            .await
+            .unwrap();
+        let canonical_path2 = file_path2.canonicalize().expect("canonicalize file_path2");
+        controller2
+            .on_file_changed(&canonical_path2)
+            .await
+            .expect("second on_file_changed");
+
+        let place_calls = ordering_second.calls.lock().unwrap().clone();
+        assert!(
+            place_calls.is_empty(),
+            "place() must not be called when disk order matches live order; got {place_calls:?}"
+        );
+    }
+
+    /// Test 7b: file reorders one block → exactly one place() call.
+    #[tokio::test]
+    async fn ordering_replay_calls_place_for_misaligned_block() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Org file has block B then block A (B is first on disk).
+        // Live order has A then B (A is first in live DB).
+        // The replay should call place() exactly once — for B (first on disk but
+        // second in live) — to move it before A.
+        //
+        // Since we don't control what IDs the parser assigns, we use a
+        // single-block file where the live order lists a DIFFERENT block as the
+        // only child. From the parser's perspective the block is NOT in the live
+        // children list → current_idx = None → misaligned → place() called.
+
+        let single_block_org = "\
+* the block
+";
+
+        let dummy_other_id = "some-other-block-id".to_string();
+        let mut live_order = std::collections::HashMap::new();
+        // Live order for the doc: a different block is listed → our parsed block
+        // is not in the list → current_idx = None → misaligned.
+        live_order.insert(
+            EntityUri::no_parent().id().to_string(),
+            vec![dummy_other_id],
+        );
+
+        // We need the doc_id for the live_order key. Build a controller first
+        // to learn the doc_id, then rebuild with the right live_order.
+        let ordering_probe = Arc::new(ConfigurableOrderingStub::new(
+            std::collections::HashMap::new(),
+        ));
+        let (_store, _doc_mgr, _ctrl, doc_id, file_path) =
+            build_controller_with_ordering(temp_dir.path(), ordering_probe);
+
+        // Build the real controller with a live_order that doesn't include our block.
+        let dummy_other_id2 = "some-other-block-id".to_string();
+        let mut live_order2 = std::collections::HashMap::new();
+        live_order2.insert(doc_id.id().to_string(), vec![dummy_other_id2]);
+        let ordering = Arc::new(ConfigurableOrderingStub::new(live_order2));
+        let (_store2, _doc_mgr2, mut controller, _doc_id2, file_path2) =
+            build_controller_with_ordering(temp_dir.path(), ordering.clone());
+
+        controller.initialize().await.expect("initialize");
+        tokio::fs::write(&file_path2, single_block_org)
+            .await
+            .unwrap();
+        // Canonicalize after writing (macOS: /var → /private/var symlink).
+        let canonical_path2 = file_path2.canonicalize().expect("canonicalize file_path2");
+        controller
+            .on_file_changed(&canonical_path2)
+            .await
+            .expect("on_file_changed");
+
+        let place_calls = ordering.calls.lock().unwrap().clone();
+        assert_eq!(
+            place_calls.len(),
+            1,
+            "exactly one place() call expected for the misaligned block; got {place_calls:?}"
+        );
     }
 }

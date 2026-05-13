@@ -12,6 +12,7 @@ members = [
     "crates/holon-frontend",
     "crates/holon-block-roundtrip-testing",
     "crates/holon-layout-testing",
+    "crates/holon-pbt-core",
     "crates/holon-integration-tests",
     "crates/holon-mcp-client",
     "crates/holon-macros",

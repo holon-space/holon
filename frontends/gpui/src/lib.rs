@@ -1037,6 +1037,7 @@ fn launch_holon_window_impl(
                 handle_clone.clone(),
                 Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
                 make_interpret_fn(services_slot.clone()),
+                services_slot.clone(),
             ));
 
             let services: Arc<dyn BuilderServices> = engine.clone();
@@ -1245,6 +1246,49 @@ fn launch_holon_window_impl(
     })
     .detach();
 
+    // Top-level editor_cursor → focused_block bridge.
+    //
+    // Without this, follow-up `editor_focus(new_block)` ops (fired by
+    // `split_block`, `join_block`) deadlock: render_entity_view only
+    // renders an `EditorView` when `focused_block == this block`, and
+    // `focused_block` only updates from inside an `EditorView` via
+    // `InputEvent::Focus`. So when split creates a new block and writes
+    // `editor_cursor = (new_block, 0)`, no `EditorView` for the new
+    // block exists yet to receive the `watch_editor_cursor` signal and
+    // call `window.focus`, so `focused_block` stays on the original
+    // target, so the new block never gets an editor, so the cycle
+    // closes.
+    //
+    // This bridge breaks the cycle by mirroring `editor_cursor.block_id`
+    // into `services.set_focus(...)` at the top level. The follow-up
+    // chain then becomes:
+    //   editor_cursor write → set_focus(new) → re-render →
+    //   render_entity_view(new) renders editable → EditorView mounts →
+    //   its watch_editor_cursor replay grabs `window.focus(new_input)`.
+    {
+        let services: Arc<dyn BuilderServices> = engine.clone();
+        if let Some(signal) = services.watch_editor_cursor() {
+            cx.spawn({
+                let services = services.clone();
+                async move |_cx| {
+                    use futures::StreamExt;
+                    use futures_signals::signal::SignalExt;
+                    let mut stream = signal.to_stream();
+                    while let Some(event) = stream.next().await {
+                        let Some((block_id, _cursor_offset)) = event else {
+                            continue;
+                        };
+                        let uri = holon_api::EntityUri::from_raw(&block_id);
+                        if services.focused_block().as_ref() != Some(&uri) {
+                            services.set_focus(Some(uri));
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
     // iOS/Android keyboard height observer.
     //
     // gpui_mobile::keyboard_height() is updated by platform notifications
@@ -1389,7 +1433,7 @@ fn scroll_entity_into_view(
     entity_id: &str,
     engine: &Arc<ReactiveEngine>,
     entity_cache: &entity_view_registry::EntityCache,
-    _window: &mut Window,
+    _window: &mut Window, // ALLOW(unused_param): signature parity with other scroll helpers in this module
     cx: &mut App,
 ) -> Result<bool, String> {
     use crate::entity_view_registry::CacheKey;
@@ -1413,7 +1457,7 @@ fn scroll_entity_into_view(
             let cache = entity_cache.read().unwrap();
             cache
                 .get(&CacheKey::LiveBlock(panel_id.to_string()))
-                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok())
+                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): downcast Err means the cached Any wasn't a ReactiveShell — treat as cache miss and fall through to the next panel
         };
         let Some(panel_shell) = panel_shell else {
             // Panel not rendered as a live_block yet. Continue scanning
@@ -1425,7 +1469,7 @@ fn scroll_entity_into_view(
             let cache = panel_cache.read().unwrap();
             cache
                 .get(&CacheKey::ReactiveShell(view.stable_cache_key()))
-                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok())
+                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): downcast Err means the cached Any wasn't a ReactiveShell — treat as cache miss and fall through to the next panel
         };
         let Some(list_shell) = list_shell else {
             // List shell not in the panel's cache. The list might use a

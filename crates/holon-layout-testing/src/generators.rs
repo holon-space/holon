@@ -14,10 +14,12 @@ use holon_frontend::reactive_view_model::{CollectionVariant, ReactiveViewModel};
 use holon_frontend::RenderContext;
 use proptest::prelude::*;
 
+use crate::blueprint::CollapsibleHandle;
 use crate::blueprint::{BlockHandle, Blueprint, DrawerHandle, Shape};
 use crate::registry::BlockTreeThunk;
 use crate::scenario::Scenario;
 use crate::ui_interaction::UiInteraction;
+use holon_pbt_core::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};
 
 // ── Thunk constructors ────────────────────────────────────────────────────
 
@@ -362,6 +364,7 @@ pub fn bp_view_mode_switcher(child: Blueprint) -> Blueprint {
             shape: new_shape,
             handles: child.handles,
             drawers: child.drawers,
+            collapsibles: child.collapsibles,
         }
     } else {
         child.map_shape(vm_view_mode_switcher)
@@ -450,7 +453,7 @@ pub fn bp_live_block_with_modes(modes: Vec<(String, Blueprint)>) -> Blueprint {
     handles.push(BlockHandle {
         block_id: block_id.clone(),
         mode_names,
-        mode_thunks,
+        mode_thunks: Some(mode_thunks),
         in_drawer: false,
         initial_mode: 0,
     });
@@ -464,6 +467,7 @@ pub fn bp_live_block_with_modes(modes: Vec<(String, Blueprint)>) -> Blueprint {
         shape,
         handles,
         drawers: vec![],
+        collapsibles: vec![],
     }
 }
 
@@ -540,6 +544,22 @@ pub fn arb_reactive_collection() -> BoxedStrategy<Blueprint> {
 }
 
 pub fn arb_wrapped_collection() -> BoxedStrategy<Blueprint> {
+    arb_wrapped_collection_inner(true)
+}
+
+/// Like `arb_wrapped_collection` but never wraps in a drawer (shrink or
+/// overlay). Used as the inner content of `columns`-with-sidebars
+/// generators so a sibling-overlay or nested-overlay-inside-overlay
+/// configuration cannot be produced. Both shapes render multiple toggle
+/// hitboxes at identical screen coordinates (overlays absolute-anchored
+/// to the same edge; or inner overlay's toggle at x=0 of outer overlay's
+/// panel), so one synthesized click fires every stacked toggle's handler
+/// — which models a production-impossible layout, not a real bug.
+pub fn arb_wrapped_collection_no_drawer() -> BoxedStrategy<Blueprint> {
+    arb_wrapped_collection_inner(false)
+}
+
+fn arb_wrapped_collection_inner(allow_drawer: bool) -> BoxedStrategy<Blueprint> {
     let inner = arb_reactive_collection()
         .prop_recursive(2, 6, 1, |c| {
             prop_oneof![
@@ -551,41 +571,55 @@ pub fn arb_wrapped_collection() -> BoxedStrategy<Blueprint> {
         })
         .boxed();
 
-    prop_oneof![
-        inner.clone(),
-        inner.clone().prop_map(bp_drawer),
-        inner.clone().prop_map(bp_drawer_overlay),
-        inner.clone().prop_map(bp_view_mode_switcher),
-        inner.prop_map(|c| { bp_live_block_with_modes(vec![("only".to_string(), c)]) }),
-        (1usize..=4, 6usize..=12).prop_map(|(n_a, n_b)| {
-            let mode_a = Blueprint::leaf(vm_reactive_text_items(n_a, CollectionVariant::list(0.0)));
-            let mode_b = Blueprint::leaf(vm_reactive_text_items(n_b, CollectionVariant::list(0.0)));
-            bp_view_mode_switcher(bp_live_block_with_modes(vec![
-                ("mode-a".to_string(), mode_a),
-                ("mode-b".to_string(), mode_b),
-            ]))
-        }),
-        (3usize..=8,).prop_map(|(n_rows,)| {
-            let data_source = Arc::new(ReactiveQueryResults::new());
-            populate_data_source(&data_source, n_rows);
-            let services: Arc<StubBuilderServices> = Arc::new(StubBuilderServices::new());
-            let mode_a = Blueprint::leaf(vm_shared_collection(
-                services.clone(),
-                data_source.clone(),
-                collection_expr("list"),
-            ));
-            let mode_b = Blueprint::leaf(vm_shared_collection(
-                services,
-                data_source,
-                collection_expr("tree"),
-            ));
-            bp_view_mode_switcher(bp_live_block_with_modes(vec![
-                ("mode-a".to_string(), mode_a),
-                ("mode-b".to_string(), mode_b),
-            ]))
-        }),
-    ]
-    .boxed()
+    let vms_a_b = (1usize..=4, 6usize..=12).prop_map(|(n_a, n_b)| {
+        let mode_a = Blueprint::leaf(vm_reactive_text_items(n_a, CollectionVariant::list(0.0)));
+        let mode_b = Blueprint::leaf(vm_reactive_text_items(n_b, CollectionVariant::list(0.0)));
+        bp_view_mode_switcher(bp_live_block_with_modes(vec![
+            ("mode-a".to_string(), mode_a),
+            ("mode-b".to_string(), mode_b),
+        ]))
+    });
+    let vms_shared = (3usize..=8,).prop_map(|(n_rows,)| {
+        let data_source = Arc::new(ReactiveQueryResults::new());
+        populate_data_source(&data_source, n_rows);
+        let services: Arc<StubBuilderServices> = Arc::new(StubBuilderServices::new());
+        let mode_a = Blueprint::leaf(vm_shared_collection(
+            services.clone(),
+            data_source.clone(),
+            collection_expr("list"),
+        ));
+        let mode_b = Blueprint::leaf(vm_shared_collection(
+            services,
+            data_source,
+            collection_expr("tree"),
+        ));
+        bp_view_mode_switcher(bp_live_block_with_modes(vec![
+            ("mode-a".to_string(), mode_a),
+            ("mode-b".to_string(), mode_b),
+        ]))
+    });
+
+    if allow_drawer {
+        prop_oneof![
+            inner.clone(),
+            inner.clone().prop_map(bp_drawer),
+            inner.clone().prop_map(bp_drawer_overlay),
+            inner.clone().prop_map(bp_view_mode_switcher),
+            inner.prop_map(|c| bp_live_block_with_modes(vec![("only".to_string(), c)])),
+            vms_a_b,
+            vms_shared,
+        ]
+        .boxed()
+    } else {
+        prop_oneof![
+            inner.clone(),
+            inner.clone().prop_map(bp_view_mode_switcher),
+            inner.prop_map(|c| bp_live_block_with_modes(vec![("only".to_string(), c)])),
+            vms_a_b,
+            vms_shared,
+        ]
+        .boxed()
+    }
 }
 
 pub fn arb_static_tree() -> BoxedStrategy<Blueprint> {
@@ -729,13 +763,13 @@ pub fn make_streaming_live_block_fixture(
         handles.push(BlockHandle {
             block_id: block_id.clone(),
             mode_names: vec!["empty".to_string(), "loaded".to_string()],
-            mode_thunks: vec![
+            mode_thunks: Some(vec![
                 Arc::new(move || empty_shape.materialize()) as BlockTreeThunk,
                 Arc::new(move || ReactiveViewModel {
                     collection: Some(streaming_view_for_thunk.clone()),
                     ..ReactiveViewModel::from_widget("list", std::collections::HashMap::new())
                 }) as BlockTreeThunk,
-            ],
+            ]),
             in_drawer: false,
             initial_mode: 0,
         });
@@ -757,6 +791,7 @@ pub fn make_streaming_live_block_fixture(
         shape,
         handles,
         drawers: vec![],
+        collapsibles: vec![],
     };
     (bp, deferred_data)
 }
@@ -796,10 +831,10 @@ fn arb_tree_with_live_block_items_inner(deferred: bool) -> BoxedStrategy<Bluepri
                 handles.push(BlockHandle {
                     block_id: block_id.clone(),
                     mode_names: vec!["empty".to_string(), "loaded".to_string()],
-                    mode_thunks: vec![
+                    mode_thunks: Some(vec![
                         Arc::new(move || empty_shape.materialize()) as BlockTreeThunk,
                         Arc::new(move || content_shape.materialize()) as BlockTreeThunk,
-                    ],
+                    ]),
                     in_drawer: false,
                     initial_mode,
                 });
@@ -821,6 +856,7 @@ fn arb_tree_with_live_block_items_inner(deferred: bool) -> BoxedStrategy<Bluepri
                 shape,
                 handles,
                 drawers: vec![],
+                collapsibles: vec![],
             }
         })
         .boxed()
@@ -870,10 +906,10 @@ pub fn arb_tree_with_offscreen_live_blocks() -> BoxedStrategy<Blueprint> {
                 handles.push(BlockHandle {
                     block_id: block_id.clone(),
                     mode_names: vec!["empty".to_string(), "loaded".to_string()],
-                    mode_thunks: vec![
+                    mode_thunks: Some(vec![
                         Arc::new(move || empty_shape.materialize()) as BlockTreeThunk,
                         Arc::new(move || content_shape.materialize()) as BlockTreeThunk,
-                    ],
+                    ]),
                     in_drawer: false,
                     initial_mode: 0, // always start empty (deferred)
                 });
@@ -895,6 +931,59 @@ pub fn arb_tree_with_offscreen_live_blocks() -> BoxedStrategy<Blueprint> {
                 shape,
                 handles,
                 drawers: vec![],
+                collapsibles: vec![],
+            }
+        })
+        .boxed()
+}
+
+/// Scenario that mounts a flat `tree` of `tree_item`s with deterministic
+/// `target_id`s on the collapsible parents. Each parent has `has_children=true`
+/// and is followed by `n_children` leaves at depth 1. The collection-mode tree
+/// renderer's `compute_visible_indices` shrinks when a parent is collapsed —
+/// which is exactly the path that historically panicked when `list_state`
+/// wasn't spliced to match.
+pub fn arb_collapsible_tree() -> BoxedStrategy<Blueprint> {
+    (2usize..=4, 1usize..=3)
+        .prop_map(|(n_parents, n_children)| {
+            let mut all_items: Vec<ReactiveViewModel> = Vec::new();
+            let mut collapsibles: Vec<CollapsibleHandle> = Vec::new();
+
+            for p in 0..n_parents {
+                let target_id = format!("collapsible-parent-{p}");
+                let parent_content = ReactiveViewModel::text(format!("parent {p}"));
+                let mut props = std::collections::HashMap::new();
+                props.insert("depth".to_string(), Value::Integer(0));
+                props.insert("has_children".to_string(), Value::Boolean(true));
+                props.insert("target_id".to_string(), Value::String(target_id.clone()));
+                let parent_vm = ReactiveViewModel {
+                    children: vec![Arc::new(parent_content)],
+                    expanded: Some(futures_signals::signal::Mutable::new(true)),
+                    ..ReactiveViewModel::from_widget("tree_item", props)
+                };
+                all_items.push(parent_vm);
+                collapsibles.push(CollapsibleHandle { target_id });
+
+                for c in 0..n_children {
+                    let child_content = ReactiveViewModel::text(format!("child {p}.{c}"));
+                    all_items.push(ReactiveViewModel::tree_item(child_content, 1, false));
+                }
+            }
+
+            let view = Arc::new(ReactiveView::new_static_with_layout(
+                all_items,
+                CollectionVariant::tree(),
+            ));
+            let shape = Shape(Arc::new(move || ReactiveViewModel {
+                collection: Some(view.clone()),
+                ..ReactiveViewModel::from_widget("tree", std::collections::HashMap::new())
+            }));
+
+            Blueprint {
+                shape,
+                handles: vec![],
+                drawers: vec![],
+                collapsibles,
             }
         })
         .boxed()
@@ -907,15 +996,19 @@ pub fn arb_columns_plain() -> BoxedStrategy<Blueprint> {
 }
 
 pub fn arb_columns_with_sidebars() -> BoxedStrategy<Blueprint> {
-    let wrapped = arb_wrapped_collection();
-    (wrapped.clone(), wrapped.clone(), wrapped)
+    // Inner/middle slots must not themselves wrap in a drawer: see
+    // `arb_wrapped_collection_no_drawer` for why same-edge or nested
+    // drawer toggles render at identical screen coordinates and break
+    // the click oracle.
+    let inner = arb_wrapped_collection_no_drawer();
+    (inner.clone(), inner.clone(), inner)
         .prop_map(|(l, m, r)| bp_columns(vec![bp_drawer(l), m, bp_drawer(r)]))
         .boxed()
 }
 
 pub fn arb_columns_with_overlay_sidebars() -> BoxedStrategy<Blueprint> {
-    let wrapped = arb_wrapped_collection();
-    (wrapped.clone(), wrapped.clone(), wrapped)
+    let inner = arb_wrapped_collection_no_drawer();
+    (inner.clone(), inner.clone(), inner)
         .prop_map(|(l, m, r)| bp_columns(vec![bp_drawer_overlay(l), m, bp_drawer_overlay(r)]))
         .boxed()
 }
@@ -929,64 +1022,107 @@ pub fn arb_blueprint() -> BoxedStrategy<Blueprint> {
         arb_columns_with_sidebars(),
         arb_columns_with_overlay_sidebars(),
         arb_tree_with_live_block_items(),
+        arb_collapsible_tree(),
     ]
     .boxed()
 }
 
-/// Generate a random `UiInteraction` — either a mode switch against a
-/// switchable handle, or a drawer toggle against a known drawer. The
-/// caller pre-filters `switchable` to handles with ≥2 modes; `drawers`
-/// may be empty. Panics if both are empty — callers must check first.
+/// Generation-context ref-state for the layout PBT. Carries the handle
+/// vectors discovered from the current `Blueprint` so the shared
+/// `TransitionFactory<LayoutRef<LayoutGenState>>` impls in
+/// `holon_layout_testing::transitions::*` can drive scenario generation
+/// without each variant being re-implemented here.
+#[derive(Debug, Clone, Default)]
+pub struct LayoutGenState {
+    pub switchable: Vec<BlockHandle>,
+    pub drawers: Vec<DrawerHandle>,
+    pub collapsibles: Vec<CollapsibleHandle>,
+    pub deferred: Vec<String>,
+}
+
+impl crate::sut::LayoutRefState for LayoutGenState {
+    fn switchable_handles(&self) -> &[BlockHandle] {
+        &self.switchable
+    }
+    fn drawer_handles(&self) -> &[DrawerHandle] {
+        &self.drawers
+    }
+    fn deferred_block_ids(&self) -> Vec<String> {
+        self.deferred.clone()
+    }
+    fn collapsible_target_ids(&self) -> Vec<String> {
+        self.collapsibles
+            .iter()
+            .map(|c| c.target_id.clone())
+            .collect()
+    }
+    fn current_view_mode(&self, _: &str) -> Option<&str> {
+        None
+    }
+    fn drawer_is_open(&self, _: &str) -> bool {
+        true
+    }
+}
+
+/// Aggregate every shared variant's `TransitionFactory::weighted_generator`
+/// against `gen_state`, mapping each into `UiInteraction` and combining
+/// with `Union::new_weighted`. Variants that reject (`NoSwitchableHandles`
+/// etc.) drop out silently — that's how rejection used to work in the
+/// hand-rolled branches.
+///
+/// Panics if no variant applies — every caller already pre-checks that
+/// `gen_state` has at least one of switchable/drawers/collapsibles/deferred.
 pub fn arb_action(
     switchable: Arc<Vec<BlockHandle>>,
     drawers: Arc<Vec<DrawerHandle>>,
+    collapsibles: Arc<Vec<CollapsibleHandle>>,
 ) -> BoxedStrategy<UiInteraction> {
-    let has_switchable = !switchable.is_empty();
-    let has_drawers = !drawers.is_empty();
-    assert!(
-        has_switchable || has_drawers,
-        "arb_action requires at least one switchable handle or drawer"
-    );
+    use crate::sut::LayoutRef;
+    use holon_pbt_core::TransitionFactory;
+    use proptest::strategy::{Strategy, Union};
+    use validated::Validated;
 
-    let switch_strat: Option<BoxedStrategy<UiInteraction>> = if has_switchable {
-        let len = switchable.len();
-        let sw = switchable.clone();
-        Some(
-            (0..len)
-                .prop_flat_map(move |i| {
-                    let sw = sw.clone();
-                    let num_modes = sw[i].mode_names.len();
-                    (Just(i), 0..num_modes).prop_map(move |(i, m)| UiInteraction::SwitchViewMode {
-                        block_id: sw[i].block_id.clone(),
-                        target_mode: sw[i].mode_names[m].clone(),
-                    })
-                })
-                .boxed(),
-        )
-    } else {
-        None
+    let gen_state = LayoutGenState {
+        switchable: (*switchable).clone(),
+        drawers: (*drawers).clone(),
+        collapsibles: (*collapsibles).clone(),
+        deferred: Vec::new(),
     };
+    let ref_view = LayoutRef::new(&gen_state);
 
-    let toggle_strat: Option<BoxedStrategy<UiInteraction>> = if has_drawers {
-        let dr = drawers.clone();
-        let len = dr.len();
-        Some(
-            (0..len)
-                .prop_map(move |i| UiInteraction::ToggleDrawer {
-                    block_id: dr[i].block_id.clone(),
-                })
-                .boxed(),
-        )
-    } else {
-        None
-    };
+    let mut arms: Vec<(u32, BoxedStrategy<UiInteraction>)> = Vec::new();
 
-    match (switch_strat, toggle_strat) {
-        (Some(s), Some(t)) => prop_oneof![s, t].boxed(),
-        (Some(s), None) => s,
-        (None, Some(t)) => t,
-        (None, None) => unreachable!("checked above"),
+    if let Validated::Good((w, s)) = <SwitchViewMode as TransitionFactory<
+        LayoutRef<'_, LayoutGenState>,
+    >>::weighted_generator(&ref_view)
+    {
+        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
     }
+    if let Validated::Good((w, s)) = <ToggleDrawer as TransitionFactory<
+        LayoutRef<'_, LayoutGenState>,
+    >>::weighted_generator(&ref_view)
+    {
+        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
+    }
+    if let Validated::Good((w, s)) = <ToggleCollapse as TransitionFactory<
+        LayoutRef<'_, LayoutGenState>,
+    >>::weighted_generator(&ref_view)
+    {
+        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
+    }
+    if let Validated::Good((w, s)) = <DeliverBlockContent as TransitionFactory<
+        LayoutRef<'_, LayoutGenState>,
+    >>::weighted_generator(&ref_view)
+    {
+        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
+    }
+
+    assert!(
+        !arms.is_empty(),
+        "arb_action: no transition applicable — caller must ensure at least one \
+         of switchable/drawers/collapsibles is non-empty"
+    );
+    Union::new_weighted(arms).boxed()
 }
 
 pub fn arb_scenario() -> BoxedStrategy<Scenario> {
@@ -1011,15 +1147,20 @@ fn arb_scenario_from_blueprint(bp_strat: BoxedStrategy<Blueprint>) -> BoxedStrat
                 .cloned()
                 .collect();
             let drawers: Vec<DrawerHandle> = bp.drawers.clone();
+            let collapsibles: Vec<CollapsibleHandle> = bp.collapsibles.clone();
 
             let actions_strat: BoxedStrategy<Vec<UiInteraction>> =
-                if switchable.is_empty() && drawers.is_empty() {
+                if switchable.is_empty() && drawers.is_empty() && collapsibles.is_empty() {
                     Just(Vec::new()).boxed()
                 } else {
                     let switchable = Arc::new(switchable);
                     let drawers = Arc::new(drawers);
-                    prop::collection::vec(arb_action(switchable.clone(), drawers.clone()), 0..=5)
-                        .boxed()
+                    let collapsibles = Arc::new(collapsibles);
+                    prop::collection::vec(
+                        arb_action(switchable.clone(), drawers.clone(), collapsibles.clone()),
+                        0..=5,
+                    )
+                    .boxed()
                 };
 
             (Just(bp), actions_strat)
@@ -1036,8 +1177,10 @@ fn arb_deferred_live_block_scenario() -> BoxedStrategy<Scenario> {
             let actions: Vec<UiInteraction> = bp
                 .handles
                 .iter()
-                .map(|h| UiInteraction::DeliverBlockContent {
-                    block_id: h.block_id.clone(),
+                .map(|h| {
+                    UiInteraction::DeliverBlockContent(DeliverBlockContent {
+                        block_id: h.block_id.clone(),
+                    })
                 })
                 .collect();
             Scenario {

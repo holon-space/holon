@@ -12,7 +12,8 @@
 
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Context;
 use chrono::NaiveDateTime;
@@ -117,6 +118,37 @@ struct ReplayArgs {
     /// reflects partial progress.
     #[arg(long, value_name = "SECS")]
     max_secs: Option<u64>,
+    /// Replay against a copy of an existing Turso database file instead
+    /// of opening a fresh one at `/tmp/turso-sql-replay.db`. The given
+    /// file (plus `-wal` / `-shm` siblings) is copied to a scratch path
+    /// so the original is never mutated. Use this to reproduce bugs
+    /// that only occur with pre-existing on-disk state.
+    #[arg(long, value_name = "PATH")]
+    existing_db: Option<String>,
+    /// Spawn a background reader task that repeatedly queries the given
+    /// matview(s) (comma-separated) on a separate connection while the
+    /// main loop is writing. Reproduces production's reactive watchers
+    /// holding cursors open during DBSP consolidation — required to
+    /// surface bugs that fire on async post-commit consolidation
+    /// (e.g. `json_group_array multiset went negative`).
+    #[arg(long, value_name = "TABLE[,TABLE...]")]
+    background_read: Option<String>,
+    /// Interval between background reader queries (default 5 ms).
+    #[arg(long, value_name = "MS", default_value_t = 5)]
+    background_read_interval_ms: u64,
+    /// After every `actor_tx_commit`, sleep this many milliseconds and
+    /// issue one read against each background-read target. Gives the
+    /// async DBSP consolidation queued by the commit a chance to run
+    /// before the next BEGIN, exposing post-commit panics. 0 disables.
+    #[arg(long, value_name = "MS", default_value_t = 50)]
+    post_commit_poll_ms: u64,
+    /// Drive the replay through Holon's `TursoBackend` actor instead of a
+    /// raw `turso::Connection`. Matches production's CDC fan-out, DDL
+    /// dependency ordering, and tokio actor model — needed to surface
+    /// panics that only fire under the actor's `process_actor_command`
+    /// path (e.g. async post-commit `aggregate_operator` invariants).
+    #[arg(long)]
+    via_holon_actor: bool,
 }
 
 #[derive(clap::Args)]
@@ -525,6 +557,27 @@ fn cmd_extract(args: &ExtractArgs) -> anyhow::Result<Option<String>> {
 
 // ─── Replay ─────────────────────────────────────────────────────────────────────
 
+/// True iff `sql` ends inside an unclosed single-quoted SQL string
+/// literal. Used by the line-based parser so that `;` and `--` on lines
+/// of multi-line literal *content* are not treated as statement
+/// terminators or comments. SQLite's escape for a literal apostrophe is
+/// `''` (a doubled single quote), so we toggle state on every `'`: an
+/// even count of consecutive `'` returns to the same state, an odd count
+/// flips it. Backslash is not an escape character in SQL string
+/// literals, so we don't honor `\'`.
+fn sql_has_open_literal(sql: &str) -> bool {
+    let mut in_literal = false;
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            in_literal = !in_literal;
+        }
+        i += 1;
+    }
+    in_literal
+}
+
 fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read replay file: {path}"))?;
@@ -567,7 +620,15 @@ fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
             continue;
         }
 
-        if line.starts_with("-- [") {
+        // Inside a multi-line single-quoted SQL literal, `--` and `;` are
+        // just content. We only treat them as directives/terminators when
+        // we're not currently inside an open literal.
+        let in_literal = current_sql
+            .as_ref()
+            .map(|(_, sql)| sql_has_open_literal(sql))
+            .unwrap_or(false);
+
+        if !in_literal && line.starts_with("-- [") {
             if let Some((tag, sql)) = current_sql.take() {
                 directives.push(Directive::Sql { tag, sql });
             }
@@ -581,20 +642,26 @@ fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
             continue;
         }
 
-        if line.starts_with("--") || line.is_empty() {
+        if !in_literal && (line.starts_with("--") || line.is_empty()) {
             continue;
         }
 
         if let Some((_, ref mut sql)) = current_sql {
-            let line_content = line.strip_suffix(';').unwrap_or(line);
+            // Append the line first, then decide whether the appended `;`
+            // terminates the statement — by inspecting the literal state
+            // *after* appending, which is the only reliable way to know.
             if !sql.is_empty() {
                 sql.push('\n');
             }
-            sql.push_str(line_content);
-
-            if line.ends_with(';') {
-                let (tag, sql) = current_sql.take().unwrap();
-                directives.push(Directive::Sql { tag, sql });
+            sql.push_str(line);
+            if line.ends_with(';') && !sql_has_open_literal(sql) {
+                // Strip the terminating semicolon.
+                if let Some(stripped) = sql.strip_suffix(';') {
+                    let stripped = stripped.to_string();
+                    let tag = current_sql.as_ref().unwrap().0.clone();
+                    current_sql = None;
+                    directives.push(Directive::Sql { tag, sql: stripped });
+                }
             }
         }
     }
@@ -930,11 +997,307 @@ async fn print_query(conn: &turso::Connection, label: &str, sql: &str) -> anyhow
     Ok(())
 }
 
+/// Install a panic hook that captures payload + location + thread into
+/// the returned `Arc<Mutex<Vec<String>>>`. The hook chains to the default
+/// hook so backtraces still print. Used by both replay paths so panics
+/// caught inside Turso's IVM or Holon's actor `catch_unwind` boundary
+/// are still surfaced in the final verdict.
+fn install_panic_hook() -> Arc<Mutex<Vec<String>>> {
+    let panic_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let panic_log_hook = panic_log.clone();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let thread = std::thread::current()
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{:?}", std::thread::current().id()));
+        let entry = format!("[panic] thread={thread} at {location}: {payload}");
+        eprintln!("{entry}");
+        panic_log_hook.lock().unwrap().push(entry);
+        default_hook(info);
+    }));
+    panic_log
+}
+
+/// Replay the trace through Holon's `TursoBackend` actor. Matches
+/// production's CDC callback (`process_cdc_event` → coalesce → broadcast)
+/// and DDL dependency ordering. The actor wraps each command in
+/// `catch_unwind`, but our panic hook fires *before* the unwind is
+/// caught, so panics on tokio worker threads are recorded in
+/// `panic_log` even when the actor "continues".
+async fn cmd_replay_via_actor(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> {
+    use holon::storage::turso::TursoBackend;
+
+    println!("=== Turso SQL Replay via Holon TursoBackend actor ===\n");
+    println!("  File: {replay_file}");
+
+    let panic_log = install_panic_hook();
+
+    let directives = parse_replay_file(replay_file)?;
+    let sql_count = directives
+        .iter()
+        .filter(|d| matches!(d, Directive::Sql { .. }))
+        .count();
+    println!("  SQL statements: {sql_count}");
+
+    let background_read_targets: Vec<String> = args
+        .background_read
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !background_read_targets.is_empty() {
+        println!(
+            "  Background read: {:?} every {}ms",
+            background_read_targets, args.background_read_interval_ms
+        );
+    }
+    if args.post_commit_poll_ms > 0 {
+        println!("  Post-commit poll: {}ms", args.post_commit_poll_ms);
+    }
+    println!();
+
+    let db_path = "/tmp/turso-sql-replay-actor.db";
+    for ext in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
+    }
+
+    // Construct the actor using production's open_database + new path so
+    // we get the same DatabaseOpts (with_views = true), the same internal
+    // turso_config (async_io: false), and the same actor mpsc + CDC
+    // broadcast wiring as a live Holon process.
+    let db = TursoBackend::open_database(db_path)
+        .map_err(|e| anyhow::anyhow!("open_database failed: {e}"))?;
+    let (cdc_tx, _cdc_rx) = tokio::sync::broadcast::channel(1024);
+    let (_backend, handle) = TursoBackend::new(db, cdc_tx)
+        .map_err(|e| anyhow::anyhow!("TursoBackend::new failed: {e}"))?;
+
+    // Subscribe to the CDC stream and drain it on a background task. This
+    // mirrors what production downstream consumers do — a live receiver
+    // prevents the broadcast channel from filling and keeps the actor
+    // hot. Without a subscriber, send() on a full channel drops messages
+    // silently and the actor's processing pattern differs from production.
+    let cdc_drain = handle.cdc_broadcast().subscribe();
+    let cdc_count = Arc::new(AtomicUsize::new(0));
+    let cdc_count_clone = cdc_count.clone();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_flag_cdc = stop_flag.clone();
+    let cdc_handle = tokio::spawn(async move {
+        let mut rx = cdc_drain;
+        while !stop_flag_cdc.load(Ordering::Relaxed) {
+            match rx.recv().await {
+                Ok(_batch) => {
+                    cdc_count_clone.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Background readers — separate connections via additional handles
+    // would require more plumbing; we route reads through the same
+    // DbHandle which queues them through the actor (still useful: a
+    // queued query exercises the same command-dispatch path that
+    // production reactive watchers do).
+    let handle_for_readers = handle.clone();
+    let mut reader_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    for target in &background_read_targets {
+        let h = handle_for_readers.clone();
+        let target = target.clone();
+        let stop = stop_flag.clone();
+        let interval = args.background_read_interval_ms;
+        reader_handles.push(tokio::spawn(async move {
+            let scan_sql = format!("SELECT * FROM {target} LIMIT 50");
+            while !stop.load(Ordering::Relaxed) {
+                let _ = h.query(&scan_sql, std::collections::HashMap::new()).await;
+                if interval > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+                }
+            }
+        }));
+    }
+
+    // Drive the replay. Statements between actor_tx_begin and
+    // actor_tx_commit are buffered and shipped as one `handle.transaction`
+    // call — that's the path production takes and the path
+    // `process_actor_command` (where the catch_unwind lives) wraps.
+    let mut stmt_idx = 0usize;
+    let mut tx_buffer: Option<Vec<(String, Vec<turso::Value>)>> = None;
+    let mut ddl_errors = 0usize;
+    let mut tx_errors = 0usize;
+
+    for directive in &directives {
+        match directive {
+            Directive::SetChangeCallback => {
+                // No-op: the actor already wired CDC during TursoBackend::new.
+            }
+            Directive::Wait(ms) => {
+                if args.replay_timing {
+                    tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+                }
+            }
+            Directive::Assert(_) => {
+                // Assertions are not meaningful in actor mode (queries go
+                // through the actor's serialized path) — skip.
+            }
+            Directive::Sql { tag, sql } => {
+                stmt_idx += 1;
+                if tag == "actor_tx_begin" {
+                    if stmt_idx % 500 == 0 || stmt_idx < 5 {
+                        println!(
+                            "[{stmt_idx}/{sql_count}] BEGIN  (CDC: {})",
+                            cdc_count.load(Ordering::Relaxed)
+                        );
+                    }
+                    tx_buffer = Some(Vec::new());
+                    continue;
+                }
+                if tag == "actor_tx_commit" {
+                    if let Some(stmts) = tx_buffer.take() {
+                        let len = stmts.len();
+                        println!(
+                            "[{stmt_idx}/{sql_count}] COMMIT ({len} stmts)  (CDC: {})",
+                            cdc_count.load(Ordering::Relaxed)
+                        );
+                        if let Err(e) = handle.transaction(stmts.clone()).await {
+                            tx_errors += 1;
+                            eprintln!("!!! [{stmt_idx}] transaction failed: {e}");
+                            for (i, (s, _)) in stmts.iter().enumerate() {
+                                if let Err(per) = handle.execute(s, Vec::new()).await {
+                                    let preview: String = s.chars().take(250).collect();
+                                    eprintln!("    [{stmt_idx}.{i}] {per}\n    SQL: {preview}");
+                                    break;
+                                }
+                            }
+                        }
+                        if args.post_commit_poll_ms > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                args.post_commit_poll_ms,
+                            ))
+                            .await;
+                            for target in &background_read_targets {
+                                let sql = format!("SELECT COUNT(*) FROM {target}");
+                                let _ = handle.query(&sql, std::collections::HashMap::new()).await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // Inside a transaction — buffer the statement.
+                if let Some(buf) = tx_buffer.as_mut() {
+                    buf.push((sql.clone(), Vec::new()));
+                    continue;
+                }
+
+                // Outside any transaction: classify and route.
+                let upper = sql.trim_start().to_uppercase();
+                let is_ddl = upper.starts_with("CREATE ")
+                    || upper.starts_with("DROP ")
+                    || upper.starts_with("ALTER ");
+                if is_ddl {
+                    if let Err(e) = handle.execute_ddl(sql).await {
+                        ddl_errors += 1;
+                        eprintln!("!!! [{stmt_idx}] DDL failed: {e}");
+                    }
+                } else if upper.starts_with("SELECT ") || upper.starts_with("WITH ") {
+                    let _ = handle.query(sql, std::collections::HashMap::new()).await;
+                } else {
+                    let _ = handle.execute(sql, Vec::new()).await;
+                }
+            }
+        }
+    }
+
+    // Give async post-commit consolidation one more chance to fire before
+    // we tear down.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    stop_flag.store(true, Ordering::Relaxed);
+    for h in reader_handles {
+        let _ = h.await;
+    }
+    drop(cdc_handle);
+
+    let captured_panics = panic_log.lock().unwrap().clone();
+    let has_panics = !captured_panics.is_empty();
+
+    println!("\n=== SUMMARY (via-holon-actor) ===");
+    println!("  Statements processed: {stmt_idx}");
+    println!(
+        "  CDC batches observed: {}",
+        cdc_count.load(Ordering::Relaxed)
+    );
+    println!("  DDL errors: {ddl_errors}");
+    println!("  Transaction errors: {tx_errors}");
+    println!("  Panics captured: {}", captured_panics.len());
+
+    if has_panics {
+        println!("\n  VERDICT: PANIC CAPTURED (IVM bug reproduced via actor)");
+        for p in &captured_panics {
+            println!("    - {p}");
+        }
+        std::process::exit(1);
+    }
+    println!("\n  VERDICT: No panics captured.");
+    Ok(())
+}
+
 async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> {
+    if args.via_holon_actor {
+        return cmd_replay_via_actor(args, replay_file).await;
+    }
     println!("=== Turso SQL Replay with CDC ===\n");
     println!("  File: {replay_file}");
     println!("  Replay timing: {}", args.replay_timing);
     println!("  Check after each: {}", args.check_after_each);
+
+    // Capture panics that fire on tokio worker threads inside Turso's IVM
+    // consolidation. Without this, panics caught by Turso's internal
+    // catch_unwind never surface and the replay verdict reads "no mismatch"
+    // even when a `json_group_array multiset went negative` or similar
+    // invariant-violation panic was raised on a worker thread.
+    let panic_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let panic_log_hook = panic_log.clone();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let thread = std::thread::current()
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{:?}", std::thread::current().id()));
+        let entry = format!("[panic] thread={thread} at {location}: {payload}");
+        eprintln!("{entry}");
+        panic_log_hook.lock().unwrap().push(entry);
+        default_hook(info);
+    }));
 
     let directives = parse_replay_file(replay_file)?;
     let sql_count = directives
@@ -945,11 +1308,46 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
         .iter()
         .any(|d| matches!(d, Directive::SetChangeCallback));
     println!("  SQL statements: {sql_count}");
-    println!("  CDC callback: {has_cdc}\n");
+    println!("  CDC callback: {has_cdc}");
+
+    let background_read_targets: Vec<String> = args
+        .background_read
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !background_read_targets.is_empty() {
+        println!(
+            "  Background read: {:?} every {}ms",
+            background_read_targets, args.background_read_interval_ms
+        );
+    }
+    if args.post_commit_poll_ms > 0 {
+        println!("  Post-commit poll: {}ms", args.post_commit_poll_ms);
+    }
+    println!();
 
     let db_path = "/tmp/turso-sql-replay.db";
     for ext in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
+    }
+
+    if let Some(src) = &args.existing_db {
+        println!("  Seeding scratch DB from existing: {src}");
+        std::fs::copy(src, db_path)
+            .with_context(|| format!("Failed to copy existing DB from {src}"))?;
+        for ext in ["-wal", "-shm"] {
+            let src_side = format!("{src}{ext}");
+            if std::path::Path::new(&src_side).exists() {
+                std::fs::copy(&src_side, format!("{db_path}{ext}"))
+                    .with_context(|| format!("Failed to copy {src_side}"))?;
+            }
+        }
     }
 
     let db = turso::Builder::new_local(db_path)
@@ -957,6 +1355,35 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
         .build()
         .await?;
     let conn = db.connect()?;
+
+    // Spawn one background reader task per target matview. Each task holds
+    // its own connection and polls in a loop until the main replay drops
+    // the stop flag. The reader queries are deliberately cheap (COUNT(*) +
+    // a small LIMITed SELECT) so the loop runs hot rather than spending
+    // most of its time in result decoding.
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let mut reader_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    for target in &background_read_targets {
+        let reader_conn = db.connect()?;
+        let target = target.clone();
+        let stop = stop_flag.clone();
+        let interval = args.background_read_interval_ms;
+        reader_handles.push(tokio::spawn(async move {
+            let count_sql = format!("SELECT COUNT(*) FROM {target}");
+            let scan_sql = format!("SELECT * FROM {target} LIMIT 50");
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(mut rows) = reader_conn.query(&count_sql, ()).await {
+                    while let Ok(Some(_)) = rows.next().await {}
+                }
+                if let Ok(mut rows) = reader_conn.query(&scan_sql, ()).await {
+                    while let Ok(Some(_)) = rows.next().await {}
+                }
+                if interval > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+                }
+            }
+        }));
+    }
 
     let cdc_count = Arc::new(AtomicUsize::new(0));
     let mut cdc_registered = false;
@@ -1049,6 +1476,25 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
                         }
                         Err(e) => {
                             println!("!!! [{stmt_idx}] COMMIT failed: {e}");
+                        }
+                    }
+                    // Post-commit settle window: give the async DBSP
+                    // consolidation queued by this commit a chance to run
+                    // before the next BEGIN, and issue one read against
+                    // each background-read target so a cursor is open
+                    // during the consolidation. This is what makes
+                    // post-commit panics (e.g. multiset-went-negative)
+                    // visible in the replay's panic hook.
+                    if args.post_commit_poll_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            args.post_commit_poll_ms,
+                        ))
+                        .await;
+                        for target in &background_read_targets {
+                            let sql = format!("SELECT COUNT(*) FROM {target}");
+                            if let Ok(mut rows) = conn.query(&sql, ()).await {
+                                while let Ok(Some(_)) = rows.next().await {}
+                            }
                         }
                     }
                     continue;
@@ -1149,6 +1595,13 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
         }
     }
 
+    // Drop background readers before the final consistency check so they
+    // aren't racing it.
+    stop_flag.store(true, Ordering::Relaxed);
+    for handle in reader_handles {
+        let _ = handle.await;
+    }
+
     println!("\n=== Final Consistency Check ===");
     let matview_names = extract_matview_names(&executed_sqls);
     println!("Active matviews: {:?}", matview_names);
@@ -1157,10 +1610,14 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     let has_data_mismatch = has_data_mismatch || final_result.has_data_mismatch;
     all_inconsistencies.extend(final_result.inconsistencies);
 
+    let captured_panics = panic_log.lock().unwrap().clone();
+    let has_panics = !captured_panics.is_empty();
+
     println!("\n=== SUMMARY ===");
     println!("  Statements executed: {stmt_idx}");
     println!("  CDC events total: {}", cdc_count.load(Ordering::SeqCst));
     println!("  Issues found: {}", all_inconsistencies.len());
+    println!("  Panics captured: {}", captured_panics.len());
     if hit_max_stmts {
         println!("  Budget: max-stmts hit (partial replay)");
     }
@@ -1172,6 +1629,24 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
         println!("\n  VERDICT: IVM BUG REPRODUCED!");
         for issue in &all_inconsistencies {
             println!("    - {issue}");
+        }
+        if has_panics {
+            println!("  Panics captured during replay:");
+            for p in &captured_panics {
+                println!("    - {p}");
+            }
+        }
+        std::process::exit(1);
+    } else if has_panics {
+        println!("\n  VERDICT: PANIC CAPTURED (IVM bug reproduced via panic hook)");
+        for p in &captured_panics {
+            println!("    - {p}");
+        }
+        if !all_inconsistencies.is_empty() {
+            println!("  Other issues:");
+            for issue in &all_inconsistencies {
+                println!("    - {issue}");
+            }
         }
         std::process::exit(1);
     } else if all_inconsistencies.is_empty() {
@@ -1326,8 +1801,11 @@ fn detect_crash_pattern(directives: &[Directive]) -> String {
         .output()
         .expect("Failed to run subprocess for crash detection");
 
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Prefer matview-inconsistency markers — these are why we're minimizing in
     // the first place when chasing IVM bugs. Pick the first INCONSISTENCY line

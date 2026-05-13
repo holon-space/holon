@@ -40,6 +40,51 @@ pub fn register_debug_services(injector: &Injector) {
     injector.provide::<DebugServices>(Provider::root(|_| Shared::new(DebugServices::default())));
 }
 
+/// DI module that populates the registered `DebugServices` singleton's
+/// optional fields (`loro_doc_store`, `orgmode_root`) from other DI
+/// services on startup.
+///
+/// Use in any process that wants live MCP inspection (`inspect_loro_blocks`,
+/// `diff_loro_sql`) — the standalone MCP, frontends, and PBT tests can
+/// all add this module instead of duplicating the resolve-and-populate
+/// boilerplate. `register_debug_services` must be called first.
+pub struct DebugServicesPopulatorModule {
+    pub orgmode_root: Option<std::path::PathBuf>,
+}
+
+impl Default for DebugServicesPopulatorModule {
+    fn default() -> Self {
+        Self { orgmode_root: None }
+    }
+}
+
+impl Module for DebugServicesPopulatorModule {
+    fn configure(&self, _: &Injector) -> std::result::Result<(), fluxdi::Error> {
+        Ok(())
+    }
+
+    fn on_start(&self, injector: Shared<Injector>) -> fluxdi::ModuleLifecycleFuture {
+        let orgmode_root = self.orgmode_root.clone();
+        Box::pin(async move {
+            let _session = injector
+                .resolve_async::<holon_frontend::FrontendSession>()
+                .await;
+            let debug = injector.resolve::<DebugServices>();
+            let loro_doc_store = injector
+                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .ok()
+                .map(|ops| ops.shared_doc_store());
+            if let Some(store) = loro_doc_store {
+                debug.loro_doc_store.set(store).ok();
+            }
+            if let Some(root) = orgmode_root {
+                debug.orgmode_root.set(root).ok();
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Configuration for the MCP server
 #[derive(Clone, Debug)]
 pub struct McpServerConfig {

@@ -103,12 +103,40 @@ pub enum Reason {
     NoPinCandidates,
     NoPinsToRemove,
 
+    // ---------- expand_toggle ----------
+    NoExpandToggleCandidates,
+    NoCollapseToggleCandidates,
+    ToggleAlreadyExpanded,
+    ToggleNotExpanded,
+
+    // ---------- shared layout-PBT variants ----------
+    NoSwitchableHandles,
+    NoDrawerHandles,
+    NoCollapsibleTargets,
+    DeliverNotMeaningfulInBackendTests,
+
     // ---------- catch-all buckets ----------
     // Used when a transition's gate is hard to name in one variant; prefer a
     // specific variant whenever possible. Both still appear in the histogram
     // and signal where richer decomposition would help.
     Unmigrated,
     PreconditionFailed,
+}
+
+/// Map every element of an `NEVec<A>` through `f` into an `NEVec<B>`. Used
+/// to translate per-variant `Reason` enums from `holon-layout-testing` /
+/// `holon-pbt-core` into this crate's `Reason` enum without losing the
+/// nonempty invariant.
+pub fn map_nevec<A, B>(src: NEVec<A>, mut f: impl FnMut(A) -> B) -> NEVec<B> {
+    let mut iter = src.into_iter();
+    let head = iter
+        .next()
+        .expect("NEVec is statically nonempty — into_iter always yields at least one element");
+    let mut out = NEVec::new(f(head));
+    for x in iter {
+        out.push(f(x));
+    }
+    out
 }
 
 /// Lift a boolean gate into a `Validated`: success carries `()`, failure

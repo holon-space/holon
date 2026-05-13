@@ -286,6 +286,14 @@ mod tests {
                 .last()
                 .map(|b| b.id))
         }
+
+        async fn children(&self, parent_id: &str) -> Result<Vec<String>> {
+            Ok(self
+                .sorted_children(parent_id)
+                .into_iter()
+                .map(|b| b.id)
+                .collect())
+        }
     }
 
     fn insert_block(store: &MemStore, id: &str, parent_id: Option<&str>, prev_key: Option<&str>) {
@@ -453,22 +461,22 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
-            id: "A".to_string(),
+            id: "block:A".to_string(),
             parent_id: Some("P".to_string()),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hello World".to_string(),
         });
 
-        store.split_block("A", 5).await.unwrap();
+        store.split_block(&EntityUri::block("A"), 5).await.unwrap();
 
-        let a = store.get("A").unwrap();
+        let a = store.get("block:A").unwrap();
         assert_eq!(a.content, "Hello");
 
         // Find the new block (not A, not P, child of P)
         let children = store.sorted_children("P");
         assert_eq!(children.len(), 2); // A and the new block
-        let new_block = children.iter().find(|b| b.id != "A").unwrap();
+        let new_block = children.iter().find(|b| b.id != "block:A").unwrap();
         assert_eq!(new_block.content, "World");
     }
 
@@ -477,20 +485,20 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
-            id: "A".to_string(),
+            id: "block:A".to_string(),
             parent_id: Some("P".to_string()),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hello".to_string(),
         });
 
-        store.split_block("A", 0).await.unwrap();
+        store.split_block(&EntityUri::block("A"), 0).await.unwrap();
 
-        let a = store.get("A").unwrap();
+        let a = store.get("block:A").unwrap();
         assert_eq!(a.content, "");
 
         let children = store.sorted_children("P");
-        let new_block = children.iter().find(|b| b.id != "A").unwrap();
+        let new_block = children.iter().find(|b| b.id != "block:A").unwrap();
         assert_eq!(new_block.content, "Hello");
     }
 
@@ -499,17 +507,17 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
-            id: "A".to_string(),
+            id: "block:A".to_string(),
             parent_id: Some("P".to_string()),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hi".to_string(),
         });
 
-        let result = store.split_block("A", 10).await;
+        let result = store.split_block(&EntityUri::block("A"), 10).await;
         assert!(result.is_err());
 
-        let result = store.split_block("A", -1).await;
+        let result = store.split_block(&EntityUri::block("A"), -1).await;
         assert!(result.is_err());
     }
 

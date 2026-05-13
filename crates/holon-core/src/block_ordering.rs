@@ -59,4 +59,14 @@ pub trait BlockOrdering: Send + Sync {
     /// Block id of the last child of `parent_id` (highest sort_key).
     /// `None` when `parent_id` has no children.
     async fn last_child(&self, parent_id: &str) -> Result<Option<String>>;
+
+    /// All children of `parent_id` in positional order (low → high
+    /// sort_key in SqlOnly mode; Loro tree order in Loro mode).
+    /// Returns an empty Vec when there are no children.
+    ///
+    /// This is the authoritative ordering the system actually renders /
+    /// projects from. Use it as the live-side ground truth in
+    /// assertions instead of computing order from a `Block`'s
+    /// `sort_key` / `sequence` field — those are encoding-specific.
+    async fn children(&self, parent_id: &str) -> Result<Vec<String>>;
 }

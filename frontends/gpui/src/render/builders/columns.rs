@@ -137,16 +137,53 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                     inner.border_l_1().border_color(tc(ctx, |t| t.border))
                 };
 
-                let target_width = if is_open { width } else { 0.0 };
+                // Clickable toggle widget at the canonical
+                // `drawer_toggle_id_for(block_id)` element id. Stays
+                // rendered even when closed so a user — or the layout
+                // PBT's `ToggleDrawer` transition — can re-open the
+                // drawer by clicking the same target. Placed at the
+                // inner edge of the panel: for a `first_shrink`
+                // (typically left sidebar) the toggle sits on the
+                // right of the panel; for the `last_shrink` (right
+                // sidebar) it sits on the left.
+                let tracked_toggle = super::drawer::drawer_toggle_widget(&block_id, "col", ctx);
+                let toggle_w = super::drawer::DRAWER_TOGGLE_WIDTH;
 
-                container = container.child(
+                // Container layout differs by open/closed: when open,
+                // panel + toggle occupy `width + toggle_w`; when
+                // closed, only the toggle is in flow — at the
+                // appropriate edge for each sidebar position — so the
+                // click target stays reachable.
+                let column = if is_open {
+                    let row = if is_first_shrink {
+                        div()
+                            .h_full()
+                            .flex()
+                            .flex_row()
+                            .child(inner)
+                            .child(tracked_toggle)
+                    } else {
+                        div()
+                            .h_full()
+                            .flex()
+                            .flex_row()
+                            .child(tracked_toggle)
+                            .child(inner)
+                    };
                     div()
                         .h_full()
-                        .overflow_hidden()
                         .flex_shrink_0()
-                        .w(px(target_width))
-                        .child(inner),
-                );
+                        .w(px(width + toggle_w))
+                        .child(row)
+                } else {
+                    div()
+                        .h_full()
+                        .flex_shrink_0()
+                        .w(px(toggle_w))
+                        .child(tracked_toggle)
+                };
+
+                container = container.child(column);
             } else {
                 let rendered = child.map(|c| super::render(c, ctx));
                 let id = hashed_id(&block_id);

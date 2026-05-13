@@ -649,12 +649,14 @@ impl Render for ReactiveShell {
                 .into_any_element();
         }
 
-        // Recompute visible indices (tree/outline collapse filtering) but
-        // DO NOT call `list_state.reset()` here. `reset` wipes scroll
-        // position AND drops all pending scroll events until the next
-        // prepaint, which breaks interactive scrolling. For tree collapse
-        // length changes, the right call would be a targeted `splice` —
-        // left for a follow-up once scroll is working.
+        // Recompute visible indices (tree/outline collapse filtering). When
+        // the visible count changes (collapse hides rows / expand reveals
+        // them), splice `list_state` to match — without this, GPUI's `list`
+        // widget calls the row callback with `ix == old_count - 1` while
+        // `visible_indices` is shorter, panicking at the `[ix]` index below.
+        // Use `splice(0..old_len, new_len)` instead of `reset()` — same
+        // idiom as `VecDiff::Replace` above; preserves scroll where possible
+        // and avoids dropping pending scroll events.
         {
             let local = LocalEntityScope::new().with_cache(self.entity_cache.clone());
             let probe_ctx = GpuiRenderContext::new(
@@ -667,7 +669,36 @@ impl Render for ReactiveShell {
                 cx,
             )
             .with_live_block_ancestors(frame_ancestors.clone());
+            // Reconcile against `list_state.item_count()`, not the previous
+            // `visible_indices.len()`. `apply_diff` splices `list_state` from
+            // `self.items.len()` (raw item count), while paint iterates via
+            // `visible_indices` (collapse-filtered). If a diff lands between
+            // renders, list_state and visible_indices can diverge with
+            // matching old/new visible counts, skipping the splice and
+            // tripping the debug_assert below.
+            let prior_list_count = self.list_state.item_count();
             self.visible_indices = Rc::new(self.compute_visible_indices(&probe_ctx));
+            let new_len = self.visible_indices.len();
+            if prior_list_count != new_len {
+                self.list_state.splice(0..prior_list_count, new_len);
+            }
+            // Invariant: the GPUI `list` widget below will call its row
+            // callback with `ix` in `0..list_state.item_count()`. The
+            // callback indexes `visible_indices[ix]`, so the two must
+            // stay in lockstep — otherwise the next paint pass panics
+            // with `index out of bounds` (see May 2026 outline-collapse
+            // crash). Cheaper to catch the mismatch here at render time
+            // than in the paint callback. Debug-only: production paths
+            // shouldn't pay the comparison cost.
+            debug_assert_eq!(
+                self.visible_indices.len(),
+                self.list_state.item_count(),
+                "ReactiveShell: visible_indices.len() ({}) != list_state.item_count() ({}). \
+                 Some code path mutated visible_indices without splicing list_state. \
+                 The next `list` paint will panic indexing visible_indices.",
+                self.visible_indices.len(),
+                self.list_state.item_count()
+            );
         }
 
         let variant = self

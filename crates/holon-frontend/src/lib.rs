@@ -55,7 +55,7 @@ pub mod editor_view_model;
 pub mod focus_path;
 pub mod frontend_module;
 pub mod geometry;
-pub use geometry::vms_button_id_for;
+pub use geometry::{drawer_toggle_id_for, expand_toggle_id_for, vms_button_id_for};
 pub mod headless_editor_mirror;
 pub mod input;
 pub mod input_trigger;

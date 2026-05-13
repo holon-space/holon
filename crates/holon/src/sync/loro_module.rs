@@ -386,6 +386,18 @@ pub async fn seed_loro_from_persistent_store(
     // layout panel + sidebar entities written via raw INSERTs) produce no
     // events, so the LEFT JOIN keeps them and the seed creates them as
     // intended.
+    // Order by (parent_id, sort_key) so siblings reach Loro in the same
+    // relative order they have in SQL. `apply_seed_row` calls
+    // `create_block` without an `after_id`, which auto-appends to the
+    // parent's children — sibling N+1's Loro fi is therefore always
+    // greater than sibling N's. After the seed loop we project Loro's
+    // assigned fis back to SQL `sort_key` (see writeback below) so the
+    // two encodings agree on absolute strings going forward. Without
+    // this ordering, Loro's auto-assigned fis would reflect HashMap /
+    // created_at order rather than the org-parser's intended sequence,
+    // and SplitBlock-time `mov_after` would slot the new fi between
+    // Loro siblings whose order disagrees with SQL — surfacing as the
+    // seed=42 SplitBlock ordering panic (devlog handoff 2026-05-14).
     let rows = db_handle
         .query(
             &format!(
@@ -400,7 +412,7 @@ pub async fn seed_loro_from_persistent_store(
                                        WHERE a.event_id = e.id AND a.consumer = 'loro' \
                                    ) \
                  WHERE e.id IS NULL \
-                 ORDER BY b.created_at ASC, b.id ASC",
+                 ORDER BY b.parent_id ASC, b.sort_key ASC, b.id ASC",
                 table = crate::storage::BLOCK_READ_TABLE,
             ),
             std::collections::HashMap::new(),
@@ -427,7 +439,7 @@ pub async fn seed_loro_from_persistent_store(
         .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
     let backend = LoroBackend::from_document(collab);
 
-    let mut applied = 0usize;
+    let mut applied_ids: Vec<String> = Vec::new();
     // Two-pass seed so children whose parent appears later in the result
     // set still get placed correctly.
     let mut pending: Vec<&std::collections::HashMap<String, Value>> = rows.iter().collect();
@@ -435,8 +447,8 @@ pub async fn seed_loro_from_persistent_store(
         let mut next: Vec<&std::collections::HashMap<String, Value>> = Vec::new();
         for row in pending.drain(..) {
             match apply_seed_row(&backend, row).await {
-                Ok(true) => applied += 1,
-                Ok(false) => {}
+                Ok(Some(id)) => applied_ids.push(id),
+                Ok(None) => {}
                 Err(_) => next.push(row),
             }
         }
@@ -451,17 +463,66 @@ pub async fn seed_loro_from_persistent_store(
         .await
         .map_err(|e| anyhow::anyhow!("save_all after seed: {}", e))?;
 
+    // Project Loro's auto-assigned fis back to SQL `sort_key`. The seed
+    // ordered rows by SQL sort_key, so Loro's per-parent fi sequence
+    // agrees with SQL's order — but the absolute strings differ (org
+    // parser uses `gen_n_keys`, Loro uses its own format). After this
+    // writeback, every block's SQL `sort_key` equals its Loro
+    // `tree.fractional_index(node)`. From here on the Loro→SQL
+    // projector (`LoroSyncController::on_loro_changed`) is the only
+    // writer of `sort_key`, and the two encodings stay in sync. Without
+    // this, SplitBlock-time `mov_after` produces a Loro fi between
+    // siblings whose SQL sort_keys came from a different generator,
+    // and the resulting SQL ordering disagrees with the reference
+    // (devlog 2026-05-14 SplitBlock handoff).
+    if !applied_ids.is_empty() {
+        let mut written = 0usize;
+        for id in &applied_ids {
+            let block = match backend.get_block(id).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        "[LoroModule] sort_key writeback: get_block({}) failed: {}",
+                        id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            let sql = format!(
+                "UPDATE {table} SET sort_key = ? WHERE id = ?",
+                table = BLOCK_WRITE_TABLE,
+            );
+            let params = vec![
+                turso::Value::Text(block.sort_key.clone()),
+                turso::Value::Text(id.clone()),
+            ];
+            db_handle
+                .execute(&sql, params)
+                .await
+                .map_err(|e| anyhow::anyhow!("sort_key writeback for {}: {}", id, e))?;
+            written += 1;
+        }
+        info!(
+            "[LoroModule] sort_key writeback: projected Loro fi to SQL for {} blocks",
+            written
+        );
+    }
+
     info!(
         "[LoroModule] Seeded Loro with {} blocks from persistent store",
-        applied
+        applied_ids.len()
     );
     Ok(())
 }
 
+/// Returns `Some(stable_id)` for blocks newly created in Loro, `None`
+/// for blocks already present (idempotent). The caller uses the
+/// returned ids to drive the post-seed sort_key writeback.
 async fn apply_seed_row(
     backend: &LoroBackend,
     row: &std::collections::HashMap<String, Value>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<String>> {
     let id = row
         .get("id")
         .and_then(|v| v.as_string())
@@ -470,7 +531,7 @@ async fn apply_seed_row(
 
     // Skip blocks already in Loro.
     if backend.resolve_to_tree_id(&id).await.is_some() {
-        return Ok(false);
+        return Ok(None);
     }
 
     let parent_id_raw = row
@@ -568,7 +629,7 @@ async fn apply_seed_row(
 
     // Unused-import shim (ContentType is re-exported for parity with other seeders).
     let _ = ContentType::Text;
-    Ok(true)
+    Ok(Some(id))
 }
 
 /// Parse the `tags` field of a CDC seed row into a typed `Vec<String>`.

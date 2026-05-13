@@ -1,35 +1,30 @@
-use std::sync::Arc;
-
 use super::prelude::*;
-use holon_frontend::reactive_view_model::ReactiveViewModel;
+use crate::geometry::TransparentTracker;
+use holon_frontend::{expand_toggle_id_for, reactive_view_model::ReactiveViewModel};
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let target_id = node.prop_str("target_id").unwrap_or_else(|| "".to_string());
-    let expanded = node.expanded.as_ref().expect("expand_toggle requires expanded state");
-    let content_slot = node.slot.as_ref();
+    let expanded = node
+        .expanded
+        .as_ref()
+        .expect("expand_toggle requires expanded state");
     let children = &node.children;
-    let render_ctx = node.render_ctx.as_ref();
-
-    // content_template is stored as a JSON-serialized RenderExpr in props
-    let content_template = node.props.lock_ref().get("content_template").and_then(|v| {
-        if let holon_api::Value::String(s) = v {
-            serde_json::from_str::<holon_api::render_types::RenderExpr>(s).ok()
-        } else {
-            None
-        }
-    });
 
     let is_expanded = expanded.get();
     let chevron = if is_expanded { "\u{25BC}" } else { "\u{25B6}" };
     let color = tc(ctx, |t| t.muted_foreground);
 
     let expanded_handle = expanded.clone();
-    let slot_handle = content_slot.map(|s| s.content.clone());
-    let template = content_template;
-    let captured_ctx = render_ctx.cloned();
-    let services = ctx.services.clone();
-
     let el_id = format!("expand-toggle-{}", target_id);
+
+    // Lazy content: `materialize_if_gated` reads the gate (= `expanded`) and
+    // either returns the cached materialised VM, fires the thunk on first
+    // expand and caches, or returns None while collapsed-and-empty.
+    // Subsequent toggles short-circuit on the cache.
+    let materialised = node
+        .lazy_slot
+        .as_ref()
+        .and_then(|s| s.materialize_if_gated());
 
     let chevron_el = div()
         .id(hashed_id(&el_id))
@@ -45,17 +40,22 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
             let new_val = !expanded_handle.get();
             expanded_handle.set(new_val);
-            if new_val {
-                if let (Some(ref expr), Some(ref slot), Some(ref ctx)) =
-                    (&template, &slot_handle, &captured_ctx)
-                {
-                    let content = services.interpret(expr, ctx);
-                    slot.set(Arc::new(content));
-                }
-            }
+            // Materialisation happens lazily on the next render when
+            // `materialize_if_gated()` sees the open gate. No need to
+            // call `services.interpret` here.
             window.refresh();
         })
         .child(chevron.to_string());
+
+    // Register the chevron in the bounds registry under the canonical id
+    // so layout-PBT `ToggleCollapse` transitions can click it via
+    // `click_at_element(expand_toggle_id_for(target_id))`.
+    let tracked_chevron = TransparentTracker::new(
+        expand_toggle_id_for(&target_id),
+        "expand_toggle",
+        ctx.bounds_registry.clone(),
+        chevron_el.into_any_element(),
+    );
 
     let mut container = div().w_full().flex().flex_col();
 
@@ -66,19 +66,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             .flex_row()
             .items_start()
             .gap(px(4.0))
-            .child(chevron_el)
+            .child(tracked_chevron)
             .child(div().flex_1().child(super::render(header, ctx)));
         container = container.child(header_row);
     }
 
     if is_expanded {
-        if let Some(slot) = content_slot {
-            let slot_content = slot.content.lock_ref().clone();
+        if let Some(content) = materialised {
             container = container.child(
                 div()
                     .w_full()
                     .pl(px(ctx.style().tree_indent_px))
-                    .child(super::render(&slot_content, ctx)),
+                    .child(super::render(&content, ctx)),
             );
         }
     }

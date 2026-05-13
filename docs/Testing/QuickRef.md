@@ -91,6 +91,24 @@ cargo test --test cucumber -- "Scenario name"
 cargo test --test cucumber -- --verbose
 ```
 
+### PBT live inspection (panic pause + holon-live MCP)
+
+When a property-based test panics, by default the embedded MCP server
+tears down with the process. To hold the process open and attach the
+`holon-live` MCP proxy to inspect live DB / Loro state:
+
+```bash
+PROPTEST_SEED=42 PBT_PAUSE_SECONDS=300 \
+  cargo test -p holon-gpui --test gpui_ui_pbt --features pbt
+```
+
+`PBT_PAUSE_SECONDS=N` is the master switch — it installs a panic hook
+that sleeps `N` seconds before the process tears down, and forces the
+embedded MCP server up on port **8528** so `holon-live` can connect.
+
+Full workflow (panic-hook details, step-level pauses, debugger setup):
+[`PbtPauseAndLiveMcp.md`](PbtPauseAndLiveMcp.md).
+
 ## What to Test
 
 ### ✅ DO Test

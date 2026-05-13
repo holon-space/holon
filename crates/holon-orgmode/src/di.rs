@@ -39,6 +39,7 @@ use holon::sync::{LoroBlockOperations, LoroDocumentStore, TursoEventBus};
 use holon::type_registry::TypeRegistry;
 use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
+use holon_core::block_ordering::BlockOrdering;
 
 /// Signal that indicates the FileWatcher is ready to receive file change events.
 ///
@@ -214,11 +215,26 @@ fn scan_org_files(dir: &std::path::Path) -> Vec<PathBuf> {
 /// tables — that storage split stays Turso's concern.
 pub struct CacheBlockReader {
     cache: Arc<QueryableCache<Block>>,
+    /// Phase 4: drives `wait_for_cache_caught_up`. `None` for backends
+    /// without an ack pipeline (only happens in tests that don't wire
+    /// up `TursoEventBus`).
+    event_bus: Option<Arc<TursoEventBus>>,
 }
 
 impl CacheBlockReader {
     pub fn new(cache: Arc<QueryableCache<Block>>) -> Self {
-        Self { cache }
+        Self {
+            cache,
+            event_bus: None,
+        }
+    }
+
+    /// Wire the TursoEventBus so `wait_for_cache_caught_up` can replace
+    /// the 10 ms full-scan poll with a push-based wait on the cache
+    /// consumer's ack watermark.
+    pub fn with_event_bus(mut self, event_bus: Arc<TursoEventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     /// Load every block from `block_raw` with edge-typed fields hydrated
@@ -273,42 +289,151 @@ impl CacheBlockReader {
 #[async_trait::async_trait]
 impl BlockReader for CacheBlockReader {
     async fn get_blocks(&self, doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
-        use std::collections::HashSet;
+        // Phase 5: push the doc-scoped BFS into SQL via a recursive CTE on
+        // `block_raw`. Replaces `load_all_blocks_with_hydration` + in-Rust
+        // BFS — that combination fired ~26×/sec on the
+        // `on_block_changed → render_file_by_doc_id` path (one full table
+        // scan per Loro→SQL block apply). The CTE walks down from
+        // `doc_id`'s direct children, excluding any block tagged `Page`
+        // (sub-document boundary; the Rust BFS did the same by skipping
+        // `block.is_page()`). Depth bound 100 matches existing
+        // `find_document_uri` shape.
+        let sql = format!(
+            "WITH RECURSIVE descendants(id, depth_acc) AS ( \
+                SELECT b.id, 0 \
+                FROM {table} b \
+                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
+                WHERE b.parent_id = $doc_id \
+                  AND bt.block_id IS NULL \
+                UNION ALL \
+                SELECT b.id, d.depth_acc + 1 \
+                FROM {table} b \
+                JOIN descendants d ON b.parent_id = d.id \
+                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
+                WHERE bt.block_id IS NULL AND d.depth_acc < 100 \
+            ) \
+            SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, \
+                   b.content_type, b.source_language, b.source_name, \
+                   b.properties, b.marks, b.collapsed, b.completed, \
+                   b.block_type, b.created_at, b.updated_at, \
+                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags \
+            FROM {table} b \
+            JOIN descendants d ON d.id = b.id",
+            table = BLOCK_WRITE_TABLE,
+        );
 
-        let all_blocks = self.load_all_blocks_with_hydration().await?;
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "doc_id".to_string(),
+            holon_api::Value::String(doc_id.to_string()),
+        );
 
-        // BFS to collect all descendants of doc_id
-        let mut result = Vec::new();
-        let mut frontier: HashSet<&str> = HashSet::new();
-        frontier.insert(doc_id.as_str());
+        let rows = self
+            .cache
+            .db_handle()
+            .query(&sql, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader::get_blocks] CTE query failed: {e}"))?;
 
-        loop {
-            let mut next_frontier = HashSet::new();
-            let mut found_any = false;
-            for block in &all_blocks {
-                if frontier.contains(block.parent_id.as_str())
-                    && !result.iter().any(|b: &Block| b.id == block.id)
-                {
-                    if block.is_page() {
-                        continue;
-                    }
-                    next_frontier.insert(block.id.as_str());
-                    result.push(block.clone());
-                    found_any = true;
-                }
-            }
-            if !found_any {
-                break;
-            }
-            frontier = next_frontier;
-        }
-
-        Ok(result)
+        // Same Block::try_from path as load_all_blocks_with_hydration — the
+        // derived TryFromEntity would silently leave `tags` empty because
+        // of `#[serde(skip, default)]`. See block_two_deserializers memory.
+        rows.into_iter()
+            .map(|row| {
+                Block::try_from(row).map_err(|e| {
+                    anyhow::anyhow!(
+                        "[CacheBlockReader::get_blocks] Block::try_from row failed: {e}"
+                    )
+                })
+            })
+            .collect()
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         let all_blocks = self.load_all_blocks_with_hydration().await?;
         Ok(blocks_by_document(&all_blocks))
+    }
+
+    /// Phase 1: load `(file_id, content_hash)` rows directly from the `file`
+    /// table via raw SQL — bypasses the in-process file QueryableCache so we
+    /// can read at controller startup, before CDC has replayed file events.
+    async fn load_file_hashes(&self) -> anyhow::Result<Vec<(holon_api::EntityUri, String)>> {
+        let rows = self
+            .cache
+            .db_handle()
+            .query(
+                "SELECT id, content_hash FROM file",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] load_file_hashes failed: {e}"))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = match row.get("id") {
+                Some(holon_api::Value::String(s)) => s.clone(),
+                _ => continue,
+            };
+            let hash = match row.get("content_hash") {
+                Some(holon_api::Value::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            if hash.is_empty() {
+                // Skip rows the legacy writer left without a hash — they'd
+                // false-match an empty stored value and incorrectly fast-path.
+                continue;
+            }
+            let uri = holon_api::EntityUri::parse(&id).map_err(|e| {
+                anyhow::anyhow!("[CacheBlockReader] file.id={id:?} not a valid EntityUri: {e}")
+            })?;
+            out.push((uri, hash));
+        }
+        Ok(out)
+    }
+
+    /// Phase 1 write-back: UPDATE `file.content_hash` for the given id.
+    /// Bypasses the OperationProvider/event pipeline because:
+    /// (a) the value is pure metadata (a hash), not domain data, so we
+    /// don't want a CDC event for it; (b) `OrgSyncController` only reads
+    /// `file.content_hash` at startup via `load_file_hashes` (raw SQL),
+    /// not via the in-process cache — so cache staleness doesn't matter.
+    /// Updates 0 rows silently when the file row hasn't been created yet
+    /// by `OrgmodeSyncProvider` (first-ever boot case); the fast path
+    /// engages on the next boot after the provider's sync creates it.
+    /// Phase 4: replace the 10 ms `get_blocks().len()` poll. Uses the
+    /// cache consumer's ack watermark exposed by `TursoEventBus`; falls
+    /// back to instant `Ok(true)` when no event bus is wired (tests).
+    async fn wait_for_cache_caught_up(
+        &self,
+        target_ts: i64,
+        timeout_ms: u64,
+    ) -> anyhow::Result<bool> {
+        match &self.event_bus {
+            Some(bus) => Ok(bus
+                .wait_for_consumer_caught_up("cache", target_ts, timeout_ms)
+                .await),
+            None => Ok(true),
+        }
+    }
+
+    async fn persist_file_hash(
+        &self,
+        file_id: &holon_api::EntityUri,
+        hash: &str,
+    ) -> anyhow::Result<()> {
+        // Positional binds for db_handle().execute (it takes Vec<turso::Value>).
+        let params = vec![
+            turso::Value::Text(hash.to_string()),
+            turso::Value::Text(file_id.to_string()),
+        ];
+        self.cache
+            .db_handle()
+            .execute("UPDATE file SET content_hash = ? WHERE id = ?", params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("[CacheBlockReader] persist_file_hash UPDATE failed: {e}")
+            })?;
+        Ok(())
     }
 }
 
@@ -751,6 +876,7 @@ impl Module for OrgModeModule {
 
                 let loro_ops_clone = loro_ops.clone();
                 let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
+                let ordering = resolver.resolve_async::<dyn BlockOrdering>().await;
                 let backend_provider =
                     resolver.resolve::<dyn holon::di::TursoBackendProvider>();
                 let backend_for_live_docs = backend_provider.backend();
@@ -768,14 +894,17 @@ impl Module for OrgModeModule {
                         .await,
                     );
 
-                    let block_reader: Arc<dyn BlockReader> =
-                        Arc::new(CacheBlockReader::new(block_cache));
+                    let block_reader: Arc<dyn BlockReader> = Arc::new(
+                        CacheBlockReader::new(block_cache)
+                            .with_event_bus(event_bus.clone()),
+                    );
 
                     let mut controller = OrgSyncController::new(
                         block_reader,
                         command_bus,
                         doc_manager,
                         config_clone.root_directory.clone(),
+                        ordering,
                     );
 
                     if let Some(hook_cmd) = config_clone.post_org_write_hook.clone() {

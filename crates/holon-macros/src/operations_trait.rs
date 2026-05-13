@@ -339,6 +339,18 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                                 (#param_name_lit.to_string(), #param_name_ident.map(|v| holon_api::Value::Integer(v as i64)).unwrap_or(holon_api::Value::Null))
                             }
                         }
+                    } else if type_str_cleaned == "EntityUri" {
+                        // EntityUri (owned or &) flattens back to its boundary
+                        // string representation for the Value side-channel.
+                        if is_required {
+                            quote! {
+                                (#param_name_lit.to_string(), holon_api::Value::String(#param_name_ident.as_str().to_string()))
+                            }
+                        } else {
+                            quote! {
+                                (#param_name_lit.to_string(), #param_name_ident.as_ref().map(|v| holon_api::Value::String(v.as_str().to_string())).unwrap_or(holon_api::Value::Null))
+                            }
+                        }
                     } else if type_str_cleaned == "HashMap" {
                         // For HashMap<String, Value>, use directly
                         quote! {
@@ -553,6 +565,22 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                                     .ok_or_else(|| format!("Missing parameter '{}' (expected Value)", #param_name_str))?;
                             }
                         }
+                    } else if type_str_cleaned == "EntityUri" {
+                        // Parse-don't-validate: extract the boundary string and
+                        // lift it to a typed EntityUri at the dispatch edge so
+                        // trait methods see only the parsed form.
+                        if is_optional {
+                            quote! {
+                                let #param_name_ident: Option<holon_api::EntityUri> = params.get(#param_name_str)
+                                    .and_then(|v| v.as_string().map(|s| holon_api::EntityUri::from_raw(s)));
+                            }
+                        } else {
+                            quote! {
+                                let #param_name_ident: holon_api::EntityUri = params.get(#param_name_str)
+                                    .and_then(|v| v.as_string().map(|s| holon_api::EntityUri::from_raw(s)))
+                                    .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected EntityUri-as-String)", #param_name_str))?;
+                            }
+                        }
                     } else {
                         // For other types, try to clone Value and let the trait method handle conversion
                         quote! {
@@ -572,6 +600,12 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                             param_names_for_call.push(quote! { #param_name_ident.as_ref().map(|s| s.as_str()) });
                         } else {
                             param_names_for_call.push(quote! { &*#param_name_ident });
+                        }
+                    } else if is_ref_type && type_str_cleaned == "EntityUri" {
+                        if is_optional {
+                            param_names_for_call.push(quote! { #param_name_ident.as_ref() });
+                        } else {
+                            param_names_for_call.push(quote! { &#param_name_ident });
                         }
                     } else {
                         param_names_for_call.push(quote! { #param_name_ident });

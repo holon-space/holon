@@ -30,6 +30,9 @@ holon-filesystem.workspace = true
 fluxdi.workspace = true
 notify = "8.0"
 ignore.workspace = true
+percent-encoding = "2.3"
+hex.workspace = true
+turso.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]

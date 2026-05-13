@@ -1,5 +1,6 @@
 pub mod credential_store;
 pub mod integration_config;
+pub mod mcp_call_surface;
 pub mod mcp_integration;
 pub mod mcp_notification_handler;
 pub mod mcp_provider;

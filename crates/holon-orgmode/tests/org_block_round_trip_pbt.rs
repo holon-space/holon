@@ -50,8 +50,13 @@ fn doc_strategy() -> impl Strategy<Value = Block> {
 }
 
 proptest! {
+    // T1 PBT (Phase 4 of the testing-strategy plan). Runtime measured at
+    // ~0.3s for 50 cases; 1024 cases finish well under the <30s T1 budget
+    // and exercise the generator surface far more thoroughly than the
+    // legacy 50-case settings. Failure seeds land in `proptest-regressions/`
+    // via proptest's default `FileFailurePersistence::SourceParallel`.
     #![proptest_config(ProptestConfig {
-        cases: 50,
+        cases: 1024,
         ..ProptestConfig::default()
     })]
 

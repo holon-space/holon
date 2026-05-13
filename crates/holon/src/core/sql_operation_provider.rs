@@ -46,6 +46,136 @@ fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
+/// Serialize a property map to canonical JSON (keys sorted by BTreeMap).
+///
+/// All callers writing the `properties` column must go through this so the
+/// diff guard's string comparison in `prepare_update` is stable regardless of
+/// insertion order.
+fn properties_to_canonical_json<I>(props: I) -> String
+where
+    I: IntoIterator<Item = (String, serde_json::Value)>,
+{
+    let canonical: std::collections::BTreeMap<_, _> = props.into_iter().collect();
+    serde_json::to_string(&canonical).expect("properties must serialize")
+}
+
+/// Compare a SQL literal string (as produced by `value_to_sql`) with a stored
+/// `Value` from the DB. Returns `true` when they represent the same value.
+///
+/// Used by `prepare_update`'s Rust diff guard to drop pairs that haven't changed
+/// without relying on Turso's `IS NOT` string-comparison semantics.
+fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
+    // NULL on either side.
+    if sql_literal == "NULL" {
+        return matches!(db_val, None | Some(Value::Null));
+    }
+    let Some(db) = db_val else {
+        return false; // new value is non-NULL, old is missing → changed
+    };
+    // Quoted string literal: `'...'` with internal `''` escapes.
+    if let Some(inner) = sql_literal
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+    {
+        let unescaped = inner.replace("''", "'");
+        return match db {
+            Value::String(s) => {
+                if *s == unescaped {
+                    return true;
+                }
+                // Try semantic JSON comparison: `{"b":1,"a":2}` == `{"a":2,"b":1}`.
+                // This handles the `properties` column where the stored value may be
+                // non-canonical (insertion-ordered) while new values are always
+                // BTreeMap-sorted by `properties_to_canonical_json`.
+                // We canonicalize both via BTreeMap round-trip because serde_json
+                // may use `preserve_order` (IndexMap), making Value equality
+                // order-sensitive.
+                if let (Ok(a), Ok(b)) = (
+                    serde_json::from_str::<serde_json::Value>(&unescaped),
+                    serde_json::from_str::<serde_json::Value>(s.as_str()),
+                ) {
+                    fn canonical_json(v: serde_json::Value) -> String {
+                        match v {
+                            serde_json::Value::Object(map) => {
+                                let sorted: std::collections::BTreeMap<_, _> =
+                                    map.into_iter().collect();
+                                serde_json::to_string(&sorted).unwrap_or_default()
+                            }
+                            other => serde_json::to_string(&other).unwrap_or_default(),
+                        }
+                    }
+                    return canonical_json(a) == canonical_json(b);
+                }
+                false
+            }
+            Value::Null => false,
+            Value::Object(_) | Value::Json(_) => {
+                // Turso may parse JSON TEXT columns into Value::Object (or
+                // Value::Json). Serialize back to string and compare canonically.
+                fn canonical_json_from_value(v: &Value) -> String {
+                    let json_val: serde_json::Value = value_to_json(v);
+                    match json_val {
+                        serde_json::Value::Object(map) => {
+                            let sorted: std::collections::BTreeMap<_, _> =
+                                map.into_iter().collect();
+                            serde_json::to_string(&sorted)
+                                .expect("BTreeMap serialization cannot fail")
+                        }
+                        other => serde_json::to_string(&other)
+                            .expect("serde_json::Value serialization cannot fail"),
+                    }
+                }
+                fn canonical_json_from_str(s: &str) -> Option<String> {
+                    // Returns None when `s` is not valid JSON — treat as not-equal.
+                    let parsed: serde_json::Value = serde_json::from_str(s)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "sql_literal_equals_value: SQL literal is not valid JSON ({e}): {s:?}"
+                            )
+                        })
+                        .ok()?; // ALLOW(ok): None means "not valid JSON → treat as changed"
+                    Some(match parsed {
+                        serde_json::Value::Object(map) => {
+                            let sorted: std::collections::BTreeMap<_, _> =
+                                map.into_iter().collect();
+                            serde_json::to_string(&sorted)
+                                .expect("BTreeMap serialization cannot fail")
+                        }
+                        other => serde_json::to_string(&other)
+                            .expect("serde_json::Value serialization cannot fail"),
+                    })
+                }
+                match canonical_json_from_str(&unescaped) {
+                    Some(new_canonical) => new_canonical == canonical_json_from_value(db),
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+    }
+    // Numeric literal.
+    if let Ok(n) = sql_literal.parse::<i64>() {
+        return match db {
+            Value::Integer(i) => *i == n,
+            _ => false,
+        };
+    }
+    if let Ok(f) = sql_literal.parse::<f64>() {
+        return match db {
+            Value::Float(g) => (*g - f).abs() < f64::EPSILON,
+            _ => false,
+        };
+    }
+    // Boolean literals.
+    if sql_literal.eq_ignore_ascii_case("true") {
+        return matches!(db, Value::Boolean(true));
+    }
+    if sql_literal.eq_ignore_ascii_case("false") {
+        return matches!(db, Value::Boolean(false));
+    }
+    false
+}
+
 /// Known columns in the blocks table that can be used directly in SQL.
 /// Any param key not in this set gets packed into the `properties` JSON column.
 /// Known columns in the blocks table (must match schema in schema_modules.rs).
@@ -207,6 +337,26 @@ impl SqlOperationProvider {
                 );
             }
         }
+    }
+
+    /// Phase 3: resolve the document URI for a block, preferring the
+    /// caller-supplied `ROUTING_DOC_URI_KEY` param when present.
+    ///
+    /// `OrgSyncController::build_block_params` always sets this key to the
+    /// real ancestor document URI, so the recursive Page-walk in
+    /// `find_document_uri` is unnecessary on the org-ingest hot path
+    /// (~1,200 calls eliminated per re-ingest of a typical vault). Chord-op
+    /// and MCP callers that don't pass the key fall through to the walk —
+    /// correctness preserved.
+    async fn resolve_doc_uri(&self, params: &StorageEntity, block_id: &str) -> Option<String> {
+        if let Some(v) = params.get(crate::sync::event_bus::ROUTING_DOC_URI_KEY) {
+            if let Some(s) = v.as_string() {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        self.find_document_uri(block_id).await
     }
 
     /// Find the document ancestor for a block using a single recursive CTE.
@@ -477,14 +627,9 @@ impl SqlOperationProvider {
         let (mut sql_fields, extra_props, edge_field_params) = self.partition_params(&params);
 
         if !extra_props.is_empty() {
-            // BTreeMap for canonical key ordering (matches prepare_update).
-            let props_json = serde_json::to_string(
-                &extra_props
-                    .into_iter()
-                    .map(|(k, v)| (k, value_to_json(&v)))
-                    .collect::<std::collections::BTreeMap<String, serde_json::Value>>(),
-            )
-            .unwrap_or_else(|_| "{}".to_string());
+            let props_json = properties_to_canonical_json(
+                extra_props.into_iter().map(|(k, v)| (k, value_to_json(&v))),
+            );
             sql_fields.push((
                 "properties".to_string(),
                 format!("'{}'", props_json.replace('\'', "''")),
@@ -497,11 +642,29 @@ impl SqlOperationProvider {
             .collect();
         let values: Vec<_> = sql_fields.iter().map(|(_, v)| v.clone()).collect();
 
+        // UPSERT — a row with this id may already exist when the
+        // `LoroSyncController::on_loro_changed` projector emits a Loro-origin
+        // create after the org parser already inserted the SQL row.
+        // INSERT OR IGNORE silently discards the projector's authoritative
+        // Loro fi in that case, leaving SQL `sort_key` stuck on the parser's
+        // value and breaking sibling ordering after `mov_after`. UPSERT lets
+        // the projector be the single authoritative writer for `sort_key`
+        // and other Loro-derived columns. The `id` column is the conflict
+        // target so it's excluded from the SET clause.
+        let upsert_set: Vec<String> = sql_fields
+            .iter()
+            .filter(|(k, _)| k != "id")
+            .map(|(k, _)| {
+                let q = Self::quote_identifier(k);
+                format!("{q} = excluded.{q}")
+            })
+            .collect();
         let mut sql_statements = vec![format!(
-            "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}",
             self.table_name,
             columns.join(", "),
-            values.join(", ")
+            values.join(", "),
+            upsert_set.join(", "),
         )];
 
         let aggregate_id = params
@@ -655,9 +818,7 @@ impl SqlOperationProvider {
 
             // Canonicalize key order so the diff guard's string comparison
             // matches regardless of insertion order across code paths.
-            let canonical: std::collections::BTreeMap<_, _> = existing.into_iter().collect();
-            let merged_json =
-                serde_json::to_string(&canonical).expect("merged properties must serialize");
+            let merged_json = properties_to_canonical_json(existing);
             let props_sql = format!("'{}'", merged_json.replace('\'', "''"));
             update_pairs.push(("properties".to_string(), props_sql));
         }
@@ -666,30 +827,60 @@ impl SqlOperationProvider {
             return Ok(None);
         }
 
+        // Rust per-column diff: read the OLD row once and drop pairs whose
+        // value hasn't changed. This replaces the SQL `IS NOT` chain which
+        // still fired an application-level Event even when 0 rows were touched.
+        //
+        // DIFF_GUARD_SKIP columns (`updated_at`, `created_at`) are always
+        // regenerated to `now` — we keep them in the SET clause when real
+        // content changed, but if they're the ONLY remaining pairs after
+        // equality-dropping the others, we return None (timestamp-only update
+        // is not a meaningful change and must not publish an Event).
+        const DIFF_GUARD_SKIP: &[&str] = &["updated_at", "created_at"];
+        if !update_pairs.is_empty() {
+            let col_names: Vec<String> = update_pairs
+                .iter()
+                .filter(|(k, _)| !DIFF_GUARD_SKIP.contains(&k.as_str()))
+                .map(|(k, _)| Self::quote_identifier(k))
+                .collect();
+            if !col_names.is_empty() {
+                let select_sql = format!(
+                    "SELECT {} FROM {} WHERE id = '{}'",
+                    col_names.join(", "),
+                    self.table_name,
+                    id.replace('\'', "''")
+                );
+                let rows = self
+                    .db_handle
+                    .query(&select_sql, HashMap::new())
+                    .await
+                    .map_err(|e| format!("prepare_update: diff read for {}: {}", id, e))?;
+                if let Some(old_row) = rows.into_iter().next() {
+                    update_pairs.retain(|(k, new_sql_literal)| {
+                        if DIFF_GUARD_SKIP.contains(&k.as_str()) {
+                            return true; // keep timestamps — pruned later if nothing else changed
+                        }
+                        let old_val = old_row.get(k);
+                        !sql_literal_equals_value(new_sql_literal, old_val)
+                    });
+                }
+            }
+            // After equality-dropping: if only skip-list columns remain AND
+            // there are no edge-field changes, the operation is a no-op.
+            let has_meaningful = update_pairs
+                .iter()
+                .any(|(k, _)| !DIFF_GUARD_SKIP.contains(&k.as_str()));
+            if !has_meaningful && edge_field_params.is_empty() {
+                return Ok(None);
+            }
+        }
+
         let set_clauses: Vec<String> = update_pairs
             .iter()
             .map(|(k, v)| format!("{} = {}", Self::quote_identifier(k), v))
             .collect();
 
-        let mut where_parts = vec![format!("id = '{}'", id.replace('\'', "''"))];
-
-        // Diff guard: prevent Turso IVM from firing CDC on no-op UPDATEs.
-        // When the Loro outbound reconcile echoes back values already in SQL,
-        // the UPDATE would touch 0 data columns but still trigger IVM CDC.
-        // Adding `AND (col1 IS NOT val1 OR col2 IS NOT val2 ...)` makes the
-        // UPDATE affect 0 rows when nothing changed, avoiding spurious CDC.
-        // Exclude timestamp columns: `updated_at` is always set to `now` by
-        // `block_to_params`, so it always differs — but a timestamp bump
-        // alone is not a meaningful change worth CDC-notifying about.
-        const DIFF_GUARD_SKIP: &[&str] = &["updated_at", "created_at"];
-        let diff_conditions: Vec<String> = update_pairs
-            .iter()
-            .filter(|(k, _)| !DIFF_GUARD_SKIP.contains(&k.as_str()))
-            .map(|(k, v)| format!("{} IS NOT {}", Self::quote_identifier(k), v))
-            .collect();
-        if !diff_conditions.is_empty() {
-            where_parts.push(format!("({})", diff_conditions.join(" OR ")));
-        }
+        let where_clause = format!("id = '{}'", id.replace('\'', "''"));
 
         let mut sql_statements = Vec::new();
         if !update_pairs.is_empty() {
@@ -697,7 +888,7 @@ impl SqlOperationProvider {
                 "UPDATE {} SET {} WHERE {}",
                 self.table_name,
                 set_clauses.join(", "),
-                where_parts.join(" AND ")
+                where_clause,
             ));
         }
         for (descriptor, targets) in &edge_field_params {
@@ -717,7 +908,7 @@ impl SqlOperationProvider {
             .and_then(|v| v.as_string())
             .ok_or_else(|| "Missing 'id' parameter".to_string())?;
 
-        let doc_uri = self.find_document_uri(&id).await;
+        let doc_uri = self.resolve_doc_uri(params, &id).await;
 
         let mut queue = vec![id.to_string()];
         let mut all_ids = Vec::new();
@@ -1145,7 +1336,7 @@ impl OperationProvider for SqlOperationProvider {
                 // Document-routing hint rides on the typed `Event::routing_doc_uri`
                 // field — lets the OrgMode event handler route this to
                 // `on_block_changed(doc_id)` instead of `re_render_all_tracked()`.
-                let routing_doc_uri = self.find_document_uri(&id).await;
+                let routing_doc_uri = self.resolve_doc_uri(&params, &id).await;
                 self.publish_event(
                     EventKind::FieldsChanged,
                     &id,
@@ -1187,13 +1378,14 @@ impl OperationProvider for SqlOperationProvider {
                         .map_err(|e| format!("Failed to execute SQL: {}", e))?;
                 }
                 // Publish Create event with routing info (block now exists in DB).
-                // Document-routing intent rides on the typed Event field — we look
-                // it up authoritatively here rather than trusting any caller-side
-                // hint, since `build_block_params` (OrgSyncController) sometimes
-                // passes the block's own ID as a placeholder before the real
-                // document ancestor is known.
+                // Phase 3: prefer the caller-supplied `ROUTING_DOC_URI_KEY` param
+                // (set by `build_block_params` to the real ancestor doc URI) and
+                // fall back to the recursive Page-walk only for chord-op / MCP
+                // callers that don't pass it. The historical "block's own ID as
+                // placeholder" footgun no longer applies — `build_block_params`
+                // unconditionally writes the real `document_uri`.
                 let payload = self.build_event_payload(&params);
-                let routing_doc_uri = self.find_document_uri(&id).await;
+                let routing_doc_uri = self.resolve_doc_uri(&params, &id).await;
                 let position_after = params
                     .get(POSITION_AFTER_BLOCK_ID_PARAM)
                     .and_then(|v| v.as_string())
@@ -1270,35 +1462,35 @@ impl OperationProvider for SqlOperationProvider {
                     .to_string();
                 if let Some(prepared) = self.prepare_update(&params).await? {
                     self.execute_prepared(prepared).await?;
+                    // Read full row after SQL so the event payload is complete.
+                    let select_sql = format!(
+                        "SELECT * FROM {} WHERE id = '{}'",
+                        self.table_name,
+                        id.replace('\'', "''")
+                    );
+                    let full_rows = self
+                        .db_handle
+                        .query(&select_sql, HashMap::new())
+                        .await
+                        .map_err(|e| format!("post-update row read for {}: {}", id, e))?;
+                    let full_row = full_rows.into_iter().next();
+                    let event_data = full_row.as_ref().unwrap_or(&params);
+                    let payload = self.build_event_payload(event_data);
+                    let routing_doc_uri = self.resolve_doc_uri(&params, &id).await;
+                    let position_after = params
+                        .get(POSITION_AFTER_BLOCK_ID_PARAM)
+                        .and_then(|v| v.as_string())
+                        .map(String::from);
+                    self.publish_event(
+                        EventKind::Updated,
+                        &id,
+                        payload,
+                        position_after,
+                        routing_doc_uri,
+                        origin.clone(),
+                    )
+                    .await;
                 }
-                // Read the full row AFTER the UPDATE so the event carries complete data.
-                let select_sql = format!(
-                    "SELECT * FROM {} WHERE id = '{}'",
-                    self.table_name,
-                    id.replace('\'', "''")
-                );
-                let full_rows = self
-                    .db_handle
-                    .query(&select_sql, HashMap::new())
-                    .await
-                    .map_err(|e| format!("post-update row read for {}: {}", id, e))?;
-                let full_row = full_rows.into_iter().next();
-                let event_data = full_row.as_ref().unwrap_or(&params);
-                let payload = self.build_event_payload(event_data);
-                let routing_doc_uri = self.find_document_uri(&id).await;
-                let position_after = params
-                    .get(POSITION_AFTER_BLOCK_ID_PARAM)
-                    .and_then(|v| v.as_string())
-                    .map(String::from);
-                self.publish_event(
-                    EventKind::Updated,
-                    &id,
-                    payload,
-                    position_after,
-                    routing_doc_uri,
-                    origin.clone(),
-                )
-                .await;
                 Ok(OperationResult::irreversible(Vec::new()))
             }
             "delete" => {
@@ -1394,7 +1586,10 @@ impl OperationProvider for SqlOperationProvider {
         // OrgSync's update ops would lose `after_block_id` and the Loro
         // consumer would fall through to the sort_key hint scan — exactly
         // the gen-strategy-mismatch path we're trying to retire.
-        let mut update_ids: Vec<(String, Option<String>)> = Vec::new();
+        // Phase 3 also carries `routing_doc_uri_param` so the post-update
+        // event-build below can skip the recursive Page-walk in
+        // `find_document_uri` for callers that already pin the doc URI.
+        let mut update_ids: Vec<(String, Option<String>, Option<String>)> = Vec::new();
 
         for (op_name, params) in &operations {
             let prepared = match op_name.as_str() {
@@ -1409,9 +1604,16 @@ impl OperationProvider for SqlOperationProvider {
                         .get(POSITION_AFTER_BLOCK_ID_PARAM)
                         .and_then(|v| v.as_string())
                         .map(String::from);
-                    update_ids.push((id, position_after));
+                    let routing_doc_uri_param = params
+                        .get(crate::sync::event_bus::ROUTING_DOC_URI_KEY)
+                        .and_then(|v| v.as_string())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from);
                     match self.prepare_update(params).await? {
-                        Some(p) => p,
+                        Some(p) => {
+                            update_ids.push((id, position_after, routing_doc_uri_param));
+                            p
+                        }
                         None => continue,
                     }
                 }
@@ -1438,7 +1640,7 @@ impl OperationProvider for SqlOperationProvider {
         // Phase 2b: Build events for update ops by reading the post-update rows.
         // prepare_update doesn't emit events (params may be partial); we read
         // the full row after SQL execution for a complete event payload.
-        for (id, position_after) in &update_ids {
+        for (id, position_after, routing_doc_uri_param) in &update_ids {
             let select_sql = format!(
                 "SELECT * FROM {} WHERE id = '{}'",
                 self.table_name,
@@ -1451,7 +1653,10 @@ impl OperationProvider for SqlOperationProvider {
                 .map_err(|e| format!("post-update row read for {}: {}", id, e))?;
             if let Some(row) = rows.into_iter().next() {
                 let payload = self.build_event_payload(&row);
-                let routing_doc_uri = self.find_document_uri(id).await;
+                let routing_doc_uri = match routing_doc_uri_param {
+                    Some(s) => Some(s.clone()),
+                    None => self.find_document_uri(id).await,
+                };
                 let event = self
                     .make_event(EventKind::Updated, id, payload)
                     .with_position_after_block_id(position_after.clone())
@@ -1479,3 +1684,7 @@ impl OperationProvider for SqlOperationProvider {
 #[cfg(test)]
 #[path = "sql_operation_provider_outbound_parent_test.rs"]
 mod sql_operation_provider_outbound_parent_test;
+
+#[cfg(test)]
+#[path = "sql_operation_provider_diff_test.rs"]
+mod sql_operation_provider_diff_test;

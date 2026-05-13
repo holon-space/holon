@@ -7,10 +7,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rmcp::RoleClient;
 use rmcp::model::CallToolRequestParam;
-use rmcp::service::Peer;
 use serde::{Deserialize, Serialize};
+
+use crate::mcp_call_surface::McpCallSurface;
 use tracing::info;
 use turso_core::Connection as CoreConnection;
 use turso_core::foreign::{ForeignCursor, ForeignDataWrapper, KeyColumn, PushedConstraint};
@@ -51,6 +51,79 @@ pub struct VtableConfig {
     /// Only meaningful for tool-based mode.
     #[serde(default)]
     pub filter_mapping: HashMap<String, FilterColumnConfig>,
+    /// Constant arguments injected into every tool call.
+    ///
+    /// Merged into the params dict alongside WHERE-derived and enumeration-
+    /// derived values. Useful for `minimal_output: false`, fixed `state`
+    /// filters, etc. WHERE constraints win over static args on key collision.
+    #[serde(default)]
+    pub static_args: serde_json::Map<String, serde_json::Value>,
+    /// Per-column extraction overrides. The map key is the SQL column name;
+    /// the value declares how to read it out of each response record.
+    /// Columns without an entry use a flat `obj[column_name]` lookup.
+    #[serde(default)]
+    pub columns: HashMap<String, ColumnConfig>,
+    /// Pagination strategy. When unset, only one call is made per fetch.
+    #[serde(default)]
+    pub pagination: Option<PaginationConfig>,
+}
+
+/// Pagination strategy declared by the YAML.
+///
+/// Three concrete styles cover the GitHub MCP surface; new MCP integrations
+/// pick the closest match or add a variant.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "style", rename_all = "snake_case")]
+pub enum PaginationConfig {
+    /// Cursor-based pagination. After each call, read the next cursor from
+    /// `cursor_response_path` and inject it as `cursor_param`. Continue while
+    /// `has_more_path` resolves to truthy.
+    Cursor {
+        /// Dotted path to next cursor in response (e.g. `pageInfo.endCursor`).
+        cursor_response_path: String,
+        /// Dotted path to boolean "has more pages" (e.g. `pageInfo.hasNextPage`).
+        has_more_path: String,
+        /// Param name to send cursor back as (e.g. `after`).
+        cursor_param: String,
+        /// Optional `perPage` param name to send with the page size.
+        #[serde(default)]
+        size_param: Option<String>,
+        /// Page size to request when `size_param` is set.
+        #[serde(default)]
+        page_size: Option<u32>,
+    },
+    /// Page-number with total. Loop while accumulated rows < total.
+    PageTotal {
+        /// `page` param name (1-based).
+        page_param: String,
+        /// `perPage` param name.
+        size_param: String,
+        /// Page size to request.
+        page_size: u32,
+        /// Dotted path to total count in response (e.g. `total_count`).
+        total_response_path: String,
+    },
+    /// Page-number, no total. Stop when a page returns fewer than `page_size`.
+    PageShort {
+        page_param: String,
+        size_param: String,
+        page_size: u32,
+    },
+}
+
+/// How to extract one SQL column from a JSON response record.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ColumnConfig {
+    /// Dotted JSON path into each record (e.g. `owner.login`). Defaults to the
+    /// column name when unset.
+    #[serde(default)]
+    pub source_path: Option<String>,
+    /// Encoding for non-scalar values landing in TEXT columns.
+    ///
+    /// - `None` — default, copy the JSON value as-is via `json_value_to_turso_value`.
+    /// - `Some("json")` — `serde_json::to_string` arrays/objects so they fit a TEXT cell.
+    #[serde(default)]
+    pub encoding: Option<String>,
 }
 
 /// Per-column filter pushdown configuration.
@@ -64,6 +137,12 @@ pub struct FilterColumnConfig {
     /// If true, queries without this column in WHERE return an error.
     #[serde(default)]
     pub required: bool,
+    /// Enumeration enumeration when the value isn't supplied by WHERE.
+    /// Carries either a single `field` (legacy: binds to this column's own
+    /// `param`) or paired `fields` (new: param_name → parent_column for FK
+    /// fan-out across multiple correlated params).
+    #[serde(default)]
+    pub enumerate_from: Option<EnumerateFrom>,
 }
 
 fn default_ops() -> Vec<String> {
@@ -71,11 +150,11 @@ fn default_ops() -> Vec<String> {
 }
 
 /// A URI template parameter value — either static, dynamic (required from WHERE),
-/// or dynamic with a fallback enumeration from another entity.
+/// or dynamic with a enumeration enumeration from another entity.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum UriParamValue {
-    /// Structured: dynamic param with fallback enumeration.
+    /// Structured: dynamic param with enumeration enumeration.
     Dynamic(DynamicUriParam),
     /// Plain string: empty = required from WHERE, non-empty = static.
     Static(String),
@@ -90,34 +169,80 @@ impl UriParamValue {
         }
     }
 
-    /// Whether this param must be resolved dynamically (from WHERE or fallback).
+    /// Whether this param must be resolved dynamically (from WHERE or enumeration).
     pub fn is_dynamic(&self) -> bool {
         self.as_static().is_none()
     }
 }
 
-/// Dynamic URI param with a fallback: when WHERE doesn't provide the value,
+/// Dynamic URI param with a enumeration: when WHERE doesn't provide the value,
 /// enumerate all values from the referenced entity's field.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DynamicUriParam {
     pub enumerate_from: EnumerateFrom,
 }
 
-/// Reference to another entity's field for fallback enumeration.
+/// Reference to another entity for FK enumeration.
+///
+/// Two shapes (one of `field` or `fields` must be set):
+/// - **Legacy single-field**: `field: id` — enumerates one value per parent row,
+///   bound to the owning column's `param`.
+/// - **Paired multi-field**: `fields: { tool_param: parent_column, ... }` —
+///   enumerates a correlated tuple per parent row. Used to bind multiple FK
+///   columns (e.g. `owner` + `repo`) from a single parent row so fan-out
+///   never produces mismatched param combinations.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EnumerateFrom {
-    /// Entity name (without prefix), e.g. `"session"`.
+    /// Entity name (without prefix), e.g. `"session"`, `"repository"`.
     pub entity: String,
-    /// Field to enumerate, e.g. `"id"`.
-    pub field: String,
+    /// Legacy single-field — binds to the owning column's `param`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Paired multi-field — `tool_param_name → parent_column_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<HashMap<String, String>>,
 }
 
-/// Resolved fallback for a dynamic URI param — the SQL query to enumerate values.
-/// Pre-computed at construction time from `EnumerateFrom` + entity prefix.
+impl EnumerateFrom {
+    /// Bindings as `(parent_column, tool_param)` pairs. `owning_param` is the
+    /// param name owning this `EnumerateFrom` (used only for the legacy
+    /// single-field shape).
+    fn bindings(&self, owning_param: &str) -> Vec<(String, String)> {
+        match (&self.fields, &self.field) {
+            (Some(map), _) => map
+                .iter()
+                .map(|(param, col)| (col.clone(), param.clone()))
+                .collect(),
+            (None, Some(f)) => vec![(f.clone(), owning_param.to_string())],
+            (None, None) => panic!(
+                "EnumerateFrom for entity '{}' must set either `field` or `fields`",
+                self.entity
+            ),
+        }
+    }
+}
+
+/// Resolved enumeration source — pre-computed SQL + binding map.
 #[derive(Debug, Clone)]
-struct ResolvedFallback {
-    /// SQL to enumerate fallback values, e.g. `SELECT id FROM cc_session`.
+struct ResolvedEnumeration {
+    /// SQL selecting the parent columns referenced by `bindings`, in order.
+    /// e.g. `SELECT id FROM cc_session`, `SELECT owner, name FROM gh_repository`.
     enumerate_sql: String,
+    /// `(parent_column, tool_param)` pairs, aligned with the SQL's SELECT order.
+    bindings: Vec<(String, String)>,
+}
+
+impl ResolvedEnumeration {
+    fn from_enumerate_from(ef: &EnumerateFrom, owning_param: &str, prefix: &str) -> Self {
+        let bindings = ef.bindings(owning_param);
+        let cols: Vec<&str> = bindings.iter().map(|(c, _)| c.as_str()).collect();
+        let table = format!("{}{}", prefix, ef.entity);
+        let enumerate_sql = format!("SELECT {} FROM {}", cols.join(", "), table);
+        Self {
+            enumerate_sql,
+            bindings,
+        }
+    }
 }
 
 /// How the FDW fetches data from the MCP server.
@@ -126,7 +251,18 @@ enum FetchMode {
     /// Call an MCP tool with optional filter pushdown.
     Tool {
         search_tool: String,
-        extract_path: String,
+        /// JSON key containing the records array. When `None`, the response is
+        /// expected to be a bare top-level array.
+        extract_path: Option<String>,
+        /// Constant args merged into every call (e.g. `minimal_output: false`).
+        static_args: serde_json::Map<String, serde_json::Value>,
+        /// Pagination loop strategy. `None` ⇒ a single call.
+        pagination: Option<PaginationConfig>,
+        /// Owning-param-name → enumeration source for FK fan-out. When the
+        /// owning param isn't supplied by WHERE, run the enumeration SQL and
+        /// fan out one tool call per parent row. Each enumeration may carry
+        /// multiple correlated bindings (e.g. `owner`+`repo` together).
+        enumerations: HashMap<String, ResolvedEnumeration>,
     },
     /// Read an MCP resource URI (returns JSON array, no pushdown).
     Resource { uri: String },
@@ -135,9 +271,9 @@ enum FetchMode {
         template: String,
         /// Static params baked in from config (non-empty values).
         default_params: HashMap<String, String>,
-        /// Param name → fallback SQL for params that have `enumerate_from`.
-        /// When WHERE doesn't provide the param, run this SQL to get all values.
-        fallbacks: HashMap<String, ResolvedFallback>,
+        /// Owning-param-name → enumeration source. Same semantics as
+        /// `FetchMode::Tool::enumerations` but applied to URI template params.
+        enumerations: HashMap<String, ResolvedEnumeration>,
     },
 }
 
@@ -168,7 +304,7 @@ fn parse_constraint_op(s: &str) -> Option<ConstraintOp> {
 #[derive(Debug)]
 pub struct McpForeignDataWrapper {
     /// Live connection to the MCP server.
-    peer: Arc<Peer<RoleClient>>,
+    peer: Arc<dyn McpCallSurface>,
     /// How to fetch data — tool call or resource read.
     fetch_mode: FetchMode,
     /// CREATE TABLE DDL for schema declaration.
@@ -185,6 +321,8 @@ pub struct McpForeignDataWrapper {
     id_scheme: Option<(String, String)>,
     /// If set, fetched rows are written to this cache table via INSERT OR REPLACE.
     cache_table: Option<String>,
+    /// Per-column extraction config (dotted source_path, encoding).
+    column_configs: HashMap<String, ColumnConfig>,
     /// Tokio runtime handle for async→sync bridge in filter().
     runtime: tokio::runtime::Handle,
 }
@@ -210,6 +348,20 @@ fn build_fdw_metadata(
             .join(", ")
     );
 
+    // Pre-compute the set of tool params that get bound by some enumeration
+    // (either as the owning column or as a paired binding). These are
+    // non-required at the KeyColumn level regardless of YAML `required:`.
+    let mut enumeration_bound_params: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for fc in vtable_config.filter_mapping.values() {
+        if let Some(ef) = &fc.enumerate_from {
+            enumeration_bound_params.insert(fc.param.clone());
+            for (_parent_col, tool_param) in ef.bindings(&fc.param) {
+                enumeration_bound_params.insert(tool_param);
+            }
+        }
+    }
+
     let mut key_columns = Vec::new();
     let mut column_to_param = HashMap::new();
 
@@ -226,21 +378,22 @@ fn build_fdw_metadata(
                 continue;
             }
 
+            let is_enumeration_bound = enumeration_bound_params.contains(&filter_config.param);
             let mut kc = KeyColumn::new(col_name.clone(), col_idx as u32, ops);
-            if filter_config.required {
+            if filter_config.required && !is_enumeration_bound {
                 kc = kc.required();
             }
             column_to_param.insert(col_idx as u32, filter_config.param.clone());
             key_columns.push(kc);
         }
         // Source 2: dynamic URI template params (column name == param name, Eq-only)
-        // Required only if there's no enumerate_from fallback.
+        // Required only if there's no enumerate_from enumeration.
         else if let Some(param_val) = vtable_config.uri_params.get(col_name) {
             if param_val.is_dynamic() {
-                let has_fallback = matches!(param_val, UriParamValue::Dynamic(_));
+                let has_enumeration = matches!(param_val, UriParamValue::Dynamic(_));
                 let mut kc =
                     KeyColumn::new(col_name.clone(), col_idx as u32, vec![ConstraintOp::Eq]);
-                if !has_fallback {
+                if !has_enumeration {
                     kc = kc.required();
                 }
                 column_to_param.insert(col_idx as u32, col_name.clone());
@@ -269,7 +422,7 @@ impl McpForeignDataWrapper {
         table_name: &str,
         columns: &[(String, String)],
         vtable_config: &VtableConfig,
-        peer: Arc<Peer<RoleClient>>,
+        peer: Arc<dyn McpCallSurface>,
         id_scheme: Option<(String, String)>,
         cache_table: Option<String>,
         runtime: tokio::runtime::Handle,
@@ -278,13 +431,30 @@ impl McpForeignDataWrapper {
         let (key_columns, column_to_param, schema_sql, column_names) =
             build_fdw_metadata(table_name, columns, vtable_config);
 
+        let prefix = entity_prefix.unwrap_or("");
         let fetch_mode = if let Some(ref tool) = vtable_config.search_tool {
+            // Tool-mode FK enumerations: one entry per filter_mapping column
+            // that declares `enumerate_from`. The map is keyed by the owning
+            // tool-param name (matches the params dict built in fetch_via_tool).
+            let enumerations: HashMap<String, ResolvedEnumeration> = vtable_config
+                .filter_mapping
+                .values()
+                .filter_map(|fc| {
+                    fc.enumerate_from.as_ref().map(|ef| {
+                        (
+                            fc.param.clone(),
+                            ResolvedEnumeration::from_enumerate_from(ef, &fc.param, prefix),
+                        )
+                    })
+                })
+                .collect();
+
             FetchMode::Tool {
                 search_tool: tool.clone(),
-                extract_path: vtable_config
-                    .extract_path
-                    .clone()
-                    .unwrap_or_else(|| "results".to_string()),
+                extract_path: vtable_config.extract_path.clone(),
+                static_args: vtable_config.static_args.clone(),
+                pagination: vtable_config.pagination.clone(),
+                enumerations,
             }
         } else if let Some(ref resource) = vtable_config.list_resource {
             let has_dynamic_params = vtable_config.uri_params.values().any(|v| v.is_dynamic());
@@ -296,24 +466,16 @@ impl McpForeignDataWrapper {
                     .filter_map(|(k, v)| v.as_static().map(|s| (k.clone(), s.to_string())))
                     .collect();
 
-                // Build fallback queries for dynamic params with enumerate_from
-                let prefix = entity_prefix.unwrap_or("");
-                let fallbacks: HashMap<String, ResolvedFallback> = vtable_config
+                // Build enumerations for dynamic params with enumerate_from.
+                // URI mode currently only uses the legacy single-field shape.
+                let enumerations: HashMap<String, ResolvedEnumeration> = vtable_config
                     .uri_params
                     .iter()
                     .filter_map(|(k, v)| match v {
-                        UriParamValue::Dynamic(d) => {
-                            let table = format!("{}{}", prefix, d.enumerate_from.entity);
-                            Some((
-                                k.clone(),
-                                ResolvedFallback {
-                                    enumerate_sql: format!(
-                                        "SELECT {} FROM {}",
-                                        d.enumerate_from.field, table
-                                    ),
-                                },
-                            ))
-                        }
+                        UriParamValue::Dynamic(d) => Some((
+                            k.clone(),
+                            ResolvedEnumeration::from_enumerate_from(&d.enumerate_from, k, prefix),
+                        )),
                         _ => None,
                     })
                     .collect();
@@ -321,7 +483,7 @@ impl McpForeignDataWrapper {
                 FetchMode::ResourceTemplate {
                     template: resource.clone(),
                     default_params,
-                    fallbacks,
+                    enumerations,
                 }
             } else {
                 let static_params: HashMap<String, String> = vtable_config
@@ -346,6 +508,7 @@ impl McpForeignDataWrapper {
             column_names,
             id_scheme,
             cache_table,
+            column_configs: vtable_config.columns.clone(),
             runtime,
         }
     }
@@ -372,6 +535,7 @@ impl ForeignDataWrapper for McpForeignDataWrapper {
             fetch_mode: self.fetch_mode.clone(),
             column_to_param: self.column_to_param.clone(),
             column_names: self.column_names.clone(),
+            column_configs: self.column_configs.clone(),
             id_scheme: self.id_scheme.clone(),
             runtime: self.runtime.clone(),
             conn,
@@ -438,13 +602,14 @@ impl WritebackTarget {
 }
 
 struct McpCursor {
-    peer: Arc<Peer<RoleClient>>,
+    peer: Arc<dyn McpCallSurface>,
     fetch_mode: FetchMode,
     column_to_param: HashMap<u32, String>,
     column_names: Vec<String>,
+    column_configs: HashMap<String, ColumnConfig>,
     id_scheme: Option<(String, String)>,
     runtime: tokio::runtime::Handle,
-    /// Database connection for fallback enumeration queries.
+    /// Database connection for enumeration enumeration queries.
     conn: Arc<CoreConnection>,
     writeback: Option<WritebackTarget>,
     rows: Vec<Vec<Value>>,
@@ -467,19 +632,51 @@ unsafe impl Send for McpCursor {}
 unsafe impl Sync for McpCursor {}
 
 impl McpCursor {
-    fn fetch_via_tool(
+    /// Build the tool param map from pushed constraints alone.
+    fn build_tool_params(
         &self,
-        search_tool: &str,
-        extract_path: &str,
         constraints: &[PushedConstraint],
-    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, LimboError> {
+    ) -> serde_json::Map<String, serde_json::Value> {
         let mut params: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for c in constraints {
             if let Some(param_name) = self.column_to_param.get(&c.column_index) {
                 params.insert(param_name.clone(), turso_value_to_json(&c.value));
             }
         }
+        params
+    }
 
+    /// Build the URI template param map from defaults overlaid with constraints.
+    fn build_uri_params(
+        &self,
+        default_params: &HashMap<String, String>,
+        constraints: &[PushedConstraint],
+    ) -> HashMap<String, String> {
+        let mut params = default_params.clone();
+        for c in constraints {
+            if let Some(param_name) = self.column_to_param.get(&c.column_index) {
+                if let Value::Text(ref t) = c.value {
+                    params.insert(param_name.clone(), t.as_str().to_owned());
+                }
+            }
+        }
+        params
+    }
+
+    /// One round trip to the MCP server. Returns `(records, full_response)`
+    /// so callers (pagination loop) can inspect cursor / total fields.
+    fn call_tool_once(
+        &self,
+        search_tool: &str,
+        extract_path: Option<&str>,
+        params: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<
+        (
+            Vec<serde_json::Map<String, serde_json::Value>>,
+            serde_json::Value,
+        ),
+        LimboError,
+    > {
         info!(
             "[McpCursor] Calling tool '{}' with {} params",
             search_tool,
@@ -522,17 +719,136 @@ impl McpCursor {
         let response: serde_json::Value = serde_json::from_str(&json_text)
             .map_err(|e| LimboError::ExtensionError(format!("Failed to parse response: {e}")))?;
 
-        let records = response
-            .get(extract_path)
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                LimboError::ExtensionError(format!("Response missing '{extract_path}' array"))
-            })?;
+        let records: &Vec<serde_json::Value> = match extract_path {
+            Some(path) => response
+                .get(path)
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| {
+                    LimboError::ExtensionError(format!("Response missing '{path}' array"))
+                })?,
+            None => response.as_array().ok_or_else(|| {
+                LimboError::ExtensionError(format!(
+                    "Tool '{search_tool}' response is not a bare array (no extract_path set)"
+                ))
+            })?,
+        };
 
-        Ok(records
+        let rows: Vec<serde_json::Map<String, serde_json::Value>> = records
             .iter()
             .filter_map(|r| r.as_object().cloned())
-            .collect())
+            .collect();
+        Ok((rows, response))
+    }
+
+    /// Fetch the records for one fan-out target, looping per `PaginationConfig`
+    /// when set. When `pagination` is `None`, a single call is issued.
+    fn call_tool_paginated(
+        &self,
+        search_tool: &str,
+        extract_path: Option<&str>,
+        base_params: serde_json::Map<String, serde_json::Value>,
+        pagination: Option<&PaginationConfig>,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, LimboError> {
+        let Some(pagination) = pagination else {
+            let (rows, _) = self.call_tool_once(search_tool, extract_path, base_params)?;
+            return Ok(rows);
+        };
+
+        let mut all = Vec::new();
+        match pagination {
+            PaginationConfig::Cursor {
+                cursor_response_path,
+                has_more_path,
+                cursor_param,
+                size_param,
+                page_size,
+            } => {
+                let mut cursor: Option<String> = None;
+                loop {
+                    let mut p = base_params.clone();
+                    if let (Some(name), Some(size)) = (size_param.as_ref(), page_size) {
+                        p.insert(name.clone(), serde_json::json!(*size));
+                    }
+                    if let Some(c) = cursor.as_ref() {
+                        p.insert(cursor_param.clone(), serde_json::Value::String(c.clone()));
+                    }
+                    let (rows, response) = self.call_tool_once(search_tool, extract_path, p)?;
+                    let got = rows.len();
+                    all.extend(rows);
+                    if got == 0 {
+                        break;
+                    }
+                    let has_more = response
+                        .as_object()
+                        .and_then(|m| resolve_json_path(m, has_more_path))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !has_more {
+                        break;
+                    }
+                    let next = response
+                        .as_object()
+                        .and_then(|m| resolve_json_path(m, cursor_response_path))
+                        .and_then(|v| v.as_str().map(str::to_owned));
+                    match next {
+                        Some(c) if !c.is_empty() => cursor = Some(c),
+                        _ => break,
+                    }
+                }
+            }
+            PaginationConfig::PageTotal {
+                page_param,
+                size_param,
+                page_size,
+                total_response_path,
+            } => {
+                let mut page: u32 = 1;
+                let mut total: Option<u64> = None;
+                loop {
+                    let mut p = base_params.clone();
+                    p.insert(page_param.clone(), serde_json::json!(page));
+                    p.insert(size_param.clone(), serde_json::json!(*page_size));
+                    let (rows, response) = self.call_tool_once(search_tool, extract_path, p)?;
+                    let got = rows.len();
+                    all.extend(rows);
+                    if got == 0 || (got as u32) < *page_size {
+                        break;
+                    }
+                    if total.is_none() {
+                        total = response
+                            .as_object()
+                            .and_then(|m| resolve_json_path(m, total_response_path))
+                            .and_then(|v| v.as_u64());
+                    }
+                    if let Some(t) = total {
+                        if (all.len() as u64) >= t {
+                            break;
+                        }
+                    }
+                    page += 1;
+                }
+            }
+            PaginationConfig::PageShort {
+                page_param,
+                size_param,
+                page_size,
+            } => {
+                let mut page: u32 = 1;
+                loop {
+                    let mut p = base_params.clone();
+                    p.insert(page_param.clone(), serde_json::json!(page));
+                    p.insert(size_param.clone(), serde_json::json!(*page_size));
+                    let (rows, _) = self.call_tool_once(search_tool, extract_path, p)?;
+                    let got = rows.len();
+                    all.extend(rows);
+                    if got == 0 || (got as u32) < *page_size {
+                        break;
+                    }
+                    page += 1;
+                }
+            }
+        }
+        Ok(all)
     }
 
     fn fetch_via_resource(
@@ -584,87 +900,133 @@ impl ForeignCursor for McpCursor {
             FetchMode::Tool {
                 search_tool,
                 extract_path,
-            } => self.fetch_via_tool(search_tool, extract_path, constraints)?,
+                static_args,
+                pagination,
+                enumerations,
+            } => {
+                let mut params = static_args.clone();
+                for (k, v) in self.build_tool_params(constraints) {
+                    params.insert(k, v);
+                }
+                let unresolved = pick_unresolved_enumerations_tool(&params, enumerations);
+                match unresolved {
+                    None => {
+                        let mut records = self.call_tool_paginated(
+                            search_tool,
+                            extract_path.as_deref(),
+                            params.clone(),
+                            pagination.as_ref(),
+                        )?;
+                        stamp_call_params(&mut records, &params);
+                        records
+                    }
+                    Some(enumeration) => {
+                        let rows = run_enumeration(&self.conn, enumeration)?;
+                        if rows.is_empty() {
+                            return Ok(false);
+                        }
+                        let mut all = Vec::new();
+                        for row in rows {
+                            let mut p = params.clone();
+                            for (tool_param, value) in &row {
+                                p.insert(
+                                    tool_param.clone(),
+                                    serde_json::Value::String(value.clone()),
+                                );
+                            }
+                            let mut records = self
+                                .call_tool_paginated(
+                                    search_tool,
+                                    extract_path.as_deref(),
+                                    p.clone(),
+                                    pagination.as_ref(),
+                                )
+                                .map_err(|e| {
+                                    LimboError::ExtensionError(format!(
+                                        "[McpCursor] tool '{search_tool}' fan-out failed for bindings {row:?}: {e}"
+                                    ))
+                                })?;
+                            stamp_call_params(&mut records, &p);
+                            all.extend(records);
+                        }
+                        all
+                    }
+                }
+            }
             FetchMode::Resource { uri } => self.fetch_via_resource(uri)?,
             FetchMode::ResourceTemplate {
                 template,
                 default_params,
-                fallbacks,
+                enumerations,
             } => {
-                let mut params = default_params.clone();
-                for c in constraints {
-                    if let Some(param_name) = self.column_to_param.get(&c.column_index) {
-                        if let Value::Text(ref t) = c.value {
-                            params.insert(param_name.clone(), t.as_str().to_owned());
-                        }
-                    }
-                }
-
-                // For any unresolved params that have enumerate_from fallbacks,
-                // query the referenced entity to get all values and fan out.
-                let mut unresolved_with_fallback: Vec<(String, Vec<String>)> = Vec::new();
-                for (param_name, fallback) in fallbacks {
-                    if !params.contains_key(param_name) {
-                        let values = enumerate_fallback_values(&self.conn, fallback)?;
-                        if values.is_empty() {
-                            return Ok(false);
-                        }
-                        unresolved_with_fallback.push((param_name.clone(), values));
-                    }
-                }
-
-                if unresolved_with_fallback.is_empty() {
-                    // All params resolved from WHERE — single fetch
-                    let uri = crate::mcp_sync_strategy::expand_uri_template(template, &params)
-                        .map_err(|e| {
-                            LimboError::ExtensionError(format!("URI template param missing: {e}"))
-                        })?;
-                    self.fetch_via_resource(&uri)?
-                } else {
-                    // Fan out: enumerate all values and concatenate results.
-                    // Currently supports a single fallback param (most common case).
-                    assert_eq!(
-                        unresolved_with_fallback.len(),
-                        1,
-                        "Multiple enumerate_from fallbacks not yet supported"
-                    );
-                    let (param_name, values) = &unresolved_with_fallback[0];
-                    let mut all_records = Vec::new();
-                    for value in values {
-                        let mut p = params.clone();
-                        p.insert(param_name.clone(), value.clone());
-                        let uri = crate::mcp_sync_strategy::expand_uri_template(template, &p)
+                let params = self.build_uri_params(default_params, constraints);
+                let unresolved = pick_unresolved_enumerations_uri(&params, enumerations);
+                match unresolved {
+                    None => {
+                        let uri = crate::mcp_sync_strategy::expand_uri_template(template, &params)
                             .map_err(|e| {
                                 LimboError::ExtensionError(format!(
                                     "URI template param missing: {e}"
                                 ))
                             })?;
-                        let records = self.fetch_via_resource(&uri).map_err(|e| {
-                            LimboError::ExtensionError(format!(
-                                "[McpCursor] fetch_via_resource failed for {} = {}: {e}",
-                                param_name, value
-                            ))
-                        })?;
-                        all_records.extend(records);
+                        self.fetch_via_resource(&uri)?
                     }
-                    all_records
+                    Some(enumeration) => {
+                        let rows = run_enumeration(&self.conn, enumeration)?;
+                        if rows.is_empty() {
+                            return Ok(false);
+                        }
+                        let mut all = Vec::new();
+                        for row in rows {
+                            let mut p = params.clone();
+                            for (param_name, value) in &row {
+                                p.insert(param_name.clone(), value.clone());
+                            }
+                            let uri = crate::mcp_sync_strategy::expand_uri_template(template, &p)
+                                .map_err(|e| {
+                                LimboError::ExtensionError(format!(
+                                    "URI template param missing: {e}"
+                                ))
+                            })?;
+                            let records = self.fetch_via_resource(&uri).map_err(|e| {
+                                LimboError::ExtensionError(format!(
+                                    "[McpCursor] fetch_via_resource failed for bindings {row:?}: {e}"
+                                ))
+                            })?;
+                            all.extend(records);
+                        }
+                        all
+                    }
                 }
             }
         };
 
         // Convert JSON records to rows of Turso Values, aligned with schema column order.
-        // Each record is a JSON object — we extract values by column name in schema order.
-        // Missing fields become NULL, extra fields are ignored.
+        // Per-column ColumnConfig (if any) drives `source_path` resolution and
+        // optional JSON encoding for non-scalar values. Missing fields → NULL.
         self.rows = records
             .iter()
             .map(|obj| {
                 self.column_names
                     .iter()
                     .map(|col_name| {
-                        let val = obj
-                            .get(col_name)
-                            .map(json_value_to_turso_value)
-                            .unwrap_or(Value::Null);
+                        let cfg = self.column_configs.get(col_name);
+                        let path = cfg
+                            .and_then(|c| c.source_path.as_deref())
+                            .unwrap_or(col_name);
+                        let raw = resolve_json_path(obj, path);
+                        let val = match (raw, cfg.and_then(|c| c.encoding.as_deref())) {
+                            (None, _) => Value::Null,
+                            (Some(serde_json::Value::Null), _) => Value::Null,
+                            (
+                                Some(
+                                    v
+                                    @ (serde_json::Value::Array(_) | serde_json::Value::Object(_)),
+                                ),
+                                Some("json"),
+                            ) => Value::build_text(serde_json::to_string(&v).unwrap_or_default()),
+                            (Some(v), _) => json_value_to_turso_value(&v),
+                        };
                         // Apply ID scheme prefix if this is the ID column
                         if let Some((ref id_col, ref scheme)) = self.id_scheme {
                             if col_name == id_col {
@@ -721,35 +1083,105 @@ impl ForeignCursor for McpCursor {
 // Helpers
 // ============================================================================
 
-/// Run a fallback enumeration query (e.g. `SELECT id FROM cc_session`) and collect
-/// all text values from the first column.
-fn enumerate_fallback_values(
-    conn: &Arc<CoreConnection>,
-    fallback: &ResolvedFallback,
-) -> Result<Vec<String>, LimboError> {
-    info!(
-        "[McpCursor] Enumerating fallback values: {}",
-        fallback.enumerate_sql
+/// Pick the single tool-mode enumeration whose owning param is unresolved.
+///
+/// Asserts at most one is unresolved — Cartesian-product fan-out of
+/// independent params is not supported (and is rarely correct: correlated
+/// FKs should be modeled as paired bindings in one `EnumerateFrom`).
+fn pick_unresolved_enumerations_tool<'a>(
+    params: &serde_json::Map<String, serde_json::Value>,
+    enumerations: &'a HashMap<String, ResolvedEnumeration>,
+) -> Option<&'a ResolvedEnumeration> {
+    let unresolved: Vec<&ResolvedEnumeration> = enumerations
+        .iter()
+        .filter(|(k, _)| !params.contains_key(*k))
+        .map(|(_, v)| v)
+        .collect();
+    assert!(
+        unresolved.len() <= 1,
+        "Multiple independent enumerate_from sources not supported \
+         (use paired `fields:` for correlated FKs); got {} unresolved",
+        unresolved.len()
     );
-    let mut stmt = conn.query(&fallback.enumerate_sql)?.ok_or_else(|| {
+    unresolved.into_iter().next()
+}
+
+/// URI-template variant of [`pick_unresolved_enumerations_tool`].
+fn pick_unresolved_enumerations_uri<'a>(
+    params: &HashMap<String, String>,
+    enumerations: &'a HashMap<String, ResolvedEnumeration>,
+) -> Option<&'a ResolvedEnumeration> {
+    let unresolved: Vec<&ResolvedEnumeration> = enumerations
+        .iter()
+        .filter(|(k, _)| !params.contains_key(*k))
+        .map(|(_, v)| v)
+        .collect();
+    assert!(
+        unresolved.len() <= 1,
+        "Multiple independent enumerate_from sources not supported \
+         (use paired `fields:` for correlated FKs); got {} unresolved",
+        unresolved.len()
+    );
+    unresolved.into_iter().next()
+}
+
+/// Run an enumeration SQL query and return one binding-map per row.
+///
+/// Each row's columns are aligned with `enumeration.bindings` and emitted as
+/// `tool_param_name → value`. For legacy single-field bindings, every row
+/// produces a one-entry map. For paired bindings (e.g. `owner` + `repo`),
+/// every row produces a multi-entry map so all correlated params get bound
+/// together in the fan-out call.
+fn run_enumeration(
+    conn: &Arc<CoreConnection>,
+    enumeration: &ResolvedEnumeration,
+) -> Result<Vec<HashMap<String, String>>, LimboError> {
+    info!(
+        "[McpCursor] Running enumeration: {}",
+        enumeration.enumerate_sql
+    );
+    let mut stmt = conn.query(&enumeration.enumerate_sql)?.ok_or_else(|| {
         LimboError::ExtensionError(format!(
-            "Fallback query returned no statement: {}",
-            fallback.enumerate_sql
+            "Enumeration query returned no statement: {}",
+            enumeration.enumerate_sql
         ))
     })?;
 
-    let mut values = Vec::new();
+    let n_cols = enumeration.bindings.len();
+    let mut rows = Vec::new();
     loop {
         match stmt.step()? {
             turso_core::StepResult::Row => {
                 if let Some(row) = stmt.row() {
-                    match row.get_value(0) {
-                        Value::Text(t) => values.push(t.as_str().to_owned()),
-                        Value::Numeric(turso_core::Numeric::Integer(i)) => {
-                            values.push(i.to_string())
-                        }
-                        _ => {}
+                    let mut binding_map = HashMap::with_capacity(n_cols);
+                    for (col_idx, (_parent_col, tool_param)) in
+                        enumeration.bindings.iter().enumerate()
+                    {
+                        let s = match row.get_value(col_idx) {
+                            Value::Text(t) => t.as_str().to_owned(),
+                            Value::Numeric(turso_core::Numeric::Integer(i)) => i.to_string(),
+                            Value::Numeric(turso_core::Numeric::Float(f)) => format!("{}", *f),
+                            Value::Null => {
+                                // A NULL FK column for an FK enumeration is a data error,
+                                // not a fan-out target. Fail loud rather than silently
+                                // calling the tool with a missing param.
+                                return Err(LimboError::ExtensionError(format!(
+                                    "Enumeration '{}' produced NULL for column '{}' \
+                                     (tool param '{}') — refusing to fan out with missing param",
+                                    enumeration.enumerate_sql, _parent_col, tool_param
+                                )));
+                            }
+                            Value::Blob(_) => {
+                                return Err(LimboError::ExtensionError(format!(
+                                    "Enumeration '{}' produced BLOB for column '{}' — \
+                                     not coercible to a tool param",
+                                    enumeration.enumerate_sql, _parent_col
+                                )));
+                            }
+                        };
+                        binding_map.insert(tool_param.clone(), s);
                     }
+                    rows.push(binding_map);
                 }
             }
             turso_core::StepResult::Done => break,
@@ -758,11 +1190,8 @@ fn enumerate_fallback_values(
         }
     }
 
-    info!(
-        "[McpCursor] Fallback enumeration got {} values",
-        values.len()
-    );
-    Ok(values)
+    info!("[McpCursor] Enumeration produced {} rows", rows.len());
+    Ok(rows)
 }
 
 /// Convert a Turso Value to a SQL literal string for INSERT statements.
@@ -802,6 +1231,40 @@ fn hex_encode(bytes: &[u8]) -> String {
         write!(s, "{:02x}", b).unwrap();
     }
     s
+}
+
+/// Inject every (param, value) into each record under `param` as the key,
+/// without clobbering existing fields. Lets SQL columns named after tool
+/// params (e.g. `owner`, `repo` for `list_issues`) carry the request-time
+/// value when the response doesn't echo it.
+fn stamp_call_params(
+    records: &mut [serde_json::Map<String, serde_json::Value>],
+    params: &serde_json::Map<String, serde_json::Value>,
+) {
+    for record in records.iter_mut() {
+        for (k, v) in params {
+            record.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+}
+
+/// Resolve a dotted JSON path against a record object. Returns `Some(value)`
+/// when every segment exists (including `Null`), or `None` when any segment
+/// is missing or traverses through a non-object.
+fn resolve_json_path(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+) -> Option<serde_json::Value> {
+    let mut segments = path.split('.');
+    let first = segments.next()?;
+    let mut current = obj.get(first)?.clone();
+    for seg in segments {
+        current = match current {
+            serde_json::Value::Object(ref m) => m.get(seg)?.clone(),
+            _ => return None,
+        };
+    }
+    Some(current)
 }
 
 /// Convert a serde_json::Value to a Turso Value (for record rows).
@@ -974,8 +1437,8 @@ uri_params:
         let has_dynamic_static = config_static.uri_params.values().any(|v| v.is_dynamic());
         assert!(!has_dynamic_static);
 
-        // Structured enumerate_from → dynamic (with fallback)
-        let yaml_fallback = r#"
+        // Structured enumerate_from → dynamic (with enumeration)
+        let yaml_enumeration = r#"
 list_resource: "claude-history://sessions/{session_id}/messages"
 uri_params:
   session_id:
@@ -983,7 +1446,7 @@ uri_params:
       entity: session
       field: id
 "#;
-        let config_fb: VtableConfig = serde_yaml::from_str(yaml_fallback).unwrap();
+        let config_fb: VtableConfig = serde_yaml::from_str(yaml_enumeration).unwrap();
         let has_dynamic_fb = config_fb.uri_params.values().any(|v| v.is_dynamic());
         assert!(has_dynamic_fb);
         // Should parse as Dynamic variant
@@ -1013,12 +1476,254 @@ uri_params:
         let (key_columns, column_to_param, _schema_sql, _column_names) =
             build_fdw_metadata("cc_message", &columns, &config);
 
-        // session_id should be registered but NOT required (has fallback)
+        // session_id should be registered but NOT required (has enumeration)
         assert_eq!(key_columns.len(), 1);
         let kc = &key_columns[0];
         assert_eq!(kc.name, "session_id");
         assert!(!kc.required);
         assert_eq!(column_to_param.get(&1), Some(&"session_id".to_string()));
+    }
+
+    #[test]
+    fn enumerate_from_legacy_single_field_parses() {
+        let yaml = r#"
+entity: session
+field: id
+"#;
+        let ef: EnumerateFrom = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(ef.entity, "session");
+        assert_eq!(ef.field.as_deref(), Some("id"));
+        assert!(ef.fields.is_none());
+        // Owning param is used as the binding target for legacy shape.
+        let bindings = ef.bindings("session_id");
+        assert_eq!(bindings, vec![("id".to_string(), "session_id".to_string())]);
+    }
+
+    #[test]
+    fn enumerate_from_paired_fields_parses() {
+        let yaml = r#"
+entity: repository
+fields:
+  owner: owner
+  repo:  name
+"#;
+        let ef: EnumerateFrom = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(ef.entity, "repository");
+        assert!(ef.field.is_none());
+        let map = ef.fields.as_ref().unwrap();
+        assert_eq!(map.get("owner"), Some(&"owner".to_string()));
+        assert_eq!(map.get("repo"), Some(&"name".to_string()));
+        let mut bindings = ef.bindings("ignored");
+        bindings.sort();
+        let mut expected = vec![
+            ("name".to_string(), "repo".to_string()),
+            ("owner".to_string(), "owner".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(bindings, expected);
+    }
+
+    #[test]
+    fn resolved_enumeration_sql_for_paired_fields() {
+        let ef = EnumerateFrom {
+            entity: "repository".to_string(),
+            field: None,
+            fields: Some({
+                let mut m = HashMap::new();
+                m.insert("owner".to_string(), "owner".to_string());
+                m.insert("repo".to_string(), "name".to_string());
+                m
+            }),
+        };
+        let r = ResolvedEnumeration::from_enumerate_from(&ef, "ignored", "gh_");
+        // HashMap iteration order is nondeterministic, so check both possibilities.
+        assert!(
+            r.enumerate_sql == "SELECT owner, name FROM gh_repository"
+                || r.enumerate_sql == "SELECT name, owner FROM gh_repository",
+            "got: {}",
+            r.enumerate_sql
+        );
+        assert_eq!(r.bindings.len(), 2);
+    }
+
+    #[test]
+    fn filter_mapping_with_paired_enumerate_from_parses() {
+        let yaml = r#"
+search_tool: list_issues
+extract_path: issues
+filter_mapping:
+  owner:
+    param: owner
+    ops: ["="]
+    enumerate_from:
+      entity: repository
+      fields:
+        owner: owner
+        repo:  name
+  repo:
+    param: repo
+    ops: ["="]
+"#;
+        let config: VtableConfig = serde_yaml::from_str(yaml).unwrap();
+        let owner = &config.filter_mapping["owner"];
+        assert!(owner.enumerate_from.is_some());
+        let ef = owner.enumerate_from.as_ref().unwrap();
+        assert_eq!(ef.entity, "repository");
+        let paired = ef.fields.as_ref().unwrap();
+        assert_eq!(paired.get("repo"), Some(&"name".to_string()));
+
+        let repo = &config.filter_mapping["repo"];
+        assert!(repo.enumerate_from.is_none());
+    }
+
+    #[test]
+    fn paired_enumeration_marks_both_params_non_required() {
+        // Even with `required: true` on the YAML, paired-bound params must
+        // be non-required at the KeyColumn level — the enumeration supplies them.
+        let yaml = r#"
+search_tool: list_issues
+extract_path: issues
+filter_mapping:
+  owner:
+    param: owner
+    ops: ["="]
+    required: true
+    enumerate_from:
+      entity: repository
+      fields:
+        owner: owner
+        repo:  name
+  repo:
+    param: repo
+    ops: ["="]
+    required: true
+"#;
+        let config: VtableConfig = serde_yaml::from_str(yaml).unwrap();
+        let columns = vec![
+            ("id".to_string(), "TEXT".to_string()),
+            ("owner".to_string(), "TEXT".to_string()),
+            ("repo".to_string(), "TEXT".to_string()),
+        ];
+        let (key_columns, _, _, _) = build_fdw_metadata("gh_issue", &columns, &config);
+        let owner_kc = key_columns.iter().find(|kc| kc.name == "owner").unwrap();
+        let repo_kc = key_columns.iter().find(|kc| kc.name == "repo").unwrap();
+        assert!(
+            !owner_kc.required,
+            "owner owns an enumerate_from — must be non-required"
+        );
+        assert!(
+            !repo_kc.required,
+            "repo is paired-bound via owner's enumerate_from — must be non-required"
+        );
+    }
+
+    #[test]
+    fn tool_fetch_mode_carries_enumerations() {
+        let yaml = r#"
+search_tool: list_issues
+extract_path: issues
+filter_mapping:
+  owner:
+    param: owner
+    ops: ["="]
+    enumerate_from:
+      entity: repository
+      fields:
+        owner: owner
+        repo:  name
+  repo:
+    param: repo
+    ops: ["="]
+"#;
+        let config: VtableConfig = serde_yaml::from_str(yaml).unwrap();
+        let columns = vec![
+            ("id".to_string(), "TEXT".to_string()),
+            ("owner".to_string(), "TEXT".to_string()),
+            ("repo".to_string(), "TEXT".to_string()),
+        ];
+        // Drive McpForeignDataWrapper construction up to the point where
+        // FetchMode is built. We can't call `new()` without a Peer, so
+        // exercise the build path via internal logic by re-deriving here.
+        let prefix = "gh_";
+        let enumerations: HashMap<String, ResolvedEnumeration> = config
+            .filter_mapping
+            .values()
+            .filter_map(|fc| {
+                fc.enumerate_from.as_ref().map(|ef| {
+                    (
+                        fc.param.clone(),
+                        ResolvedEnumeration::from_enumerate_from(ef, &fc.param, prefix),
+                    )
+                })
+            })
+            .collect();
+        // One entry: keyed by the owning param `owner`.
+        assert_eq!(enumerations.len(), 1);
+        let owner_enum = enumerations.get("owner").expect("owner enumeration");
+        assert_eq!(owner_enum.bindings.len(), 2);
+        assert!(owner_enum.enumerate_sql.contains("FROM gh_repository"));
+
+        // Sanity: build_fdw_metadata also registers `repo` as a key column
+        // (so SQL `WHERE repo='x'` would pushdown), but non-required.
+        let (key_columns, column_to_param, _, _) =
+            build_fdw_metadata("gh_issue", &columns, &config);
+        assert_eq!(key_columns.len(), 2);
+        assert_eq!(column_to_param.get(&1), Some(&"owner".to_string()));
+        assert_eq!(column_to_param.get(&2), Some(&"repo".to_string()));
+    }
+
+    #[test]
+    fn pick_unresolved_tool_returns_single() {
+        let mut enumerations = HashMap::new();
+        let ef = EnumerateFrom {
+            entity: "repository".to_string(),
+            field: None,
+            fields: Some({
+                let mut m = HashMap::new();
+                m.insert("owner".to_string(), "owner".to_string());
+                m.insert("repo".to_string(), "name".to_string());
+                m
+            }),
+        };
+        enumerations.insert(
+            "owner".to_string(),
+            ResolvedEnumeration::from_enumerate_from(&ef, "owner", "gh_"),
+        );
+
+        // Empty params → unresolved
+        let empty = serde_json::Map::new();
+        assert!(pick_unresolved_enumerations_tool(&empty, &enumerations).is_some());
+
+        // owner present → resolved
+        let mut filled = serde_json::Map::new();
+        filled.insert(
+            "owner".to_string(),
+            serde_json::Value::String("martinmauch".to_string()),
+        );
+        assert!(pick_unresolved_enumerations_tool(&filled, &enumerations).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Multiple independent enumerate_from sources")]
+    fn pick_unresolved_tool_rejects_multiple_independent() {
+        // Two independent enumerate_from entries (Cartesian product would be
+        // wrong for correlated FKs). Helper asserts.
+        let make = |entity: &str, field: &str| EnumerateFrom {
+            entity: entity.to_string(),
+            field: Some(field.to_string()),
+            fields: None,
+        };
+        let mut enumerations = HashMap::new();
+        enumerations.insert(
+            "a".to_string(),
+            ResolvedEnumeration::from_enumerate_from(&make("ent_a", "id"), "a", ""),
+        );
+        enumerations.insert(
+            "b".to_string(),
+            ResolvedEnumeration::from_enumerate_from(&make("ent_b", "id"), "b", ""),
+        );
+        let empty = serde_json::Map::new();
+        let _ = pick_unresolved_enumerations_tool(&empty, &enumerations);
     }
 
     #[test]

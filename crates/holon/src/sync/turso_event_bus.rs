@@ -128,6 +128,30 @@ impl WatermarkState {
         }
     }
 
+    /// Phase 4: wait until the watermark for `consumer` is at least `target`.
+    /// Returns immediately if already satisfied. The current implementation
+    /// polls the `Mutable<i64>` snapshot every 2 ms because
+    /// `futures_signals::MutableBTreeMap` doesn't expose a per-key signal
+    /// directly and the wrapper would need a fold over `SignalMap` deltas
+    /// (an O(map_size) cost per emission). Polling a single `lock_ref`
+    /// read is cheaper and matches the contract; bound this with
+    /// `tokio::time::timeout` at the call site so a stuck consumer fails
+    /// loud instead of hanging forever.
+    pub async fn wait_for_consumer_ge(&self, consumer: &str, target: i64) {
+        loop {
+            let cur = self
+                .by_consumer
+                .lock_ref()
+                .get(consumer)
+                .copied()
+                .unwrap_or(0);
+            if cur >= target {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    }
+
     fn apply_acks_cdc(&self, change: &crate::storage::turso::ChangeData) {
         use crate::storage::turso::ChangeData;
         match change {
@@ -173,6 +197,23 @@ impl TursoEventBus {
     /// Reactive signal of the global watermark (max `created_at`).
     pub fn watermark_signal(&self) -> impl futures_signals::signal::Signal<Item = i64> {
         self.watermark_state.global.signal()
+    }
+
+    /// Phase 4: wait until the ack watermark for `consumer` reaches `target`,
+    /// bounded by `timeout_ms`. Returns `true` on caught-up, `false` on
+    /// timeout. Replaces 10 ms `get_blocks().len() >= expected` polls with
+    /// a 2 ms in-memory map check driven by CDC pushes.
+    pub async fn wait_for_consumer_caught_up(
+        &self,
+        consumer: &str,
+        target: i64,
+        timeout_ms: u64,
+    ) -> bool {
+        let fut = self.watermark_state.wait_for_consumer_ge(consumer, target);
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+            Ok(()) => true,
+            Err(_) => false,
+        }
     }
 
     /// Run DDL to create events table, indexes, and watermark matview.

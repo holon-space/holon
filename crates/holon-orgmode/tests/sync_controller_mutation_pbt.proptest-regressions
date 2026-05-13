@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 13ea659cb50745853b9ba32f2eea3f9701f322ab0e20e20708aa958f0fa0e586 # shrinks to variant = 0, mutation = ReplaceTitle { headline_idx: 0, new_title: "aa" }
 cc 373b5b31082483e6e926c2d202bf518321b64b675dfa86416e6583ebc9e575b2 # shrinks to variant = 0, mutation = SetTitle("AA"), target_idx = Index(0)
+cc 978a0a0686342e72d091dc5f7b4b4e21ceba68dfbca054670fcde50cdca1d1fe # shrinks to variant = 0, mutation = ReplaceTitle { headline_idx: 0, new_title: "aa" }, path_segments = ["a", "A"], inject_id_directive = true, pre_seed_doc = false

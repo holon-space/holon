@@ -10,6 +10,7 @@ use proptest::test_runner::TestCaseError;
 use crate::blueprint::Blueprint;
 use crate::invariants::assert_layout_ok;
 use crate::registry::{BlockTreeRegistry, BlockTreeThunk};
+use crate::scene_state::SceneState;
 use crate::snapshot::BoundsSnapshot;
 use crate::ui_interaction::UiInteraction;
 
@@ -58,7 +59,13 @@ impl Scenario {
                     .mode_names
                     .iter()
                     .cloned()
-                    .zip(h.mode_thunks.iter().cloned())
+                    .zip(
+                        h.mode_thunks
+                            .as_ref()
+                            .expect("scenario.block_registrations requires blueprint-sourced handles with mode_thunks")
+                            .iter()
+                            .cloned(),
+                    )
                     .collect();
                 (h.block_id.clone(), modes, h.initial_mode)
             })
@@ -82,7 +89,13 @@ impl Scenario {
                     .mode_names
                     .iter()
                     .cloned()
-                    .zip(h.mode_thunks.iter().cloned())
+                    .zip(
+                        h.mode_thunks
+                            .as_ref()
+                            .expect("scenario.block_registrations requires blueprint-sourced handles with mode_thunks")
+                            .iter()
+                            .cloned(),
+                    )
                     .collect();
                 (h.block_id.clone(), modes, active_idx)
             })
@@ -102,58 +115,28 @@ impl Scenario {
 pub enum StepInput<'a> {
     /// Open (or re-open) the frontend with the given tree and block registrations.
     /// Return a snapshot after settling.
+    ///
+    /// `state` carries the full UI state the session must pre-apply
+    /// before first paint — modes via `state.active_modes`, drawer
+    /// open/closed via `state.closed_drawers()`, collapsibles via
+    /// `state.collapsed_rows()`. Adding a new dimension is one new
+    /// field on `SceneState` plus one new session-side pre-apply; no
+    /// new `StepInput` field needed.
     Mount {
         vm: Arc<ReactiveViewModel>,
         /// Pass to `BlockTreeRegistry::register` for each entry.
         blocks: Vec<(String, Vec<(String, BlockTreeThunk)>, usize)>,
-        /// Per-drawer initial open/closed state. Any drawer not listed
-        /// here defaults to open. The session must apply these values
-        /// to its widget-state store *before* the first render.
-        drawer_states: HashMap<String, bool>,
+        /// Final UI state to pre-apply before first paint. For the test
+        /// mount this is `SceneState::from_handles(...)` (defaults
+        /// everywhere); for the reference mount it's
+        /// `SceneState::replay(..., &actions)`.
+        state: SceneState,
     },
     /// Apply the given interaction, settle, and return a new snapshot.
     Apply(&'a UiInteraction),
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
-/// Compute the final active mode for each block after replaying the action
-/// sequence. Used to pre-apply modes for the reference render.
-pub fn compute_final_modes(actions: &[UiInteraction]) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for action in actions {
-        match action {
-            UiInteraction::SwitchViewMode {
-                block_id,
-                target_mode,
-            } => {
-                out.insert(block_id.clone(), target_mode.clone());
-            }
-            UiInteraction::ToggleDrawer { .. } => {}
-            UiInteraction::DeliverBlockContent { block_id } => {
-                out.insert(block_id.clone(), "loaded".to_string());
-            }
-        }
-    }
-    out
-}
-
-/// Compute the final open/closed state for each drawer after replaying
-/// toggle actions. Drawers default to open; each toggle flips the state.
-/// Returns only drawers whose final state differs from default (i.e. closed).
-pub fn compute_final_drawer_states(actions: &[UiInteraction]) -> HashMap<String, bool> {
-    let mut toggle_counts: HashMap<String, usize> = HashMap::new();
-    for action in actions {
-        if let UiInteraction::ToggleDrawer { block_id } = action {
-            *toggle_counts.entry(block_id.clone()).or_default() += 1;
-        }
-    }
-    toggle_counts
-        .into_iter()
-        .filter(|(_, count)| count % 2 == 1) // odd toggles → closed
-        .map(|(id, _)| (id, false))
-        .collect()
-}
 
 /// Register all scenario blocks into `registry` with default (index-0) modes.
 pub fn register_scenario_blocks(scenario: &Scenario, registry: &BlockTreeRegistry) {
@@ -182,23 +165,32 @@ pub fn run_scenario<F>(scenario: &Scenario, mut step: F) -> Result<(), TestCaseE
 where
     F: FnMut(StepInput<'_>) -> BoundsSnapshot,
 {
-    let final_modes = compute_final_modes(&scenario.actions);
-    let final_drawer_states = compute_final_drawer_states(&scenario.actions);
+    let reference_state = SceneState::replay(
+        scenario.blueprint.handles.clone(),
+        scenario.blueprint.drawers.clone(),
+        scenario.blueprint.collapsibles.clone(),
+        &scenario.actions,
+    );
 
-    // ── Reference render: final modes + final drawer states pre-applied ──
+    // ── Reference render: final state (all dimensions) pre-applied ──
     let reference_snap = step(StepInput::Mount {
         vm: scenario.materialize(),
-        blocks: scenario.block_registrations_with_overrides(&final_modes),
-        drawer_states: final_drawer_states,
+        blocks: scenario.block_registrations_with_overrides(&reference_state.active_modes),
+        state: reference_state,
     });
     catch_invariant(|| assert_layout_ok(&reference_snap, "proptest.reference"))?;
     let reference_dump = reference_snap.structural_dump();
 
-    // ── Test render: initial modes, drawers default-open, replay actions ──
+    // ── Test render: defaults everywhere, replay actions ──
+    let test_initial_state = SceneState::from_handles(
+        scenario.blueprint.handles.clone(),
+        scenario.blueprint.drawers.clone(),
+        scenario.blueprint.collapsibles.clone(),
+    );
     let initial_snap = step(StepInput::Mount {
         vm: scenario.materialize(),
         blocks: scenario.block_registrations(),
-        drawer_states: HashMap::new(),
+        state: test_initial_state,
     });
     catch_invariant(|| assert_layout_ok(&initial_snap, "proptest.test.initial"))?;
 

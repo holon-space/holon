@@ -25,17 +25,23 @@ pub mod invariants;
 pub mod live_tree;
 pub mod registry;
 pub mod scenario;
+pub mod scene_state;
 pub mod snapshot;
+pub mod sut;
+pub mod transitions;
 pub mod ui_interaction;
 pub mod vms;
 
 pub use blueprint::{BlockHandle, Blueprint, Shape};
+pub use holon_pbt_core::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};
 pub use invariants::{
     assert_all_nonzero, assert_all_nonzero_except, assert_containment, assert_content_fidelity,
     assert_layout_ok, assert_no_sibling_overlap, assert_nonempty,
 };
 pub use registry::{BlockEntry, BlockTreeRegistry, BlockTreeThunk};
-pub use scenario::{compute_final_drawer_states, run_scenario, Scenario, StepInput};
+pub use scenario::{run_scenario, Scenario, StepInput};
+pub use scene_state::SceneState;
 pub use snapshot::{BoundsSnapshot, VISIBLE_LEAF_TYPES};
+pub use sut::{Clickable, LayoutRef, LayoutRefState, LayoutSut, LiveBlockSink};
 pub use ui_interaction::UiInteraction;
-pub use vms::vms_button_id_for;
+pub use vms::{drawer_toggle_id_for, vms_button_id_for};

@@ -169,6 +169,34 @@ fn parse_weight_env() -> Vec<(WeightPattern, u32)> {
 /// (delegating to existing helpers).
 #[async_trait::async_trait(?Send)]
 pub trait SutHandle {
+    /// Shared-PBT capability: synthesize a click on a UI element by
+    /// its bounds-registry id. Used by `holon_layout_testing`'s shared
+    /// `apply_to_sut` bodies (`SwitchViewMode`, `ToggleDrawer`,
+    /// `ToggleCollapse`) via `SutClickAdapter`. Default impl panics
+    /// loud — concrete SUTs override with their click pipeline (e.g.
+    /// `GpuiUserDriver::click_entity`).
+    async fn apply_click_at_element(&mut self, element_id: &str) {
+        let _ = element_id;
+        unimplemented!(
+            "SutHandle::apply_click_at_element — the concrete SUT for this PBT \
+             variant hasn't been migrated to support shared layout interactions yet."
+        )
+    }
+
+    /// Shared-PBT capability: push deferred `live_block` content
+    /// through the SUT's data-arrival pipeline. Mirror of the layout
+    /// PBT's `LiveBlockSink::deliver_block_content_loaded`. Default
+    /// panics — real backend tests should override or skip
+    /// `DeliverBlockContent` from their generator.
+    async fn apply_deliver_block_content_loaded(&mut self, block_id: &str) {
+        let _ = block_id;
+        unimplemented!(
+            "SutHandle::apply_deliver_block_content_loaded — the integration-tests \
+             PBT runs a real backend; deferred block delivery isn't a meaningful \
+             stimulus there. Skip `DeliverBlockContent` in the generator."
+        )
+    }
+
     /// Pilot-variant capability: drive the navigation back-button via
     /// `TestContext::navigate_back` and dump nav tables for tracing.
     async fn navigate_back(&mut self, region: holon_api::Region);
@@ -394,6 +422,22 @@ pub trait SutHandle {
     /// Post-startup: close one open `navigation_history` row by id (`close`
     /// op — sidebar X button). Region-less.
     async fn apply_unpin_block(&mut self, history_id: i64);
+
+    /// Post-startup: flip an `expand_toggle`'s `expanded` Mutable from
+    /// false to true. Production binding is a chevron click; there is no
+    /// backend operation — it's a frontend-state flip that drives
+    /// `LazyReactiveSlot::materialize_if_gated` on the next render. The
+    /// `E2ESut` impl walks the engine's reactive tree, finds the
+    /// `expand_toggle` node whose `target_id` prop matches `block_id`,
+    /// and calls `.expanded.set(true)`. Fails loud if the corpus grows a
+    /// toggle render but the engine produces no matching node.
+    async fn apply_expand_toggle(&mut self, block_id: &holon_api::EntityUri);
+
+    /// Inverse of `apply_expand_toggle` — sets `.expanded` to false.
+    /// Same walker; the `LazyReactiveSlot` cache is preserved by design
+    /// so re-expand is instant. See
+    /// `devlog/2026-05-15-lazy-expand-toggle-plan.md`.
+    async fn apply_collapse_toggle(&mut self, block_id: &holon_api::EntityUri);
 }
 
 /// `declare_e2e_transitions!` — the only central code in the file-

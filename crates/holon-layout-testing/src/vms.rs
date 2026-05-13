@@ -5,4 +5,4 @@
 //! `holon-layout-testing`. This module just re-exports it for tests that
 //! already pull in `holon-layout-testing`.
 
-pub use holon_frontend::vms_button_id_for;
+pub use holon_frontend::{drawer_toggle_id_for, vms_button_id_for};

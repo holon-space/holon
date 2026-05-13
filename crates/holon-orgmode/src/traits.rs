@@ -21,6 +21,43 @@ pub trait BlockReader: Send + Sync {
     /// Returns (doc_id, blocks) pairs. Path resolution is the caller's concern.
     async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>>;
 
+    /// Load `(file_id, content_hash)` pairs from the `file` table. Used by
+    /// `OrgSyncController` at startup to populate the projection-hash cache
+    /// (`last_projection_hash`) before CDC has replayed file events into
+    /// the in-process cache — so we can short-circuit on-disk-unchanged
+    /// re-ingests without doing a single block-table SQL op.
+    ///
+    /// Returns the URI form (e.g. `file:projects/todo.org`) since the
+    /// caller knows its own root directory and can resolve to a concrete
+    /// `CanonicalPath`. Default impl returns empty so backends without a
+    /// `file` table (in-memory tests) don't have to implement it.
+    async fn load_file_hashes(&self) -> Result<Vec<(EntityUri, String)>> {
+        Ok(Vec::new())
+    }
+
+    /// Phase 1 write-back: persist `content_hash` for a file row so the
+    /// next boot's `load_file_hashes` returns the new value and the
+    /// fast-path engages. Returns `Ok(())` whether the row existed or
+    /// not — `OrgmodeSyncProvider` is the authoritative creator of file
+    /// rows, and on first ingest the row may not yet exist; the next
+    /// provider sync will create it and we'll succeed on a later
+    /// re-ingest. Default impl is a no-op for backends without a `file`
+    /// table.
+    async fn persist_file_hash(&self, _: &EntityUri, _: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Phase 4: wait until the in-process block cache has applied every
+    /// event with `created_at <= target_ts`. Returns immediately if the
+    /// cache's ack watermark is already ahead of `target_ts`.
+    /// Bounded by `timeout_ms` so a stuck consumer surfaces as a loud
+    /// error rather than a deadlock — `Ok(false)` on timeout, `Ok(true)`
+    /// when the watermark caught up. Default impl returns `Ok(true)`
+    /// immediately for backends without an ack pipeline.
+    async fn wait_for_cache_caught_up(&self, _: i64, _: u64) -> Result<bool> {
+        Ok(true)
+    }
+
     /// Check if any of the given block IDs already exist under a DIFFERENT document.
     /// Returns Vec<(block_id, owning_doc_uri)> for conflicts found.
     ///

@@ -1313,6 +1313,52 @@ impl LoroBackend {
         };
         let id_cache = self.id_cache.clone();
 
+        let noop = self
+            .collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let current_parent_tid = get_node_parent(&tree, target);
+                let want_parent_uri = &new_parent_uri;
+                // If the parent can't be resolved yet (not in the tree), treat as a
+                // real move — fall through to the actual mov_after which will error
+                // if the parent truly doesn't exist.
+                let want_parent_tid =
+                    match resolve_parent_tree_id(&tree, &id_cache, want_parent_uri) {
+                        Ok(tid) => tid,
+                        Err(_) => return Ok::<bool, anyhow::Error>(false),
+                    };
+
+                // If the parent changed, definitely not a no-op.
+                if current_parent_tid != want_parent_tid {
+                    return Ok::<bool, anyhow::Error>(false);
+                }
+
+                // Parent matches — check predecessor.
+                let siblings: Vec<loro::TreeID> = match current_parent_tid {
+                    Some(p) => tree.children(p).unwrap_or_default(),
+                    None => tree.roots(),
+                };
+                let my_idx = siblings.iter().position(|&s| s == target);
+                let current_pred = my_idx.and_then(|i| {
+                    if i == 0 {
+                        None
+                    } else {
+                        siblings.get(i - 1).copied()
+                    }
+                });
+
+                // Resolve want predecessor to TreeID for comparison.
+                let want_pred_tid = predecessor;
+                Ok(current_pred == want_pred_tid)
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("Failed to check block position: {}", e),
+            })?;
+
+        if noop {
+            return Ok(());
+        }
+
         self.collab_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
@@ -2471,6 +2517,59 @@ mod tests {
             "{} < {}",
             s_second.sort_key,
             s_third.sort_key
+        );
+    }
+
+    /// Test 5: `update_block_position` is idempotent — calling it twice with the
+    /// same arguments must not advance Loro's oplog frontiers the second time.
+    #[tokio::test]
+    async fn update_block_position_is_idempotent() {
+        let backend = create_test_backend().await;
+        let first = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "a".into() },
+                None,
+            )
+            .await
+            .unwrap();
+        let second = backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "b".into() },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Place `second` after `first`.
+        backend
+            .update_block_position(
+                second.id.as_str(),
+                EntityUri::no_parent().as_str(),
+                Some(first.id.as_str()),
+            )
+            .await
+            .unwrap();
+
+        // Capture frontiers after the first (real) move.
+        let frontiers_after_first = backend.collab_for_test().doc().oplog_frontiers();
+
+        // Second call with identical args — must be a no-op (no new Loro op).
+        backend
+            .update_block_position(
+                second.id.as_str(),
+                EntityUri::no_parent().as_str(),
+                Some(first.id.as_str()),
+            )
+            .await
+            .unwrap();
+
+        let frontiers_after_second = backend.collab_for_test().doc().oplog_frontiers();
+
+        assert_eq!(
+            frontiers_after_first, frontiers_after_second,
+            "second update_block_position with identical args must not advance oplog frontiers"
         );
     }
 

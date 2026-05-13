@@ -15,10 +15,17 @@ holon_macros::widget_builder! {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
 
-        // Default mode = first in the modes JSON array.
-        let default_mode = serde_json::from_str::<Vec<serde_json::Value>>(&modes)
-            .ok()
-            .and_then(|arr| arr.first()?.get("name")?.as_str().map(|s| s.to_string()))
+        // Default mode: explicit `default_mode` arg wins (backend marks the
+        // unconditional `Predicate::Always` variant; see
+        // `holon::api::block_domain::view_mode_switcher_from_variants`).
+        // Otherwise, first entry in the `modes` JSON array.
+        let default_mode = ba.args.get_string("default_mode")
+            .map(|s| s.to_string())
+            .or_else(|| {
+                serde_json::from_str::<Vec<serde_json::Value>>(&modes)
+                    .ok()
+                    .and_then(|arr| arr.first()?.get("name")?.as_str().map(|s| s.to_string()))
+            })
             .unwrap_or_else(|| "tree".to_string());
 
         let active_mode = futures_signals::signal::Mutable::new(default_mode);

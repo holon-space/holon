@@ -128,7 +128,24 @@ impl Render for RenderEntityView {
             .cursor_pointer()
             .child(child_el)
             .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
-                services.set_focus(Some(id_for_click.clone()));
+                // Dispatch `navigation.editor_focus` so the bridge in
+                // `lib.rs` (watch_editor_cursor → set_focus → render →
+                // EditorView::mount → window.focus(input)) fires. The
+                // mirror in `dispatch_intent` also updates UiState
+                // synchronously, so a separate `set_focus` call would be
+                // redundant. Without the SQL write the freshly-mounted
+                // editor never grabs window focus and clicks on
+                // non-focused blocks appear to do nothing.
+                let bare_id = id_for_click.id().to_string();
+                let mut params = std::collections::HashMap::new();
+                params.insert("region".into(), holon_api::Value::String("main".into()));
+                params.insert("block_id".into(), holon_api::Value::String(bare_id));
+                params.insert("cursor_offset".into(), holon_api::Value::Integer(0));
+                services.dispatch_intent(holon_frontend::OperationIntent::new(
+                    "navigation".into(),
+                    "editor_focus".into(),
+                    params,
+                ));
             })
             .into_any_element()
     }

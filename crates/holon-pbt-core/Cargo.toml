@@ -1,0 +1,14 @@
+[package]
+name = "holon-pbt-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "holon_pbt_core"
+path = "src/lib.rs"
+
+[dependencies]
+proptest = { workspace = true }
+validated = "1.0"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

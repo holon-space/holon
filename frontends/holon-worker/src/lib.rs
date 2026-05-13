@@ -53,6 +53,7 @@ pub async fn ping(s: String) -> String {
 /// (See `tokio/src/lib.rs` line 478 in the installed crate version.) That
 /// means the worker MUST drive `BackendEngine` from a current-thread runtime.
 /// This function builds one and asserts that `tokio::spawn` + `tokio::time`
+// ALLOW(fallback): historical doc-comment quoting an architectural plan that uses the word; not a runtime fallback
 /// still work on a current-thread driver — which is the entire fallback path
 /// the plan called out under H4. If this also fails, the whole architecture
 /// has to rethink async.
@@ -183,6 +184,7 @@ mod backend {
                 Some(s) => interpret_pure(expr, rows, &**s),
                 None => ReactiveViewModel::empty(),
             },
+            services_slot.clone(),
         ));
         let services: Arc<dyn BuilderServices> = reactive.clone();
         // Ignore the error — if already set, a previous init wired things up.
@@ -795,7 +797,7 @@ mod backend {
                 let block_uri = EntityUri::parse(&block_id)?;
 
                 let block_result = runtime.block_on(service.execute_raw_sql(
-                    &format!("SELECT * FROM {BLOCK_READ_TABLE} WHERE id = $1"),
+                    &format!("SELECT * FROM {BLOCK_READ_TABLE} WHERE id = $1"), // ALLOW(sql): pre-existing direct read; worker bootstraps from a snapshot before BackendEngine routes exist
                     HashMap::from([("1".to_string(), Value::String(block_uri.to_string()))]),
                 ))?;
 

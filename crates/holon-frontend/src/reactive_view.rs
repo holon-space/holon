@@ -780,8 +780,18 @@ impl ReactiveView {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         use crate::mutable_tree::{extract_parent_id, extract_sort_key, MutableTree};
 
-        let mut tree = MutableTree::new(self.items.clone());
-        let mut key_index: Vec<String> = Vec::new();
+        // `tree` and `key_index` need to be reachable from both the data
+        // driver and the focus driver (added below); wrap in Arc<Mutex<_>> so
+        // both drivers can mutate. `row_map` is new — it mirrors the rows
+        // currently in the tree so the focus driver can re-interpret affected
+        // rows without going back to the backend.
+        let tree = Arc::new(Mutex::new(MutableTree::new(self.items.clone())));
+        let key_index: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let row_map: Arc<Mutex<HashMap<String, Arc<holon_api::widget_spec::DataRow>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // Capture the focus signal before `services` is moved into the
+        // interpret closures below.
+        let focus_mutable = services.focused_block_mutable();
         let tmpl = item_template.clone();
         let space_handle = space.clone();
 
@@ -827,13 +837,15 @@ impl ReactiveView {
             })
         };
 
-        let interpret_row = {
-            let svc = services;
+        let interpret_row: Arc<
+            dyn Fn(Arc<holon_api::widget_spec::DataRow>) -> Arc<ReactiveViewModel> + Send + Sync,
+        > = {
+            let svc = services.clone();
             let space = space_handle.clone();
             let nif = node_interpret_fn;
             let ds = data_source.clone();
             let rules = config_rules;
-            move |row: Arc<holon_api::widget_spec::DataRow>| -> Arc<ReactiveViewModel> {
+            Arc::new(move |row: Arc<holon_api::widget_spec::DataRow>| {
                 let parent_space = space.get_cloned();
                 let handle = row
                     .get("id")
@@ -857,75 +869,171 @@ impl ReactiveView {
                 );
                 node.interpret_fn = Some(nif.clone());
                 Arc::new(node)
-            }
+            })
         };
 
-        let get_sort_key = move |row: &holon_api::widget_spec::DataRow| -> String {
-            match &config_sort_key {
-                Some(col) => holon_api::render_eval::sort_value(row.get(col)),
-                None => extract_sort_key(row),
-            }
+        let get_sort_key: Arc<dyn Fn(&holon_api::widget_spec::DataRow) -> String + Send + Sync> = {
+            Arc::new(move |row: &holon_api::widget_spec::DataRow| -> String {
+                match &config_sort_key {
+                    Some(col) => holon_api::render_eval::sort_value(row.get(col)),
+                    None => extract_sort_key(row),
+                }
+            })
         };
 
-        let driver = data_source.keyed_rows_signal_vec().for_each(move |diff| {
-            match diff {
-                VecDiff::Replace { values } => {
-                    key_index = values.iter().map(|(k, _)| k.clone()).collect();
-                    let entries: Vec<_> = values
-                        .into_iter()
-                        .map(|(k, row)| {
-                            let parent = extract_parent_id(&row);
-                            let sk = get_sort_key(&row);
-                            let w = interpret_row(row);
-                            (k, parent, sk, w)
-                        })
-                        .collect();
-                    tree.rebuild(entries);
-                }
-                VecDiff::InsertAt {
-                    index,
-                    value: (key, row),
-                } => {
-                    key_index.insert(index, key.clone());
-                    let parent = extract_parent_id(&row);
-                    let sk = get_sort_key(&row);
-                    let w = interpret_row(row);
-                    tree.insert(key, parent, sk, w);
-                }
-                VecDiff::UpdateAt {
-                    index: _,
-                    value: (key, row),
-                } => {
-                    let parent = extract_parent_id(&row);
-                    let sk = get_sort_key(&row);
-                    let w = interpret_row(row);
-                    tree.update(&key, parent, sk, w);
-                }
-                VecDiff::RemoveAt { index } => {
-                    let key = key_index.remove(index);
-                    tree.remove(&key);
-                }
-                VecDiff::Push { value: (key, row) } => {
-                    key_index.push(key.clone());
-                    let parent = extract_parent_id(&row);
-                    let sk = get_sort_key(&row);
-                    let w = interpret_row(row);
-                    tree.insert(key, parent, sk, w);
-                }
-                VecDiff::Pop {} => {
-                    if let Some(key) = key_index.pop() {
+        let data_driver = {
+            let tree = tree.clone();
+            let key_index = key_index.clone();
+            let row_map = row_map.clone();
+            let interpret_row = interpret_row.clone();
+            let get_sort_key = get_sort_key.clone();
+            data_source.keyed_rows_signal_vec().for_each(move |diff| {
+                let mut tree = tree.lock().unwrap();
+                let mut key_index = key_index.lock().unwrap();
+                let mut row_map = row_map.lock().unwrap();
+                match diff {
+                    VecDiff::Replace { values } => {
+                        row_map.clear();
+                        *key_index = values.iter().map(|(k, _)| k.clone()).collect();
+                        let entries: Vec<_> = values
+                            .into_iter()
+                            .map(|(k, row)| {
+                                row_map.insert(k.clone(), row.clone());
+                                let parent = extract_parent_id(&row);
+                                let sk = get_sort_key(&row);
+                                let w = interpret_row(row);
+                                (k, parent, sk, w)
+                            })
+                            .collect();
+                        tree.rebuild(entries);
+                    }
+                    VecDiff::InsertAt {
+                        index,
+                        value: (key, row),
+                    } => {
+                        row_map.insert(key.clone(), row.clone());
+                        key_index.insert(index, key.clone());
+                        let parent = extract_parent_id(&row);
+                        let sk = get_sort_key(&row);
+                        let w = interpret_row(row);
+                        tree.insert(key, parent, sk, w);
+                    }
+                    VecDiff::UpdateAt {
+                        index: _,
+                        value: (key, row),
+                    } => {
+                        row_map.insert(key.clone(), row.clone());
+                        let parent = extract_parent_id(&row);
+                        let sk = get_sort_key(&row);
+                        let w = interpret_row(row);
+                        tree.update(&key, parent, sk, w);
+                    }
+                    VecDiff::RemoveAt { index } => {
+                        let key = key_index.remove(index);
+                        row_map.remove(&key);
                         tree.remove(&key);
                     }
+                    VecDiff::Push { value: (key, row) } => {
+                        row_map.insert(key.clone(), row.clone());
+                        key_index.push(key.clone());
+                        let parent = extract_parent_id(&row);
+                        let sk = get_sort_key(&row);
+                        let w = interpret_row(row);
+                        tree.insert(key, parent, sk, w);
+                    }
+                    VecDiff::Pop {} => {
+                        if let Some(key) = key_index.pop() {
+                            row_map.remove(&key);
+                            tree.remove(&key);
+                        }
+                    }
+                    VecDiff::Clear {} => {
+                        key_index.clear();
+                        row_map.clear();
+                        tree.rebuild(vec![]);
+                    }
+                    VecDiff::Move { .. } => {}
                 }
-                VecDiff::Clear {} => {
-                    key_index.clear();
-                    tree.rebuild(vec![]);
+                async {}
+            })
+        };
+
+        // Focus driver: re-interpret affected rows when the focused block
+        // changes. `pick_active_variant` reads `is_focused` from
+        // `services.ui_state(id)` at interpret time; without this driver,
+        // a focus change updates `UiState.focused_block` but rows keep
+        // their stale variant — e.g. clicking a `rendered_text` block
+        // never swaps it for the `editable_text` variant. Companion to
+        // the existing `space_driver` / `profile_driver` pattern in
+        // `create_flat_driver` (which re-interpret on viewport / profile
+        // changes for the same reason).
+        let focus_driver: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match focus_mutable {
+                Some(m) => {
+                    use futures_signals::signal::SignalExt;
+                    let tree = tree.clone();
+                    let row_map = row_map.clone();
+                    let interpret_row = interpret_row.clone();
+                    let get_sort_key = get_sort_key.clone();
+                    let mut last_focus: Option<EntityUri> = m.get_cloned();
+                    Box::pin(m.signal_cloned().for_each(move |new_focus| {
+                        if new_focus != last_focus {
+                            // Collect ids whose `is_focused` predicate
+                            // flipped: the previously focused block (now
+                            // false) and the newly focused block (now
+                            // true). Row keys are bare ids (no `block:`
+                            // scheme); `EntityUri::id()` returns that.
+                            let mut affected: Vec<String> = Vec::new();
+                            for opt in [last_focus.as_ref(), new_focus.as_ref()] {
+                                if let Some(uri) = opt {
+                                    let bare = uri.id().to_string();
+                                    if !affected.contains(&bare) {
+                                        affected.push(bare);
+                                    }
+                                }
+                            }
+                            // Snapshot rows under the row_map lock, then
+                            // release before taking the tree lock to keep
+                            // the lock order consistent with the data
+                            // driver (which takes tree → key_index →
+                            // row_map; we take row_map then tree, but the
+                            // row_map lock is released first).
+                            let updates: Vec<(
+                                String,
+                                Option<String>,
+                                String,
+                                Arc<ReactiveViewModel>,
+                            )> = {
+                                let rm = row_map.lock().unwrap();
+                                affected
+                                    .iter()
+                                    .filter_map(|id| {
+                                        rm.get(id).cloned().map(|row| {
+                                            let parent = extract_parent_id(&row);
+                                            let sk = get_sort_key(&row);
+                                            let w = interpret_row(row);
+                                            (id.clone(), parent, sk, w)
+                                        })
+                                    })
+                                    .collect()
+                            };
+                            if !updates.is_empty() {
+                                let mut t = tree.lock().unwrap();
+                                for (id, parent, sk, w) in updates {
+                                    t.update(&id, parent, sk, w);
+                                }
+                            }
+                            last_focus = new_focus;
+                        }
+                        async {}
+                    }))
                 }
-                VecDiff::Move { .. } => {}
-            }
-            async {}
-        });
-        Box::pin(driver)
+                None => Box::pin(std::future::pending()),
+            };
+
+        Box::pin(async move {
+            futures::future::join(data_driver, focus_driver).await;
+        })
     }
 
     /// Flat collection driver: Table/List/Columns.
@@ -1204,6 +1312,30 @@ impl ReactiveView {
                 })
         };
 
+        // Focus driver: re-interpret items when the focused block changes.
+        // `pick_active_variant` reads `is_focused` from `services.ui_state(id)`
+        // at interpret time; without this driver, a focus change leaves all
+        // rows on their stale variant — e.g. clicking a `rendered_text` block
+        // never swaps it for the `editable_text` variant. Companion to the
+        // `space_driver` / `profile_driver` pattern above.
+        let focus_driver: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match services.focused_block_mutable() {
+                Some(m) => {
+                    use futures_signals::signal::SignalExt;
+                    let rebuild = full_rebuild.clone();
+                    let entries = entries.clone();
+                    let mut last_focus: Option<EntityUri> = m.get_cloned();
+                    Box::pin(m.signal_cloned().for_each(move |new_focus| {
+                        if new_focus != last_focus && !entries.lock().unwrap().is_empty() {
+                            rebuild();
+                        }
+                        last_focus = new_focus;
+                        async {}
+                    }))
+                }
+                None => Box::pin(std::future::pending()),
+            };
+
         // Template driver: re-interpret all items' props when the shared
         // template Mutable changes. Items are updated in place — no new
         // Arc<ReactiveViewModel>, no MutableVec signals. GPUI's props
@@ -1228,8 +1360,11 @@ impl ReactiveView {
 
         Box::pin(async move {
             futures::future::join(
-                futures::future::join(data_driver, space_driver),
-                futures::future::join(template_driver, profile_driver),
+                futures::future::join(
+                    futures::future::join(data_driver, space_driver),
+                    futures::future::join(template_driver, profile_driver),
+                ),
+                focus_driver,
             )
             .await;
         })

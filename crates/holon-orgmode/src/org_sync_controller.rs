@@ -19,10 +19,12 @@ use holon::sync::CanonicalPath;
 use holon_api::block::Block;
 use holon_api::{EntityName, EntityUri, Value};
 use holon_core::file_format::FileFormatAdapter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+use holon_core::block_ordering::BlockOrdering;
 
 use crate::block_params::build_block_params;
 use crate::file_format::OrgFormatAdapter;
@@ -30,11 +32,25 @@ use crate::models::{OrgBlockExt, OrgDocumentExt};
 use crate::parser::parse_doc_id;
 use crate::traits::{BlockReader, DocumentManager, ImageDataProvider};
 
+/// Bump when the org renderer changes in a way that alters the canonical
+/// projection bytes (formatting, property ordering, directive layout, …).
+/// Mismatch on next boot forces a one-shot re-ingest per file so the stored
+/// `file.content_hash` snaps to the new canonical form.
+pub const RENDERER_VERSION: &str = "1";
+
 pub struct OrgSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
     /// Uses CanonicalPath to resolve macOS /var → /private/var symlinks,
     /// so scan_org_files and file watcher events match the same key.
+    /// Session-only, populated lazily on first miss.
     last_projection: HashMap<CanonicalPath, String>,
+
+    /// Phase 1 fast-path: `sha256(RENDERER_VERSION || render(parsed_blocks))`
+    /// per file, persisted via `file.content_hash`. Populated at startup
+    /// from `block_reader.load_file_hashes()` so a cold boot of an unchanged
+    /// vault skips block-table batches entirely (parses + renders + hashes,
+    /// then compares — no SQL writes when the hash matches).
+    last_projection_hash: HashMap<CanonicalPath, String>,
 
     /// Cheap dirty-check signature `(mtime, size)` per tracked path. Used by
     /// `poll_external_changes` to skip the expensive `read_to_string` when
@@ -71,6 +87,10 @@ pub struct OrgSyncController {
     /// notion / logseq adapters plug in here without changing the
     /// controller's logic.
     format: Arc<dyn FileFormatAdapter>,
+
+    /// Positional-intent writer. Used during disk-order replay to move
+    /// misaligned blocks into the position recorded in the org file.
+    ordering: Arc<dyn BlockOrdering>,
 }
 
 /// Callback for registering doc_id → path aliases in the storage layer.
@@ -87,6 +107,7 @@ impl OrgSyncController {
         command_bus: Arc<dyn OperationProvider>,
         doc_manager: Arc<dyn DocumentManager>,
         root_dir: PathBuf,
+        ordering: Arc<dyn BlockOrdering>,
     ) -> Self {
         Self::with_format(
             block_reader,
@@ -94,6 +115,7 @@ impl OrgSyncController {
             doc_manager,
             root_dir,
             Arc::new(OrgFormatAdapter::new()),
+            ordering,
         )
     }
 
@@ -106,12 +128,14 @@ impl OrgSyncController {
         doc_manager: Arc<dyn DocumentManager>,
         root_dir: PathBuf,
         format: Arc<dyn FileFormatAdapter>,
+        ordering: Arc<dyn BlockOrdering>,
     ) -> Self {
         // Canonicalize root_dir so strip_prefix works with canonical file paths
         // (macOS: /var → /private/var symlink resolution).
         let root_dir = CanonicalPath::new(&root_dir).into_path_buf();
         Self {
             last_projection: HashMap::new(),
+            last_projection_hash: HashMap::new(),
             disk_signatures: HashMap::new(),
             block_reader,
             command_bus,
@@ -121,6 +145,7 @@ impl OrgSyncController {
             post_org_write_hook: None,
             image_data: None,
             format,
+            ordering,
         }
     }
 
@@ -144,52 +169,71 @@ impl OrgSyncController {
     /// Must be called at startup BEFORE scanning files, so that we have a
     /// diff base for detecting external edits.
     pub async fn initialize(&mut self) -> Result<()> {
-        let documents = self.block_reader.iter_documents_with_blocks().await?;
-
-        for (doc_id, blocks) in documents {
-            let file_path = match self.resolve_doc_to_path(&doc_id).await {
-                Some(p) => p,
-                None => {
-                    debug!(
-                        "[OrgSyncController] Skipping doc_id={} — cannot resolve to file path",
-                        doc_id
-                    );
-                    continue;
+        // Phase 1 fast-path: load persisted `(file_id, content_hash)` pairs
+        // from the `file` table BEFORE the in-process cache has replayed file
+        // events. If an on-disk file's `hash(RENDERER_VERSION || disk_bytes)`
+        // matches its stored hash, `on_file_changed` skips block ingest
+        // entirely — the dominant cold-boot cost. See plan §Phase 1.
+        match self.block_reader.load_file_hashes().await {
+            Ok(rows) => {
+                for (uri, hash) in rows {
+                    if let Some(canonical) = self.file_uri_to_canonical_path(&uri) {
+                        self.last_projection_hash.insert(canonical, hash);
+                    }
                 }
-            };
-            let rendered = match self.doc_manager.get_by_id(&doc_id).await {
-                Ok(Some(doc)) => self
-                    .format
-                    .render_document(&doc, &blocks, &file_path, &doc_id),
-                _ => self.format.render_blocks(&blocks, &file_path, &doc_id),
-            };
-            self.last_projection
-                .insert(CanonicalPath::new(&file_path), rendered);
+                info!(
+                    "[OrgSyncController] Loaded last_projection_hash for {} files \
+                     (will skip ingest when disk_bytes hash matches)",
+                    self.last_projection_hash.len()
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "[OrgSyncController] load_file_hashes failed; cold-boot fast \
+                     path disabled, will re-ingest every file. Error: {e}"
+                );
+            }
         }
 
-        info!(
-            "[OrgSyncController] Initialized last_projection for {} files",
-            self.last_projection.len()
-        );
+        // last_projection (full rendered string) is intentionally NOT eagerly
+        // populated by walking every block — it's a session-only cache used
+        // for echo suppression, populated lazily on first miss by
+        // `on_file_changed`. Walking iter_documents_with_blocks here would
+        // pay parse+render cost for every doc on every boot.
+        info!("[OrgSyncController] Initialize complete");
         Ok(())
     }
 
-    /// Resolve a document ID to a file path under root_dir.
-    async fn resolve_doc_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
-        // Try alias registrar first (Loro path stores UUID→path mapping)
-        if let Some(ref registrar) = self.alias_registrar {
-            if let Some(path) = registrar.resolve_alias_to_path(&doc_id).await {
-                return Some(path);
-            }
+    /// Convert a `file:<encoded-path>` EntityUri back to a CanonicalPath
+    /// relative to this controller's `root_dir`. Returns None if the URI
+    /// scheme isn't `file:` or the on-disk path doesn't exist (which can
+    /// legitimately happen if the user deleted the file while the row
+    /// lingers — next sync will tombstone it).
+    fn file_uri_to_canonical_path(&self, uri: &EntityUri) -> Option<CanonicalPath> {
+        if uri.scheme() != "file" {
+            return None;
         }
-        // Fall back to name_chain → file path
-        match self.doc_manager.name_chain(doc_id).await {
-            Ok(chain) if !chain.is_empty() => {
-                let file_name = format!("{}.org", chain.join("/"));
-                Some(self.root_dir.join(file_name))
-            }
-            _ => None,
-        }
+        let encoded = uri.id();
+        // `EntityUri::file` percent-encodes path segments; reverse it before
+        // joining with root_dir so spaces etc. match the on-disk file name.
+        // `decode_utf8_lossy` substitutes U+FFFD for invalid sequences rather
+        // than swallowing them — keeps the fast-path correct for ASCII paths
+        // and visibly broken for the rare non-UTF-8 case.
+        let decoded = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy();
+        let abs = self.root_dir.join(decoded.as_ref());
+        Some(CanonicalPath::new(&abs))
+    }
+
+    /// Phase 1: `sha256(RENDERER_VERSION || disk_bytes)`. Same hash function
+    /// is used both to gate ingest on read and to stamp `file.content_hash`
+    /// after write so the next boot's gate compares like-for-like.
+    fn projection_hash(disk_bytes: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(RENDERER_VERSION.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(disk_bytes.as_bytes());
+        hex::encode(hasher.finalize())
     }
 
     /// Handle a file change event from the FileWatcher.
@@ -238,6 +282,35 @@ impl OrgSyncController {
             return Ok(());
         }
 
+        // Phase 1 cold-boot fast-path: when `last_projection` has no entry
+        // (first time we see this file this session) but `last_projection_hash`
+        // — loaded from `file.content_hash` at startup — matches the disk
+        // bytes hashed with the same renderer-version-prefixed sha256, the
+        // ingest path is a guaranteed no-op (we wrote this content last time
+        // and nothing changed on disk). Skip ingest entirely; stamp
+        // `last_projection` so subsequent in-session echo-suppression hits.
+        //
+        // Approach A (disk-bytes hash, not projection hash): the false-miss
+        // case (user externally edited in a benign way — trailing newline,
+        // property reorder — that re-renders to the same projection) costs
+        // exactly one parse + diff + zero block ops (Phase 2 ensures the
+        // edge sets don't churn either), then re-stamps the hash. Bounded
+        // and only fires on actual edits. Approach B (projection hash) would
+        // parse + render every file on every boot to confirm "skip" — a
+        // guaranteed cost per boot we don't pay here.
+        let disk_hash = Self::projection_hash(&disk_content);
+        if let Some(stored) = self.last_projection_hash.get(&canonical) {
+            if stored == &disk_hash {
+                debug!(
+                    "[OrgSyncController] Skipping {} — disk hash matches \
+                     stored file.content_hash (cold-boot fast path)",
+                    path.display()
+                );
+                self.last_projection.insert(canonical.clone(), disk_content);
+                return Ok(());
+            }
+        }
+
         info!(
             "[OrgSyncController] Processing external change: {}",
             path.display()
@@ -269,7 +342,17 @@ impl OrgSyncController {
                             .last()
                             .cloned()
                             .unwrap_or_else(|| "unknown".to_string());
-                        let mut new_doc = Block::new_text(id, EntityUri::no_parent(), title);
+                        let parent_id = if segments.len() > 1 {
+                            let parent_segments: Vec<&str> =
+                                segment_refs[..segments.len() - 1].to_vec();
+                            self.doc_manager
+                                .get_or_create_by_name_chain(&parent_segments)
+                                .await?
+                                .id
+                        } else {
+                            EntityUri::no_parent()
+                        };
+                        let mut new_doc = Block::new_text(id, parent_id, title);
                         new_doc.set_page(true);
                         self.doc_manager.create(new_doc).await?
                     }
@@ -477,6 +560,13 @@ impl OrgSyncController {
                             Value::String(prev.to_string()),
                         );
                     }
+                    // Phase 2: drop edge fields from params when unchanged, so
+                    // SqlOperationProvider's edge_field_replace_sql (DELETE +
+                    // re-INSERT into block_requires/block_tags) is not invoked.
+                    // Junction values are order-undefined on read, so compare as
+                    // sets. Idempotent re-ingests of an unchanged vault stop
+                    // churning ~2,400 statements per startup.
+                    strip_unchanged_edge_fields(&mut params, old_block, new_block);
                     operations.push(("update".to_string(), params));
                 }
             }
@@ -488,6 +578,12 @@ impl OrgSyncController {
                 has_structural_changes = true;
                 let mut params = HashMap::new();
                 params.insert("id".to_string(), Value::String(id.to_string()));
+                // Phase 3: pin the document URI so the provider's prepare_delete
+                // skips the WITH RECURSIVE Page-walk (find_document_uri).
+                params.insert(
+                    holon::sync::event_bus::ROUTING_DOC_URI_KEY.to_string(),
+                    Value::String(document_uri.to_string()),
+                );
                 operations.push(("delete".to_string(), params));
             }
         }
@@ -511,25 +607,177 @@ impl OrgSyncController {
                     )
                 })?;
 
-            // Wait for the CDC-driven cache to reflect the committed changes.
-            // Without this, render_file_by_doc_id reads stale data and overwrites
-            // the file with fewer blocks than what we just ingested.
-            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(2000);
-            loop {
-                let cached_blocks = self.block_reader.get_blocks(&document_uri).await?;
-                if cached_blocks.len() >= expected_block_count {
-                    break;
+            // Phase 4: wait for the CDC-driven cache to reflect the committed
+            // changes via the ack-watermark signal (push-based on CDC), not
+            // a 10 ms `SELECT * FROM block` full-scan poll. Capture
+            // `target_ts` AFTER the batch returns so events.created_at <=
+            // target_ts for every event we just published. The cache
+            // consumer acks in order, so its watermark reaching target_ts
+            // proves our batch has been fully applied.
+            //
+            // V-4a caveat: `Consumer::CACHE` is shared by block/directory/
+            // file cache subscribers. In rare cases a non-block ack could
+            // race ahead of the block one; the sanity SELECT below catches
+            // that. A timeout still falls back to the strict get_blocks
+            // count check to preserve loud failure on a stuck consumer.
+            let target_ts = chrono::Utc::now().timestamp_millis();
+            let caught_up = self
+                .block_reader
+                .wait_for_cache_caught_up(target_ts, 2000)
+                .await?;
+            let cached_blocks = self.block_reader.get_blocks(&document_uri).await?;
+            if cached_blocks.len() < expected_block_count {
+                anyhow::bail!(
+                    "[on_file_changed] CDC cache did not catch up within 2s for {} \
+                     (expected {} blocks, cache has {}, watermark_caught_up={})",
+                    path.display(),
+                    expected_block_count,
+                    cached_blocks.len(),
+                    caught_up
+                );
+            }
+        }
+
+        // Disk-order replay: move any block that is not already in the position
+        // recorded in the parsed org file. One `children()` call per distinct
+        // parent (cached in `live_children`), O(N) total reads.
+        //
+        // Before reading children we wait for every newly-created block to be
+        // visible to the ordering layer. `execute_batch_with_origin` above
+        // published `EventOrigin::Org` create events whose Loro-side
+        // application is asynchronous (the `LoroSyncController` inbound
+        // consumer processes them off the EventBus). The CDC-cache wait at
+        // ~line 528 only gates on the SQL projection; if we proceed straight
+        // to `ordering.place` we may call `update_block_position` for a
+        // block whose Loro tree node hasn't been created yet, surfacing as
+        // `Block not found: <id>` — the block then lands at Loro's default
+        // position and the renderer's children-of-doc query never finds it.
+        // Polling `ordering.children(parent)` reads through the same path
+        // `ordering.place` will use, so once a created id appears there the
+        // subsequent `place` is guaranteed to find it.
+        {
+            let mut live_children: HashMap<String, Vec<String>> = HashMap::new();
+            let mut expected_per_parent: HashMap<String, HashSet<String>> = HashMap::new();
+            // `BlockOrdering::children` filters `b.parent_id.as_str() == parent_id`,
+            // and `EntityUri::as_str()` returns the FULL URI (`"block:ref-doc-0"`).
+            // Keys here are full URIs so the compare matches.
+            for new_block in &new_blocks_vec {
+                if !created_ids.contains(&new_block.id.to_string()) {
+                    continue;
                 }
-                if tokio::time::Instant::now() >= deadline {
+                let parent_key = if new_block.parent_id == new_parse.document.id {
+                    document_uri.as_str().to_string()
+                } else {
+                    new_block.parent_id.as_str().to_string()
+                };
+                // Compare against the full URI form returned by
+                // `BlockOrdering::children` (kids are `b.id.as_str()`).
+                expected_per_parent
+                    .entry(parent_key)
+                    .or_default()
+                    .insert(new_block.id.as_str().to_string());
+            }
+            let propagate_deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(2000);
+            for (parent_key, expected_ids) in &expected_per_parent {
+                loop {
+                    let kids = self
+                        .ordering
+                        .children(parent_key)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("ordering.children failed: {e}"))?;
+                    let present: HashSet<&str> = kids.iter().map(String::as_str).collect();
+                    if expected_ids.iter().all(|id| present.contains(id.as_str())) {
+                        live_children.insert(parent_key.clone(), kids);
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= propagate_deadline {
+                        let missing: Vec<&String> = expected_ids
+                            .iter()
+                            .filter(|id| !present.contains(id.as_str()))
+                            .collect();
+                        anyhow::bail!(
+                            "[on_file_changed] new blocks did not appear in ordering for \
+                             parent {parent_key} within 2s: missing {missing:?}; \
+                             present children: {kids:?}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+            }
+            // Backfill children lists for parents that only contained
+            // pre-existing blocks (no creates) — the wait loop above skipped
+            // them entirely.
+            for new_block in &new_blocks_vec {
+                let parent_key = if new_block.parent_id == new_parse.document.id {
+                    document_uri.as_str().to_string()
+                } else {
+                    new_block.parent_id.as_str().to_string()
+                };
+                if !live_children.contains_key(&parent_key) {
+                    let kids = self
+                        .ordering
+                        .children(&parent_key)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("ordering.children failed: {e}"))?;
+                    live_children.insert(parent_key, kids);
+                }
+            }
+
+            for new_block in &new_blocks_vec {
+                // Source / image children are grouped ahead of text by
+                // `OrgRenderer::render_entity_tree` regardless of sort_key
+                // (see assertions.rs `render_group`). They also don't land
+                // in the Loro tree — synthetic ids like `<parent>::render::0`
+                // exist only in SQL — so `place()` would surface
+                // `Block not found` through `update_block_position`.
+                if !matches!(new_block.content_type, holon_api::ContentType::Text) {
+                    continue;
+                }
+                let parent = if new_block.parent_id == new_parse.document.id {
+                    &document_uri
+                } else {
+                    &new_block.parent_id
+                };
+                // Full-URI form throughout: `BlockOrdering::children` /
+                // `prev_sibling` return `b.id.as_str()` = `"block:foo"`, and
+                // `place()`'s internal comparisons (sql_block_operations.rs:182)
+                // also use `as_str()`. Mixing bare ids here silently skips
+                // every block.
+                let want_after: Option<&str> = predecessors
+                    .get(&new_block.id)
+                    .and_then(|p| p.as_ref())
+                    .map(|u| u.as_str());
+
+                let siblings = live_children
+                    .get(parent.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let Some(current_idx) = siblings.iter().position(|s| s == new_block.id.as_str())
+                else {
+                    // Wait-loop above guarantees newly-created blocks are
+                    // present in `live_children`; pre-existing blocks were
+                    // backfilled. Anything missing here is a real bug.
                     anyhow::bail!(
-                        "[on_file_changed] CDC cache did not catch up within 2s for {} \
-                         (expected {} blocks, cache has {})",
-                        path.display(),
-                        expected_block_count,
-                        cached_blocks.len()
+                        "[on_file_changed] block {} not found in live_children under {}: {:?}",
+                        new_block.id.as_str(),
+                        parent.as_str(),
+                        siblings
                     );
+                };
+                let current_prev = if current_idx == 0 {
+                    None
+                } else {
+                    siblings.get(current_idx - 1).map(String::as_str)
+                };
+                if current_prev == want_after {
+                    continue;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+                self.ordering
+                    .place(&new_block.id, parent.as_str(), want_after)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("ordering.place failed: {e}"))?;
             }
         }
 
@@ -553,6 +801,8 @@ impl OrgSyncController {
         if !has_structural_changes && !needs_id_writeback {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
+            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+                .await;
             return Ok(());
         }
 
@@ -617,10 +867,46 @@ impl OrgSyncController {
             }
         }
 
+        // Phase 1: stamp file.content_hash for the bytes that are NOW on
+        // disk (= `rendered` if we wrote it, else still == disk_content;
+        // in both cases `rendered` is the canonical projection). Updates
+        // in-memory map and persists to SQL so next boot's fast-path engages.
+        let final_hash = Self::projection_hash(&rendered);
+        self.persist_disk_hash_for(&canonical, rel_path, &final_hash)
+            .await;
+
         // Update last_projection
         self.last_projection.insert(canonical.clone(), rendered);
 
         Ok(())
+    }
+
+    /// Update `last_projection_hash` in memory and persist to
+    /// `file.content_hash` via the BlockReader's raw-SQL write-back. Best-
+    /// effort: a failure to persist (e.g. file row not yet created by
+    /// `OrgmodeSyncProvider`) does not abort the ingest — we've already
+    /// committed the block ops and don't want to bail the controller. The
+    /// next sync will create the row and the following boot will write
+    /// the hash successfully. Logged at warn so the case is observable.
+    async fn persist_disk_hash_for(
+        &mut self,
+        canonical: &CanonicalPath,
+        rel_path: &Path,
+        hash: &str,
+    ) {
+        self.last_projection_hash
+            .insert(canonical.clone(), hash.to_string());
+        let rel = rel_path.to_string_lossy();
+        let file_uri = EntityUri::file(&rel);
+        if let Err(e) = self.block_reader.persist_file_hash(&file_uri, hash).await {
+            warn!(
+                "[OrgSyncController] persist_file_hash failed for {} ({}): {} \
+                 (in-memory hash updated; next boot will re-ingest)",
+                file_uri,
+                canonical.as_path_buf().display(),
+                e
+            );
+        }
     }
 
     /// Handle a block change notification (from EventBus or Loro).
@@ -1163,6 +1449,34 @@ fn path_to_name_chain(rel_path: &Path) -> Vec<String> {
 }
 
 /// Check if two blocks differ in ways that require an update.
+/// Phase 2: when an UPDATE op's edge sets (`tags`, `requires`) match the
+/// old block's, strip those keys from `params` so the provider doesn't
+/// emit a wipe-and-rebuild on the `block_tags` / `block_requires` junction.
+///
+/// Compares as `HashSet<&str>` because junction reads have undefined row
+/// order; vector compare would flag false diffs.
+fn strip_unchanged_edge_fields(
+    params: &mut HashMap<String, Value>,
+    old_block: &Block,
+    new_block: &Block,
+) {
+    if set_eq(&old_block.tags, &new_block.tags) {
+        params.remove("tags");
+    }
+    if set_eq(&old_block.requires, &new_block.requires) {
+        params.remove("requires");
+    }
+}
+
+fn set_eq(a: &[String], b: &[String]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let sa: HashSet<&str> = a.iter().map(String::as_str).collect();
+    let sb: HashSet<&str> = b.iter().map(String::as_str).collect();
+    sa == sb
+}
+
 fn blocks_differ(a: &Block, b: &Block) -> bool {
     a.content != b.content
         || a.parent_id != b.parent_id

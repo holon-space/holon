@@ -226,6 +226,67 @@ impl ReactiveSlot {
     }
 }
 
+// ── LazyReactiveSlot ───────────────────────────────────────────────────
+
+/// Deferred reactive content — built on demand the first time `gate` is true.
+///
+/// Sibling of `ReactiveSlot`. Used by widgets that should not pay the cost of
+/// materialising their content until a user-controlled gate opens
+/// (expand_toggle's `expanded`, tabs' "this tab is active", drawer's "open").
+///
+/// Lifecycle:
+/// - Built with `gate` + `thunk`. Cache starts empty. No work runs.
+/// - First snapshot with `gate == true` invokes `thunk`, stores the result in
+///   `cache`, and returns it.
+/// - Subsequent snapshots reuse the cached `Arc<ReactiveViewModel>` regardless
+///   of gate state — flipping the gate closed does **not** evict the cache or
+///   suspend the materialised subscriptions; the children stay live in the
+///   background and re-expand is instant. Suspend-on-collapse is a future
+///   extension.
+///
+/// The thunk must be `Send + Sync` and is typically built by capturing
+/// `BuilderServices::clone_arc()`, the widget's `content_template`, and the
+/// `RenderContext` it was constructed in. The captured services then provide
+/// `interpret(&template, &ctx)` for the deferred call.
+pub struct LazyReactiveSlot {
+    pub thunk: Arc<dyn Fn() -> ReactiveViewModel + Send + Sync>,
+    pub cache: Mutable<Option<Arc<ReactiveViewModel>>>,
+    pub gate: futures_signals::signal::ReadOnlyMutable<bool>,
+}
+
+impl LazyReactiveSlot {
+    pub fn new(
+        gate: futures_signals::signal::ReadOnlyMutable<bool>,
+        thunk: Arc<dyn Fn() -> ReactiveViewModel + Send + Sync>,
+    ) -> Self {
+        Self {
+            thunk,
+            cache: Mutable::new(None),
+            gate,
+        }
+    }
+
+    /// Return the materialised content if the gate is open. Materialises on
+    /// first call; subsequent calls short-circuit on the cache. Returns `None`
+    /// while the gate is closed and the cache is empty — callers should treat
+    /// this as "render nothing for the slot."
+    pub fn materialize_if_gated(&self) -> Option<Arc<ReactiveViewModel>> {
+        if let Some(cached) = self.cache.get_cloned() {
+            return Some(cached);
+        }
+        if !self.gate.get() {
+            return None;
+        }
+        let materialised = Arc::new((self.thunk)());
+        self.cache.set(Some(materialised.clone()));
+        Some(materialised)
+    }
+
+    pub fn is_materialised(&self) -> bool {
+        self.cache.lock_ref().is_some()
+    }
+}
+
 // ── ReactiveViewModel ──────────────────────────────────────────────────
 
 /// A persistent reactive ViewModel node.
@@ -262,6 +323,11 @@ pub struct ReactiveViewModel {
 
     /// Deferred content slot (live_block, live_query, view_mode_switcher).
     pub slot: Option<ReactiveSlot>,
+
+    /// Gated lazy content slot. Sibling of `slot` — content is interpreted
+    /// only when `gate` opens for the first time, cached thereafter for the
+    /// VM lifetime. Used by `expand_toggle` and (planned) tabs/drawer.
+    pub lazy_slot: Option<LazyReactiveSlot>,
 
     /// Expand/collapse state — shared handle from the engine's cache.
     pub expanded: Option<Mutable<bool>>,
@@ -381,6 +447,7 @@ impl ReactiveViewModel {
         self.children = Self::push_down_children(&self.children, &fresh.children);
         self.collection = fresh.collection.clone();
         self.slot = Self::push_down_slot(&self.slot, &fresh.slot);
+        self.lazy_slot = Self::push_down_lazy_slot(&self.lazy_slot, &fresh.lazy_slot);
         self.operations = fresh.operations.clone();
         self.triggers = fresh.triggers.clone();
         self.layout_hint = fresh.layout_hint;
@@ -403,6 +470,7 @@ impl ReactiveViewModel {
             children: Self::push_down_children(&self.children, &fresh.children),
             collection: fresh.collection.clone(),
             slot: Self::push_down_slot(&self.slot, &fresh.slot),
+            lazy_slot: Self::push_down_lazy_slot(&self.lazy_slot, &fresh.lazy_slot),
             expanded: self.expanded.clone(),
             operations: fresh.operations.clone(),
             triggers: fresh.triggers.clone(),
@@ -445,6 +513,10 @@ impl ReactiveViewModel {
                             children: pushed,
                             collection: fresh_child.collection.clone(),
                             slot: Self::push_down_slot(&old_child.slot, &fresh_child.slot),
+                            lazy_slot: Self::push_down_lazy_slot(
+                                &old_child.lazy_slot,
+                                &fresh_child.lazy_slot,
+                            ),
                             expanded: old_child.expanded.clone(),
                             operations: fresh_child.operations.clone(),
                             triggers: fresh_child.triggers.clone(),
@@ -490,6 +562,32 @@ impl ReactiveViewModel {
             }
             (_, Some(fresh_slot)) => Some(ReactiveSlot {
                 content: fresh_slot.content.clone(),
+            }),
+            (_, None) => None,
+        }
+    }
+
+    /// Push-down for `LazyReactiveSlot`. Unlike `push_down_slot` we must
+    /// preserve the *old* cache — the fresh slot is always unmaterialised at
+    /// build time, so blindly adopting fresh would wipe out content the user
+    /// already expanded. We adopt the fresh `thunk` + `gate` (they reflect
+    /// the latest captured context) but carry the old `cache` forward when
+    /// it's already populated. New widget instances (no old slot) just adopt
+    /// fresh wholesale; gone-from-fresh drops the lazy_slot entirely.
+    fn push_down_lazy_slot(
+        old: &Option<LazyReactiveSlot>,
+        fresh: &Option<LazyReactiveSlot>,
+    ) -> Option<LazyReactiveSlot> {
+        match (old, fresh) {
+            (Some(old_lazy), Some(fresh_lazy)) => Some(LazyReactiveSlot {
+                thunk: fresh_lazy.thunk.clone(),
+                cache: old_lazy.cache.clone(),
+                gate: fresh_lazy.gate.clone(),
+            }),
+            (_, Some(fresh_lazy)) => Some(LazyReactiveSlot {
+                thunk: fresh_lazy.thunk.clone(),
+                cache: fresh_lazy.cache.clone(),
+                gate: fresh_lazy.gate.clone(),
             }),
             (_, None) => None,
         }
@@ -779,20 +877,26 @@ impl ReactiveViewModel {
                 let target_id = self.prop_str("target_id").unwrap_or_default();
                 let is_expanded = self.expanded.as_ref().map_or(false, |m| m.get());
                 let header_children = snap_children();
-                let all_children = if is_expanded {
-                    if let Some(ref slot) = self.slot {
-                        let content_vm = match resolve_block {
-                            Some(rb) => slot.snapshot_resolved(rb),
-                            None => slot.snapshot(),
+                // Gated lazy content. `materialize_if_gated()` fires the thunk
+                // exactly once (cache lives on the lazy_slot for the VM
+                // lifetime). Collapsed and not-yet-materialised → None →
+                // header-only render. Expanded → cache hit → snapshot the
+                // materialised VM and append after the header.
+                let all_children = match self
+                    .lazy_slot
+                    .as_ref()
+                    .and_then(|s| s.materialize_if_gated())
+                {
+                    Some(content_vm) => {
+                        let snapshot = match resolve_block {
+                            Some(rb) => content_vm.snapshot_resolved(rb),
+                            None => content_vm.snapshot(),
                         };
                         let mut items = header_children.items;
-                        items.push(content_vm);
+                        items.push(snapshot);
                         LazyChildren::fully_materialized(items)
-                    } else {
-                        header_children
                     }
-                } else {
-                    header_children
+                    None => header_children,
                 };
                 ViewKind::ExpandToggle {
                     target_id,
@@ -956,6 +1060,7 @@ impl Default for ReactiveViewModel {
             children: vec![],
             collection: None,
             slot: None,
+            lazy_slot: None,
             expanded: None,
             operations: vec![],
             triggers: vec![],
@@ -1603,5 +1708,131 @@ mod tests {
             node.click_intent().is_none(),
             "key-chord-only op must not be treated as a click action"
         );
+    }
+
+    // ── LazyReactiveSlot semantics ─────────────────────────────────────
+    //
+    // These tests pin the lifecycle decisions from
+    // `devlog/2026-05-15-lazy-expand-toggle-plan.md`:
+    //   1. Closed gate → no materialisation.
+    //   2. First open → thunk fires exactly once.
+    //   3. Re-snapshot while open → cache hit, thunk does not re-fire.
+    //   4. Close again → cache preserved (subscriptions stay live; this is
+    //      the conscious "no suspend-on-collapse" choice).
+    //   5. Re-open → cache hit, still no thunk re-fire.
+
+    fn counting_thunk() -> (
+        Arc<dyn Fn() -> ReactiveViewModel + Send + Sync>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = counter.clone();
+        let thunk: Arc<dyn Fn() -> ReactiveViewModel + Send + Sync> = Arc::new(move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ReactiveViewModel::text("materialised")
+        });
+        (thunk, counter)
+    }
+
+    #[test]
+    fn lazy_slot_closed_gate_does_not_materialise() {
+        let (thunk, counter) = counting_thunk();
+        let gate = Mutable::new(false);
+        let slot = LazyReactiveSlot::new(gate.read_only(), thunk);
+
+        assert!(slot.materialize_if_gated().is_none());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!slot.is_materialised());
+    }
+
+    #[test]
+    fn lazy_slot_open_gate_materialises_once_and_caches() {
+        let (thunk, counter) = counting_thunk();
+        let gate = Mutable::new(false);
+        let slot = LazyReactiveSlot::new(gate.read_only(), thunk);
+
+        gate.set(true);
+        let first = slot.materialize_if_gated().expect("gate open → Some");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let second = slot.materialize_if_gated().expect("cache hit → Some");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "thunk must not re-fire on cached read"
+        );
+        assert!(Arc::ptr_eq(&first, &second), "cache returns the same Arc");
+    }
+
+    #[test]
+    fn lazy_slot_cache_survives_gate_close_and_reopen() {
+        let (thunk, counter) = counting_thunk();
+        let gate = Mutable::new(true);
+        let slot = LazyReactiveSlot::new(gate.read_only(), thunk);
+
+        let first = slot.materialize_if_gated().expect("gate open → Some");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Close the gate. By design, the cache is preserved — re-reading
+        // returns the same Arc, not None. Closing only affects future
+        // materialisations from an empty cache (which here never happens).
+        gate.set(false);
+        let while_closed = slot
+            .materialize_if_gated()
+            .expect("cache preserved across close");
+        assert!(Arc::ptr_eq(&first, &while_closed));
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        gate.set(true);
+        let after_reopen = slot.materialize_if_gated().expect("re-open → Some");
+        assert!(Arc::ptr_eq(&first, &after_reopen));
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "thunk fires at most once across the slot's lifetime"
+        );
+    }
+
+    #[test]
+    fn push_down_lazy_slot_preserves_cache_across_rebuild() {
+        let (old_thunk, old_counter) = counting_thunk();
+        let old_gate = Mutable::new(true);
+        let old_slot = Some(LazyReactiveSlot::new(old_gate.read_only(), old_thunk));
+        old_slot
+            .as_ref()
+            .unwrap()
+            .materialize_if_gated()
+            .expect("old materialised");
+        let old_cached = old_slot.as_ref().unwrap().cache.get_cloned();
+        assert!(old_cached.is_some());
+        assert_eq!(old_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Fresh build produces an unmaterialised slot (typical: builder
+        // creates a brand-new Mutable<bool> = false on every rebuild).
+        let (fresh_thunk, fresh_counter) = counting_thunk();
+        let fresh_gate = Mutable::new(false);
+        let fresh_slot = Some(LazyReactiveSlot::new(fresh_gate.read_only(), fresh_thunk));
+
+        let merged = ReactiveViewModel::push_down_lazy_slot(&old_slot, &fresh_slot)
+            .expect("merged slot present");
+        // Cache must carry forward — push_down_lazy_slot's contract.
+        assert!(
+            merged.cache.get_cloned().is_some(),
+            "merged slot must keep the old cache"
+        );
+        // Reading the merged slot must NOT re-fire either thunk; cache wins.
+        let post_merge_gate = Mutable::new(true);
+        let merged_with_open_gate = LazyReactiveSlot {
+            thunk: merged.thunk.clone(),
+            cache: merged.cache.clone(),
+            gate: post_merge_gate.read_only(),
+        };
+        merged_with_open_gate.materialize_if_gated().unwrap();
+        assert_eq!(
+            fresh_counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "fresh thunk must not be invoked when cache carries content forward"
+        );
+        assert_eq!(old_counter.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

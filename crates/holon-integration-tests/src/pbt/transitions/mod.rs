@@ -48,6 +48,7 @@ mod drag_drop_block;
 mod edit_via_display_tree;
 mod edit_via_view_model;
 mod emit_mcp_data;
+mod expand_toggle;
 mod focus_editable_text;
 mod git_init;
 mod indent;
@@ -75,6 +76,7 @@ mod split_block;
 mod start_app;
 mod switch_view;
 mod sync_with_peer;
+mod toggle_collapse;
 mod toggle_state;
 mod trigger_doc_link;
 mod trigger_slash_command;
@@ -82,6 +84,11 @@ mod type_chars;
 mod undo_last_mutation;
 mod unpin_block;
 mod write_org_file;
+
+// Shared layout-PBT variants (delegate to holon-pbt-core + holon-layout-testing).
+mod deliver_block_content;
+mod switch_view_mode;
+mod toggle_drawer;
 
 pub use add_peer::AddPeer;
 pub use apply_mutation::ApplyMutation;
@@ -98,6 +105,7 @@ pub use drag_drop_block::DragDropBlock;
 pub use edit_via_display_tree::EditViaDisplayTree;
 pub use edit_via_view_model::EditViaViewModel;
 pub use emit_mcp_data::EmitMcpData;
+pub use expand_toggle::ExpandToggle;
 pub use focus_editable_text::FocusEditableText;
 pub use git_init::GitInit;
 pub use indent::Indent;
@@ -132,6 +140,11 @@ pub use type_chars::TypeChars;
 pub use undo_last_mutation::UndoLastMutation;
 pub use unpin_block::UnpinBlock;
 pub use write_org_file::WriteOrgFile;
+
+pub use deliver_block_content::DeliverBlockContent;
+pub use switch_view_mode::SwitchViewMode;
+pub use toggle_collapse::ToggleCollapse;
+pub use toggle_drawer::ToggleDrawer;
 
 // ── Shared helper types for peer-sync transitions ──────────────────
 // These would naturally live in `peer_edit.rs` / `peer_char_edit.rs`
@@ -212,6 +225,7 @@ crate::declare_e2e_transitions! {
         EditViaDisplayTree(EditViaDisplayTree),
         EditViaViewModel(EditViaViewModel),
         EmitMcpData(EmitMcpData),
+        ExpandToggle(ExpandToggle),
         FocusEditableText(FocusEditableText),
         GitInit(GitInit),
         Indent(Indent),
@@ -247,6 +261,10 @@ crate::declare_e2e_transitions! {
         SyncWithPeer(SyncWithPeer),
         MergeFromPeer(MergeFromPeer),
         PeerCharEdit(PeerCharEdit),
+        SwitchViewMode(SwitchViewMode),
+        ToggleDrawer(ToggleDrawer),
+        ToggleCollapse(ToggleCollapse),
+        DeliverBlockContent(DeliverBlockContent),
     }
 }
 

@@ -114,12 +114,19 @@ impl E2ETransitionImpl for SplitBlock {
         let new_block_id = state.split_block(&self.block_id, self.position);
         // Production issues an editor_focus follow-up that moves keyboard focus
         // to the new block at position 0 (traits.rs::split_block → editor_focus_op).
-        // Mirror that here so subsequent transitions (NavigateFocus, ArrowNavigate,
-        // JoinBlock, SplitBlock) see the correct focused block in Main.
-        state.focused_entity_id.insert(Region::Main, new_block_id);
+        // The watch_editor_cursor reactor moves GPUI window.focus to the new
+        // block's input, whose InputEvent::Focus calls `services.set_focus(new)`,
+        // which is the engine-global `focused_block` mirror inv-focus-matches-ref
+        // compares against. Mirror that here so subsequent transitions
+        // (NavigateFocus, ArrowNavigate, JoinBlock, SplitBlock) and the
+        // post-step invariants see the correct focused block.
+        state
+            .focused_entity_id
+            .insert(Region::Main, new_block_id.clone());
         state
             .focused_cursor
             .insert(Region::Main, CursorPosition::start());
+        state.focused_block = Some(new_block_id);
     }
 
     async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {

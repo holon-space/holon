@@ -97,6 +97,35 @@ devlogs) instead of smuggling state through `payload`. To suppress: \
 """
 
 [[smell]]
+id = "sort_key_writer"
+# `block.sort_key` has exactly two authoritative writers:
+#   - `LoroSyncController::on_loro_changed` (Loro tree.fractional_index → SQL),
+#   - the `SqlBlockOrdering` impl (`crates/holon/src/core/sql_block_operations.rs`).
+# Producers — notably the org-sync path — must emit only positional
+# intent (`after_block_id`, lifted to `Event::position_after_block_id`)
+# and let the projector compute the resulting fi.
+#
+# When the org parser used to also write `sort_key` directly to SQL via
+# `params.insert("sort_key".to_string(), Value::String(...))`, its
+# `gen_n_keys` strings competed with Loro's auto-assigned fis — two
+# generators in disjoint string spaces, producing the seed=42
+# SplitBlock ordering panic (devlog 2026-05-14 SplitBlock handoff).
+#
+# This rule fires on the producer-side write shape inside the org-sync
+# crate. Loro/SQL projector + SqlBlockOrdering impl live in `holon`
+# proper and are not matched. To suppress: // ALLOW(sort_key_writer): <reason>
+pattern = '"sort_key"\.to_string\(\)\s*,\s*Value::'
+files = "crates/holon-orgmode/**/*.rs"
+case_sensitive = true
+message = """
+Producer-side `sort_key` write detected. The org parser path may not
+write `block.sort_key` directly — emit `after_block_id` instead and let
+`LoroSyncController::on_loro_changed` project Loro's fractional index
+back to SQL. See devlog 2026-05-14 (SplitBlock handoff). To suppress:
+// ALLOW(sort_key_writer): <reason>
+"""
+
+[[smell]]
 id = "raw_sql_in_frontend"
 # Mirror the cargo arch-test (no_raw_sql_in_frontends): catches schema-changing
 # and read-leaking SQL but deliberately omits UPDATE/DELETE — frontend-side

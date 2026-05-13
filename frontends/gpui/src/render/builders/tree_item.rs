@@ -1,6 +1,7 @@
 use super::prelude::*;
+use crate::geometry::TransparentTracker;
 use futures_signals::signal::Mutable;
-use holon_frontend::reactive_view_model::ReactiveViewModel;
+use holon_frontend::{expand_toggle_id_for, reactive_view_model::ReactiveViewModel};
 
 /// Extract a stable ID from the first child's entity data for collapse state tracking.
 /// Walks into wrapper nodes (render_entity, live_query) to find the actual entity with an "id".
@@ -82,6 +83,7 @@ fn collapse_chevron(
 /// each tree_item carries its own state (set by `wrap_tree_item` in
 /// `mutable_tree.rs`). Two rows wrapping the same widget id therefore
 /// have independent collapse state.
+// ALLOW(unused_param): ctx kept in signature for future per-node theme reads
 pub fn collapse_state(node: &ReactiveViewModel, _ctx: &GpuiRenderContext) -> Option<(usize, bool)> {
     if node.widget_name().as_deref() != Some("tree_item") {
         return None;
@@ -117,7 +119,14 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let children = &node.children;
     let items = children.clone();
 
-    let id = items.first().and_then(|c| node_id(c));
+    // Prefer an explicit `target_id` prop on the tree_item VM — generators
+    // and shadow builders that need stable click-targetable chevrons stamp
+    // this so the bounds-registry id is deterministic. Fall back to the
+    // child's entity id (production org-tree path).
+    let explicit_target = node.prop_str("target_id");
+    let id = explicit_target
+        .clone()
+        .or_else(|| items.first().and_then(|c| node_id(c)));
 
     // Per-instance expand/collapse state. Read the `Mutable` from the VM
     // (set by `wrap_tree_item`) so two tree_items wrapping the same id keep
@@ -151,7 +160,20 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         // `expanded` field — the chevron still renders but click toggles
         // a detached cell. In practice `wrap_tree_item` always sets one.
         let mutable = expanded_handle.unwrap_or_else(|| Mutable::new(true));
-        row = row.child(collapse_chevron(collapsed, el_id, mutable, ctx));
+        let chevron_el = collapse_chevron(collapsed, el_id, mutable, ctx);
+        if let Some(target_id) = explicit_target.as_deref() {
+            // Register the chevron in the bounds registry under the
+            // canonical id so layout-PBT `ToggleCollapse` transitions
+            // can click it via `expand_toggle_id_for(target_id)`.
+            row = row.child(TransparentTracker::new(
+                expand_toggle_id_for(target_id),
+                "expand_toggle",
+                ctx.bounds_registry.clone(),
+                chevron_el.into_any_element(),
+            ));
+        } else {
+            row = row.child(chevron_el);
+        }
     } else if show_bullet {
         row = row.child(bullet_dot(ctx));
     }

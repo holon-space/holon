@@ -32,7 +32,7 @@ use holon::entity_profile::RowProfile;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
 use holon_api::{EntityUri, QueryLanguage};
-use holon_frontend::geometry::{ElementInfo, GeometryProvider};
+use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
@@ -69,6 +69,9 @@ impl BuilderServices for StubServices {
     }
     fn widget_state(&self, _: &str) -> WidgetState {
         unimplemented!("StubServices::widget_state")
+    }
+    fn set_widget_open(&self, _: &str, _: bool) {
+        unimplemented!("StubServices::set_widget_open")
     }
     fn dispatch_intent(&self, _: OperationIntent) {
         unimplemented!("StubServices::dispatch_intent")
@@ -200,6 +203,12 @@ impl BuilderServices for TestServices {
             self.inner.widget_state(id)
         }
     }
+    fn set_widget_open(&self, id: &str, open: bool) {
+        self.drawer_states
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), open);
+    }
     fn dispatch_intent(&self, intent: OperationIntent) {
         self.inner.dispatch_intent(intent)
     }
@@ -234,7 +243,7 @@ impl BuilderServices for TestServices {
     }
     fn popup_query(
         &self,
-        _sql: String,
+        _: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>
     {
         let rows = self.popup_results.lock().unwrap().clone();
@@ -244,7 +253,7 @@ impl BuilderServices for TestServices {
     fn watch_live(
         &self,
         block_id: &EntityUri,
-        _services: Arc<dyn BuilderServices>,
+        _: Arc<dyn BuilderServices>,
     ) -> holon_frontend::LiveBlock {
         self.registry.watch_live(&block_id.to_string())
     }
@@ -522,13 +531,7 @@ pub fn render_fixture_sized(
 
     cx.run_until_parked();
 
-    let mut entries: Vec<(String, ElementInfo)> = bounds.all_elements();
-    // Sort by the `{name}#{seq}` id's numeric suffix so render-tree traversal
-    // order is preserved. `all_elements()` returns a HashMap-backed Vec which
-    // is unordered otherwise.
-    entries.sort_by_key(|(id, _)| seq_from_id(id));
-
-    BoundsSnapshot { entries }
+    holon_layout_testing::snapshot::snapshot_from_provider(&bounds)
 }
 
 /// Reactive counterpart to `render_fixture_sized`. Routes `vm` through the
@@ -576,17 +579,7 @@ pub fn render_reactive_fixture_sized(
         .advance_clock(std::time::Duration::from_millis(500));
     cx.run_until_parked();
 
-    let mut entries: Vec<(String, ElementInfo)> = bounds.all_elements();
-    entries.sort_by_key(|(id, _)| seq_from_id(id));
-    BoundsSnapshot { entries }
-}
-
-/// Extract the `#{seq}` suffix from an id like `"col#3"`. Unknown ids sort
-/// last under `u64::MAX` so a malformed id is visible but not crashing.
-fn seq_from_id(id: &str) -> u64 {
-    id.rsplit_once('#')
-        .and_then(|(_, n)| n.parse::<u64>().ok())
-        .unwrap_or(u64::MAX)
+    holon_layout_testing::snapshot::snapshot_from_provider(&bounds)
 }
 
 // ── GpuiScenarioSession (multi-render window) ─────────────────────────
@@ -618,7 +611,7 @@ impl GpuiScenarioSession {
         cx: &mut TestAppContext,
         vm: Arc<ReactiveViewModel>,
         blocks: Vec<(String, Vec<(String, BlockTreeThunk)>, usize)>,
-        drawer_states: std::collections::HashMap<String, bool>,
+        state: holon_layout_testing::SceneState,
         window_size: Size<Pixels>,
     ) -> Self {
         cx.update(|cx| {
@@ -639,10 +632,15 @@ impl GpuiScenarioSession {
         // first render reads the requested open/closed state.
         {
             let mut ds = services.drawer_states.lock().unwrap();
-            for (id, open) in drawer_states {
+            for (id, open) in state.closed_drawers() {
                 ds.insert(id, open);
             }
         }
+        // Pre-applying collapsible state is deferred: tree_item
+        // `expanded` Mutables live inside the VM tree, which doesn't
+        // exist until after the view is constructed. Done post-mount
+        // via `pre_set_collapsed_rows` below.
+        let collapsed_rows = state.collapsed_rows();
         let bounds = BoundsRegistry::new();
         let bounds_for_view = bounds.clone();
         let services_for_view = services.clone() as Arc<dyn BuilderServices>;
@@ -677,7 +675,69 @@ impl GpuiScenarioSession {
             _window: window,
         };
         session.settle(cx);
+        // Reset every tree_item's `expanded` Mutable to the default
+        // (true). Reference and test mounts share the underlying
+        // `ReactiveView` (and thus the same Mutables) across calls to
+        // `materialize()`; without this reset the test mount would
+        // inherit whatever state the reference mount left behind.
+        // Idempotent — safe to run when there are no collapsibles.
+        session.reset_collapsibles_to_default(cx);
+        if !collapsed_rows.is_empty() {
+            session.pre_set_collapsed_rows(cx, &collapsed_rows);
+            session.settle(cx);
+        }
         session
+    }
+
+    /// Walk every `tree_item` in the rendered VM tree and set its
+    /// `expanded` Mutable to `true`. Ensures a clean baseline before
+    /// applying per-scenario collapse overrides.
+    pub fn reset_collapsibles_to_default(&self, cx: &mut TestAppContext) {
+        self._window
+            .update(cx, |view, _window, cx| {
+                walk_and_reset_tree_items(&view.vm);
+                if let Some(collection) = view.vm.collection.as_ref() {
+                    let items = collection.items.lock_ref();
+                    for item in items.iter() {
+                        walk_and_reset_tree_items(item);
+                    }
+                }
+                cx.notify();
+            })
+            .expect("window update failed");
+    }
+
+    /// Walk the rendered VM tree and flip the `expanded` `Mutable<bool>`
+    /// to `false` for every `tree_item` whose `target_id` prop matches a
+    /// key in `collapsed`. Used by the reference mount so all dimensions
+    /// — modes, drawers, *and* collapse state — are in their final state
+    /// before the snapshot is compared.
+    pub fn pre_set_collapsed_rows(
+        &self,
+        cx: &mut TestAppContext,
+        collapsed: &std::collections::HashMap<String, bool>,
+    ) {
+        if collapsed.is_empty() {
+            return;
+        }
+        self._window
+            .update(cx, |view, _window, cx| {
+                // Walk the rendered VM tree. For each `tree_item` whose
+                // `target_id` prop is in `collapsed`, set its `expanded`
+                // Mutable to `false`. Other tree_items keep their default.
+                walk_and_collapse_tree_items(&view.vm, collapsed);
+                // Also walk the collection items (the tree's row list
+                // sits inside `ReactiveView::items`, not as direct
+                // children of the tree VM).
+                if let Some(collection) = view.vm.collection.as_ref() {
+                    let items = collection.items.lock_ref();
+                    for item in items.iter() {
+                        walk_and_collapse_tree_items(item, collapsed);
+                    }
+                }
+                cx.notify();
+            })
+            .expect("window update failed");
     }
 
     /// Pre-set drawer open/closed states before the first render settles.
@@ -719,59 +779,42 @@ impl GpuiScenarioSession {
         cx: &mut TestAppContext,
         action: &holon_layout_testing::UiInteraction,
     ) {
-        match action {
-            holon_layout_testing::UiInteraction::SwitchViewMode {
-                block_id,
-                target_mode,
-            } => {
-                let button_id = holon_frontend::vms_button_id_for(block_id, target_mode);
-                let info = self.bounds.element_info(&button_id).unwrap_or_else(|| {
-                    panic!(
-                        "GpuiScenarioSession::apply_action(SwitchViewMode {{ \
-                             block_id: {block_id:?}, target_mode: {target_mode:?} }}): \
-                             no VMS button bounds recorded under id {button_id:?}. \
-                             The scenario generator produced an action for a button \
-                             the UI did not render. Either the block is not a VMS, \
-                             the target mode is not registered, or the VMS builder \
-                             failed to tag the button."
-                    )
-                });
-                let (cx_ref, cy) = info.center();
-                let position = gpui::Point::new(px(cx_ref), px(cy));
+        use holon_layout_testing::{LayoutRef, LayoutSut, UiInteraction};
+        use holon_pbt_core::TransitionImpl;
 
-                let mut vcx = gpui::VisualTestContext::from_window(self._window.into(), cx);
-                // Move first so hit-test picks up the non-zero hitbox — same
-                // reason `simulate_wheel_at` does this (see its doc).
-                vcx.simulate_event(gpui::MouseMoveEvent {
-                    position,
-                    ..Default::default()
-                });
-                vcx.simulate_event(gpui::MouseDownEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    modifiers: gpui::Modifiers::default(),
-                    click_count: 1,
-                    first_mouse: false,
-                });
-                vcx.simulate_event(gpui::MouseUpEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    modifiers: gpui::Modifiers::default(),
-                    click_count: 1,
-                });
-            }
-            holon_layout_testing::UiInteraction::ToggleDrawer { block_id } => {
-                self.services.toggle_drawer(block_id);
-                self._window
-                    .update(cx, |_view, _window, cx| cx.notify())
-                    .expect("window update failed");
-            }
-            holon_layout_testing::UiInteraction::DeliverBlockContent { block_id } => {
-                self.registry.set_active(block_id, "loaded");
-                self._window
-                    .update(cx, |_view, _window, cx| cx.notify())
-                    .expect("window update failed");
-            }
+        // Dispatch via the shared `TransitionImpl` impls in
+        // `holon_layout_testing::transitions::*`. The orphan-rule
+        // wrappers `LayoutSut` / `LayoutRef` let those impls work
+        // against this crate's `GpuiInteractionSession` and against a
+        // default `SceneState` (the per-variant `apply_to_sut` impls
+        // don't read ref state — replay/projection is done in
+        // `run_scenario`, not per-action).
+        {
+            let mut session = GpuiInteractionSession { session: self, cx };
+            let mut sut = LayoutSut::new(&mut session);
+            let ref_state = holon_layout_testing::SceneState::default();
+            let ref_view = LayoutRef::new(&ref_state);
+            futures::executor::block_on(async {
+                match action {
+                    UiInteraction::SwitchViewMode(t) => t.apply_to_sut(&ref_view, &mut sut).await,
+                    UiInteraction::ToggleDrawer(t) => t.apply_to_sut(&ref_view, &mut sut).await,
+                    UiInteraction::ToggleCollapse(t) => t.apply_to_sut(&ref_view, &mut sut).await,
+                    UiInteraction::DeliverBlockContent(t) => {
+                        t.apply_to_sut(&ref_view, &mut sut).await
+                    }
+                }
+            });
+        }
+        // The shared `SwitchViewMode::apply_to_sut` just clicks the VMS
+        // button. In production the click handler swaps the slot via
+        // `tmpl_mode_*` templates, but the layout PBT's manually-built
+        // VMS wraps a `live_block` and never populates those templates —
+        // so the click is a visual no-op and the live_block's underlying
+        // tree (sourced from `BlockTreeRegistry`) doesn't change. Mirror
+        // the production effect by pushing the mode flip through the
+        // registry, which wakes the ReactiveShell consumer stream.
+        if let holon_layout_testing::UiInteraction::SwitchViewMode(t) = action {
+            self.registry.set_active(&t.block_id, &t.target_mode);
         }
         self.settle(cx);
     }
@@ -821,9 +864,118 @@ impl GpuiScenarioSession {
         // frames on its own — so without this, every snapshot after a
         // `notify`-driven re-render lags by one frame.
         self.bounds.flush();
-        let mut entries: Vec<(String, ElementInfo)> = self.bounds.all_elements();
-        entries.sort_by_key(|(id, _)| seq_from_id(id));
-        BoundsSnapshot { entries }
+        holon_layout_testing::snapshot::snapshot_from_provider(&self.bounds)
+    }
+}
+
+// ── GpuiInteractionSession (primitives-only SUT for TransitionImpl) ──
+//
+// Thin bag of GPUI-specific primitives that the per-variant
+// `TransitionImpl` impls under `support/transitions/<variant>.rs`
+// orchestrate. Holds the borrows the primitives need together:
+// `&GpuiScenarioSession` (bounds, registry, services, window) plus
+// `&mut TestAppContext` (mouse simulation, window update).
+//
+// Adding a new variant means adding a new file under
+// `support/transitions/` and — if the variant needs a primitive that
+// doesn't exist yet — adding one method here. The variant file owns
+// the semantics; this struct owns the GPUI plumbing.
+pub struct GpuiInteractionSession<'a> {
+    session: &'a GpuiScenarioSession,
+    cx: &'a mut TestAppContext,
+}
+
+impl holon_layout_testing::Clickable for GpuiInteractionSession<'_> {
+    /// Synthesize a real left-click at the centre of the element
+    /// registered under `element_id` in the session's `BoundsRegistry`.
+    /// Panics loud if no bounds — a missing element is a scenario-
+    /// generator bug, not a runtime to paper over.
+    fn click_at_element(&mut self, element_id: &str) {
+        let info = self
+            .session
+            .bounds
+            .element_info(element_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "GpuiInteractionSession::click_at_element({element_id:?}): \
+                     no bounds recorded under that id. Either the widget didn't \
+                     render, or its builder failed to wrap with TransparentTracker."
+                )
+            });
+        let (cx_ref, cy) = info.center();
+        let position = gpui::Point::new(px(cx_ref), px(cy));
+
+        let mut vcx = gpui::VisualTestContext::from_window(self.session._window.into(), self.cx);
+        // Move first so hit-test picks up the non-zero hitbox — same
+        // reason `simulate_wheel_at` does this (see its doc).
+        vcx.simulate_event(gpui::MouseMoveEvent {
+            position,
+            ..Default::default()
+        });
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position,
+            button: gpui::MouseButton::Left,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position,
+            button: gpui::MouseButton::Left,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+        });
+    }
+}
+
+impl holon_layout_testing::LiveBlockSink for GpuiInteractionSession<'_> {
+    /// Push deferred `live_block` content into the registry channel
+    /// (the test-harness side of async data arrival) and notify the
+    /// window so the next layout pass picks it up.
+    fn deliver_block_content_loaded(&mut self, block_id: &str) {
+        self.session.registry.set_active(block_id, "loaded");
+        self.session
+            ._window
+            .update(self.cx, |_view, _window, cx| cx.notify())
+            .expect("window update failed");
+    }
+}
+
+/// Walk a `ReactiveViewModel` tree and reset every `tree_item`'s
+/// per-instance `expanded` Mutable to `true` (the default). Used by
+/// `reset_collapsibles_to_default` to give every mount a deterministic
+/// starting baseline despite ReactiveView Arcs being shared across
+/// `materialize()` calls.
+fn walk_and_reset_tree_items(node: &holon_frontend::reactive_view_model::ReactiveViewModel) {
+    if node.widget_name().as_deref() == Some("tree_item") {
+        if let Some(ref expanded) = node.expanded {
+            expanded.set(true);
+        }
+    }
+    for child in &node.children {
+        walk_and_reset_tree_items(child);
+    }
+}
+
+/// Walk a `ReactiveViewModel` tree and flip the per-instance `expanded`
+/// `Mutable<bool>` to `false` for every `tree_item` whose `target_id`
+/// prop appears in `collapsed`. Used by `pre_set_collapsed_rows` so the
+/// reference render starts with the post-replay collapse state.
+fn walk_and_collapse_tree_items(
+    node: &holon_frontend::reactive_view_model::ReactiveViewModel,
+    collapsed: &std::collections::HashMap<String, bool>,
+) {
+    if node.widget_name().as_deref() == Some("tree_item") {
+        if let Some(target_id) = node.prop_str("target_id") {
+            if collapsed.contains_key(&target_id) {
+                if let Some(ref expanded) = node.expanded {
+                    expanded.set(false);
+                }
+            }
+        }
+    }
+    for child in &node.children {
+        walk_and_collapse_tree_items(child, collapsed);
     }
 }
 
@@ -925,7 +1077,7 @@ impl ScrollableListView {
 }
 
 impl Render for ScrollableListView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         self.bounds.begin_pass();
 
         let item_count = self.item_count;

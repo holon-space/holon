@@ -1,6 +1,39 @@
 //! `BoundsSnapshot` — a flat list of element bounds captured after a render pass.
 
-use holon_frontend::geometry::ElementInfo;
+use holon_frontend::geometry::{ElementInfo, GeometryProvider};
+
+/// Build a snapshot from any `GeometryProvider`, sorted by the `#{seq}`
+/// suffix that `BoundsRegistry::record()` stamps onto element ids — so the
+/// iteration order matches render-tree traversal order.
+pub fn snapshot_from_provider(provider: &dyn GeometryProvider) -> BoundsSnapshot {
+    let mut entries: Vec<(String, ElementInfo)> = provider.all_elements();
+    entries.sort_by_key(|(id, _)| seq_from_id(id));
+    BoundsSnapshot { entries }
+}
+
+/// Write the snapshot's SVG diagram and structural dump into `dir` as
+/// `{basename}.svg` and `{basename}.txt`. The directory is created if it
+/// doesn't already exist. Panics on I/O failure — these artifacts are
+/// observability hooks, and a missing write usually points at a busted
+/// CI runner or path-typo we want to know about immediately.
+pub fn write_artifacts(snap: &BoundsSnapshot, dir: &std::path::Path, basename: &str) {
+    std::fs::create_dir_all(dir)
+        .unwrap_or_else(|e| panic!("create_dir_all({}) failed: {e}", dir.display()));
+    let svg_path = dir.join(format!("{basename}.svg"));
+    std::fs::write(&svg_path, snap.to_svg())
+        .unwrap_or_else(|e| panic!("write({}) failed: {e}", svg_path.display()));
+    let txt_path = dir.join(format!("{basename}.txt"));
+    std::fs::write(&txt_path, snap.structural_dump())
+        .unwrap_or_else(|e| panic!("write({}) failed: {e}", txt_path.display()));
+}
+
+fn seq_from_id(id: &str) -> u64 {
+    // Malformed ids (no numeric `#NN` suffix) sort last under u64::MAX so a
+    // stray id is visible in the dump rather than crashing the render pass.
+    id.rsplit_once('#')
+        .and_then(|(_, n)| n.parse::<u64>().ok()) // ALLOW(ok): see fn-level comment
+        .unwrap_or(u64::MAX)
+}
 
 /// Result of rendering a fixture: flat list of `(element_id, info)` in the
 /// order they were recorded during prepaint.

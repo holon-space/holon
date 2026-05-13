@@ -346,6 +346,16 @@ pub struct E2ESut<V: VariantMarker> {
     /// totals we snapshot `queries_by_origin()` before each reset and merge
     /// here. Used only when `PBT_MATVIEW_METRICS=1`.
     query_origin_acc: RefCell<std::collections::HashMap<Vec<String>, (usize, std::time::Duration)>>,
+    /// Reference state as it stood at the END of the previous transition —
+    /// i.e. the state the user CURRENTLY sees rendered in the SUT, before
+    /// the in-flight transition is applied. The framework passes the
+    /// POST-transition state into `apply_to_sut`, but waits that gate "what
+    /// the user can act on right now" need the pre-transition shape (the
+    /// post-state already contains any blocks the SUT hasn't been told to
+    /// create yet). Updated at the END of `apply_transition_async`, so
+    /// during the next call this holds previous-post = current-pre. `None`
+    /// for the very first transition — pre-state is effectively empty.
+    pre_ref_state: Option<ReferenceState>,
     _marker: PhantomData<V>,
 }
 
@@ -484,6 +494,47 @@ impl<V: VariantMarker> E2ESut<V> {
 
 #[async_trait::async_trait(?Send)]
 impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> {
+    /// Override the default-panicking SutHandle stub: route the layout-PBT
+    /// `Clickable::click_at_element` capability through the same
+    /// `UserDriver::click_entity` path the rich-PBT chord transitions use.
+    /// Region is unknown at this layer (the shared variant only has an
+    /// `element_id`) so we pass an empty region string — the driver
+    /// resolves geometry via the bounds registry alone.
+    async fn apply_click_at_element(&mut self, element_id: &str) {
+        let driver = self
+            .driver
+            .as_ref()
+            .expect("driver not installed — was start_app called?");
+        // The driver's editor_focus fallback requires a valid region. Infer
+        // from the element_id prefix; default to "main" for generic clicks.
+        let region = if element_id.contains("left-sidebar") || element_id.contains("left_sidebar") {
+            "left_sidebar"
+        } else if element_id.contains("right-sidebar") || element_id.contains("right_sidebar") {
+            "right_sidebar"
+        } else {
+            "main"
+        };
+        driver
+            .click_entity(element_id, region)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[LayoutPBT::click_at_element] click_entity({element_id}) failed: {e:#}")
+            });
+        self.ctx.drain_region_cdc_events().await;
+    }
+
+    /// Override the default-panicking SutHandle stub. Backend tests don't
+    /// generate `DeliverBlockContent` (the variant's `weighted_generator`
+    /// returns `Fail(DeliverNotMeaningfulInBackendTests)`), so this should
+    /// never be reached. Keep the override so accidental wiring fails
+    /// loud with a typed message instead of the default `unimplemented!`.
+    async fn apply_deliver_block_content_loaded(&mut self, block_id: &str) {
+        panic!(
+            "[LayoutPBT::deliver_block_content_loaded] reached for {block_id} — backend PBT \
+             should reject DeliverBlockContent in its generator (see weighted_generator)."
+        );
+    }
+
     async fn navigate_back(&mut self, region: holon_api::Region) {
         debug_assert_eq!(
             region,
@@ -504,6 +555,36 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         self.write_org_file(filename, content)
             .await
             .expect("Failed to write org file");
+
+        // If app is running, wait for OrgSyncController to ingest the file
+        // and re-key ctx.documents from `file:<filename>` to the resolved
+        // doc URI. Mirrors the start_app loop (see apply_start_app body):
+        // without this, subsequent transitions like apply_bulk_external_add
+        // that resolve the doc via `resolve_uri` (which checks doc_uri_map)
+        // and then `ctx.documents.get(&resolved)` will miss because docs
+        // added post-startup never got re-keyed.
+        if !self.ctx.is_running() {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match self.ctx.resolve_doc_uri_by_name(filename).await {
+                Ok(resolved) => {
+                    let file_key = holon_api::EntityUri::file(filename);
+                    if let Some(path) = self.ctx.documents.remove(&file_key) {
+                        self.ctx.documents.insert(resolved.clone(), path);
+                    }
+                    // The synthetic URI minted by the ref-model equals
+                    // the resolved URI (WriteOrgFile.apply_to_sut
+                    // injects `#+ID: <synthetic>` into the file).
+                    if !self.doc_uri_map.contains_key(&resolved) {
+                        self.doc_uri_map.insert(resolved.clone(), resolved.clone());
+                    }
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
     }
 
     async fn apply_create_directory(&mut self, path: &str) {
@@ -784,15 +865,24 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         tracing::trace!(
             "[apply] NavigateFocus: region={region:?} block={block_id} (resolved={resolved_id})"
         );
-        let driver = self
-            .driver
-            .as_ref()
-            .expect("driver not installed — was start_app called?");
         // Drive the real UI: clicking the LeftSidebar entry dispatches
         // its bound `navigation.focus(region: "main", block_id)` action.
         // `ReactiveEngineDriver::click_entity` shares GPUI's intent
         // resolution: snapshot_resolved → find_click_intent_in_view_model
         // → apply_intent. No driver-specific synthesis needed.
+        //
+        // Mouse-driven dispatch under GPUI requires committed bounds in
+        // BoundsRegistry — sidebar entries from a freshly-loaded layout
+        // may not have promoted staged → committed by the time the test
+        // polls. Mirror ClickBlock / SplitBlock and wait first; headless
+        // drivers no-op the wait.
+        self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|e| panic!("[NavigateFocus] {e}"));
+        let driver = self
+            .driver
+            .as_ref()
+            .expect("driver not installed — was start_app called?");
         driver
             .click_entity(resolved_id.as_str(), "left_sidebar")
             .await
@@ -2195,9 +2285,53 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         // dispatches `split_block` directly — a separate code path
         // from the bubble-phase chord resolver that `Ctrl+x` hits.
         // Driving Enter exercises that production path.
-        self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
+        if let Err(e) = self
+            .wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
             .await
-            .unwrap_or_else(|e| panic!("[SplitBlock] bounds unavailable for {resolved_id}: {e:#}"));
+        {
+            let sql_probe = self.probe_block_sql_state(resolved_id.as_str()).await;
+            panic!(
+                "[SplitBlock] bounds unavailable for {resolved_id}: {e:#}\nSQL probe for missing entity:\n{sql_probe}"
+            );
+        }
+        // Children-settled gate. `wait_for_entity_bounds` confirms the target
+        // appears *somewhere* in the geometry, but coords resolved against a
+        // partial first-render get invalidated by the next CDC batch that
+        // adds siblings. Wait until every non-Page child of this block's
+        // parent — as the PRE-transition ref-state predicted — has rendered
+        // so `require_element_center` returns stable bounds. Uses the
+        // pre-state instead of `ref_state` (post-transition) so the
+        // predicate matches what the user can see right now. No-op when
+        // pre-state isn't recorded yet or the parent has no children.
+        let parent_for_settle = self
+            .pre_ref_state
+            .as_ref()
+            .and_then(|s| s.block_state.blocks.get(block_id))
+            .map(|b| b.parent_id.clone());
+        if let Some(parent_id) = parent_for_settle {
+            self.wait_for_children_settled(&parent_id, Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "[SplitBlock] children of parent {parent_id} not settled before click: {e:#}"
+                    )
+                });
+        }
+        // Stronger precondition than bounds-exist: the block must be rendered
+        // as an interactive widget (editable_text or its read-only sibling
+        // rendered_text) so a click can either focus the editor or promote
+        // the read-only variant. Mismatch here (e.g. block rendered as
+        // `text` or not promoted at all) used to surface 1 s later as a
+        // confusing "click didn't change focus" timeout.
+        self.wait_for_widget_kind(
+            resolved_id.as_str(),
+            &["editable_text", "rendered_text"],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("[SplitBlock] target not rendered as editable_text/rendered_text: {e:#}")
+        });
         let driver = self.driver.as_ref().expect("driver not installed");
         driver
             .click_entity(resolved_id.as_str(), "main")
@@ -2221,6 +2355,21 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
                      before Enter — split would have hit the wrong block: {e:#}"
                 )
             });
+        // Pre-Enter SQL snapshot: log the live content + length so panic-time
+        // analysis can distinguish "cursor position drift" from "content
+        // diverged before the split" cases.
+        {
+            let sql_pre = self.probe_block_sql_state(resolved_id.as_str()).await;
+            let ref_content_len = ref_state
+                .block_state
+                .blocks
+                .get(block_id)
+                .map(|b| b.content_text().len());
+            eprintln!(
+                "[SplitBlock-presplit] target={resolved_id} position={position} \
+                 ref_content_len={ref_content_len:?}\n{sql_pre}"
+            );
+        }
         driver
             .send_raw_keystroke("home", &[])
             .await
@@ -2240,13 +2389,80 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         let expected_ids = self.expected_block_ids(ref_state);
         let timeout = std::time::Duration::from_secs(5);
         let db_rows = self.wait_for_blocks_synced(&expected_ids, timeout).await;
+        if db_rows.len() != expected_count {
+            let id_vec: Vec<String> = db_rows
+                .iter()
+                .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
+                .collect();
+            let actual_ids: HashSet<String> = id_vec.iter().cloned().collect();
+            let mut id_counts: std::collections::HashMap<String, u32> = HashMap::new();
+            for id in &id_vec {
+                *id_counts.entry(id.clone()).or_insert(0) += 1;
+            }
+            let duplicates: Vec<(String, u32)> = id_counts
+                .iter()
+                .filter(|(_, c)| **c > 1)
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            let missing: Vec<&String> = expected_ids.difference(&actual_ids).collect();
+            let extra: Vec<&String> = actual_ids.difference(&expected_ids).collect();
+            eprintln!(
+                "[SplitBlock count-mismatch diag] expected={} db_rows={} unique_ids={} duplicates={:?} missing_from_block_raw={:?} extra_in_block_raw={:?}",
+                expected_count,
+                db_rows.len(),
+                actual_ids.len(),
+                duplicates,
+                missing,
+                extra,
+            );
+        }
         assert_eq!(
             db_rows.len(),
             expected_count,
             "[SplitBlock] Block count mismatch after split"
         );
 
+        // Capture pre-split known real ids so we can identify the freshly
+        // created block among `db_rows` (mirrors map_unmapped_split_synthetic_ids).
+        let pre_known: HashSet<String> = {
+            let mut ids: HashSet<String> =
+                self.doc_uri_map.values().map(|u| u.to_string()).collect();
+            for ref_id in ref_state.block_state.blocks.keys() {
+                if !self.doc_uri_map.contains_key(ref_id) && !ref_id.as_str().contains(":split-") {
+                    ids.insert(ref_id.to_string());
+                }
+            }
+            ids
+        };
         self.map_unmapped_split_synthetic_ids(ref_state, &db_rows, "[SplitBlock]");
+
+        // Production fires editor_focus(new_block) as a follow-up of
+        // split_block. The chain is: SQL editor_cursor write → watch_editor_cursor
+        // reactor → GPUI window.focus(new_input) → InputEvent::Focus →
+        // services.set_focus(new_block) → engine.focused_block mirrors new.
+        // This chain isn't synchronous with the Enter dispatch, so without
+        // an explicit wait the next inv-focus-matches-ref check sees the
+        // pre-split click_entity target (c2f12z-s) instead of the new block.
+        // Mirrors the wait_for_focus_to_match barriers used by ClickBlock /
+        // NavigateFocus.
+        let new_block_real_id: Option<String> = db_rows
+            .iter()
+            .filter_map(|row| row.get("id")?.as_string().map(|s| s.to_string()))
+            .find(|id| !pre_known.contains(id));
+        if self.frontend_geometry.is_some() {
+            if let Some(new_id) = new_block_real_id.as_deref() {
+                // Best-effort barrier: try to absorb the
+                // editor_cursor → window.focus(new) → InputEvent::Focus →
+                // set_focus(new) propagation chain before the next step. If
+                // it doesn't converge in 2s, fall through and let the
+                // downstream inv-focus-matches-ref polling catch real
+                // regressions — the new EditorView may not have mounted
+                // yet (a real, separate fragility worth surfacing there).
+                let _ = self
+                    .wait_for_focus_to_match(new_id, Duration::from_secs(2))
+                    .await;
+            }
+        }
     }
 
     async fn apply_join_block(
@@ -2665,6 +2881,14 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         self.ctx.drain_region_cdc_events().await;
         self.dump_nav_tables("after UnpinBlock").await;
     }
+
+    async fn apply_expand_toggle(&mut self, block_id: &holon_api::EntityUri) {
+        self.set_expand_toggle_gate(block_id, true).await;
+    }
+
+    async fn apply_collapse_toggle(&mut self, block_id: &holon_api::EntityUri) {
+        self.set_expand_toggle_gate(block_id, false).await;
+    }
 }
 
 impl<V: VariantMarker> E2ESut<V> {
@@ -2697,6 +2921,7 @@ impl<V: VariantMarker> E2ESut<V> {
             live_blocks_cell: RefCell::new(None),
             live_focus_roots_cell: RefCell::new(None),
             query_origin_acc: RefCell::new(std::collections::HashMap::new()),
+            pre_ref_state: None,
             _marker: PhantomData,
         })
     }
@@ -2737,6 +2962,7 @@ impl<V: VariantMarker> E2ESut<V> {
             live_blocks_cell: RefCell::new(None),
             live_focus_roots_cell: RefCell::new(None),
             query_origin_acc: RefCell::new(std::collections::HashMap::new()),
+            pre_ref_state: None,
             _marker: PhantomData,
         })
     }
@@ -2826,6 +3052,87 @@ impl<V: VariantMarker> E2ESut<V> {
             .any(|c| Self::view_model_contains_entity(c, entity_id))
     }
 
+    /// Walk the live reactive tree from `root` and flip the
+    /// `expanded` Mutable of the `expand_toggle` whose `target_id`
+    /// prop matches `block_id`. Used by `apply_expand_toggle` /
+    /// `apply_collapse_toggle`.
+    ///
+    /// Note on headless persistence: `ReactiveEngine::snapshot_reactive`
+    /// runs `interpret_fn` and returns a freshly-built tree on every
+    /// call, so the `Mutable<bool>` we flip here is reborn on the next
+    /// snapshot unless the GPUI-side `with_update` / `push_down_*`
+    /// machinery is holding a persistent root. This SUT helper is
+    /// correct in either case: the reference-model side already tracks
+    /// the toggle in `state.expanded_toggles`, and the assertion below
+    /// fails loud if the corpus grows an `expand_toggle` render but the
+    /// engine never produces a matching node (the most likely
+    /// regression).
+    async fn set_expand_toggle_gate(&self, block_id: &holon_api::EntityUri, value: bool) {
+        use holon_frontend::reactive_view_model::ReactiveViewModel;
+
+        let engine = self
+            .reactive_engine
+            .borrow()
+            .clone()
+            .expect("reactive engine not installed — was start_app called?");
+        let root_id = self
+            .reactive_root_id
+            .borrow()
+            .clone()
+            .unwrap_or_else(holon_api::root_layout_block_uri);
+        let root = engine.snapshot_reactive(&root_id);
+
+        fn find_and_flip(node: &ReactiveViewModel, target_id: &str, value: bool) -> bool {
+            let is_toggle = matches!(node.widget_name().as_deref(), Some("expand_toggle"));
+            if is_toggle {
+                let props = node.props.lock_ref();
+                let matches = props
+                    .get("target_id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s == target_id)
+                    .unwrap_or(false);
+                drop(props);
+                if matches {
+                    if let Some(gate) = node.expanded.as_ref() {
+                        gate.set(value);
+                        return true;
+                    }
+                }
+            }
+            for child in &node.children {
+                if find_and_flip(child, target_id, value) {
+                    return true;
+                }
+            }
+            if let Some(slot) = node.slot.as_ref() {
+                let content = slot.content.lock_ref();
+                if find_and_flip(&content, target_id, value) {
+                    return true;
+                }
+            }
+            if let Some(lazy) = node.lazy_slot.as_ref() {
+                if let Some(materialised) = lazy.cache.get_cloned() {
+                    if find_and_flip(&materialised, target_id, value) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        let block_uri = block_id.to_string();
+        let target_id = block_uri.strip_prefix("block:").unwrap_or(&block_uri);
+        assert!(
+            find_and_flip(&root, target_id, value),
+            "set_expand_toggle_gate: no expand_toggle node with \
+             target_id={target_id} in reactive tree under {root_id}. \
+             The fixture grew an expand_toggle render but the engine \
+             didn't produce a matching node — likely a shadow_builder \
+             or interpret regression. See \
+             devlog/2026-05-15-lazy-expand-toggle-plan.md."
+        );
+    }
+
     /// Diagnostic probe: dump navigation_history, navigation_cursor, and
     /// focus_roots to stderr. Lets us see whether navigation provider
     /// writes are landing and whether the focus_roots matview has
@@ -2860,6 +3167,70 @@ impl<V: VariantMarker> E2ESut<V> {
                 Err(e) => eprintln!("[nav_probe {label}] {name}: ERROR {e:?}"),
             }
         }
+    }
+
+    /// Probe the live SQL backend for a single block's row across the layers
+    /// that matter for render: `block_raw` (writable base table),
+    /// `block` (hydrated matview the renderer reads), and `focus_roots`
+    /// (matview that gates Main-panel descendant inclusion). Returns a
+    /// human-readable multi-line summary suitable for embedding in a panic
+    /// message — used when `wait_for_entity_bounds` times out and we want to
+    /// tell apart "row missing from SQL" from "row in SQL but not rendered".
+    async fn probe_block_sql_state(&self, entity_id: &str) -> String {
+        let engine = self.engine();
+        let escaped = entity_id.replace('\'', "''");
+        let queries: &[(&str, String)] = &[
+            (
+                "block_raw",
+                format!(
+                    "SELECT id, parent_id, content, content_type, source_language, \
+                     json_extract(properties, '$.task_state') AS task_state, \
+                     json_extract(properties, '$.sequence')  AS sequence \
+                     FROM block_raw WHERE id = '{escaped}'"
+                ),
+            ),
+            (
+                "block (matview)",
+                format!(
+                    "SELECT id, parent_id, content, content_type, source_language, \
+                     json_extract(properties, '$.task_state') AS task_state, tags \
+                     FROM block WHERE id = '{escaped}'"
+                ),
+            ),
+            (
+                "siblings_raw",
+                format!(
+                    "SELECT b.id, b.content_type, json_extract(b.properties, '$.task_state') AS task_state, \
+                     json_extract(b.properties, '$.sequence') AS sequence \
+                     FROM block_raw b \
+                     WHERE b.parent_id = (SELECT parent_id FROM block_raw WHERE id = '{escaped}') \
+                     ORDER BY sequence"
+                ),
+            ),
+            (
+                "focus_roots",
+                "SELECT region, root_id, history_id FROM focus_roots ORDER BY region, history_id"
+                    .to_string(),
+            ),
+        ];
+        let mut out = String::new();
+        for (name, sql) in queries {
+            match engine
+                .execute_query(sql.clone(), std::collections::HashMap::new(), None)
+                .await
+            {
+                Ok(rows) => {
+                    out.push_str(&format!("  [{name}] {} row(s)\n", rows.len()));
+                    for row in &rows {
+                        out.push_str(&format!("    {row:?}\n"));
+                    }
+                }
+                Err(e) => {
+                    out.push_str(&format!("  [{name}] ERROR {e:?}\n"));
+                }
+            }
+        }
+        out
     }
 
     /// Wait until `frontend_geometry` (if installed) has committed bounds for
@@ -2917,12 +3288,118 @@ impl<V: VariantMarker> E2ESut<V> {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
+                // Dump BoundsRegistry contents to disambiguate "element not
+                // rendered at all" from "element rendered under an id we
+                // didn't try" (the latter is a wait_for_entity_bounds bug;
+                // the former is a render-pipeline bug). Filter to elements
+                // mentioning the entity id so the dump stays scannable.
+                let all = geometry.all_elements();
+                let matching: Vec<String> = all
+                    .iter()
+                    .filter(|(id, info)| {
+                        id.contains(entity_id)
+                            || info
+                                .entity_id
+                                .as_deref()
+                                .is_some_and(|eid| eid == entity_id)
+                    })
+                    .map(|(id, info)| {
+                        format!(
+                            "    {id:?} entity_id={:?} widget={} xywh=({},{},{},{})",
+                            info.entity_id,
+                            info.widget_type,
+                            info.x,
+                            info.y,
+                            info.width,
+                            info.height,
+                        )
+                    })
+                    .collect();
+                let matching_str = if matching.is_empty() {
+                    // Also dump entries whose entity_id starts with "block:"
+                    // or "file:" — useful to see what's actually data-bound
+                    // when the target is absent.
+                    let bound: Vec<String> = all
+                        .iter()
+                        .filter_map(|(id, info)| {
+                            info.entity_id.as_deref().map(|eid| {
+                                format!("    {id:?} entity_id={eid:?} widget={}", info.widget_type)
+                            })
+                        })
+                        .take(40)
+                        .collect();
+                    format!(
+                        "    <no element mentions this entity_id>\n\
+                         Data-bound elements (up to 40):\n{}",
+                        bound.join("\n")
+                    )
+                } else {
+                    matching.join("\n")
+                };
                 anyhow::bail!(
                     "wait_for_entity_bounds: timed out after {timeout:?} waiting for \
                      bounds of entity {entity_id:?} — tried element ids \
                      {render_id:?}, {selectable_id:?}, and entity_id scan; element \
                      was never rendered to BoundsRegistry (post-scroll), or bounds \
-                     weren't promoted staged → committed since the last render pass."
+                     weren't promoted staged → committed since the last render pass.\n\
+                     BoundsRegistry total elements: {}\n\
+                     Elements mentioning {entity_id:?}:\n{matching_str}",
+                    all.len(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Wait until at least one element with `entity_id == entity_id` reports
+    /// one of the accepted `widget_type` values.
+    ///
+    /// Stronger precondition than `wait_for_entity_bounds`: a block can have
+    /// bounds while rendered as a non-interactive `rendered_text`. Driving
+    /// keyboard focus through `click_entity` against a `rendered_text` is a
+    /// known footgun — the click doesn't promote the block to edit mode
+    /// when the upstream profile selector picked the wrong variant, and the
+    /// caller's `wait_for_focus_to_match` then times out blaming the click.
+    /// This helper surfaces that mismatch before the click happens.
+    ///
+    /// Returns `Ok(())` when no geometry is installed (headless variants).
+    #[tracing::instrument(skip(self), name = "pbt.wait_for_widget_kind", fields(%entity_id))]
+    async fn wait_for_widget_kind(
+        &self,
+        entity_id: &str,
+        accepted: &[&str],
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
+        let Some(ref geometry) = self.frontend_geometry else {
+            return Ok(String::new());
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let mut observed_for_entity: Vec<String> = Vec::new();
+            for (_, info) in geometry.all_elements() {
+                if info.entity_id.as_deref() == Some(entity_id) {
+                    if accepted.iter().any(|a| info.widget_type == *a) {
+                        return Ok(info.widget_type);
+                    }
+                    observed_for_entity.push(info.widget_type.clone());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let diag = crate::pbt::panic_diag::focus_and_render_dump(
+                    self.engine(),
+                    self.ctx
+                        .reactive_engine
+                        .as_ref()
+                        .and_then(|e| e.ui_state().focused_block())
+                        .as_ref(),
+                    self.frontend_geometry.as_deref(),
+                    "wait_for_widget_kind",
+                )
+                .await;
+                anyhow::bail!(
+                    "wait_for_widget_kind: {entity_id:?} never rendered as one of \
+                     {accepted:?} within {timeout:?}; observed widget_types for this \
+                     entity_id: {observed_for_entity:?}\n{diag}"
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2961,12 +3438,117 @@ impl<V: VariantMarker> E2ESut<V> {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
+                let diag = crate::pbt::panic_diag::focus_and_render_dump(
+                    self.engine(),
+                    actual.as_ref(),
+                    self.frontend_geometry.as_deref(),
+                    "wait_for_focus_to_match",
+                )
+                .await;
                 anyhow::bail!(
                     "wait_for_focus_to_match: expected={expected_block_id:?} \
-                     actual={actual:?} after {timeout:?}"
+                     actual={actual:?} after {timeout:?}\n{diag}"
                 );
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Block until the geometry tree's children of `parent_id` match the
+    /// reference state's prediction for that parent.
+    ///
+    /// Why this gate exists: a CDC batch that adds N siblings to the same
+    /// parent (e.g. NavigateFocus exposing a doc's full block list) can
+    /// arrive in two render passes — first an initial render with a subset
+    /// of children, then a second pass that adds the rest and shifts the
+    /// initially-rendered siblings' bounds. `wait_for_entity_bounds(target)`
+    /// passes against the first pass and returns a `(cx, cy)` that becomes
+    /// stale once the second pass commits, so the synthetic click lands on
+    /// whichever block now sits at those coords. Concrete observation:
+    /// PBT seed=42 step 4, NavigateFocus → c2f12z-s at y=63 → click
+    /// dispatched → render added `-q--2b-9` above → click hit
+    /// `-q--2b-9` instead.
+    ///
+    /// Predicate: count widgets with widget_type ∈ {rendered_text,
+    /// editable_text} whose `entity_id` resolves to a known child of
+    /// `parent_id` in the PRE-transition ref-state. When that count
+    /// equals the number of non-Page children of `parent_id` in the
+    /// pre-state, the children list has stabilised for the purposes of
+    /// coordinate resolution against what the user can see right now.
+    ///
+    /// Reads `self.pre_ref_state` rather than the post-transition state
+    /// passed into `apply_to_sut` — the post-state already contains any
+    /// blocks the in-flight transition will create, but those blocks
+    /// can't exist in the SUT's geometry yet because the transition
+    /// hasn't dispatched. Using the pre-state means the wait is
+    /// expressed in terms of "what the user sees" and needs no
+    /// per-transition exclusion list.
+    ///
+    /// No-op when geometry is unavailable (headless drivers), when no
+    /// pre-state has been recorded yet (first transition), or when the
+    /// parent has no known children — `wait_for_entity_bounds` remains
+    /// the authoritative single-element gate.
+    #[tracing::instrument(skip(self), name = "pbt.wait_for_children_settled", fields(%parent_id))]
+    async fn wait_for_children_settled(
+        &self,
+        parent_id: &EntityUri,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let Some(ref geometry) = self.frontend_geometry else {
+            return Ok(());
+        };
+        let Some(ref pre_state) = self.pre_ref_state else {
+            return Ok(());
+        };
+        let resolved_parent = self.resolve_uri(parent_id);
+        let expected_child_ids: HashSet<String> = pre_state
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| !b.is_page() && b.parent_id == *parent_id)
+            .map(|b| self.resolve_uri(&b.id).to_string())
+            .collect();
+        if expected_child_ids.is_empty() {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let mut seen: HashSet<String> = HashSet::new();
+            for (_, info) in geometry.all_elements() {
+                if info.widget_type != "rendered_text" && info.widget_type != "editable_text" {
+                    continue;
+                }
+                if let Some(eid) = info.entity_id.as_deref() {
+                    if expected_child_ids.contains(eid) {
+                        seen.insert(eid.to_string());
+                    }
+                }
+            }
+            if seen.len() >= expected_child_ids.len() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let missing: Vec<&String> = expected_child_ids.difference(&seen).collect();
+                let diag = crate::pbt::panic_diag::focus_and_render_dump(
+                    self.engine(),
+                    self.ctx
+                        .reactive_engine
+                        .as_ref()
+                        .and_then(|e| e.ui_state().focused_block())
+                        .as_ref(),
+                    self.frontend_geometry.as_deref(),
+                    "wait_for_children_settled",
+                )
+                .await;
+                anyhow::bail!(
+                    "wait_for_children_settled: parent={resolved_parent} expected \
+                     {} child widget(s) (rendered_text/editable_text), saw {} after \
+                     {timeout:?}; missing={missing:?}\n{diag}",
+                    expected_child_ids.len(),
+                    seen.len(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -3034,6 +3616,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 };
                 holon_frontend::interpret_pure(expr, rows, &*services)
             },
+            services_slot.clone(),
         ));
         let services: Arc<dyn holon_frontend::reactive::BuilderServices> = reactive.clone();
         services_slot.set(services).ok();
@@ -3371,6 +3954,11 @@ impl<V: VariantMarker> E2ESut<V> {
     ) {
         use crate::pbt::transitions::E2ETransitionImpl;
         transition.apply_to_sut(ref_state, self).await;
+        // Stash the post-transition ref-state so the NEXT call can read it
+        // as its pre-transition state. The framework hands us only the
+        // post-state, so we have to carry the previous post forward
+        // ourselves. See `pre_ref_state` field doc for the rationale.
+        self.pre_ref_state = Some(ref_state.clone());
 
         // Yield to let tokio schedule CDC forwarding tasks before we drain.
         tokio::task::yield_now().await;
@@ -3719,12 +4307,15 @@ impl<V: VariantMarker> E2ESut<V> {
         // `block:<uuid>` parent (the canonical resolved id). Files not yet
         // resolved fall back to `file:<filename>` to match the legacy parser
         // output. Exclude document blocks and seed blocks.
+        //
+        // Use `lazy_doc_uri_map` (not `self.doc_uri_map`) so docs added
+        // post-startup via WriteOrgFile (which only populates the lazy map
+        // via `ctx.resolve_doc_uri_by_name` above) are mapped correctly.
         let synthetic_to_parent: HashMap<EntityUri, EntityUri> = ref_state
             .documents
             .iter()
             .map(|(syn, filename)| {
-                let target = self
-                    .doc_uri_map
+                let target = lazy_doc_uri_map
                     .get(syn)
                     .cloned()
                     .unwrap_or_else(|| EntityUri::file(filename));
@@ -3776,6 +4367,49 @@ impl<V: VariantMarker> E2ESut<V> {
                 &ref_blocks_org_only,
                 "Org file block ordering wrong",
             );
+
+            // 2c. Live block_raw children order (the projector's authoritative
+            // ordering) matches the reference model's predicted children list.
+            // This compares the encoding-free child-id list directly: no
+            // `sort_key` strings or `sequence` numbers cross the boundary.
+            // Earlier and more diagnostic than the org-roundtrip assertion
+            // above (which can mask the underlying disagreement when the org
+            // renderer's group sort accidentally re-orders things back).
+            self.assert_live_children_match_ref(ref_state).await;
+
+            // 2d. inv-org-render-fixed-point: re-rendering the current SQL
+            // state for each tracked .org file must produce the exact bytes
+            // already on disk. This is the contract `re_render_all_tracked`
+            // depends on for echo suppression: if `render(SQL) != disk`,
+            // the next event-driven re-render will write a different file,
+            // FSEvent fires, `on_file_changed` reprocesses, and the
+            // controller spins. Catches the May-2026 shared-tree mount
+            // loop where a property-drawer key round-trip differs between
+            // ingestion and render. The 2/2b checks above re-parse and
+            // compare blocks against the reference model; they don't see
+            // bytes-level disagreement that the parser is forgiving of
+            // (e.g. property ordering, sibling reordering driven by
+            // sort_key drift), and they don't see disagreement at all
+            // when the bug only manifests in a file shape the reference
+            // model never generates (e.g. `:share-role: mount`).
+            let pairs = self
+                .snapshot_org_render_pairs()
+                .await
+                .expect("snapshot_org_render_pairs failed");
+            for (path, (disk, rendered)) in &pairs {
+                if disk != rendered {
+                    panic!(
+                        "[inv-org-render-fixed-point] {} would be rewritten by the \
+                         next re_render_all_tracked → echo-suppression loop risk.\n\
+                         --- disk ({} bytes) ---\n{}\n--- rendered from SQL ({} bytes) ---\n{}",
+                        path.display(),
+                        disk.len(),
+                        disk,
+                        rendered.len(),
+                        rendered,
+                    );
+                }
+            }
         }
 
         // 3. UI model (built from CDC) matches reference — verify all fields, not just IDs
@@ -5423,9 +6057,6 @@ impl<V: VariantMarker> E2ESut<V> {
                     for s in &summaries {
                         eprintln!("    {s}");
                     }
-                    crate::debug_pause::pause_on_fail(&format!(
-                        "inv-frontend-no-error-widgets — {error_count} Error widget(s); details above"
-                    ));
                 }
                 assert!(
                     error_count == 0,
@@ -6108,14 +6739,29 @@ impl<V: VariantMarker> E2ESut<V> {
             && let Some(ref ref_focused) = ref_state.focused_block
             && ref_state.active_editor.is_none()
         {
-            let actual = engine.focused_block();
+            let resolved_ref = self.resolve_uri(ref_focused);
+            // Poll briefly: chord ops like SplitBlock / JoinBlock fire
+            // editor_focus(new_block) as a follow-up that propagates through
+            // SQL → watch_editor_cursor → window.focus → InputEvent::Focus →
+            // set_focus. The new block's EditorView may not have mounted by
+            // the time this invariant runs; poll up to 1s for the chain to
+            // converge before failing.
+            let poll_deadline = std::time::Instant::now() + Duration::from_millis(1000);
+            let mut actual = engine.focused_block();
+            while actual
+                .as_ref()
+                .is_some_and(|u| u.as_str() != resolved_ref.as_str())
+                && std::time::Instant::now() < poll_deadline
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                actual = engine.focused_block();
+            }
             if let Some(ref actual_uri) = actual {
-                let resolved_ref = self.resolve_uri(ref_focused);
                 assert_eq!(
                     actual_uri.as_str(),
                     resolved_ref.as_str(),
                     "[inv-focus-matches-ref] Global focus mismatch: reference model has {} \
-                     (resolved: {}), but engine.focused_block() has {}",
+                     (resolved: {}), but engine.focused_block() has {} (polled 1s)",
                     ref_focused,
                     resolved_ref,
                     actual_uri,
@@ -6395,6 +7041,66 @@ impl<V: VariantMarker> E2ESut<V> {
                 actual_rows.len(),
                 elapsed
             );
+        }
+    }
+
+    /// Compare every parent's live `block_raw` children order (sorted
+    /// by `sort_key`, the projector's authoritative ordering) against
+    /// the reference model's predicted children list. This is the
+    /// encoding-free equivalent of `assert_block_order` — both sides
+    /// produce a `Vec<EntityUri>` per parent, no `sort_key` /
+    /// `sequence` strings cross the boundary.
+    ///
+    /// Mirrors `BlockOrdering::children(parent_id)` semantically;
+    /// queries `block_raw` directly because the test doesn't hold a
+    /// `dyn BlockOrdering` (the trait lives in the holon backend, not
+    /// the engine surface). When/if a `BlockOrdering` is exposed via
+    /// `BlockDomain`, swap the SQL out for the trait call.
+    async fn assert_live_children_match_ref(&self, ref_state: &ReferenceState) {
+        let parents: std::collections::BTreeSet<EntityUri> = ref_state
+            .block_state
+            .blocks
+            .values()
+            .map(|b| b.parent_id.clone())
+            .collect();
+        let engine = self.engine();
+        for parent in parents {
+            if !parent.is_block() {
+                continue;
+            }
+            let resolved_parent = self.resolve_uri(&parent);
+            let sql = format!(
+                "SELECT id FROM block_raw WHERE parent_id = '{}' ORDER BY sort_key, id",
+                resolved_parent.as_str().replace('\'', "''")
+            );
+            let rows = match engine.execute_query(sql, HashMap::new(), None).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    panic!(
+                        "[inv-live-children-match-ref] block_raw query failed for parent {}: {e:#}",
+                        resolved_parent
+                    );
+                }
+            };
+            let live_ids: Vec<String> = rows
+                .iter()
+                .filter_map(|row| row.get("id").and_then(|v| v.as_string()).map(String::from))
+                .collect();
+            // Resolve ref ids the same way the rest of the test does so
+            // synthetic split / doc URIs line up with their real UUIDs.
+            let ref_ids: Vec<String> = ref_state
+                .children_of(&parent)
+                .into_iter()
+                .map(|uri| self.resolve_uri(&uri).as_str().to_string())
+                .collect();
+            if live_ids != ref_ids {
+                panic!(
+                    "[inv-live-children-match-ref] children of {} disagree:\n  \
+                     live  (block_raw ORDER BY sort_key): {:?}\n  \
+                     ref   (sorted_children_of):          {:?}",
+                    resolved_parent, live_ids, ref_ids
+                );
+            }
         }
     }
 

@@ -133,7 +133,14 @@ impl E2ETransitionImpl for BulkExternalAdd {
         for block in &self.blocks {
             let mut block = block.clone();
             block.content = normalize_content_for_org_roundtrip(&block.content, block.content_type);
-            state.block_state.blocks.insert(block.id.clone(), block);
+            let id = block.id.clone();
+            state.block_state.blocks.insert(id.clone(), block);
+            // Register doc ownership so WriteOrgFile::apply_to_ref's delete
+            // cascade can find these on a subsequent file rewrite.
+            state
+                .block_state
+                .block_documents
+                .insert(id, self.doc_uri.clone());
         }
         // BulkExternalAdd serializes via serialize_blocks_to_org (canonical order)
         let mut all_blocks: Vec<Block> = state.block_state.blocks.values().cloned().collect();

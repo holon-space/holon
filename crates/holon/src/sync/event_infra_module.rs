@@ -26,6 +26,7 @@ use crate::sync::event_bus::EventBus;
 use crate::sync::link_event_subscriber::LinkEventSubscriber;
 use crate::sync::turso_event_bus::{TursoEventBus, WatermarkState};
 use holon_api::block::Block;
+use holon_core::block_ordering::BlockOrdering;
 
 /// Marker type for the CacheEventSubscriber background wiring.
 /// Resolving this from DI triggers the EventBus → QueryableCache subscription.
@@ -138,6 +139,40 @@ impl Module for EventInfraModule {
                 Arc::new(block_ops) as Arc<dyn OperationProvider>
             },
         ));
+
+        // Expose a shared BlockOrdering instance for consumers that need positional
+        // intent writes (OrgSyncController, future markdown adapter, MCP).
+        // Uses the same SqlBlockOperations construction as the OperationProvider above,
+        // routing through the cell_registry for Loro vs SqlOnly mode.
+        injector.provide::<dyn BlockOrdering>(Provider::root_async(|resolver| async move {
+            let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
+            let event_bus = resolver.resolve_async::<TursoEventBus>().await;
+            let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
+            let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
+
+            let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
+                db_handle_provider.handle(),
+                BLOCK_WRITE_TABLE.to_string(),
+                "block".to_string(),
+                "block".to_string(),
+                event_bus_arc,
+                BlockSchemaModule.edge_fields(),
+            ));
+
+            let cell_registry: Arc<crate::sync::block_cell_registry::BlockCellRegistry> =
+                match resolver
+                    .optional_resolve_async::<crate::sync::block_cell_registry::BlockCellRegistry>()
+                    .await
+                {
+                    Some(arc) => arc.clone(),
+                    None => {
+                        Arc::new(crate::sync::block_cell_registry::BlockCellRegistry::sql_only())
+                    }
+                };
+            let block_ops =
+                SqlBlockOperations::new(sql_ops, block_cache).with_cell_registry(cell_registry);
+            Arc::new(block_ops) as Arc<dyn BlockOrdering>
+        }));
 
         injector.provide::<LinkEventSubscriberHandle>(Provider::root_async(
             |resolver| async move {
