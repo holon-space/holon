@@ -1,30 +1,47 @@
-//! Phase 7 — `inv-viewmodel-tree-virtual-slots` (DEFERRED).
+//! Phase 7 — `inv-viewmodel-tree-virtual-slots` (SKIPPED — blocked upstream).
 //!
-//! Inline body lives at `sut.rs:5447–5508` (inside ReactiveEngine snapshot
-//! block, sub-check 10j).
+//! Inline body originally at `sut.rs:5447–5508` (sub-check 10j).
 //!
-//! # Why deferred
+//! The inline body is explicitly a no-op: it defines a walk function, initialises
+//! `found = 0; without = 0`, immediately discards them with `let _ = (found, without)`,
+//! and emits "SKIPPED — display_tree not wired in this scope". The walk is never
+//! invoked because `display_tree` is not accessible in the inline scope.
 //!
-//! The body is explicitly marked as `SKIPPED` in sut.rs itself ("display_tree must
-//! be obtained from wait_for_entity_in_resolved_view_model or similar before this
-//! invariant can meaningfully execute"). It requires:
-//! - `display_tree` from private reactive_engine path (same blocker as inv-viewmodel-snapshot)
-//! - `ref_state.active_render_expr_name(Region::Main)` — no Ref* cap
-//! - `holon_frontend::ReactiveViewModel` collection walk internals
+//! When this invariant becomes unblocked the logic should:
+//! - Gate on `ref_.active_render_expr_name(CapRegion::Main) == Some("tree")`
+//! - Walk the snapshot looking for collection nodes whose last child has an
+//!   entity_id containing `":__virtual:"`.
+//! - Warn (not fail) when tree collections have no virtual child slot.
 //!
-//! The inline code sets `found = 0; without = 0; let _ = (found, without);` and then
-//! immediately emits the SKIPPED log — effectively a no-op. Wire when the
-//! `display_tree` blocker (inv-viewmodel-snapshot) is resolved AND when the walk
-//! infra is exposed via a cap method.
+//! Status: honestly SKIPPED — same `display_tree` blocker as the inline body.
+//! Promote when `SutRenderer::widget_tree_snapshot` is wired for the headless
+//! path and virtual-slot entity IDs are propagated through `WidgetSnapshot`.
+
+use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvViewmodelTreeVirtualSlots;
 
 impl InvViewmodelTreeVirtualSlots {
-    pub const ID: holon_pbt_core::invariant::InvariantId =
-        holon_pbt_core::invariant::InvariantId("inv-viewmodel-tree-virtual-slots");
+    pub const ID: InvariantId = InvariantId("inv-viewmodel-tree-virtual-slots");
 }
 
-// Status: ref-side unblocked (RefRender::active_render_expr_name added).
-// Remaining blocker: inline body is explicitly SKIPPED in sut.rs (display_tree
-// not wired). Same reactive_engine blocker as other viewmodel invariants.
-// Promote only after display_tree is exposed via SutViewModel headless path.
+#[allow(async_fn_in_trait)]
+impl<R, S> Invariant<R, S> for InvViewmodelTreeVirtualSlots
+where
+    S: SutRenderer,
+{
+    fn id(&self) -> InvariantId {
+        Self::ID
+    }
+
+    fn mode(&self) -> RunMode {
+        RunMode::Warn
+    }
+
+    async fn check(&self, _: &R, _: &S) -> InvariantResult {
+        InvariantResult::Skipped(
+            "display_tree not wired — same blocker as inline sut.rs:5486".into(),
+        )
+    }
+}

@@ -93,6 +93,9 @@ impl RefBlockTree for ToyRef {
     fn is_page_block(&self, _: &CapBlockId) -> bool {
         false
     }
+    fn all_non_seed_block_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+        Default::default()
+    }
 }
 
 impl RefTaskState for ToyRef {
@@ -115,6 +118,9 @@ impl SutRenderer for ToySut {
     }
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
         Default::default()
+    }
+    async fn widget_tree_for(&self, _: &CapBlockId) -> Option<WidgetSnapshot> {
+        None
     }
 }
 

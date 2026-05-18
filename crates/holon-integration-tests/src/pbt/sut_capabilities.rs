@@ -360,6 +360,28 @@ impl<V: VariantMarker> SutRenderer for E2ESut<V> {
         view_model_to_snapshot(&vm)
     }
 
+    /// Widget tree for an explicit block id. Builds the snapshot via
+    /// interpret_pure against that block's resolved render_expr +
+    /// data_rows, same path as `widget_tree_snapshot` but rooted at
+    /// `block_id` instead of the layout root. Returns `None` if the
+    /// block isn't watchable yet.
+    async fn widget_tree_for(
+        &self,
+        block_id: &CapBlockId,
+    ) -> Option<holon_pbt_core::capabilities::WidgetSnapshot> {
+        let engine = self.frontend_engine.clone()?;
+        let uri = holon_api::EntityUri::parse(block_id).ok()?;
+        let rqr = engine.ensure_watching(&uri);
+        if rqr.is_loading() {
+            return None;
+        }
+        let (render_expr, data_rows) = rqr.snapshot();
+        let services =
+            holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
+        let vm = holon_frontend::interpret_pure(&render_expr, &data_rows, &services).snapshot();
+        Some(view_model_to_snapshot(&vm))
+    }
+
     /// Extracts the `id` column from the layout root's data_rows.
     /// Returns empty set if the layout root isn't watchable yet.
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<CapBlockId> {

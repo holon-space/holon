@@ -120,6 +120,16 @@ pub trait RefBlockTree {
     /// True if `id` is a Page block (tagged `Page`). Mirrors
     /// `Block::is_page()`. Pure slice has no pages → returns `false`.
     fn is_page_block(&self, id: &CapBlockId) -> bool;
+
+    /// All block ids tracked by the reference model, EXCLUDING seed
+    /// blocks (those with sentinel/no_parent docs — they're inserted
+    /// via direct SQL, never reverse-synced to Loro, and don't appear
+    /// in the matview the wide PBT compares against).
+    ///
+    /// Used by `inv-block-ids-match-ref` to compare against
+    /// `SutSqlProjection::all_block_ids()` for set-equality drift
+    /// detection at the storage layer.
+    fn all_non_seed_block_ids(&self) -> BTreeSet<CapBlockId>;
 }
 
 /// Block-tree mutations. Concrete impls maintain whatever bookkeeping
@@ -558,6 +568,19 @@ pub trait SutRenderer {
     /// assert tree-referenced entity_ids are a subset of available
     /// data rows.
     async fn root_data_row_ids(&self) -> BTreeSet<CapBlockId>;
+
+    /// Widget tree for a SPECIFIC block id — the snapshot the renderer
+    /// would produce if that block were the root of its own subtree.
+    /// Used by invariants that need per-block-subtree BFS (e.g.
+    /// `inv-editable-text-has-draggable`, which enforces pairing within
+    /// each block_profile-rendered tree independently).
+    ///
+    /// Returns `None` if `block_id` doesn't resolve (no such block /
+    /// not watchable yet). A "live_block" node referenced inside
+    /// another tree's snapshot is the typical input: caller BFS-es by
+    /// following live_block children, calling this method per discovered
+    /// block id.
+    async fn widget_tree_for(&self, block_id: &CapBlockId) -> Option<WidgetSnapshot>;
 }
 
 // ─── Phase 6d — Layout/Bounds cluster ────────────────────────────────

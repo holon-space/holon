@@ -199,6 +199,9 @@ impl RefBlockTree for EditorPureRef {
     fn is_page_block(&self, _: &CapBlockId) -> bool {
         false
     }
+    fn all_non_seed_block_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+        self.blocks.keys().cloned().collect()
+    }
 }
 
 impl RefBlockTreeMut for EditorPureRef {

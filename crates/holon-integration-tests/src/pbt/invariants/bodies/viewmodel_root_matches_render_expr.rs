@@ -1,28 +1,60 @@
-//! Phase 7 — `inv-viewmodel-root-matches-render-expr` (DEFERRED).
+//! Phase 7 — `inv-viewmodel-root-matches-render-expr` (FUNCTIONAL).
 //!
-//! Inline body lives at `sut.rs:5019–5061` (inside ReactiveEngine snapshot block,
-//! sub-check 10d).
+//! Inline body originally at `sut.rs:5019–5062` (sub-check 10d).
 //!
-//! # Why deferred
+//! Asserts that the root widget kind in the snapshot matches the reference
+//! model's active render expression name for `CapRegion::Main`. The engine
+//! may wrap the root in a `view_mode_switcher`; in that case we look one
+//! level deeper (first child's kind).
 //!
-//! The body requires:
-//! - `display_tree` from private `reactive_engine` interpret_pure path
-//! - `ref_state.root_render_expr()` — ref-side gate, no Ref* cap
-//! - `holon_api::render_types::RenderExpr` + `expected_expr.to_rhai()` — api types
-//!   not in pbt-core
-//!
-//! Wire when `SutRenderer::render_tree_of` or a new `SutViewModel::root_widget_name()`
-//! covers the headless path and `RefBlockTree` gains `root_render_expr_name()`.
+//! Status: functional.
+
+use holon_pbt_core::capabilities::{CapRegion, RefRender, SutRenderer};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvViewmodelRootMatchesRenderExpr;
 
 impl InvViewmodelRootMatchesRenderExpr {
-    pub const ID: holon_pbt_core::invariant::InvariantId =
-        holon_pbt_core::invariant::InvariantId("inv-viewmodel-root-matches-render-expr");
+    pub const ID: InvariantId = InvariantId("inv-viewmodel-root-matches-render-expr");
 }
 
-// Status: ref-side unblocked (RefRender::has_root_render_expr added).
-// Remaining blocker: display_tree comes from reactive_engine (private RefCell);
-// RefRender::has_root_render_expr is a bool gate but the body also needs
-// ref_state.root_render_expr() as a RenderExpr (not in any cap trait).
-// Promote when SutViewModel::root_widget_name is wired and RefRender gains root_render_expr_name.
+#[allow(async_fn_in_trait)]
+impl<R, S> Invariant<R, S> for InvViewmodelRootMatchesRenderExpr
+where
+    R: RefRender,
+    S: SutRenderer,
+{
+    fn id(&self) -> InvariantId {
+        Self::ID
+    }
+
+    fn mode(&self) -> RunMode {
+        RunMode::Strict
+    }
+
+    async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
+        let Some(expected_name) = ref_.active_render_expr_name(CapRegion::Main) else {
+            return InvariantResult::Ok;
+        };
+
+        let root = sut.widget_tree_snapshot().await;
+        let actual = root.kind.as_str();
+
+        let matches = actual == expected_name
+            || (actual == "view_mode_switcher"
+                && root
+                    .children
+                    .first()
+                    .map(|c| c.kind.as_str() == expected_name)
+                    .unwrap_or(false));
+
+        if matches {
+            InvariantResult::Ok
+        } else {
+            InvariantResult::Fail(format!(
+                "[inv-viewmodel-root-matches-render-expr] Root widget '{actual}' \
+                 does not match expected render expr '{expected_name}'"
+            ))
+        }
+    }
+}

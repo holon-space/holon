@@ -1,26 +1,70 @@
-//! Phase 7 — `inv-viewmodel-entity-ids-subset-of-data` (DEFERRED).
+//! Phase 7 — `inv-viewmodel-entity-ids-subset-of-data` (FUNCTIONAL).
 //!
-//! Inline body lives at `sut.rs:5064–5113` (inside the ReactiveEngine snapshot
-//! block).
+//! Inline body originally at `sut.rs:5064–5114` (sub-check 10e).
 //!
-//! # Why deferred
+//! Asserts that every entity ID present in the widget tree snapshot is also
+//! present in the root layout's data rows. The check is gated on:
+//! - The ref model tracking a render expression (i.e. `has_root_render_expr()`)
+//! - Both the tree-id set and the data-id set being non-empty
 //!
-//! The body requires:
-//! - `display_tree.collect_entity_ids()` — produced from private `self.reactive_engine`
-//! - `data_rows` snapshot from `reactive.ensure_watching` — private engine
-//! - `ref_state.root_render_expr().is_some()` — ref gate, no Ref* cap
+//! When profile-variant YAML hard-codes `live_block("block:default-*")` IDs
+//! outside the query data, `has_root_render_expr()` returns false and the
+//! assertion is intentionally skipped.
 //!
-//! Wire when `SutViewModel` exposes `tree_entity_ids()` + `data_row_ids()`
-//! and `RefBlockTree` covers `root_render_expr`.
+//! Status: functional.
+
+use holon_pbt_core::capabilities::{RefRender, SutRenderer};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvViewmodelEntityIdsSubsetOfData;
 
 impl InvViewmodelEntityIdsSubsetOfData {
-    pub const ID: holon_pbt_core::invariant::InvariantId =
-        holon_pbt_core::invariant::InvariantId("inv-viewmodel-entity-ids-subset-of-data");
+    pub const ID: InvariantId = InvariantId("inv-viewmodel-entity-ids-subset-of-data");
 }
 
-// Status: ref-side unblocked (RefRender::has_root_render_expr added).
-// Remaining blocker: display_tree and data_rows both come from private
-// reactive_engine RefCell; no cap exposes this surface yet.
-// Promote when SutViewModel::tree_entity_ids + data_row_ids are wired.
+#[allow(async_fn_in_trait)]
+impl<R, S> Invariant<R, S> for InvViewmodelEntityIdsSubsetOfData
+where
+    R: RefRender,
+    S: SutRenderer,
+{
+    fn id(&self) -> InvariantId {
+        Self::ID
+    }
+
+    fn mode(&self) -> RunMode {
+        RunMode::Strict
+    }
+
+    async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
+        if !ref_.has_root_render_expr() {
+            return InvariantResult::Ok;
+        }
+
+        let root = sut.widget_tree_snapshot().await;
+        let tree_ids = root.collect_entity_ids();
+        let data_ids = sut.root_data_row_ids().await;
+
+        if tree_ids.is_empty() || data_ids.is_empty() {
+            return InvariantResult::Ok;
+        }
+
+        let missing: Vec<&String> = tree_ids
+            .iter()
+            .filter(|id| !data_ids.contains(*id))
+            .collect();
+
+        if missing.is_empty() {
+            InvariantResult::Ok
+        } else {
+            InvariantResult::Fail(format!(
+                "[inv-viewmodel-entity-ids-subset-of-data] ViewModel has entity IDs not in \
+                 query data. Missing: {missing:?}\n\
+                 Tree IDs ({}):\n  {tree_ids:?}\n\
+                 Data IDs ({}):\n  {data_ids:?}",
+                tree_ids.len(),
+                data_ids.len(),
+            ))
+        }
+    }
+}

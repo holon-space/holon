@@ -196,6 +196,22 @@ impl RefBlockTree for ReferenceState {
             .get(&uri)
             .is_some_and(|b| b.is_page())
     }
+
+    fn all_non_seed_block_ids(&self) -> BTreeSet<CapBlockId> {
+        self.block_state
+            .blocks
+            .keys()
+            .filter(|uri| {
+                let is_seed = self
+                    .block_state
+                    .block_documents
+                    .get(uri)
+                    .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
+                !is_seed
+            })
+            .map(cap_id)
+            .collect()
+    }
 }
 
 // ─── RefBlockTreeMut ──────────────────────────────────────────────────
