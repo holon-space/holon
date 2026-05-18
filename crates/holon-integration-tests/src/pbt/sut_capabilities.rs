@@ -1,4 +1,4 @@
-//! Blanket `SutLoro` + `SutLoroLog` + `SutLifecycle` impls on `E2ESut<V>`.
+//! Blanket `SutLoro` + `SutLoroLog` + `SutLifecycle` + Phase 6c-g impls on `E2ESut<V>`.
 //!
 //! Follows the same pattern as `reference_capabilities.rs`:
 //! thin forwarding impls that expose capability-trait surface
@@ -7,7 +7,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use holon_pbt_core::capabilities::{
-    CapBlockId, SutCdc, SutLifecycle, SutLoro, SutLoroLog, SutOrgFileWrite, SutSqlProjection,
+    CapBlockId, SutCdc, SutDriver, SutLayout, SutLifecycle, SutLoro, SutLoroLog, SutOrgFileWrite,
+    SutOrgRender, SutQueryCompile, SutRenderer, SutSqlProjection, SutViewModel,
 };
 
 use super::sut::E2ESut;
@@ -286,5 +287,217 @@ impl<V: VariantMarker> SutCdc for E2ESut<V> {
     /// transitions in `check_invariants_async` (sut.rs:3965, 4005).
     async fn drain_cdc(&mut self) {
         self.ctx.drain_cdc_events().await;
+    }
+}
+
+// ─── SutViewModel ─────────────────────────────────────────────────────
+
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutViewModel for E2ESut<V> {
+    /// Not wired: `vm_emissions` is a private field on `E2ESut` (sut.rs:295).
+    /// The production path at sut.rs:5845 calls
+    /// `std::mem::take(&mut *self.vm_emissions.lock().unwrap())`.
+    /// Add a `pub(super)` accessor for `vm_emissions` in Phase 7 to wire this.
+    async fn drain_vm_emissions(&mut self) -> Vec<String> {
+        unimplemented!(
+            "SutViewModel::drain_vm_emissions on E2ESut: vm_emissions is a private field \
+             (sut.rs:295). Add a pub(super) accessor in Phase 7."
+        )
+    }
+
+    /// True if the frontend root ViewModel is the Error variant.
+    /// Mirrors `inv-frontend-root-not-error` (sut.rs:6038–6047):
+    /// snapshots the root URI via the frontend engine and checks
+    /// `widget_name() == "error"`. Uses `frontend_engine` (pub) and falls
+    /// back to `false` when none is installed. `reactive_root_id` (private)
+    /// is not reachable here, so uses `root_layout_block_uri` as the root.
+    async fn frontend_root_is_error(&self) -> bool {
+        let Some(engine) = self.frontend_engine.clone() else {
+            return false;
+        };
+        let root_uri = holon_api::root_layout_block_uri();
+        let vm = engine.snapshot(&root_uri);
+        vm.widget_name() == Some("error")
+    }
+}
+
+// ─── SutRenderer ──────────────────────────────────────────────────────
+
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutRenderer for E2ESut<V> {
+    /// Returns a debug-formatted render-tree string for `id` via
+    /// `frontend_engine` (pub). `reactive_engine` (private, sut.rs:291)
+    /// would provide a fallback path, but is not accessible here.
+    /// Add a pub accessor in Phase 7 to wire the headless fallback.
+    async fn render_tree_of(&self, id: &CapBlockId) -> Option<String> {
+        let engine = self.frontend_engine.clone()?;
+        let uri = holon_api::EntityUri::parse(id).ok()?;
+        let rqr = engine.ensure_watching(&uri);
+        if rqr.is_loading() {
+            return None;
+        }
+        let (render_expr, data_rows) = rqr.snapshot();
+        let services =
+            holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
+        let vm =
+            holon_frontend::interpret_pure(&render_expr, &data_rows, &services).snapshot();
+        Some(vm.pretty_print(0))
+    }
+}
+
+// ─── SutLayout ────────────────────────────────────────────────────────
+
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutLayout for E2ESut<V> {
+    /// True if any element carrying `id` as its `entity_id` is currently
+    /// in the BoundsRegistry. Mirrors the `lookup_entity` helper used in
+    /// `inv-frontend-bounds-rendered` (sut.rs:6093–6105).
+    async fn has_registered_bounds(&self, id: &CapBlockId) -> bool {
+        let Some(ref geometry) = self.frontend_geometry else {
+            return false;
+        };
+        geometry
+            .element_info(&format!("render-entity-{id}"))
+            .or_else(|| geometry.element_info(&format!("live-block-{id}")))
+            .or_else(|| geometry.element_info(&format!("selectable-{id}")))
+            .or_else(|| geometry.element_info(&format!("editable-text-{id}")))
+            .or_else(|| geometry.find_by_entity_id(id))
+            .is_some()
+    }
+
+    /// True if a `draggable` element carrying `id` is in the BoundsRegistry.
+    /// Mirrors the `tree_draggable` collection in `inv-editable-text-has-draggable`
+    /// (sut.rs:6634–6643): an element whose widget_type == "draggable" and
+    /// entity_id == id.
+    async fn has_draggable_handle(&self, id: &CapBlockId) -> bool {
+        let Some(ref geometry) = self.frontend_geometry else {
+            return false;
+        };
+        geometry
+            .all_elements()
+            .into_iter()
+            .any(|(_, info)| {
+                info.widget_type == "draggable" && info.entity_id.as_deref() == Some(id.as_str())
+            })
+    }
+
+    /// True if any rendered element has widget_type == "error".
+    /// Mirrors `inv-frontend-no-error-widgets` (sut.rs:6050–6063) via the
+    /// BoundsRegistry; falls back to the ViewModel tree via `frontend_engine`
+    /// (pub) when no geometry provider is installed.
+    async fn any_error_widget(&self) -> bool {
+        if let Some(ref geometry) = self.frontend_geometry {
+            return geometry
+                .all_elements()
+                .into_iter()
+                .any(|(_, info)| info.widget_type == "error");
+        }
+        let Some(engine) = self.frontend_engine.clone() else {
+            return false;
+        };
+        let root_uri = holon_api::root_layout_block_uri();
+        let vm = engine.snapshot(&root_uri);
+        crate::display_assertions::count_error_nodes(&vm) > 0
+    }
+}
+
+// ─── SutDriver ────────────────────────────────────────────────────────
+
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutDriver for E2ESut<V> {
+    /// Send a raw key chord to the currently focused entity.
+    /// Not wired: SutDriver::driver_send_key_chord needs a KeyChord
+    /// (not a raw string) and a known focused entity id — both are
+    /// context-dependent. The existing `E2ESut::send_key_chord` requires
+    /// an entity_id param and a parsed `holon_api::KeyChord`. A thin
+    /// bridge would need parsing + focus resolution not yet exposed. Wire
+    /// in Phase 7 alongside the SutFocus trait (which will expose
+    /// `current_focus` from the reference model).
+    async fn driver_send_key_chord(&mut self, _: &str) {
+        unimplemented!(
+            "SutDriver::driver_send_key_chord on E2ESut: requires a focused entity id \
+             and a parsed KeyChord; E2ESut::send_key_chord already provides this with \
+             explicit args. Bridge in Phase 7 once SutFocus exposes the current focus id."
+        )
+    }
+
+    /// Click an entity by id via the installed UserDriver.
+    /// Delegates to the driver's `click_entity` with region "main",
+    /// the same default used for most SplitBlock / ClickBlock transitions
+    /// (sut.rs:2228–2256).
+    async fn driver_click(&mut self, id: &CapBlockId) {
+        let driver = self
+            .driver
+            .as_ref()
+            .expect("SutDriver::driver_click: driver not installed");
+        driver
+            .click_entity(id.as_str(), "main")
+            .await
+            .unwrap_or_else(|e| panic!("SutDriver::driver_click failed for {id}: {e:#}"));
+    }
+
+    /// Returns the current SQL-side focus block id from the `current_focus`
+    /// matview. Not wired via the UserDriver (drivers don't expose a
+    /// `current_focus()` verb); instead reads the authoritative SQL view,
+    /// matching the prod path used in `check_invariants_async` (sut.rs:4665).
+    /// Returns the Main-region focus id, or `None` when the matview is empty.
+    async fn driver_current_focus(&self) -> Option<CapBlockId> {
+        let rows = self
+            .ctx
+            .query_sql("SELECT region, block_id FROM current_focus")
+            .await
+            .expect("SutDriver::driver_current_focus: current_focus query failed");
+        rows.into_iter()
+            .find(|row| {
+                row.get("region")
+                    .and_then(|v| v.as_string())
+                    .map(|r| r == "main")
+                    .unwrap_or(false)
+            })
+            .and_then(|row| {
+                row.get("block_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+    }
+}
+
+// ─── SutOrgRender ─────────────────────────────────────────────────────
+
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutOrgRender for E2ESut<V> {
+    /// Render all tracked documents to org-mode text, returning
+    /// `(path_string, org_contents)` pairs.
+    /// Delegates to `TestContext::snapshot_org_render_pairs` — the same
+    /// path used by `inv-org-render-fixed-point` (sut.rs:4395–4412).
+    async fn render_documents_to_org(&self) -> Vec<(String, String)> {
+        let pairs = self
+            .ctx
+            .snapshot_org_render_pairs()
+            .await
+            .expect("SutOrgRender::render_documents_to_org: snapshot_org_render_pairs failed");
+        pairs
+            .into_iter()
+            .map(|(path, (_disk, rendered))| (path.to_string_lossy().to_string(), rendered))
+            .collect()
+    }
+}
+
+// ─── SutQueryCompile ──────────────────────────────────────────────────
+
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutQueryCompile for E2ESut<V> {
+    /// Not wired: query compilation (PRQL/GQL) requires access to the
+    /// holon query-compiler helpers. The compilation path lives in
+    /// `crates/holon/src/` and is not currently exposed via `E2ESut` or
+    /// `TestContext`. This trait is bound by GENERATORS (not invariants),
+    /// so slices without it simply produce no query-content blocks — no
+    /// regression. Wire in Phase 7 when a generator actually needs it.
+    async fn compile_query(&self, _: &str, _: &str) -> Result<String, String> {
+        unimplemented!(
+            "SutQueryCompile::compile_query on E2ESut: query compiler helpers are in \
+             crates/holon/src/ and not yet exposed via TestContext. Wire in Phase 7 \
+             when a generator needs this path."
+        )
     }
 }
