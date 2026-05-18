@@ -193,9 +193,11 @@ impl PbtSuiteSpec {
     }
 }
 
-/// Build the canonical registry of the 25 invariants live in
-/// `check_invariants_async` today. Metadata derived from
-/// `docs/TESTING_INVARIANT_AUDIT.md`.
+/// Build the canonical registry of all invariants live in
+/// `check_invariants_async` plus Phase 8 storage-slice additions.
+/// Metadata for the original 25 derived from
+/// `docs/TESTING_INVARIANT_AUDIT.md`; the storage-slice additions
+/// (3) are registered after the 3-subsystem block.
 pub fn register_default() -> InvariantRegistry {
     use RunMode::*;
     use Subsystem::*;
@@ -362,6 +364,26 @@ pub fn register_default() -> InvariantRegistry {
         Strict,
     ));
 
+    // ── Phase 8 storage-slice additions ────────────────────────────
+    reg.register(InvariantSpec::new(
+        "inv-block-ids-match-ref",
+        "Set of block ids reachable in the SUT's SQL projection equals the reference's non-seed block ids.",
+        &[BlockTree, TursoProjection],
+        Strict,
+    ));
+    reg.register(InvariantSpec::new(
+        "inv-block-tags-references-exist",
+        "Every block_tags row refers to a block that still exists in block_raw.",
+        &[BlockTree, TursoProjection],
+        Strict,
+    ));
+    reg.register(InvariantSpec::new(
+        "inv-task-state-storage-coherence",
+        "Loro task_state and SQL task_state projection agree per block.",
+        &[BlockTree, Loro, TursoProjection],
+        Strict,
+    ));
+
     reg
 }
 
@@ -373,17 +395,17 @@ pub fn register_default() -> InvariantRegistry {
 mod tests {
     use super::*;
 
-    /// The canonical registry currently encodes 25 invariants, matching
-    /// `docs/TESTING_INVARIANT_AUDIT.md` and `check_invariants_async`'s
-    /// labels in `sut.rs`. If this drifts, either the audit or the
+    /// The canonical registry encodes 25 invariants from the original
+    /// `check_invariants_async` audit plus 3 Phase 8 storage-slice
+    /// additions = 28. If this drifts, either the audit or the
     /// registry is stale.
     #[test]
     fn registry_size_matches_audit() {
         let reg = register_default();
         assert_eq!(
             reg.len(),
-            25,
-            "registry size disagrees with TESTING_INVARIANT_AUDIT.md"
+            28,
+            "registry size disagrees with audit (25 original + 3 Phase 8 storage)"
         );
     }
 
@@ -493,6 +515,118 @@ mod tests {
             3,
             "exactly 3 invariants should be Warn-mode; got {warn:?}"
         );
+    }
+
+    /// Phase 10.4 — body↔registry id parity. Every `Invariant<R,S>`
+    /// impl in `bodies/` has its `id()` registered, and every registry
+    /// entry has a matching body file. Drift means either a body was
+    /// added without registering its metadata, or a registry entry
+    /// lost its body.
+    ///
+    /// The list is hand-maintained because the bodies live in many
+    /// different generic instantiations and aren't trivially
+    /// enumerable from a single trait object. Updating it is part of
+    /// the contract: adding a body requires also registering it here.
+    #[test]
+    fn body_ids_match_registry_ids() {
+        let reg = register_default();
+        let registry_ids: BTreeSet<&str> = reg.all().iter().map(|i| i.id.0).collect();
+
+        // Source of truth: every file under
+        // `crates/holon-integration-tests/src/pbt/invariants/bodies/*.rs`
+        // exposes a struct `Inv*` whose `Invariant::id()` returns one
+        // of these strings. Keep this set in lockstep with that
+        // directory.
+        let body_ids: BTreeSet<&str> = [
+            "inv-backend-blocks-match-ref",
+            "inv-block-ids-match-ref",
+            "inv-block-tags-references-exist",
+            "inv-displayed-text",
+            "inv-editable-text-has-draggable",
+            "inv-focus-matches-ref",
+            "inv-focus-roots",
+            "inv-frontend-bounds-rendered",
+            "inv-frontend-engine",
+            "inv-frontend-no-error-widgets",
+            "inv-frontend-root-not-error",
+            "inv-live-children-match-ref",
+            "inv-loro-no-errors",
+            "inv-matview-consistent-with-ref",
+            "inv-org-render-fixed-point",
+            "inv-sql-budget",
+            "inv-task-state-storage-coherence",
+            "inv-value-fn-provider-arg-variance-13",
+            "inv-value-fn-provider-identity",
+            "inv-viewmodel-decompiled-rows-match-query",
+            "inv-viewmodel-editable-text-triggers",
+            "inv-viewmodel-entity-ids-subset-of-data",
+            "inv-viewmodel-no-error-widgets",
+            "inv-viewmodel-root-matches-render-expr",
+            "inv-viewmodel-snapshot",
+            "inv-viewmodel-state-toggle-correct",
+            "inv-viewmodel-tree-virtual-slots",
+            "inv-watch-rows-match-ref",
+        ]
+        .into_iter()
+        .collect();
+
+        let in_body_not_registry: Vec<&&str> = body_ids.difference(&registry_ids).collect();
+        let in_registry_not_body: Vec<&&str> = registry_ids.difference(&body_ids).collect();
+        assert!(
+            in_body_not_registry.is_empty() && in_registry_not_body.is_empty(),
+            "body↔registry drift: bodies missing from registry = {in_body_not_registry:?}; \
+             registry entries without body = {in_registry_not_body:?}"
+        );
+    }
+
+    /// Phase 10.4 — H11 anti-rubber-stamp guard (runtime form).
+    /// Every invariant a non-wide slice consumes MUST also exist in
+    /// the wide registry. The compile-time archlint upgrade lives in
+    /// Phase 10.3; this runtime check catches the regression early.
+    ///
+    /// `storage_consistency_pbt` runs:
+    ///   - `InvLoroNoErrors` → id `inv-loro-no-errors`
+    ///   - `InvBlockTagsReferencesExist` → id `inv-block-tags-references-exist`
+    /// Both must appear in the wide registry.
+    #[test]
+    fn storage_slice_invariants_are_subset_of_wide_registry() {
+        let reg = register_default();
+        let registry_ids: BTreeSet<&str> = reg.all().iter().map(|i| i.id.0).collect();
+        let storage_slice_ids: &[&str] = &["inv-loro-no-errors", "inv-block-tags-references-exist"];
+        for id in storage_slice_ids {
+            assert!(
+                registry_ids.contains(id),
+                "H11 violation: storage_consistency_pbt uses '{id}' but it is not registered in the wide registry"
+            );
+        }
+    }
+
+    /// Phase 10.4 — body files exist for every registered id. This is
+    /// the inverse direction of `body_ids_match_registry_ids`,
+    /// checked from disk rather than the hand-maintained list, so a
+    /// missing body file fails fast.
+    #[test]
+    fn every_registry_id_has_a_body_file() {
+        use std::path::PathBuf;
+        let bodies_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/pbt/invariants/bodies");
+        let reg = register_default();
+        for inv in reg.all() {
+            // id `inv-loro-no-errors` → file `loro_no_errors.rs`
+            let stem = inv
+                .id
+                .0
+                .strip_prefix("inv-")
+                .expect("invariant ids start with 'inv-'")
+                .replace('-', "_");
+            let path = bodies_dir.join(format!("{stem}.rs"));
+            assert!(
+                path.exists(),
+                "registered invariant '{}' is missing body file at {}",
+                inv.id,
+                path.display()
+            );
+        }
     }
 
     /// Sanity: every invariant's min_sut is non-empty. A zero-subsystem
