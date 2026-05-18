@@ -29,6 +29,7 @@ use holon_pbt_core::capabilities::{
 
 use super::peer_ops::PeerBlock;
 use super::reference_state::PeerRefState;
+use super::state_machine::{merge_peer_blocks_into_primary, refresh_peer_baseline};
 
 use super::reference_state::{CursorPosition, ReferenceState};
 
@@ -458,15 +459,76 @@ impl RefPeersMut for ReferenceState {
 
     fn peer_apply_char_delete(&mut self, _: usize, _: &str, _: usize, _: usize) {}
 
-    fn peer_sync_from_primary(&mut self, _: usize) {
-        unimplemented!(
-            "Phase 6a: SyncWithPeer ref-state logic lives in state_machine::merge_peer_blocks_into_primary; extraction needs careful audit of primary block_state mutations"
+    fn peer_sync_from_primary(&mut self, peer_idx: usize) {
+        // Bidirectional sync: peer→primary merge, then reflect merged
+        // primary state back into the peer's view. Mirrors
+        // `sync_with_peer.rs::apply_to_ref` verbatim.
+        let modified = self.peers[peer_idx].modified_stable_ids.clone();
+        let created = self.peers[peer_idx].created_stable_ids.clone();
+        let baseline = self.peers[peer_idx].baseline_contents.clone();
+        self.peers[peer_idx].deleted_stable_ids.clear();
+        self.peers[peer_idx].modified_stable_ids.clear();
+        self.peers[peer_idx].created_stable_ids.clear();
+        let peer_blocks: Vec<_> = self.peers[peer_idx].blocks.values().cloned().collect();
+        merge_peer_blocks_into_primary(
+            &mut self.block_state,
+            &peer_blocks,
+            &modified,
+            &created,
+            &baseline,
         );
+        self.recanon_and_rebuild();
+
+        // Primary → peer reflect-back: insert any non-seed, non-page
+        // primary blocks into the peer (overwrite content so the peer
+        // sees post-merge truth).
+        let primary_as_peer: Vec<PeerBlock> = self
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| {
+                let is_seed = self
+                    .block_state
+                    .block_documents
+                    .get(&b.id)
+                    .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
+                !is_seed && !b.is_page()
+            })
+            .map(|b| PeerBlock {
+                stable_id: b.id.id().to_string(),
+                parent_stable_id: if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
+                    None
+                } else {
+                    Some(b.parent_id.id().to_string())
+                },
+                content: b.content_text().to_string(),
+            })
+            .collect();
+        let peer = &mut self.peers[peer_idx];
+        for pb in primary_as_peer {
+            peer.blocks.insert(pb.stable_id.clone(), pb);
+        }
+        refresh_peer_baseline(peer);
     }
 
-    fn peer_merge_into_primary(&mut self, _: usize) {
-        unimplemented!(
-            "Phase 6a: MergeFromPeer pairs with peer_sync_from_primary — same extraction concern"
+    fn peer_merge_into_primary(&mut self, peer_idx: usize) {
+        // Unidirectional: peer→primary merge only, no reflect-back.
+        // Mirrors `merge_from_peer.rs::apply_to_ref`.
+        let modified = self.peers[peer_idx].modified_stable_ids.clone();
+        let created = self.peers[peer_idx].created_stable_ids.clone();
+        let baseline = self.peers[peer_idx].baseline_contents.clone();
+        self.peers[peer_idx].deleted_stable_ids.clear();
+        self.peers[peer_idx].modified_stable_ids.clear();
+        self.peers[peer_idx].created_stable_ids.clear();
+        let peer_blocks: Vec<_> = self.peers[peer_idx].blocks.values().cloned().collect();
+        merge_peer_blocks_into_primary(
+            &mut self.block_state,
+            &peer_blocks,
+            &modified,
+            &created,
+            &baseline,
         );
+        self.recanon_and_rebuild();
+        refresh_peer_baseline(&mut self.peers[peer_idx]);
     }
 }

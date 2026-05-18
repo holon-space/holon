@@ -11,9 +11,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use super::E2ETransitionImpl;
-use crate::pbt::peer_ops::PeerBlock;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::state_machine::{merge_peer_blocks_into_primary, refresh_peer_baseline};
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
 
@@ -66,79 +64,11 @@ impl E2ETransitionImpl for SyncWithPeer {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Peer → primary: apply creates/updates.
-        // Peer deletes are tracked on `deleted_stable_ids` but
-        // NOT propagated to the primary reference model. The
-        // production path DOES propagate them (via
-        // `LoroSyncController`'s `subscribe_root` → outbound
-        // reconcile), but accurately mirroring Loro's cascading-
-        // delete semantics in the reference model requires a
-        // PBT-wide refactor — the ref model uses a different ID
-        // convention than the peer's Loro tree. Known gap:
-        // scenarios that combine `PeerEdit::Delete` with
-        // `SyncWithPeer`/`MergeFromPeer` will flag divergence.
-        let modified = state.peers[self.peer_idx].modified_stable_ids.clone();
-        let created = state.peers[self.peer_idx].created_stable_ids.clone();
-        let baseline = state.peers[self.peer_idx].baseline_contents.clone();
-        state.peers[self.peer_idx].deleted_stable_ids.clear();
-        state.peers[self.peer_idx].modified_stable_ids.clear();
-        state.peers[self.peer_idx].created_stable_ids.clear();
-        let peer_blocks: Vec<_> = state.peers[self.peer_idx]
-            .blocks
-            .values()
-            .cloned()
-            .collect();
-        merge_peer_blocks_into_primary(
-            &mut state.block_state,
-            &peer_blocks,
-            &modified,
-            &created,
-            &baseline,
-        );
-        // See the matching comment in `MergeFromPeer` above.
-        state.recanon_and_rebuild();
-
-        // Primary → peer: add any primary blocks missing from peer,
-        // but skip blocks the peer deleted in this round (already removed
-        // from primary above, so they won't be re-added).
-        //
-        // Also skip seed blocks (document blocks at sentinel:no_parent).
-        // These live in the reference model for bookkeeping but never
-        // reach Loro — the actual peer LoroDoc doesn't contain them.
-        // Including them here would create a PeerBlock with
-        // `stable_id = "no_parent"` (from the seed_doc_block's URI),
-        // which a subsequent `MergeFromPeer` would synthesize back
-        // into the primary ref model as a phantom `block:no_parent`.
-        let primary_as_peer: Vec<_> = state
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| {
-                let is_seed = state
-                    .block_state
-                    .block_documents
-                    .get(&b.id)
-                    .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
-                !is_seed && !b.is_page()
-            })
-            .map(|b| PeerBlock {
-                stable_id: b.id.id().to_string(),
-                parent_stable_id: if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
-                    None
-                } else {
-                    Some(b.parent_id.id().to_string())
-                },
-                content: b.content_text().to_string(),
-            })
-            .collect();
-        let peer = &mut state.peers[self.peer_idx];
-        for pb in primary_as_peer {
-            // Bidirectional sync: both sides converge to the merged
-            // primary state. Overwrite (not just `or_insert`) so the
-            // peer's PeerBlock content reflects the post-merge truth.
-            peer.blocks.insert(pb.stable_id.clone(), pb);
-        }
-        refresh_peer_baseline(peer);
+        use holon_pbt_core::capabilities::RefPeersMut;
+        // Known gap: peer deletes aren't propagated to primary — see
+        // the original comment block in git history. Mirror logic now
+        // lives in `RefPeersMut::peer_sync_from_primary`.
+        state.peer_sync_from_primary(self.peer_idx);
     }
 
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {

@@ -12,7 +12,6 @@ use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::state_machine::{merge_peer_blocks_into_primary, refresh_peer_baseline};
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
 
@@ -66,35 +65,13 @@ impl E2ETransitionImpl for MergeFromPeer {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        let modified = state.peers[self.peer_idx].modified_stable_ids.clone();
-        let created = state.peers[self.peer_idx].created_stable_ids.clone();
-        let baseline = state.peers[self.peer_idx].baseline_contents.clone();
-        state.peers[self.peer_idx].deleted_stable_ids.clear();
-        state.peers[self.peer_idx].modified_stable_ids.clear();
-        state.peers[self.peer_idx].created_stable_ids.clear();
-        let peer_blocks: Vec<_> = state.peers[self.peer_idx]
-            .blocks
-            .values()
-            .cloned()
-            .collect();
-        merge_peer_blocks_into_primary(
-            &mut state.block_state,
-            &peer_blocks,
-            &modified,
-            &created,
-            &baseline,
-        );
-        // Newly-created peer blocks are inserted with the default
-        // `sequence=0` (via `Block::default()` in `from_block_content`),
-        // colliding with whatever sequence the parent's existing
-        // children already have. Production renders by
-        // `(content_type group, sort_key, id)` and re-parses sequences
-        // 0..N in render order — so the parent's child ordering only
-        // converges after a recanon. Without this, the assertion at
-        // `assertions.rs:117` flags an order mismatch on the next
-        // org-file round-trip.
-        state.recanon_and_rebuild();
-        refresh_peer_baseline(&mut state.peers[self.peer_idx]);
+        use holon_pbt_core::capabilities::RefPeersMut;
+        // recanon_and_rebuild + refresh_peer_baseline are handled
+        // inside `RefPeersMut::peer_merge_into_primary` — the order
+        // matters because newly-created peer blocks default to
+        // sequence=0 and need a recanon pass before the next org
+        // round-trip (see `assertions.rs:117`).
+        state.peer_merge_into_primary(self.peer_idx);
     }
 
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
