@@ -14,10 +14,10 @@ pub mod phased;
 pub mod query;
 pub mod query_ast;
 pub mod reference_capabilities;
-pub mod sut_capabilities;
 pub mod reference_state;
 pub mod state_machine;
 pub mod sut;
+pub mod sut_capabilities;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
 pub mod transition_dispatch;

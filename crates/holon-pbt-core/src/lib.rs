@@ -26,8 +26,13 @@
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+pub mod caching_proxy;
 pub mod capabilities;
 pub mod interactions;
+pub mod invariant;
+
+pub use caching_proxy::{cached, CachingProxy};
+pub use invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};
 

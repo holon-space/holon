@@ -28,6 +28,7 @@
 //! `inv-...` label appears in `sut.rs`, register it here in the same PR.
 //! The arch-test below catches the obvious drift case.
 
+pub mod bodies;
 pub mod registry;
 
 pub use registry::{

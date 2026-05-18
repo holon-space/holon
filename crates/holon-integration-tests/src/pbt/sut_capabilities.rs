@@ -213,11 +213,7 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
             .await
             .expect("SutSqlProjection::all_block_ids query failed");
         rows.into_iter()
-            .filter_map(|r| {
-                r.get("id")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
-            })
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
             .collect()
     }
 
@@ -339,8 +335,7 @@ impl<V: VariantMarker> SutRenderer for E2ESut<V> {
         let (render_expr, data_rows) = rqr.snapshot();
         let services =
             holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
-        let vm =
-            holon_frontend::interpret_pure(&render_expr, &data_rows, &services).snapshot();
+        let vm = holon_frontend::interpret_pure(&render_expr, &data_rows, &services).snapshot();
         Some(vm.pretty_print(0))
     }
 }
@@ -373,12 +368,9 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
         let Some(ref geometry) = self.frontend_geometry else {
             return false;
         };
-        geometry
-            .all_elements()
-            .into_iter()
-            .any(|(_, info)| {
-                info.widget_type == "draggable" && info.entity_id.as_deref() == Some(id.as_str())
-            })
+        geometry.all_elements().into_iter().any(|(_, info)| {
+            info.widget_type == "draggable" && info.entity_id.as_deref() == Some(id.as_str())
+        })
     }
 
     /// True if any rendered element has widget_type == "error".
