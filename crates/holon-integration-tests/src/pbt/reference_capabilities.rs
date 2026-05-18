@@ -24,7 +24,7 @@ use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
     CapBlockId, CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
-    RefEditorMirrorMut, RefFocus, RefFocusMut, RefLifecycle,
+    RefEditorMirrorMut, RefFocus, RefFocusMut, RefLifecycle, RefPeers,
 };
 
 use super::reference_state::{CursorPosition, ReferenceState};
@@ -331,5 +331,34 @@ impl RefFocusMut for ReferenceState {
     fn clear_focus_if_deleted(&mut self, id: &CapBlockId) {
         let uri = parse_id_must(id);
         ReferenceState::clear_focus_if_deleted(self, &uri);
+    }
+}
+
+// ─── Phase 6a — RefPeers (read side) ─────────────────────────────────
+
+impl RefPeers for ReferenceState {
+    fn peers_len(&self) -> usize {
+        self.peers.len()
+    }
+
+    fn peer_block_stable_ids(&self, peer_idx: usize) -> Vec<String> {
+        self.peers
+            .get(peer_idx)
+            .map(|p| p.blocks.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn peer_block_content(&self, peer_idx: usize, stable_id: &str) -> Option<String> {
+        self.peers
+            .get(peer_idx)
+            .and_then(|p| p.blocks.get(stable_id))
+            .map(|b| b.content.clone())
+    }
+
+    fn peer_block_parent(&self, peer_idx: usize, stable_id: &str) -> Option<String> {
+        self.peers
+            .get(peer_idx)
+            .and_then(|p| p.blocks.get(stable_id))
+            .and_then(|b| b.parent_stable_id.clone())
     }
 }

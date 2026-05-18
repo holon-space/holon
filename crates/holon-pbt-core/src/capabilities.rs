@@ -276,6 +276,269 @@ impl<T> SutTransitionTarget for T where
 {
 }
 
+// ─── Phase 6a — Loro cluster (Stage B) ───────────────────────────────
+//
+// Peer-Loro transitions: AddPeer, PeerEdit, PeerCharEdit, SyncWithPeer,
+// MergeFromPeer, CreateStaleLoro. Surface intentionally avoids the
+// integration-tests crate's `PeerEditOp` enum — the trait uses scalar +
+// owned-String params so pbt-core stays dep-free of holon-api.
+
+/// Reference-side peer-Loro read surface. Wide PBT impl delegates to
+/// `ReferenceState::peers`; pure slice has no peers (returns `0`/empty).
+pub trait RefPeers {
+    fn peers_len(&self) -> usize;
+
+    /// Stable IDs (peer-internal, NOT EntityUri) the peer currently holds.
+    fn peer_block_stable_ids(&self, peer_idx: usize) -> Vec<String>;
+
+    /// Content of a peer's block by its stable id.
+    fn peer_block_content(&self, peer_idx: usize, stable_id: &str) -> Option<String>;
+
+    /// Parent stable id of a peer's block (None for root-level peer blocks).
+    fn peer_block_parent(&self, peer_idx: usize, stable_id: &str) -> Option<String>;
+}
+
+/// Reference-side peer-Loro write surface.
+pub trait RefPeersMut: RefPeers {
+    /// Snapshot the primary's non-seed, non-page blocks into a new peer.
+    /// Wide PBT computes the snapshot from `ReferenceState::block_state`;
+    /// pure slice no-ops (returns peer_id=0).
+    fn add_peer_from_primary_snapshot(&mut self) -> u64;
+
+    fn peer_apply_create(
+        &mut self,
+        peer_idx: usize,
+        parent_stable_id: Option<&str>,
+        content: &str,
+        stable_id: &str,
+    );
+
+    fn peer_apply_update(&mut self, peer_idx: usize, stable_id: &str, content: &str);
+
+    fn peer_apply_delete(&mut self, peer_idx: usize, stable_id: &str);
+
+    /// Codepoint-level insert into a peer's block content (PeerCharEdit).
+    fn peer_apply_char_insert(
+        &mut self,
+        peer_idx: usize,
+        stable_id: &str,
+        pos_codepoint: usize,
+        text: &str,
+    );
+
+    fn peer_apply_char_delete(
+        &mut self,
+        peer_idx: usize,
+        stable_id: &str,
+        pos_codepoint: usize,
+        len_codepoint: usize,
+    );
+
+    /// Propagate primary's current state to peer (SyncWithPeer).
+    fn peer_sync_from_primary(&mut self, peer_idx: usize);
+
+    /// Propagate peer's pending edits back into primary (MergeFromPeer).
+    fn peer_merge_into_primary(&mut self, peer_idx: usize);
+}
+
+/// SUT-side peer-Loro write surface. Methods are `async` because the
+/// wide-PBT SUT performs real LoroDoc imports/exports + reactive-engine
+/// quiescence between ops.
+#[allow(async_fn_in_trait)]
+pub trait SutLoro {
+    async fn apply_add_peer(&mut self);
+
+    async fn apply_peer_create(
+        &mut self,
+        peer_idx: usize,
+        parent_stable_id: Option<&str>,
+        content: &str,
+        stable_id: &str,
+    );
+
+    async fn apply_peer_update(&mut self, peer_idx: usize, stable_id: &str, content: &str);
+
+    async fn apply_peer_delete(&mut self, peer_idx: usize, stable_id: &str);
+
+    async fn apply_peer_char_insert(
+        &mut self,
+        peer_idx: usize,
+        stable_id: &str,
+        pos_codepoint: usize,
+        text: &str,
+    );
+
+    async fn apply_peer_char_delete(
+        &mut self,
+        peer_idx: usize,
+        stable_id: &str,
+        pos_codepoint: usize,
+        len_codepoint: usize,
+    );
+
+    async fn apply_sync_with_peer(&mut self, peer_idx: usize);
+
+    async fn apply_merge_from_peer(&mut self, peer_idx: usize);
+
+    /// Construct a fresh peer holding a STALE snapshot (lag-N export).
+    /// Wide PBT replays N pre-recorded snapshots; pure slice no-ops.
+    async fn apply_create_stale_loro(&mut self, lag_steps: usize);
+}
+
+/// Read-side observation of Loro state for invariants.
+/// Phase 7 will bind `inv-loro-no-errors`, `inv-live-children-match-ref`
+/// on this trait.
+#[allow(async_fn_in_trait)]
+pub trait SutLoroLog {
+    /// True if the LoroSyncController logged any error since startup.
+    async fn loro_had_errors(&self) -> bool;
+
+    /// Snapshot of Loro tree children for a parent — stable-id order.
+    /// `None` if the parent isn't represented in Loro.
+    async fn loro_children_of(&self, parent_stable_id: &str) -> Option<Vec<String>>;
+}
+
+// ─── Phase 6b — Turso/CDC cluster (Stage B) ──────────────────────────
+//
+// Binds: WriteOrgFile, BulkExternalAdd, all matview-touching invariants
+// (`inv-matview-consistent-with-ref`, `inv-watch-rows-match-ref`,
+// `inv-focus-roots`, `inv-backend-blocks-match-ref` Turso side,
+// `inv-sql-budget`). Required by Phase 8 storage-consistency slice.
+
+/// SUT-side SQL projection read surface. Methods reflect Turso state
+/// AFTER CDC quiescence — invariants must call `quiesce()` first.
+#[allow(async_fn_in_trait)]
+pub trait SutSqlProjection {
+    /// Read a hydrated `block` matview row by id. `None` = row not
+    /// present (deleted or never inserted). The flat Vec is the row's
+    /// fields as Strings in matview-column-declaration order — concrete
+    /// impls expose accessor helpers; the trait surface stays generic.
+    async fn block_row(&self, id: &CapBlockId) -> Option<Vec<String>>;
+
+    /// All non-deleted block IDs visible in the projection.
+    async fn all_block_ids(&self) -> BTreeSet<CapBlockId>;
+
+    /// Row count for a watched query (used by `inv-watch-rows-match-ref`).
+    async fn watch_row_count(&self, query_id: &str) -> Option<usize>;
+
+    /// Raw block table read (no matview hydration). Used by WARN/SKIP
+    /// classifier's `block_raw` truth-check.
+    async fn block_raw_row(&self, id: &CapBlockId) -> Option<Vec<String>>;
+}
+
+/// SUT-side write surface for org-file-driven mutations (WriteOrgFile,
+/// BulkExternalAdd). External-source-of-truth path that bypasses the
+/// reactive engine and writes via OrgFileWatcher.
+#[allow(async_fn_in_trait)]
+pub trait SutOrgFileWrite {
+    /// Write `contents` to `path`. Wide-PBT impl invokes the real
+    /// OrgFileWatcher's scan; pure slice writes to an in-memory map.
+    async fn write_org_file(&mut self, path: &str, contents: &str);
+}
+
+/// SUT-side CDC observation surface.
+#[allow(async_fn_in_trait)]
+pub trait SutCdc {
+    /// True if any CDC stage is mid-flight (used by `live_blocks_stale`
+    /// classifier). Wide PBT: checks WatermarkState; pure slice: false.
+    async fn cdc_in_flight(&self) -> bool;
+
+    /// Drain pending CDC events into the projection. Idempotent.
+    async fn drain_cdc(&mut self);
+}
+
+// ─── Phase 6c — ViewModel/Renderer cluster ───────────────────────────
+//
+// Binds: ViewModel-touching invariants (`inv-viewmodel-*`,
+// `inv-frontend-root-not-error`). Pure slice doesn't bind this.
+
+#[allow(async_fn_in_trait)]
+pub trait SutViewModel {
+    /// Drain pending ViewModel emissions. Drain-once semantics —
+    /// after drain, subsequent calls return `Vec::new` until next emit.
+    /// Phase 7 `CachingProxy` memoizes this per-tick.
+    async fn drain_vm_emissions(&mut self) -> Vec<String>;
+
+    /// True if the frontend root ViewModel is the Error variant.
+    async fn frontend_root_is_error(&self) -> bool;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait SutRenderer {
+    /// Stringified render-tree for a block id (debug-formatted).
+    /// Used by `inv-displayed-text` and OrgRender fixed-point checks.
+    async fn render_tree_of(&self, id: &CapBlockId) -> Option<String>;
+}
+
+// ─── Phase 6d — Layout/Bounds cluster ────────────────────────────────
+//
+// Re-export trait over `holon_pbt_core::user_driver::UserDriver` geometry
+// methods. Phase 7 binds `inv-frontend-bounds-*`,
+// `inv-editable-text-has-draggable`, `inv-frontend-no-error-widgets`.
+
+#[allow(async_fn_in_trait)]
+pub trait SutLayout {
+    /// True if a widget for `id` is currently registered with bounds.
+    async fn has_registered_bounds(&self, id: &CapBlockId) -> bool;
+
+    /// True if a draggable handle is wired for `id`.
+    async fn has_draggable_handle(&self, id: &CapBlockId) -> bool;
+
+    /// True if any rendered widget is an Error variant.
+    async fn any_error_widget(&self) -> bool;
+}
+
+// ─── Phase 6e — Driver cluster ───────────────────────────────────────
+//
+// Re-export of `UserDriver` input methods. Phase 7 binds
+// `inv-focus-matches-ref`. Driver methods are already trait-bound;
+// this re-export keeps slice opt-in symmetric with the other clusters.
+
+#[allow(async_fn_in_trait)]
+pub trait SutDriver {
+    async fn driver_send_key_chord(&mut self, chord: &str);
+    async fn driver_click(&mut self, id: &CapBlockId);
+    async fn driver_current_focus(&self) -> Option<CapBlockId>;
+}
+
+// ─── Phase 6f — OrgRender cluster ────────────────────────────────────
+//
+// Binds: `inv-org-render-fixed-point`.
+
+#[allow(async_fn_in_trait)]
+pub trait SutOrgRender {
+    /// Render the current document set to org-mode text. Used by the
+    /// fixed-point invariant: `parse(render(parse(text))) == parse(text)`.
+    async fn render_documents_to_org(&self) -> Vec<(String, String)>;
+}
+
+// ─── Phase 6g — QueryCompile cluster ─────────────────────────────────
+//
+// Bound by GENERATORS that synthesize query-content blocks (PRQL/SQL/GQL
+// `query_source`). Transitions creating query-bearing blocks gate on
+// this; slices without it produce no query-content. No invariants today.
+
+#[allow(async_fn_in_trait)]
+pub trait SutQueryCompile {
+    /// Compile a query source string to its canonical form. `Err` on
+    /// parse/typecheck failure. Generators use this to filter the
+    /// proposed query string space to valid inputs.
+    async fn compile_query(&self, language: &str, source: &str) -> Result<String, String>;
+}
+
+// ─── Phase 6h — Lifecycle cluster (discovered P1.2) ──────────────────
+//
+// SUT-side counterpart to RefLifecycle. Wide PBT: real app start; pure
+// slice: synchronous no-op. Phase 7 binds the `app_started`/setup gates
+// invariants reference today.
+
+#[allow(async_fn_in_trait)]
+pub trait SutLifecycle {
+    async fn apply_start_app(&mut self);
+    async fn apply_simulate_restart(&mut self);
+    async fn is_app_started(&self) -> bool;
+}
+
 // ─── Cross-cut helpers ───────────────────────────────────────────────
 
 /// Cross-cut helper used by `TypeChars::apply_to_ref` and
