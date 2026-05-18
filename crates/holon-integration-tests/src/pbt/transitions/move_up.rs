@@ -6,6 +6,9 @@
 //! `sut.rs:3555-3560` (SUT apply), and
 //! `transition_budgets.rs:298-302` (expected SQL).
 
+use holon_pbt_core::capabilities::{
+    CapBlockId, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefLifecycle,
+};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
@@ -18,7 +21,7 @@ use crate::pbt::validation::{Reason, check};
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
 
-use holon_api::{ContentType, EntityUri};
+use holon_api::EntityUri;
 
 /// Move the focused block up: swap its sort_key with its previous sibling's.
 #[derive(Clone, Debug)]
@@ -26,82 +29,91 @@ pub struct MoveUp {
     pub block_id: EntityUri,
 }
 
+// ── Capability-bound free functions (Phase 3) ─────────────────────
+
+pub fn move_up_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
+    block_id: &CapBlockId,
+    state: &R,
+) -> Validated<(), Reason> {
+    let mut checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(state.is_properly_setup(), Reason::NotProperlySetup),
+    ];
+
+    let focus = state.current_focus(CapRegion::Main);
+    checks.push(check(
+        focus.as_ref() == Some(block_id),
+        Reason::FocusedIsNotSelf,
+    ));
+
+    if focus.as_ref() == Some(block_id) {
+        let focus_roots = state.focus_root_ids(CapRegion::Main);
+        checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
+        checks.push(check(!state.is_page_block(block_id), Reason::FocusedIsPage));
+        checks.push(check(
+            state.is_focusable(block_id),
+            Reason::FocusedNotFocusable,
+        ));
+        checks.push(check(
+            !state.is_no_content_update(block_id),
+            Reason::FocusedInNoContentUpdate,
+        ));
+        checks.push(check(
+            state.is_descendant_of_any(block_id, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ));
+        checks.push(check(
+            state.previous_sibling(block_id).is_some(),
+            Reason::NoPreviousSibling,
+        ));
+    }
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+pub fn move_up_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
+    state: &R,
+) -> Validated<(u32, BoxedStrategy<MoveUp>), Reason> {
+    let Some(focus_str) = state.current_focus(CapRegion::Main) else {
+        return Validated::fail(Reason::NoFocusInMain);
+    };
+    move_up_preconditions(&focus_str, state).map(|()| {
+        let block_id =
+            EntityUri::parse(&focus_str).expect("focused id must parse as EntityUri in wide PBT");
+        let instance = MoveUp { block_id };
+        (1, Just(instance).boxed())
+    })
+}
+
+pub fn move_up_apply_to_ref<R: RefBlockTree + RefBlockTreeMut>(
+    block_id: &CapBlockId,
+    state: &mut R,
+) {
+    state.push_undo_snapshot();
+    let prev_id = state
+        .previous_sibling(block_id)
+        .expect("MoveUp: previous sibling required (precondition)");
+    state.swap_siblings(block_id, &prev_id);
+}
+
+// ── E2E trait impls (delegate to _cap fns) ────────────────────────
+
 impl E2ETransitionFactory for MoveUp {
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Single-instance pattern: focused block is the only candidate.
-        // Delegate all validation to preconditions.
-        let Some(block_id) = state.focused_entity(holon_api::Region::Main).cloned() else {
-            return Validated::fail(Reason::NoFocusInMain);
-        };
-        let instance = MoveUp { block_id };
-        instance.preconditions(state).map(|()| {
-            let strat = Just(instance.clone()).boxed();
-            (1, strat)
-        })
+        move_up_weighted_generator(state)
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for MoveUp {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
-            check(state.is_properly_setup(), Reason::NotProperlySetup),
-        ];
-
-        let focus = state.focused_entity(holon_api::Region::Main);
-        checks.push(check(
-            focus == Some(&self.block_id),
-            Reason::FocusedIsNotSelf,
-        ));
-
-        if focus == Some(&self.block_id) {
-            let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-            let no_content_update: std::collections::HashSet<EntityUri> = state
-                .layout_blocks
-                .render_source_ids
-                .iter()
-                .chain(state.layout_blocks.query_source_ids.iter())
-                .chain(state.profile_block_ids.iter())
-                .cloned()
-                .collect();
-
-            let block = state.block_state.blocks.get(&self.block_id);
-            checks.push(check(
-                block.is_some_and(|b| b.content_type == ContentType::Text),
-                Reason::FocusedNotText,
-            ));
-            if let Some(b) = block {
-                checks.push(check(!b.is_page(), Reason::FocusedIsPage));
-            }
-            checks.push(check(
-                state.layout_blocks.is_focusable(&self.block_id),
-                Reason::FocusedNotFocusable,
-            ));
-            checks.push(check(
-                !no_content_update.contains(&self.block_id),
-                Reason::FocusedInNoContentUpdate,
-            ));
-            checks.push(check(
-                state.is_descendant_of_any(&self.block_id, &focus_roots),
-                Reason::FocusedNotDescendantOfFocusRoot,
-            ));
-            checks.push(check(
-                state.previous_sibling(&self.block_id).is_some(),
-                Reason::NoPreviousSibling,
-            ));
-        }
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        move_up_preconditions(&self.block_id.as_str().to_string(), state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.push_undo_snapshot();
-        let prev_id = state.previous_sibling(&self.block_id).unwrap();
-        state.swap_sequence(&self.block_id, &prev_id);
+        move_up_apply_to_ref(&self.block_id.as_str().to_string(), state);
     }
 
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {

@@ -126,6 +126,16 @@ impl RefBlockTree for ReferenceState {
             .map(cap_id)
     }
 
+    fn parent_of(&self, id: &CapBlockId) -> Option<CapBlockId> {
+        let uri = parse_id(id)?;
+        let b = self.block_state.blocks.get(&uri)?;
+        if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
+            None
+        } else {
+            Some(cap_id(&b.parent_id))
+        }
+    }
+
     fn grandparent(&self, id: &CapBlockId) -> Option<CapBlockId> {
         let uri = parse_id(id)?;
         ReferenceState::grandparent(self, &uri).as_ref().map(cap_id)
@@ -161,6 +171,25 @@ impl RefBlockTree for ReferenceState {
             return false;
         };
         self.layout_blocks.is_focusable(&uri)
+    }
+
+    fn is_no_content_update(&self, id: &CapBlockId) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.layout_blocks.render_source_ids.contains(&uri)
+            || self.layout_blocks.query_source_ids.contains(&uri)
+            || self.profile_block_ids.contains(&uri)
+    }
+
+    fn is_page_block(&self, id: &CapBlockId) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.block_state
+            .blocks
+            .get(&uri)
+            .is_some_and(|b| b.is_page())
     }
 }
 

@@ -1,3 +1,21 @@
+# Stage A Verdict Report — PBT capability decomposition
+
+**UPDATED 2026-05-18 @ Stage A complete.**
+
+## Stage A summary
+
+| Phase | Status | Deliverable |
+|---|---|---|
+| 1 — Hypothesis verification | ✅ | 6 docs, capabilities.rs, H4 spike with running code |
+| 2 — Blanket impls on ReferenceState | ✅ | `crates/holon-integration-tests/src/pbt/reference_capabilities.rs`, cargo check green |
+| 3 — Migrate 9 T0 transitions | ✅ | `_cap` free functions in 9 transition files; wide PBT unchanged |
+| 4 — SUT trait split | DEFERRED | Sidestepped: pure slice uses _cap fns for both ref + SUT |
+| 5 — editor_pure_pbt.rs | ✅ | `crates/holon-integration-tests/tests/editor_pure_pbt.rs` — runs migrated transitions through pure slice; 256 cases × 30 steps in 1.6s, **~1240× speedup over wide PBT** |
+
+Phase 4 is genuinely needed only when a future slice has a distinct SUT (e.g. matview-drift slice with real Loro+Turso but no UI). The editor-pure slice works without it.
+
+---
+
 # Phase 1 Verdict Report — PBT capability decomposition
 
 **Plan**: `~/.claude/plans/stage-a-ship-with-dynamic-pudding.md`.

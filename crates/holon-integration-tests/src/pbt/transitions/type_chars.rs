@@ -7,7 +7,10 @@
 //! `transition_budgets.rs:368-377` (expected SQL).
 
 use crate::pbt::validation::{Reason, check};
-use holon_api::Region;
+use holon_pbt_core::capabilities::{
+    CapRegion, RefBlockTreeMut, RefEditorMirror, RefEditorMirrorMut, RefFocus, RefLifecycle,
+    commit_active_editor_if_changed,
+};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
@@ -26,72 +29,89 @@ pub struct TypeChars {
     pub text: String,
 }
 
+// ── Capability-bound free functions (Phase 3) ─────────────────────
+//
+// These are the canonical logic; `E2ETransitionImpl` below just delegates.
+// The pure slice can call these directly without `E2ETransitionImpl`.
+
+/// Preconditions for `TypeChars`, bound only on the capability traits it reads.
+pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
+    state: &R,
+) -> Validated<(), Reason> {
+    let checks: Vec<Validated<(), Reason>> = vec![
+        check(R::atomic_editor_enabled(), Reason::AtomicEditorDisabled),
+        check(state.enable_loro(), Reason::LoroRequiredForAtomicEditor),
+        check(state.app_started(), Reason::AppNotStarted),
+        check(state.is_properly_setup(), Reason::NotProperlySetup),
+        check(
+            state.current_focus(CapRegion::Main).is_some(),
+            Reason::NoFocusInMain,
+        ),
+        check(
+            state.active_editor_block().is_some(),
+            Reason::NoActiveEditor,
+        ),
+    ];
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+/// Weighted generator for `TypeChars`, capability-bound.
+pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycle>(
+    state: &R,
+) -> Validated<(u32, BoxedStrategy<TypeChars>), Reason> {
+    type_chars_preconditions(state).map(|_| {
+        let last = state.last_transition_kind();
+        let tc_weight = match last {
+            Some("FocusEditableText") | Some("MoveCursor") => 6,
+            Some("TypeChars") => 4,
+            _ => 1,
+        };
+        let strat = "[a-z]{1,4}"
+            .prop_map(|text: String| TypeChars { text })
+            .boxed();
+        (tc_weight, strat)
+    })
+}
+
+/// Ref-state apply for `TypeChars`, capability-bound. Mirrors the
+/// original ReferenceState-specific apply exactly: type into the active
+/// editor, then commit through to block content if Loro is enabled.
+pub fn type_chars_apply_to_ref<R>(text: &str, state: &mut R)
+where
+    R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
+{
+    state.type_chars(text);
+    // After Phase 1 of `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`:
+    // when Loro is enabled, per-keystroke writes flow through
+    // `MutableText` into the global Loro doc, and `LoroSyncController`
+    // projects them into `block.content` SQL between transitions (CDC
+    // quiescence barrier at the PBT runner). SqlOnly has no Loro path —
+    // typing only lives in the editor's `InputState` until on-blur
+    // fires `set_field`, so ref-state shouldn't commit either.
+    if state.enable_loro() {
+        commit_active_editor_if_changed(state);
+    }
+}
+
+// ── E2E trait impls (wide PBT entry point; delegate to _cap fns) ──
+
 impl E2ETransitionFactory for TypeChars {
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Strategy generates random 1-4 character strings; let `preconditions`
-        // validate all state constraints (atomic_editor, loro, editor setup, focus).
-        // Delegate to a probe instance to check if TypeChars can succeed.
-        let probe = TypeChars {
-            text: String::new(),
-        };
-        probe.preconditions(state).map(|_| {
-            let last = state.last_transition_kind;
-            let tc_weight = match last {
-                Some("FocusEditableText") | Some("MoveCursor") => 6,
-                Some("TypeChars") => 4,
-                _ => 1,
-            };
-
-            let strat = "[a-z]{1,4}"
-                .prop_map(|text: String| TypeChars { text })
-                .boxed();
-            (tc_weight, strat)
-        })
+        type_chars_weighted_generator(state)
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for TypeChars {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let checks: Vec<Validated<(), Reason>> = vec![
-            check(
-                ReferenceState::atomic_editor_enabled(),
-                Reason::AtomicEditorDisabled,
-            ),
-            check(
-                state.variant.enable_loro,
-                Reason::LoroRequiredForAtomicEditor,
-            ),
-            check(state.app_started, Reason::AppNotStarted),
-            check(state.is_properly_setup(), Reason::NotProperlySetup),
-            check(
-                state.current_focus(Region::Main).is_some(),
-                Reason::NoFocusInMain,
-            ),
-            check(state.active_editor.is_some(), Reason::NoActiveEditor),
-        ];
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        type_chars_preconditions(state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        if let Some(editor) = state.active_editor.as_mut() {
-            editor.type_chars(&self.text);
-        }
-        // After Phase 1 of `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`:
-        // when Loro is enabled, per-keystroke writes flow through
-        // `MutableText` into the global Loro doc, and
-        // `LoroSyncController` projects them into `block.content` SQL
-        // between transitions (CDC quiescence barrier at the PBT runner).
-        // SqlOnly has no Loro path — typing only lives in the editor's
-        // `InputState` until on-blur fires `set_field`, so ref-state
-        // shouldn't commit either.
-        if state.variant.enable_loro {
-            state.commit_active_editor_if_changed();
-        }
+        type_chars_apply_to_ref(&self.text, state);
     }
 
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {

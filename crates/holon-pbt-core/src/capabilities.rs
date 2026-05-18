@@ -87,6 +87,11 @@ pub trait RefBlockTree {
     fn previous_sibling(&self, id: &CapBlockId) -> Option<CapBlockId>;
     fn next_sibling(&self, id: &CapBlockId) -> Option<CapBlockId>;
 
+    /// Parent of `id`. `None` if `id` is root or has a sentinel parent
+    /// (wide PBT: `EntityUri::is_no_parent` / `is_sentinel`; pure slice:
+    /// `parent: None`).
+    fn parent_of(&self, id: &CapBlockId) -> Option<CapBlockId>;
+
     /// Grandparent for outdent.
     fn grandparent(&self, id: &CapBlockId) -> Option<CapBlockId>;
 
@@ -104,6 +109,17 @@ pub trait RefBlockTree {
     /// True if `id` exists and is focusable (i.e. not a layout block,
     /// not immutable, has the right content type).
     fn is_focusable(&self, id: &CapBlockId) -> bool;
+
+    /// True if `id` is in the "no content update" set — render sources,
+    /// query sources, profile blocks. Wide PBT consults
+    /// `layout_blocks.render_source_ids` + `layout_blocks.query_source_ids`
+    /// + `profile_block_ids`. Pure slice has no such concept → returns
+    /// `false`.
+    fn is_no_content_update(&self, id: &CapBlockId) -> bool;
+
+    /// True if `id` is a Page block (tagged `Page`). Mirrors
+    /// `Block::is_page()`. Pure slice has no pages → returns `false`.
+    fn is_page_block(&self, id: &CapBlockId) -> bool;
 }
 
 /// Block-tree mutations. Concrete impls maintain whatever bookkeeping

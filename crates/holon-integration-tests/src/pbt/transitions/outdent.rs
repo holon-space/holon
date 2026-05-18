@@ -6,6 +6,10 @@
 //! `sut.rs:3548-3553` (SUT apply), and
 //! `transition_budgets.rs:298-302` (expected SQL).
 
+use holon_api::EntityUri;
+use holon_pbt_core::capabilities::{
+    CapBlockId, CapRegion, RefBlockTree, RefBlockTreeMut, RefLifecycle,
+};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
@@ -18,8 +22,6 @@ use crate::pbt::validation::{Reason, check};
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
 
-use holon_api::{ContentType, EntityUri};
-
 /// Outdent the focused block: move it up one level to its grandparent via the
 /// `Alt+Left` / Shift+Tab chord.
 #[derive(Clone, Debug)]
@@ -27,70 +29,78 @@ pub struct Outdent {
     pub block_id: EntityUri,
 }
 
+// ── Capability-bound free functions (Phase 3) ─────────────────────
+
+pub fn outdent_preconditions<R: RefBlockTree + RefLifecycle>(
+    block_id: &CapBlockId,
+    state: &R,
+) -> Validated<(), Reason> {
+    let focus_roots = state.focus_root_ids(CapRegion::Main);
+    let mut checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(state.is_properly_setup(), Reason::NotProperlySetup),
+    ];
+    checks.push(check(
+        state.block_content(block_id).is_some(),
+        Reason::FocusedBlockMissing,
+    ));
+    checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
+    checks.push(check(
+        !state.is_layout_block(block_id),
+        Reason::FocusedInLayoutBlocks,
+    ));
+    checks.push(check(
+        state.is_descendant_of_any(block_id, &focus_roots),
+        Reason::FocusedNotDescendantOfFocusRoot,
+    ));
+    checks.push(check(
+        state.grandparent(block_id).is_some(),
+        Reason::NoGrandparent,
+    ));
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+pub fn outdent_weighted_generator<R: RefBlockTree + RefLifecycle>(
+    state: &R,
+) -> Validated<(u32, BoxedStrategy<Outdent>), Reason> {
+    let candidates: Vec<EntityUri> = state
+        .main_editable_descendants()
+        .into_iter()
+        .filter(|id| outdent_preconditions(id, state).is_good())
+        .filter_map(|id| EntityUri::parse(&id).ok())
+        .collect();
+    check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
+        let strat = prop::sample::select(candidates)
+            .prop_map(|block_id| Outdent { block_id })
+            .boxed();
+        (1, strat)
+    })
+}
+
+pub fn outdent_apply_to_ref<R: RefBlockTreeMut>(block_id: &CapBlockId, state: &mut R) {
+    state.push_undo_snapshot();
+    state.outdent(block_id);
+}
+
+// ── E2E trait impls (delegate to _cap fns) ────────────────────────
+
 impl E2ETransitionFactory for Outdent {
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Candidate set: Main's editable descendants. Per-precondition
-        // filter narrows to outdentable subset (grandparent exists).
-        let candidates: Vec<EntityUri> = state
-            .main_editable_descendants()
-            .into_iter()
-            .filter(|uri| {
-                Outdent {
-                    block_id: uri.clone(),
-                }
-                .preconditions(state)
-                .is_good()
-            })
-            .collect();
-        check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
-            let strat = prop::sample::select(candidates)
-                .prop_map(|block_id| Outdent { block_id })
-                .boxed();
-            (1, strat)
-        })
+        outdent_weighted_generator(state)
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for Outdent {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
-            check(state.is_properly_setup(), Reason::NotProperlySetup),
-        ];
-
-        let block = state.block_state.blocks.get(&self.block_id);
-        checks.push(check(block.is_some(), Reason::FocusedBlockMissing));
-        if let Some(b) = block {
-            checks.push(check(
-                b.content_type == ContentType::Text,
-                Reason::FocusedNotText,
-            ));
-        }
-
-        checks.push(check(
-            !state.layout_blocks.contains(&self.block_id),
-            Reason::FocusedInLayoutBlocks,
-        ));
-        checks.push(check(
-            state.is_descendant_of_any(&self.block_id, &focus_roots),
-            Reason::FocusedNotDescendantOfFocusRoot,
-        ));
-        checks.push(check(
-            state.grandparent(&self.block_id).is_some(),
-            Reason::NoGrandparent,
-        ));
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        outdent_preconditions(&self.block_id.as_str().to_string(), state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.push_undo_snapshot();
-        state.outdent_block(&self.block_id);
+        outdent_apply_to_ref(&self.block_id.as_str().to_string(), state);
     }
 
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
