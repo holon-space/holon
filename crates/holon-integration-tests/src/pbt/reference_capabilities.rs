@@ -24,7 +24,8 @@ use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
     CapBlockId, CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
-    RefEditorMirrorMut, RefFocus, RefFocusMut, RefLifecycle, RefPeers, RefPeersMut,
+    RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
+    RefLifecycle, RefPeers, RefPeersMut, RefRender, RefTaskState, RefWatches,
 };
 
 use super::peer_ops::PeerBlock;
@@ -530,5 +531,71 @@ impl RefPeersMut for ReferenceState {
         );
         self.recanon_and_rebuild();
         refresh_peer_baseline(&mut self.peers[peer_idx]);
+    }
+}
+
+// ─── Phase 7 Stage B — extended ref-side cap impls ───────────────────
+
+impl RefFocusRoots for ReferenceState {
+    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<CapBlockId> {
+        let api_region = from_cap_region(region);
+        cap_id_set(self.expected_focus_root_ids(api_region))
+    }
+}
+
+impl RefLayout for ReferenceState {
+    fn layout_block_ids(&self) -> BTreeSet<CapBlockId> {
+        let ids: BTreeSet<&holon_api::entity_uri::EntityUri> = self
+            .layout_blocks
+            .headline_ids
+            .iter()
+            .chain(self.layout_blocks.query_source_ids.iter())
+            .chain(self.layout_blocks.render_source_ids.iter())
+            .collect();
+        ids.into_iter().map(cap_id).collect()
+    }
+
+    fn profile_block_ids(&self) -> BTreeSet<CapBlockId> {
+        self.profile_block_ids.iter().map(cap_id).collect()
+    }
+
+    fn has_blocks_profile(&self) -> bool {
+        self.has_blocks_profile()
+    }
+}
+
+impl RefRender for ReferenceState {
+    fn active_render_expr_name(&self, region: CapRegion) -> Option<String> {
+        let api_region = from_cap_region(region);
+        self.active_render_expr_name(api_region)
+    }
+
+    fn has_root_render_expr(&self) -> bool {
+        self.root_render_expr().is_some()
+    }
+}
+
+impl RefWatches for ReferenceState {
+    fn active_watch_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.active_watches.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+}
+
+impl RefGlobalFocus for ReferenceState {
+    fn global_focused_block(&self) -> Option<CapBlockId> {
+        self.focused_block.as_ref().map(cap_id)
+    }
+}
+
+impl RefTaskState for ReferenceState {
+    fn task_state_of(&self, id: &CapBlockId) -> Option<String> {
+        let uri = parse_id(id)?;
+        let block = self.block_state.blocks.get(&uri)?;
+        block
+            .properties
+            .get("task_state")
+            .and_then(|v| v.as_string().map(str::to_owned))
     }
 }

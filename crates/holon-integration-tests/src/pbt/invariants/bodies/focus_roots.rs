@@ -25,4 +25,9 @@ impl InvFocusRoots {
         holon_pbt_core::invariant::InvariantId("inv-focus-roots");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked. SUT-side: live_focus_roots_arc pub(super)
+// accessor added (pass 2); SutCdc::cdc_in_flight already wired.
+// Remaining blocker: body uses holon_api::Region::ALL, EntityUri::parse,
+// and ctx.query_sql() for the CDC-lag truth-check — integration-test-internal
+// types that cannot appear in a generic Invariant<R,S> body without a new
+// SutFocusRoots capability trait. Promote in a follow-up pass.

@@ -21,4 +21,8 @@ impl InvViewmodelStateToggleCorrect {
         holon_pbt_core::invariant::InvariantId("inv-viewmodel-state-toggle-correct");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked (RefTaskState::task_state_of added).
+// Remaining blocker: display_tree comes from reactive_engine (private RefCell);
+// collect_state_toggle_nodes + holon_frontend::ViewKind::StateToggle are
+// integration-test-internal types not in pbt-core.
+// Promote when SutViewModel::state_toggle_pairs is wired via reactive_engine.

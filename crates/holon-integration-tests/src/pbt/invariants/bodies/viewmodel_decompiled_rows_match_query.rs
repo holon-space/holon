@@ -23,4 +23,7 @@ impl InvViewmodelDecompiledRowsMatchQuery {
         holon_pbt_core::invariant::InvariantId("inv-viewmodel-decompiled-rows-match-query");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked (RefRender added).
+// Remaining blocker: reactive_engine (private RefCell) + display_assertions
+// internal helpers (extract_rendered_rows, is_ordered_subset) not in pbt-core.
+// Promote when SutViewModel::rendered_row_contents + data_row_contents are wired.

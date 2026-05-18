@@ -15,6 +15,7 @@ use super::sut::E2ESut;
 use super::transition_dispatch::SutHandle;
 use super::transitions::{PeerEditOp, TextOp};
 use super::types::VariantMarker;
+use holon_frontend::reactive::BuilderServices;
 
 #[allow(async_fn_in_trait)]
 impl<V: VariantMarker> SutLoro for E2ESut<V> {
@@ -444,6 +445,25 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
                     .and_then(|v| v.as_string())
                     .map(str::to_string)
             })
+    }
+
+    /// Returns the globally focused block id as tracked by the frontend
+    /// engine's `focused_block()` field. Returns `None` in SqlOnly mode
+    /// (no `frontend_engine` installed) or when the engine has no focus.
+    /// Mirrors `inv-focus-matches-ref` (sut.rs:6750): `engine.focused_block()`.
+    async fn engine_focused_block(&self) -> Option<CapBlockId> {
+        self.frontend_engine
+            .as_ref()
+            .and_then(|engine| engine.focused_block())
+            .map(|uri| uri.as_str().to_string())
+    }
+
+    /// Translate a reference-model synthetic block id (e.g. `block:ref-doc-0`)
+    /// to the resolved UUID-based id the SUT engine tracks. Delegates to
+    /// `E2ESut::resolve_uri`, which consults `doc_uri_map`.
+    fn resolve_ref_block_id(&self, id: &CapBlockId) -> CapBlockId {
+        let uri = holon_api::EntityUri::from_raw(id);
+        self.resolve_uri(&uri).as_str().to_string()
     }
 }
 

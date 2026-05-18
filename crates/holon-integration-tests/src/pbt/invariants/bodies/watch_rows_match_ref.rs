@@ -24,4 +24,8 @@ impl InvWatchRowsMatchRef {
         holon_pbt_core::invariant::InvariantId("inv-watch-rows-match-ref");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side partially unblocked (RefWatches::active_watch_ids added).
+// SUT-side: ui_model is pub on TestContext (E2ESut derefs); SutCdc::cdc_in_flight
+// already wired. Remaining blocker: ref_state.query_results(watch_spec) +
+// CdcAccumulator per-field truth-check require new RefWatchQueries cap and
+// SutSqlProjection::watch_field_value. Not promoteable without those caps.

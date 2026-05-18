@@ -7417,6 +7417,18 @@ impl<V: VariantMarker> E2ESut<V> {
         };
         live.consumed_seq() < target
     }
+
+    /// Pub accessor for `live_focus_roots_cell` — exposes the lazily-initialised
+    /// CDC-driven mirror of the `focus_roots` matview for invariant impls in
+    /// `sut_capabilities.rs`. Initialises the watcher on first call; subsequent
+    /// calls return the cached Arc. Same body as the private `live_focus_roots`
+    /// above; kept separate so the private method can remain `&self → Arc`
+    /// without being confused with capability-layer accessors.
+    pub(super) async fn live_focus_roots_arc(
+        &self,
+    ) -> Arc<holon::sync::LiveData<FocusRoot>> {
+        self.live_focus_roots().await
+    }
 }
 
 /// Fields that are SQL columns on `block` rather than entries in the

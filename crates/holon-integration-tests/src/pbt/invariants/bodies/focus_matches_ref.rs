@@ -1,28 +1,83 @@
-//! Phase 7 — `inv-focus-matches-ref` (DEFERRED).
+//! Phase 7 — `inv-focus-matches-ref`.
 //!
 //! Inline body lives at `sut.rs:6709–6773`.
 //!
-//! # Why deferred
+//! Checks that the reactive/frontend engine's global `focused_block`
+//! matches the reference model's global focus after every focus-changing
+//! transition. Skipped when:
+//! - No frontend engine is installed (SqlOnly mode).
+//! - The reference model has no global focus yet.
+//! - An editor is open in the reference model (editor focus is the source
+//!   of truth while editing; engine focus may lag).
 //!
-//! The body requires:
-//! - `self.frontend_engine` (pub, but needs `engine.focused_block()` — not
-//!   exposed via `SutDriver::driver_current_focus` which reads SQL, not the engine)
-//! - `self.resolve_uri` (private) — to translate ref-state synthetic IDs to real UUIDs
-//! - `ref_state.focused_block` — the global focus (not per-region), no Ref* cap today
-//! - `ref_state.active_editor` — to skip the check while an editor is open
+//! The comparison bridges the ref-model's synthetic URI (e.g. `block:ref-doc-0`)
+//! to the engine's resolved UUID via `SutDriver::resolve_ref_block_id`.
 //!
-//! `SutDriver::driver_current_focus` reads `current_focus` SQL, which is the
-//! navigation-focus matview, not the engine's global `focused_block` field
-//! (which the reactive click handler sets). These are deliberately different
-//! sources; mixing them produces false positives. Wire once a `RefFocus`
-//! capability exposes the global focus field and a `SutDriver::engine_focused_block`
-//! method reads `ReactiveEngine::focused_block()`.
+//! Status: functional.
+
+use holon_pbt_core::capabilities::{RefEditorMirror, RefGlobalFocus, SutDriver};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvFocusMatchesRef;
 
 impl InvFocusMatchesRef {
-    pub const ID: holon_pbt_core::invariant::InvariantId =
-        holon_pbt_core::invariant::InvariantId("inv-focus-matches-ref");
+    pub const ID: InvariantId = InvariantId("inv-focus-matches-ref");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+#[allow(async_fn_in_trait)]
+impl<R, S> Invariant<R, S> for InvFocusMatchesRef
+where
+    R: RefGlobalFocus + RefEditorMirror,
+    S: SutDriver,
+{
+    fn id(&self) -> InvariantId {
+        Self::ID
+    }
+
+    fn mode(&self) -> RunMode {
+        RunMode::Strict
+    }
+
+    async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
+        // Skipped when no global focus is set in the reference model.
+        let Some(ref_focused) = ref_.global_focused_block() else {
+            return InvariantResult::Ok;
+        };
+        // Skipped while an editor is open — engine focus may not have
+        // updated yet relative to the click handler.
+        if ref_.active_editor_block().is_some() {
+            return InvariantResult::Ok;
+        }
+
+        let resolved_ref = sut.resolve_ref_block_id(&ref_focused);
+
+        // Poll up to 1 s: chord ops (SplitBlock, JoinBlock) fire
+        // editor_focus(new_block) as a follow-up that propagates through
+        // SQL → watch_editor_cursor → window.focus → InputEvent::Focus →
+        // set_focus. The new block's EditorView may not have mounted yet.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        loop {
+            let actual = sut.engine_focused_block().await;
+            match &actual {
+                None => {
+                    // No frontend engine installed — skip (SqlOnly mode).
+                    return InvariantResult::Ok;
+                }
+                Some(actual_id) => {
+                    if actual_id == &resolved_ref {
+                        return InvariantResult::Ok;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return InvariantResult::Fail(format!(
+                            "[inv-focus-matches-ref] Global focus mismatch: \
+                             reference model has {ref_focused} (resolved: {resolved_ref}), \
+                             but engine.focused_block() has {actual_id} (polled 1s)"
+                        ));
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+}

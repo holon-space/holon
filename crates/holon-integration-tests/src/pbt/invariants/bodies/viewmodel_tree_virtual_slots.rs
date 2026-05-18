@@ -24,4 +24,7 @@ impl InvViewmodelTreeVirtualSlots {
         holon_pbt_core::invariant::InvariantId("inv-viewmodel-tree-virtual-slots");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked (RefRender::active_render_expr_name added).
+// Remaining blocker: inline body is explicitly SKIPPED in sut.rs (display_tree
+// not wired). Same reactive_engine blocker as other viewmodel invariants.
+// Promote only after display_tree is exposed via SutViewModel headless path.

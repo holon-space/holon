@@ -24,4 +24,7 @@ impl InvEditableTextHasDraggable {
         holon_pbt_core::invariant::InvariantId("inv-editable-text-has-draggable");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked (RefLayout::has_blocks_profile added).
+// Remaining blocker: body needs frontend_engine / reactive_engine (private)
+// plus reactive_root_id (private) for the BFS root. No cap exposes the
+// walk_draggable_pairs surface yet. Promote in the FrontendBounds/Renderer pass.

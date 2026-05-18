@@ -20,4 +20,7 @@ impl InvViewmodelEntityIdsSubsetOfData {
         holon_pbt_core::invariant::InvariantId("inv-viewmodel-entity-ids-subset-of-data");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked (RefRender::has_root_render_expr added).
+// Remaining blocker: display_tree and data_rows both come from private
+// reactive_engine RefCell; no cap exposes this surface yet.
+// Promote when SutViewModel::tree_entity_ids + data_row_ids are wired.

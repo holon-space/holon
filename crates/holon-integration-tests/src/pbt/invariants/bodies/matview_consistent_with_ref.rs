@@ -27,4 +27,7 @@ impl InvMatviewConsistentWithRef {
         holon_pbt_core::invariant::InvariantId("inv-matview-consistent-with-ref");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked (RefFocusRoots, RefLayout added).
+// Remaining blocker: data_rows come from self.reactive_engine (private RefCell)
+// via reactive.ensure_watching; no cap exposes this surface yet.
+// Promote when SutViewModel::root_layout_data_row_ids is added and wired.

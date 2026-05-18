@@ -21,4 +21,8 @@ impl InvViewmodelRootMatchesRenderExpr {
         holon_pbt_core::invariant::InvariantId("inv-viewmodel-root-matches-render-expr");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+// Status: ref-side unblocked (RefRender::has_root_render_expr added).
+// Remaining blocker: display_tree comes from reactive_engine (private RefCell);
+// RefRender::has_root_render_expr is a bool gate but the body also needs
+// ref_state.root_render_expr() as a RenderExpr (not in any cap trait).
+// Promote when SutViewModel::root_widget_name is wired and RefRender gains root_render_expr_name.

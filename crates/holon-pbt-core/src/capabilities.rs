@@ -499,6 +499,16 @@ pub trait SutDriver {
     async fn driver_send_key_chord(&mut self, chord: &str);
     async fn driver_click(&mut self, id: &CapBlockId);
     async fn driver_current_focus(&self) -> Option<CapBlockId>;
+    /// The globally focused block id as tracked by the reactive/frontend
+    /// engine (distinct from the per-region SQL `current_focus` matview).
+    /// Set by click handlers; read by `inv-focus-matches-ref`.
+    /// Returns `None` when no frontend engine is installed (SqlOnly mode).
+    async fn engine_focused_block(&self) -> Option<CapBlockId>;
+    /// Translate a reference-model block id (which may be a synthetic URI
+    /// like `block:ref-doc-0`) to the resolved UUID-based id that the SUT
+    /// engine tracks. Wide PBT: delegates to `E2ESut::resolve_uri` via
+    /// `doc_uri_map`; pure slice: returns the id unchanged (no synthetic URIs).
+    fn resolve_ref_block_id(&self, id: &CapBlockId) -> CapBlockId;
 }
 
 // ─── Phase 6f — OrgRender cluster ────────────────────────────────────
@@ -537,6 +547,72 @@ pub trait SutLifecycle {
     async fn apply_start_app(&mut self);
     async fn apply_simulate_restart(&mut self);
     async fn is_app_started(&self) -> bool;
+}
+
+// ─── Reference-side: extended caps added in Phase 7 (Stage B) ───────
+//
+// These traits surface `ReferenceState` fields that are needed by the
+// deferred invariant bodies. Each is a thin read-only projection; the
+// blanket impl in `reference_capabilities.rs` delegates directly to the
+// corresponding field/method on `ReferenceState`.
+
+/// Focus-roots expected by the reference model — per-region set of
+/// block ids that the reactive engine should use as pin roots.
+pub trait RefFocusRoots {
+    /// Expected focus-root block ids for `region`. Wide PBT reads from
+    /// `ReferenceState::expected_focus_root_ids`; pure slice: empty set.
+    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<CapBlockId>;
+}
+
+/// Layout-block metadata needed by matview + ViewModel invariants.
+pub trait RefLayout {
+    /// All block ids that are part of the layout scaffolding (headline,
+    /// query-source, render-source). `is_layout_block` on `RefBlockTree`
+    /// is the per-id predicate; this gives the full set for iteration.
+    fn layout_block_ids(&self) -> BTreeSet<CapBlockId>;
+
+    /// Block ids of the active profile blocks (from `profile_block_ids`).
+    fn profile_block_ids(&self) -> BTreeSet<CapBlockId>;
+
+    /// True if the test has an active "block" profile override.
+    /// Wide PBT: `ReferenceState::has_blocks_profile()`; pure slice: `false`.
+    fn has_blocks_profile(&self) -> bool;
+}
+
+/// Render-expression metadata exposed for ViewModel invariants.
+pub trait RefRender {
+    /// Name of the active render expression for `region` (e.g. "tree",
+    /// "list"). `None` when no render source block is set up yet.
+    /// Wide PBT: `ReferenceState::active_render_expr_name(region)`.
+    fn active_render_expr_name(&self, region: CapRegion) -> Option<String>;
+
+    /// True if the reference model has a root render expression at all.
+    /// Invariants gate on this before inspecting ViewModel structure.
+    fn has_root_render_expr(&self) -> bool;
+}
+
+/// Active watched queries on the reference model.
+pub trait RefWatches {
+    /// Query ids of currently registered watches (stable, sorted).
+    /// Wide PBT: keys of `ReferenceState::active_watches`; pure slice: empty.
+    fn active_watch_ids(&self) -> Vec<String>;
+}
+
+/// Global engine-focused block (distinct from the per-region navigation
+/// focus). Set by click handlers in the reactive engine; read by
+/// `inv-focus-matches-ref` to compare against `ReactiveEngine::focused_block`.
+pub trait RefGlobalFocus {
+    /// The globally focused block id, or `None` if nothing is focused.
+    /// Wide PBT: `ReferenceState::focused_block`; pure slice: `None`.
+    fn global_focused_block(&self) -> Option<CapBlockId>;
+}
+
+/// Task-state read-side projection. Used by `inv-viewmodel-state-toggle-correct`
+/// to compare block task_state values against ViewModel StateToggle nodes.
+pub trait RefTaskState {
+    /// Task state string for `id` (`"TODO"`, `"DONE"`, etc.), or `None`
+    /// if the block has no task_state property.
+    fn task_state_of(&self, id: &CapBlockId) -> Option<String>;
 }
 
 // ─── Cross-cut helpers ───────────────────────────────────────────────
