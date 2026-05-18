@@ -10,6 +10,7 @@
 
 pub mod backend_blocks_match_ref;
 pub mod block_ids_match_ref;
+pub mod block_tags_references_exist;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
 pub mod focus_matches_ref;
@@ -23,6 +24,7 @@ pub mod loro_no_errors;
 pub mod matview_consistent_with_ref;
 pub mod org_render_fixed_point;
 pub mod sql_budget;
+pub mod task_state_storage_coherence;
 pub mod value_fn_provider_arg_variance_13;
 pub mod value_fn_provider_identity;
 pub mod viewmodel_decompiled_rows_match_query;

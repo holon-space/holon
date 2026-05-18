@@ -7,8 +7,9 @@
 use std::collections::{BTreeSet, HashSet};
 
 use holon_pbt_core::capabilities::{
-    CapBlockId, SutCdc, SutDriver, SutLayout, SutLifecycle, SutLoro, SutLoroLog, SutOrgFileWrite,
-    SutOrgRender, SutQueryCompile, SutRenderer, SutSqlProjection, SutViewModel,
+    CapBlockId, SutCdc, SutDriver, SutLayout, SutLifecycle, SutLoro, SutLoroLog,
+    SutLoroTaskState, SutOrgFileWrite, SutOrgRender, SutQueryCompile, SutRenderer,
+    SutSqlProjection, SutViewModel,
 };
 
 use super::sut::E2ESut;
@@ -179,6 +180,22 @@ impl<V: VariantMarker> SutLoroLog for E2ESut<V> {
     }
 }
 
+// ─── SutLoroTaskState ─────────────────────────────────────────────────
+
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutLoroTaskState for E2ESut<V> {
+    /// Not yet wired: projecting `task_state` out of Loro tags requires
+    /// exposing the LoroSyncController's property map through `TestContext`,
+    /// which is deferred to Phase 8 alongside `inv-live-children-match-ref`.
+    async fn loro_task_state_of(&self, _: &str) -> Option<String> {
+        unimplemented!(
+            "SutLoroTaskState::loro_task_state_of on E2ESut: Loro tag \
+             property projection is not yet exposed through TestContext. \
+             Wire in Phase 8 when LoroSyncController tag-read surface lands."
+        )
+    }
+}
+
 // ─── SutSqlProjection ─────────────────────────────────────────────────
 
 #[allow(async_fn_in_trait)]
@@ -244,6 +261,39 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
             fields.sort();
             fields
         })
+    }
+
+    /// Returns all distinct block_id values from `block_tags`. Mirrors
+    /// `SELECT DISTINCT block_id FROM block_tags` — same table used by
+    /// `inv-block-tags-references-exist`.
+    async fn block_tag_block_ids(&self) -> BTreeSet<CapBlockId> {
+        let rows = self
+            .ctx
+            .query_sql("SELECT DISTINCT block_id FROM block_tags")
+            .await
+            .expect("SutSqlProjection::block_tag_block_ids query failed");
+        rows.into_iter()
+            .filter_map(|r| r.get("block_id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect()
+    }
+
+    /// Reads `json_extract(properties, '$.task_state')` from `block_raw`
+    /// for the given block id. Returns `None` when the block doesn't exist
+    /// or the property is absent/null.
+    async fn block_task_state(&self, id: &CapBlockId) -> Option<String> {
+        let escaped = id.replace('\'', "''");
+        let sql = format!(
+            "SELECT json_extract(properties, '$.task_state') AS task_state \
+             FROM block_raw WHERE id = '{escaped}'"
+        );
+        let rows = self
+            .ctx
+            .query_sql(&sql)
+            .await
+            .expect("SutSqlProjection::block_task_state query failed");
+        rows.into_iter()
+            .next()
+            .and_then(|r| r.get("task_state").and_then(|v| v.as_string()).map(str::to_string))
     }
 }
 

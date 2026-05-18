@@ -137,4 +137,12 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
     async fn block_raw_row(&self, id: &CapBlockId) -> Option<Vec<String>> {
         self.inner.block_raw_row(id).await
     }
+
+    async fn block_tag_block_ids(&self) -> BTreeSet<CapBlockId> {
+        self.inner.block_tag_block_ids().await
+    }
+
+    async fn block_task_state(&self, id: &CapBlockId) -> Option<String> {
+        self.inner.block_task_state(id).await
+    }
 }

@@ -434,6 +434,31 @@ pub trait SutSqlProjection {
     /// Raw block table read (no matview hydration). Used by WARN/SKIP
     /// classifier's `block_raw` truth-check.
     async fn block_raw_row(&self, id: &CapBlockId) -> Option<Vec<String>>;
+
+    /// Distinct block_id values present in the `block_tags` junction table.
+    /// Used by `inv-block-tags-references-exist` to check for orphan rows
+    /// (tag references whose block_id doesn't exist in block_raw).
+    async fn block_tag_block_ids(&self) -> BTreeSet<CapBlockId>;
+
+    /// `task_state` JSON property for `id` from `block_raw.properties`.
+    /// Returns `None` if the block doesn't exist or has no `task_state`
+    /// property. Used by `inv-task-state-storage-coherence`.
+    async fn block_task_state(&self, id: &CapBlockId) -> Option<String>;
+}
+
+/// Loro-side task_state projection. Phase 7 addition for
+/// `inv-task-state-storage-coherence`. Separate from `SutLoroLog` to
+/// keep the Loro-tree surface (children snapshot) isolated from the
+/// property-projection surface.
+#[allow(async_fn_in_trait)]
+pub trait SutLoroTaskState {
+    /// Task state string for `block_id` as projected from Loro tags.
+    ///
+    /// Not yet wired on `E2ESut`: the LoroSyncController's tag projection
+    /// is only read inside `check_invariants_async` and is not yet exposed
+    /// through `TestContext`. Returns `unimplemented!()` until Phase 8
+    /// wires the plumbing.
+    async fn loro_task_state_of(&self, block_id: &str) -> Option<String>;
 }
 
 /// SUT-side write surface for org-file-driven mutations (WriteOrgFile,

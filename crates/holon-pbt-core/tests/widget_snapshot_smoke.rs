@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapCursor, CapRegion, RefBlockTree, RefTaskState, SutRenderer, WidgetSnapshot,
+    CapBlockId, CapCursor, CapRegion, RefBlockTree, RefTaskState, SutLoroTaskState, SutRenderer,
+    SutSqlProjection, WidgetSnapshot,
 };
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
@@ -120,6 +121,35 @@ impl SutRenderer for ToySut {
         Default::default()
     }
     async fn widget_tree_for(&self, _: &CapBlockId) -> Option<WidgetSnapshot> {
+        None
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl SutSqlProjection for ToySut {
+    async fn block_row(&self, _: &CapBlockId) -> Option<Vec<String>> {
+        None
+    }
+    async fn all_block_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+        Default::default()
+    }
+    async fn watch_row_count(&self, _: &str) -> Option<usize> {
+        None
+    }
+    async fn block_raw_row(&self, _: &CapBlockId) -> Option<Vec<String>> {
+        None
+    }
+    async fn block_tag_block_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+        Default::default()
+    }
+    async fn block_task_state(&self, _: &CapBlockId) -> Option<String> {
+        None
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl SutLoroTaskState for ToySut {
+    async fn loro_task_state_of(&self, _: &str) -> Option<String> {
         None
     }
 }
