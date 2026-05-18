@@ -7,9 +7,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use holon_pbt_core::capabilities::{
-    CapBlockId, SutCdc, SutDriver, SutLayout, SutLifecycle, SutLoro, SutLoroLog,
-    SutLoroTaskState, SutOrgFileWrite, SutOrgRender, SutQueryCompile, SutRenderer,
-    SutSqlProjection, SutViewModel,
+    CapBlockId, SutCdc, SutDriver, SutLayout, SutLifecycle, SutLoro, SutLoroLog, SutLoroTaskState,
+    SutOrgFileWrite, SutOrgRender, SutQueryCompile, SutRenderer, SutSqlProjection, SutViewModel,
 };
 
 use super::sut::E2ESut;
@@ -273,7 +272,11 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
             .await
             .expect("SutSqlProjection::block_tag_block_ids query failed");
         rows.into_iter()
-            .filter_map(|r| r.get("block_id").and_then(|v| v.as_string()).map(str::to_string))
+            .filter_map(|r| {
+                r.get("block_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
             .collect()
     }
 
@@ -291,9 +294,11 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
             .query_sql(&sql)
             .await
             .expect("SutSqlProjection::block_task_state query failed");
-        rows.into_iter()
-            .next()
-            .and_then(|r| r.get("task_state").and_then(|v| v.as_string()).map(str::to_string))
+        rows.into_iter().next().and_then(|r| {
+            r.get("task_state")
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+        })
     }
 }
 

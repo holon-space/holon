@@ -59,10 +59,7 @@ where
             let loro_state = sut.loro_task_state_of(id).await;
 
             if sql_state != loro_state {
-                mismatches.push(format!(
-                    "  {id}: sql={:?} loro={:?}",
-                    sql_state, loro_state
-                ));
+                mismatches.push(format!("  {id}: sql={:?} loro={:?}", sql_state, loro_state));
             }
         }
 
@@ -75,7 +72,12 @@ where
              diverging task_state between block_raw SQL and Loro projection.\n\
              {details}",
             count = mismatches.len(),
-            details = mismatches.iter().take(10).cloned().collect::<Vec<_>>().join("\n"),
+            details = mismatches
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n"),
         ))
     }
 }
