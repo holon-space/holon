@@ -26,6 +26,7 @@
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+pub mod capabilities;
 pub mod interactions;
 
 pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};

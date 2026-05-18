@@ -5134,6 +5134,7 @@ name = "holon-pbt-core"
 version = "0.1.0"
 dependencies = [
  "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "proptest-state-machine",
  "validated",
  "workspace-hack 0.1.0",
 ]

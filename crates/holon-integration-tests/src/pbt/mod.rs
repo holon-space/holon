@@ -13,6 +13,7 @@ pub mod peer_ops;
 pub mod phased;
 pub mod query;
 pub mod query_ast;
+pub mod reference_capabilities;
 pub mod reference_state;
 pub mod state_machine;
 pub mod sut;
