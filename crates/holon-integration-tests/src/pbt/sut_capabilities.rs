@@ -262,20 +262,13 @@ impl<V: VariantMarker> SutOrgFileWrite for E2ESut<V> {
 
 #[allow(async_fn_in_trait)]
 impl<V: VariantMarker> SutCdc for E2ESut<V> {
-    /// Not wired: the production stale-check (`live_blocks_stale` in
-    /// `check_invariants_async`, sut.rs:4225) relies on `live_blocks_cell`
-    /// which is a private field of `E2ESut`. The `LiveData::consumed_seq()`
-    /// vs `db_handle().cdc_emitted_watermark()` comparison needs either a
-    /// pub(super) accessor added to `E2ESut` or a dedicated helper on
-    /// `TestContext`. Wire in Phase 7 when the first slice-level invariant
-    /// needs this signal.
+    /// True when the `live_blocks` CDC mirror has not yet consumed all events
+    /// emitted since the last write. Delegates to `E2ESut::live_blocks_cdc_stale`
+    /// (pub(super) accessor): compares `LiveData::consumed_seq()` against
+    /// `db_handle().cdc_emitted_watermark()`. Returns `false` pre-startup or
+    /// before the mirror is initialised.
     async fn cdc_in_flight(&self) -> bool {
-        unimplemented!(
-            "SutCdc::cdc_in_flight on E2ESut: requires comparing \
-             live_blocks_cell.consumed_seq() against db_handle().cdc_emitted_watermark(), \
-             but live_blocks_cell is a private field. Add a pub(super) accessor to E2ESut \
-             or a TestContext helper and wire in Phase 7."
-        )
+        self.live_blocks_cdc_stale()
     }
 
     /// Drains pending CDC events from all active watches into the `ui_model`.
@@ -290,15 +283,15 @@ impl<V: VariantMarker> SutCdc for E2ESut<V> {
 
 #[allow(async_fn_in_trait)]
 impl<V: VariantMarker> SutViewModel for E2ESut<V> {
-    /// Not wired: `vm_emissions` is a private field on `E2ESut` (sut.rs:295).
-    /// The production path at sut.rs:5845 calls
-    /// `std::mem::take(&mut *self.vm_emissions.lock().unwrap())`.
-    /// Add a `pub(super)` accessor for `vm_emissions` in Phase 7 to wire this.
+    /// Drains all pending ViewModel emissions since the last call.
+    /// Delegates to `E2ESut::vm_emissions_drain` (pub(super) accessor).
+    /// Each ViewModel is rendered via `pretty_print(0)` — the same format
+    /// used by `render_tree_of` for consistent slice-level string comparisons.
     async fn drain_vm_emissions(&mut self) -> Vec<String> {
-        unimplemented!(
-            "SutViewModel::drain_vm_emissions on E2ESut: vm_emissions is a private field \
-             (sut.rs:295). Add a pub(super) accessor in Phase 7."
-        )
+        self.vm_emissions_drain()
+            .into_iter()
+            .map(|vm| vm.pretty_print(0))
+            .collect()
     }
 
     /// True if the frontend root ViewModel is the Error variant.

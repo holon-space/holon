@@ -7389,6 +7389,34 @@ impl<V: VariantMarker> E2ESut<V> {
             }
         }
     }
+
+    // ── Phase 7 accessors for capability-trait impls ───────────────────────
+    // These expose private state through the narrowest safe surface.
+    // DO NOT use from transitions — the proxy semantics are invariant-only.
+
+    /// Drain all pending ViewModel emissions since the last drain.
+    /// Production path: sut.rs:5846 `std::mem::take(&mut *self.vm_emissions.lock().unwrap())`.
+    pub(super) fn vm_emissions_drain(&mut self) -> Vec<holon_frontend::ViewModel> {
+        std::mem::take(&mut *self.vm_emissions.lock().unwrap())
+    }
+
+    /// True if the `live_blocks` CDC mirror has not yet caught up to the
+    /// last emitted watermark. Compares `LiveData::consumed_seq()` against
+    /// `db_handle().cdc_emitted_watermark()`. Returns `false` when the app
+    /// is not running or the mirror has not been initialised yet.
+    pub(super) fn live_blocks_cdc_stale(&self) -> bool {
+        if !self.ctx.is_running() {
+            return false;
+        }
+        let target = self.ctx.engine().db_handle().cdc_emitted_watermark();
+        if target == 0 {
+            return false;
+        }
+        let Some(live) = self.live_blocks_cell.borrow().clone() else {
+            return false;
+        };
+        live.consumed_seq() < target
+    }
 }
 
 /// Fields that are SQL columns on `block` rather than entries in the
