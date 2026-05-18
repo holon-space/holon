@@ -6,13 +6,13 @@
 //! `sut.rs:4365-4390` (SUT apply), and
 //! `transition_budgets.rs:351-360` (expected SQL).
 
+use holon_pbt_core::capabilities::{RefLifecycle, RefPeers, RefPeersMut};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use super::E2ETransitionImpl;
-use crate::pbt::peer_ops::PeerBlock;
-use crate::pbt::reference_state::{PeerRefState, ReferenceState};
+use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
 
@@ -23,75 +23,46 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[derive(Clone, Debug)]
 pub struct AddPeer;
 
+// ── Capability-bound free functions (Phase 6a) ────────────────────
+
+pub fn add_peer_preconditions<R: RefPeers + RefLifecycle>(state: &R) -> Validated<(), Reason> {
+    let checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(state.enable_loro(), Reason::LoroRequiredForPeers),
+        check(state.peers_len() < 3, Reason::PeerLimitReached),
+    ];
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+pub fn add_peer_weighted_generator<R: RefPeers + RefLifecycle>(
+    state: &R,
+) -> Validated<(u32, BoxedStrategy<AddPeer>), Reason> {
+    add_peer_preconditions(state).map(|_| (1, Just(AddPeer).boxed()))
+}
+
+pub fn add_peer_apply_to_ref<R: RefPeersMut>(state: &mut R) {
+    state.add_peer_from_primary_snapshot();
+}
+
+// ── E2E trait impls (delegate to _cap fns) ────────────────────────
+
 impl E2ETransitionFactory for AddPeer {
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let instance = AddPeer;
-        instance
-            .preconditions(state)
-            .map(|_| (1, Just(instance).boxed()))
+        add_peer_weighted_generator(state)
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl E2ETransitionImpl for AddPeer {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
-            check(state.variant.enable_loro, Reason::LoroRequiredForPeers),
-            check(state.peers.len() < 3, Reason::PeerLimitReached),
-        ];
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        add_peer_preconditions(state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        let peer_id = (state.peers.len() as u64) + 100;
-        // Peer starts with a copy of the primary's blocks.
-        // Exclude seed blocks (doc = sentinel) — they are inserted via
-        // direct SQL and never reverse-synced to Loro, so the actual
-        // peer LoroDoc (created from a Loro snapshot) won't have them.
-        let peer_blocks: std::collections::HashMap<String, PeerBlock> = state
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| {
-                // Exclude seed blocks (doc = sentinel/no_parent).
-                let is_seed = state
-                    .block_state
-                    .block_documents
-                    .get(&b.id)
-                    .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
-                // Exclude document blocks (name != None) — they exist
-                // in the reference model but not as Loro tree nodes.
-                !is_seed && !b.is_page()
-            })
-            .map(|b| {
-                let pb = PeerBlock {
-                    stable_id: b.id.id().to_string(),
-                    parent_stable_id: if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
-                        None
-                    } else {
-                        Some(b.parent_id.id().to_string())
-                    },
-                    content: b.content_text().to_string(),
-                };
-                (pb.stable_id.clone(), pb)
-            })
-            .collect();
-        let baseline_contents = peer_blocks
-            .values()
-            .map(|pb| (pb.stable_id.clone(), pb.content.clone()))
-            .collect();
-        state.peers.push(PeerRefState {
-            peer_id,
-            blocks: peer_blocks,
-            deleted_stable_ids: std::collections::HashSet::new(),
-            modified_stable_ids: std::collections::HashSet::new(),
-            created_stable_ids: std::collections::HashSet::new(),
-            baseline_contents,
-        });
+        add_peer_apply_to_ref(state);
     }
 
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {

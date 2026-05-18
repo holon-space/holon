@@ -24,8 +24,11 @@ use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
     CapBlockId, CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
-    RefEditorMirrorMut, RefFocus, RefFocusMut, RefLifecycle, RefPeers,
+    RefEditorMirrorMut, RefFocus, RefFocusMut, RefLifecycle, RefPeers, RefPeersMut,
 };
+
+use super::peer_ops::PeerBlock;
+use super::reference_state::PeerRefState;
 
 use super::reference_state::{CursorPosition, ReferenceState};
 
@@ -360,5 +363,110 @@ impl RefPeers for ReferenceState {
             .get(peer_idx)
             .and_then(|p| p.blocks.get(stable_id))
             .and_then(|b| b.parent_stable_id.clone())
+    }
+}
+
+// ─── Phase 6a — RefPeersMut (write side) ─────────────────────────────
+//
+// AddPeer is fully migrated. The remaining 5 Loro transitions
+// (PeerEdit{Create,Update,Delete}, PeerCharEdit, SyncWithPeer,
+// MergeFromPeer) panic with `unimplemented!` — wide PBT keeps using
+// their original `apply_to_ref` path until a slice consumer drives
+// the migration. This mirrors the Phase 6 "trait surface first,
+// blanket impls on demand" stance.
+
+impl RefPeersMut for ReferenceState {
+    fn add_peer_from_primary_snapshot(&mut self) -> u64 {
+        let peer_id = (self.peers.len() as u64) + 100;
+        let peer_blocks: std::collections::HashMap<String, PeerBlock> = self
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| {
+                let is_seed = self
+                    .block_state
+                    .block_documents
+                    .get(&b.id)
+                    .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
+                !is_seed && !b.is_page()
+            })
+            .map(|b| {
+                let pb = PeerBlock {
+                    stable_id: b.id.id().to_string(),
+                    parent_stable_id: if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
+                        None
+                    } else {
+                        Some(b.parent_id.id().to_string())
+                    },
+                    content: b.content_text().to_string(),
+                };
+                (pb.stable_id.clone(), pb)
+            })
+            .collect();
+        let baseline_contents = peer_blocks
+            .values()
+            .map(|pb| (pb.stable_id.clone(), pb.content.clone()))
+            .collect();
+        self.peers.push(PeerRefState {
+            peer_id,
+            blocks: peer_blocks,
+            deleted_stable_ids: std::collections::HashSet::new(),
+            modified_stable_ids: std::collections::HashSet::new(),
+            created_stable_ids: std::collections::HashSet::new(),
+            baseline_contents,
+        });
+        peer_id
+    }
+
+    fn peer_apply_create(
+        &mut self,
+        peer_idx: usize,
+        parent_stable_id: Option<&str>,
+        content: &str,
+        stable_id: &str,
+    ) {
+        let peer = &mut self.peers[peer_idx];
+        peer.blocks.insert(
+            stable_id.to_string(),
+            PeerBlock {
+                stable_id: stable_id.to_string(),
+                parent_stable_id: parent_stable_id.map(|s| s.to_string()),
+                content: content.to_string(),
+            },
+        );
+        peer.created_stable_ids.insert(stable_id.to_string());
+    }
+
+    fn peer_apply_update(&mut self, peer_idx: usize, stable_id: &str, content: &str) {
+        let peer = &mut self.peers[peer_idx];
+        if let Some(block) = peer.blocks.get_mut(stable_id) {
+            block.content = content.to_string();
+            peer.modified_stable_ids.insert(stable_id.to_string());
+        }
+    }
+
+    fn peer_apply_delete(&mut self, peer_idx: usize, stable_id: &str) {
+        let peer = &mut self.peers[peer_idx];
+        peer.blocks.remove(stable_id);
+        peer.deleted_stable_ids.insert(stable_id.to_string());
+    }
+
+    // PeerCharEdit operates at LoroText character level; ref model
+    // tracks block-level content only. No-op on the ref side; cross-peer
+    // text convergence is checked post-sync by invariants.
+    fn peer_apply_char_insert(&mut self, _: usize, _: &str, _: usize, _: &str) {}
+
+    fn peer_apply_char_delete(&mut self, _: usize, _: &str, _: usize, _: usize) {}
+
+    fn peer_sync_from_primary(&mut self, _: usize) {
+        unimplemented!(
+            "Phase 6a: SyncWithPeer ref-state logic lives in state_machine::merge_peer_blocks_into_primary; extraction needs careful audit of primary block_state mutations"
+        );
+    }
+
+    fn peer_merge_into_primary(&mut self, _: usize) {
+        unimplemented!(
+            "Phase 6a: MergeFromPeer pairs with peer_sync_from_primary — same extraction concern"
+        );
     }
 }

@@ -33,7 +33,7 @@
 //! Setup helpers (loading fixtures, seeding files, harness DI wiring)
 //! are exempt — they aren't simulating a user action.
 
-mod add_peer;
+pub mod add_peer;
 mod apply_mutation;
 mod arrow_navigate;
 mod bulk_external_add;

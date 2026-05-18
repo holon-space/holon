@@ -11,7 +11,6 @@ use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
 use super::E2ETransitionImpl;
-use crate::pbt::peer_ops::PeerBlock;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transitions::{PeerEditOp, deterministic_peer_block_id};
@@ -159,33 +158,22 @@ impl E2ETransitionImpl for PeerEdit {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        let peer = &mut state.peers[self.peer_idx];
+        use holon_pbt_core::capabilities::RefPeersMut;
         match &self.op {
             PeerEditOp::Create {
                 parent_stable_id,
                 content,
                 stable_id,
-            } => {
-                peer.blocks.insert(
-                    stable_id.clone(),
-                    PeerBlock {
-                        stable_id: stable_id.clone(),
-                        parent_stable_id: parent_stable_id.clone(),
-                        content: content.clone(),
-                    },
-                );
-                peer.created_stable_ids.insert(stable_id.clone());
-            }
+            } => state.peer_apply_create(
+                self.peer_idx,
+                parent_stable_id.as_deref(),
+                content,
+                stable_id,
+            ),
             PeerEditOp::Update { stable_id, content } => {
-                if let Some(block) = peer.blocks.get_mut(stable_id) {
-                    block.content = content.clone();
-                    peer.modified_stable_ids.insert(stable_id.clone());
-                }
+                state.peer_apply_update(self.peer_idx, stable_id, content)
             }
-            PeerEditOp::Delete { stable_id } => {
-                peer.blocks.remove(stable_id);
-                peer.deleted_stable_ids.insert(stable_id.clone());
-            }
+            PeerEditOp::Delete { stable_id } => state.peer_apply_delete(self.peer_idx, stable_id),
         }
     }
 
