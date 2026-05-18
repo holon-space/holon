@@ -4096,21 +4096,25 @@ impl<V: VariantMarker> E2ESut<V> {
             self.documents.keys().collect::<Vec<_>>()
         );
 
-        // 0b. inv-loro-no-errors: LoroSyncController must not log any errors.
-        //     Catches Bug B and similar SQL→Loro reconcile failures (e.g.
-        //     `Cannot resolve parent URI to TreeID`, missing-block warnings,
-        //     `update_parent_id failed`, etc.). The controller increments
-        //     `error_count` whenever `on_inbound_event` returns Err, so any
-        //     non-zero count means the SQL→Loro mirror dropped a CDC event.
-        let loro_errs = self.ctx.loro_sync_error_count();
-        assert_eq!(
-            loro_errs, 0,
-            "[inv-loro-no-errors] LoroSyncController logged {loro_errs} error(s). \
-             Search captured logs for `[LoroSyncController] Failed to apply` to find which \
-             event(s) the SQL→Loro mirror dropped (e.g. `Cannot resolve parent URI to TreeID: \
-             block:UUID` for outdent/indent/split where the new parent isn't yet a TreeID in the \
-             Loro tree)."
-        );
+        // 0b. inv-loro-no-errors — Phase 10.1: migrated to capability-bound
+        //     `Invariant<R, S>` impl. Runs via the `SutLoroLog` blanket impl
+        //     on `E2ESut<V>`. See
+        //     `crates/holon-integration-tests/src/pbt/invariants/bodies/loro_no_errors.rs`.
+        //
+        //     If the migrated impl reports Fail, the message identifies the
+        //     [LoroSyncController] error class — search captured logs for
+        //     `[LoroSyncController] Failed to apply` to find which event(s)
+        //     the SQL→Loro mirror dropped.
+        {
+            use crate::pbt::invariants::bodies::loro_no_errors::InvLoroNoErrors;
+            use holon_pbt_core::invariant::{Invariant, InvariantResult};
+            match Invariant::<ReferenceState, Self>::check(&InvLoroNoErrors, ref_state, self).await
+            {
+                InvariantResult::Ok => {}
+                InvariantResult::Fail(msg) => panic!("{msg}"),
+                InvariantResult::Skipped(_) => {}
+            }
+        }
 
         // 1. Backend storage matches reference model
         //    Read from the CDC-driven `LiveData<Block>` mirroring the `block`
