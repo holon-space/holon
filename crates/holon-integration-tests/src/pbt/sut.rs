@@ -7424,9 +7424,7 @@ impl<V: VariantMarker> E2ESut<V> {
     /// calls return the cached Arc. Same body as the private `live_focus_roots`
     /// above; kept separate so the private method can remain `&self → Arc`
     /// without being confused with capability-layer accessors.
-    pub(super) async fn live_focus_roots_arc(
-        &self,
-    ) -> Arc<holon::sync::LiveData<FocusRoot>> {
+    pub(super) async fn live_focus_roots_arc(&self) -> Arc<holon::sync::LiveData<FocusRoot>> {
         self.live_focus_roots().await
     }
 }

@@ -55,8 +55,7 @@ where
         // editor_focus(new_block) as a follow-up that propagates through
         // SQL → watch_editor_cursor → window.focus → InputEvent::Focus →
         // set_focus. The new block's EditorView may not have mounted yet.
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
         loop {
             let actual = sut.engine_focused_block().await;
             match &actual {

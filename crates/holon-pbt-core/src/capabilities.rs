@@ -463,11 +463,101 @@ pub trait SutViewModel {
     async fn frontend_root_is_error(&self) -> bool;
 }
 
+/// Frontend-agnostic widget-tree IR. The minimum surface renderer-required
+/// invariants need to walk; frontends translate from their native structure
+/// (e.g. `ReactiveEngine.display_tree`, real GPUI render tree) into this.
+///
+/// `kind`: widget type identifier matching the frontend's ViewKind tag
+/// ("editable_text", "draggable", "state_toggle", "live_block", etc.).
+/// `entity_id`: the block / row id this widget renders, if any.
+/// `props`: scalar widget properties as canonical strings — e.g. for a
+/// `state_toggle`, this carries `field`, `current`, `label`, `states` as
+/// JSON-encoded values. Invariants parse from this map; the contract is
+/// "frontend serializes props it wants checked, in stable canonical form."
+/// `operations`: bound operations as canonical strings, one per op, of
+/// the shape `<op_name>:<key>:<value>` (e.g. `set_field:task_state:DONE`).
+/// Invariants match by prefix.
+/// `children`: nested widgets in render order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidgetSnapshot {
+    pub kind: String,
+    pub entity_id: Option<String>,
+    pub props: std::collections::BTreeMap<String, String>,
+    pub operations: Vec<String>,
+    pub children: Vec<WidgetSnapshot>,
+}
+
+impl WidgetSnapshot {
+    /// Pre-order recursive iterator over self + descendants.
+    pub fn walk(&self) -> WidgetSnapshotIter<'_> {
+        WidgetSnapshotIter { stack: vec![self] }
+    }
+
+    /// First operation whose canonical string starts with `prefix`.
+    pub fn find_op(&self, prefix: &str) -> Option<&str> {
+        self.operations
+            .iter()
+            .find(|op| op.starts_with(prefix))
+            .map(String::as_str)
+    }
+
+    /// All non-None `entity_id` values reachable in the tree, deduped.
+    /// `live_block` widgets carry the referenced block id as `entity_id`
+    /// per the translator contract.
+    pub fn collect_entity_ids(&self) -> BTreeSet<String> {
+        self.walk().filter_map(|n| n.entity_id.clone()).collect()
+    }
+
+    /// All nodes whose `kind` equals `kind`.
+    pub fn collect_by_kind<'a>(&'a self, kind: &str) -> Vec<&'a WidgetSnapshot> {
+        self.walk().filter(|n| n.kind == kind).collect()
+    }
+
+    /// All `entity_id` values of nodes whose `kind` matches any of `kinds`.
+    pub fn entity_ids_of_kinds(&self, kinds: &[&str]) -> BTreeSet<String> {
+        self.walk()
+            .filter(|n| kinds.iter().any(|k| n.kind == *k))
+            .filter_map(|n| n.entity_id.clone())
+            .collect()
+    }
+}
+
+/// Pre-order traversal iterator over a `WidgetSnapshot` tree.
+pub struct WidgetSnapshotIter<'a> {
+    stack: Vec<&'a WidgetSnapshot>,
+}
+
+impl<'a> Iterator for WidgetSnapshotIter<'a> {
+    type Item = &'a WidgetSnapshot;
+    fn next(&mut self) -> Option<&'a WidgetSnapshot> {
+        let node = self.stack.pop()?;
+        for child in node.children.iter().rev() {
+            self.stack.push(child);
+        }
+        Some(node)
+    }
+}
+
 #[allow(async_fn_in_trait)]
 pub trait SutRenderer {
     /// Stringified render-tree for a block id (debug-formatted).
     /// Used by `inv-displayed-text` and OrgRender fixed-point checks.
     async fn render_tree_of(&self, id: &CapBlockId) -> Option<String>;
+
+    /// Frontend-agnostic snapshot of the current widget tree. Any slice
+    /// with a renderer (wide PBT, hypothetical Phase 9 in-memory + GPUI)
+    /// can produce one; pure / storage-only slices have no widget tree
+    /// and don't implement this trait at all.
+    ///
+    /// Returns the root widget; descendants reachable via `.children`.
+    async fn widget_tree_snapshot(&self) -> WidgetSnapshot;
+
+    /// Block ids in the data_rows that feed the current root layout's
+    /// widget tree — i.e. what the renderer is reading from query
+    /// results. Used by `inv-viewmodel-entity-ids-subset-of-data` to
+    /// assert tree-referenced entity_ids are a subset of available
+    /// data rows.
+    async fn root_data_row_ids(&self) -> BTreeSet<CapBlockId>;
 }
 
 // ─── Phase 6d — Layout/Bounds cluster ────────────────────────────────

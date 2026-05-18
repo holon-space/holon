@@ -332,6 +332,134 @@ impl<V: VariantMarker> SutRenderer for E2ESut<V> {
         let vm = holon_frontend::interpret_pure(&render_expr, &data_rows, &services).snapshot();
         Some(vm.pretty_print(0))
     }
+
+    /// Build a frontend-agnostic [`WidgetSnapshot`] from the ViewModel
+    /// rooted at the layout root. Mirrors the path
+    /// `render_tree_of` uses (interpret_pure against the layout root) but
+    /// returns the structured snapshot instead of a pretty-printed string.
+    async fn widget_tree_snapshot(&self) -> holon_pbt_core::capabilities::WidgetSnapshot {
+        let empty = || holon_pbt_core::capabilities::WidgetSnapshot {
+            kind: "empty".into(),
+            entity_id: None,
+            props: Default::default(),
+            operations: Vec::new(),
+            children: Vec::new(),
+        };
+        let Some(engine) = self.frontend_engine.clone() else {
+            return empty();
+        };
+        let root_uri = holon_api::root_layout_block_uri();
+        let rqr = engine.ensure_watching(&root_uri);
+        if rqr.is_loading() {
+            return empty();
+        }
+        let (render_expr, data_rows) = rqr.snapshot();
+        let services =
+            holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
+        let vm = holon_frontend::interpret_pure(&render_expr, &data_rows, &services).snapshot();
+        view_model_to_snapshot(&vm)
+    }
+
+    /// Extracts the `id` column from the layout root's data_rows.
+    /// Returns empty set if the layout root isn't watchable yet.
+    async fn root_data_row_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+        let Some(engine) = self.frontend_engine.clone() else {
+            return Default::default();
+        };
+        let root_uri = holon_api::root_layout_block_uri();
+        let rqr = engine.ensure_watching(&root_uri);
+        if rqr.is_loading() {
+            return Default::default();
+        }
+        let (_, data_rows) = rqr.snapshot();
+        data_rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
+            .collect()
+    }
+}
+
+/// Frontend-agnostic ViewModel→WidgetSnapshot translator.
+///
+/// Encoding contract (see `WidgetSnapshot` rustdoc in pbt-core):
+/// - `kind` = `vm.widget_name()` or `"unknown"` for un-tagged kinds.
+/// - `entity_id` = `vm.row_id()` if present.
+/// - `props` = kind-specific scalar fields canonicalised to strings
+///   (StateToggle.field/current/label/states, EditableText.field/content, etc.).
+/// - `operations` = canonical form `<op_name>:<affected_fields_csv>:<param_names_csv>`,
+///   one per `OperationWiring`. Invariants match by prefix
+///   (`set_field:task_state:` etc.).
+fn view_model_to_snapshot(
+    vm: &holon_frontend::view_model::ViewModel,
+) -> holon_pbt_core::capabilities::WidgetSnapshot {
+    use holon_frontend::view_model::ViewKind;
+    use std::collections::BTreeMap;
+
+    let kind = vm.widget_name().unwrap_or("unknown").to_string();
+    // For LiveBlock, the referenced block id lives in `kind.block_id`;
+    // `vm.row_id()` returns None. Mirror `ViewModel::collect_ids_recursive`
+    // semantics by surfacing block_id as entity_id so cross-slice
+    // invariants can walk references without knowing about LiveBlock.
+    let entity_id = match &vm.kind {
+        ViewKind::LiveBlock { block_id, .. } => Some(block_id.clone()),
+        _ => vm.row_id(),
+    };
+
+    let mut props: BTreeMap<String, String> = BTreeMap::new();
+    match &vm.kind {
+        ViewKind::StateToggle {
+            field,
+            current,
+            label,
+            states,
+        } => {
+            props.insert("field".into(), field.clone());
+            props.insert("current".into(), current.clone());
+            props.insert("label".into(), label.clone());
+            props.insert("states".into(), states.clone());
+        }
+        ViewKind::EditableText { content, field } => {
+            props.insert("field".into(), field.clone());
+            props.insert("content".into(), content.clone());
+        }
+        ViewKind::RenderedText { content, field } => {
+            props.insert("field".into(), field.clone());
+            props.insert("content".into(), content.clone());
+        }
+        ViewKind::Text { content, .. } => {
+            props.insert("content".into(), content.clone());
+        }
+        ViewKind::Badge { label } => {
+            props.insert("label".into(), label.clone());
+        }
+        _ => {}
+    }
+
+    let operations: Vec<String> = vm
+        .operations
+        .iter()
+        .map(|ow| {
+            let fields_csv = ow.descriptor.affected_fields.join(",");
+            let params_csv = ow
+                .descriptor
+                .required_params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}:{}:{}", ow.descriptor.name, fields_csv, params_csv)
+        })
+        .collect();
+
+    let children = vm.children().iter().map(view_model_to_snapshot).collect();
+
+    holon_pbt_core::capabilities::WidgetSnapshot {
+        kind,
+        entity_id,
+        props,
+        operations,
+        children,
+    }
 }
 
 // ─── SutLayout ────────────────────────────────────────────────────────
