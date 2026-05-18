@@ -97,25 +97,30 @@ work:
 
 ### 10.1 — delete inline invariant bodies in `sut.rs::check_invariants_async`
 
-**Status: 1 of 7 migrated.** `inv-loro-no-errors` migration landed
-(`sut.rs:4099-4116`) — the inline `assert_eq!` was replaced with a call
-to `InvLoroNoErrors.check(&ref_state, self)` via the `SutLoroLog`
-blanket impl, matching against `InvariantResult::Fail(msg)` and
-panicking with the same message text. This is the proof-of-concept that
-the wire-up mechanism works end-to-end.
+**Status: 4 of 7 migrated; 3 intentionally kept inline.**
 
-The remaining 6 functional inline bodies require case-by-case migration
-because they carry inline-only context that the migrated
-`Invariant<R,S>` impls don't currently model:
+Migrated to `Invariant<R,S>` calls (each replaces an inline `assert!`/`assert_eq!`):
 
-| Inline body | Inline-only context to preserve |
+| Invariant | Inline site | Notes |
+|---|---|---|
+| `inv-loro-no-errors` | sut.rs:4099 | Pure 1:1 replacement |
+| `inv-frontend-root-not-error` | sut.rs:6042 (14a) | Wrapped in `!is_loading()` outer gate; diagnostic `error_message` retained via concatenated panic |
+| `inv-frontend-no-error-widgets` | sut.rs:6049 (14b) | Diagnostic per-node `collect_error_node_summaries` eprintln'd before migrated panic |
+| `inv-focus-matches-ref` | sut.rs:6709 | All 3 skip conditions + 1s polling loop already in migrated impl — clean substitution |
+
+Kept inline (migration not safe — would lose semantics or coverage):
+
+| Invariant | Why kept inline |
 |---|---|
-| `inv-frontend-root-not-error` (sut.rs:6042) | wrapped in `if !fe_engine.is_loading()` gate; `vm.entity.get("error_message")` diagnostic snapshot |
-| `inv-frontend-no-error-widgets` (sut.rs:6049) | `collect_error_node_summaries(&vm)` per-node summaries eprintln'd before panic |
-| `inv-focus-matches-ref` (sut.rs:6709) | rich diff between predicted+actual focus, region-specific |
-| `inv-viewmodel-entity-ids-subset-of-data` (sut.rs:5098) | per-region SQL re-query for CDC-lag truth check |
-| `inv-viewmodel-root-matches-render-expr` (sut.rs:5039) | RenderExpr comparison via DataRow.expr |
-| `inv-viewmodel-state-toggle-correct` (sut.rs:5204) | per-StateToggle-node iteration with field/label/states/operations assertions |
+| `inv-viewmodel-root-matches-render-expr` (sut.rs:5039) | Wide inline runs against `HeadlessBuilderServices::interpret_pure(render_expr, data_rows)` — a **fresh local interpretation** of the snapshot. Migrated `InvViewmodelRootMatchesRenderExpr` runs against the **live ReactiveEngine snapshot** via `sut.widget_tree_snapshot()`. These check related but distinct properties; the fresh-interp path catches set_data-propagation bugs the live snapshot doesn't. |
+| `inv-viewmodel-entity-ids-subset-of-data` (sut.rs:5098) | Same fresh-interp vs live-snapshot semantic gap as the prior. |
+| `inv-viewmodel-state-toggle-correct` (sut.rs:5204) | Wide inline asserts MORE than the migrated impl: (a) `label == state_display(current).0` for all blocks, (b) `!operations.is_empty()` for task blocks. Migration would silently drop both assertions. |
+
+To safely migrate the remaining 3, the framework needs either:
+1. Widen the migrated impls to add the missing assertions (state_toggle:
+   label + operations checks; entity-ids/root-matches: a `fresh_interp`
+   SUT method that runs `interpret_pure` against the snapshot).
+2. Run BOTH inline AND migrated in the wide PBT — accepts dual maintenance.
 
 Note: Phase 8 invariants (`inv-block-ids-match-ref`,
 `inv-block-tags-references-exist`, `inv-task-state-storage-coherence`)
@@ -173,17 +178,54 @@ is also in the wide registry via
 catches the regression but doesn't prevent it landing in a PR — the
 archlint rule provides the gate.
 
-### 10.5 — retire dead code
+### 10.5 — retire dead code (partial)
 
-Audit:
-- `E2ETransitionFactory` / `E2ETransitionImpl` — are these fully
-  replaced by `holon-pbt-core::{TransitionFactory, TransitionImpl}`?
-  If yes, delete.
-- `SutHandle` methods whose only callers were inline invariant bodies
-  migrated to `bodies/` — delete unused.
+**E2ETransitionFactory / E2ETransitionImpl audit verdict: NOT retirable.**
+All 55 transitions still implement them; the `declare_e2e_transitions!`
+macro generates them and `state_machine.rs` / `sut.rs` /
+`transition_budgets.rs` dispatch through them. The Stage A/B migration
+moved transition LOGIC into capability-bound free helpers; the
+macro-generated thin adapter methods on the trait stay (the macro
+requires `&mut ReferenceState` signatures because that's its codegen
+shape).
+
+**What this session deleted (compiler-flagged dead code only)**:
+- `live_block_has_substantive_content` (sut.rs:43-94) — 60-line utility
+  with no callers anywhere. Originally helper for
+  `inv-frontend-bounds-rendered`; not referenced by the migrated
+  `bodies/frontend_bounds_rendered.rs` (deferred) or any active code.
+- `current_resolved_view_model` (sut.rs:3559-3589) — 30-line async
+  method, no callers. Two doc-comment references at sut.rs:1071
+  describing it as "the older path" are retained for historical
+  context.
+- `assert_keychord_resolves` (sut.rs:3833-3854) — 22-line method, no
+  callers. Doc comment at sut.rs:1146 describing it as "the older
+  path" retained.
+- Nested `walk` fn inside the `inv-viewmodel-tree-virtual-slots`
+  SKIPPED placeholder block (sut.rs:5340-5363) + unreachable
+  `if found > 0` and `if without > 0` branches that gated on
+  hardcoded 0 values. The SKIPPED eprintln + FIXME comment + pointer
+  to the deferred migrated body are retained.
+- Stale comment reference at sut.rs:308 pointing at the deleted
+  `current_resolved_view_model` — replaced with reference to the
+  active helper.
+
+Net warning reduction (holon-integration-tests): 7 → 4 (lib) + 7 → 4
+(lib test).
+
+**Intentionally retained**:
+- `live_focus_roots_arc` (sut.rs) + `FocusRoot` struct — referenced
+  by deferred `bodies/focus_roots.rs:28` as "available for future
+  migration". Removing now would force a re-introduction when the
+  invariant body promotes from deferred to functional.
+- `run_invariants_with_post_overlay` (phased.rs:420) — diagnostic
+  scaffolding (screenshot overlay around `check_invariants_async`),
+  not stale leftover.
+- `row_tags_contain_page` (test_environment.rs:2339) — multi-shape
+  JSON tag parser, deliberate scaffolding.
 - 6 stubs in `sut_capabilities.rs` with `unimplemented!()` /
-  `panic!("…")` — each has a documented blocker; resolve or document
-  why permanent.
+  `panic!("…")` — each has documented unblocker; resolve when the
+  paired invariant body promotes from deferred.
 
 ### 10.6 — docs + result marker
 

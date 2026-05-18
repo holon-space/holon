@@ -33,66 +33,6 @@ use super::reference_state::ReferenceState;
 use super::state_machine::VariantRef;
 use super::types::*;
 
-/// True iff the VM contains a `LiveBlock` for `block_id` whose content
-/// recursively contains at least one widget node that is neither `Empty`
-/// nor `Loading`. Used by inv-frontend-bounds-rendered/vm-data-tracked-as-content to skip wrappers whose inner profile
-/// materialised as a placeholder (e.g. org-parsed blocks with
-/// `::src::N`/`::render::N` children that fall back to the empty default)
-/// — those aren't the "GPUI only materialised region wrappers" bug vm-data-tracked-as-content
-/// is designed to catch, and panicking on them masks the real signal.
-fn live_block_has_substantive_content(vm: &holon_frontend::ViewModel, block_id: &str) -> bool {
-    use holon_frontend::view_model::ViewKind;
-    fn has_substantive(node: &holon_frontend::ViewModel) -> bool {
-        match &node.kind {
-            // Placeholders & invisible whitespace: not substantive.
-            ViewKind::Empty
-            | ViewKind::Loading
-            | ViewKind::Spacer { .. }
-            | ViewKind::DropZone { .. } => false,
-            // Visible content leaves: substantive.
-            ViewKind::Text { .. }
-            | ViewKind::Badge { .. }
-            | ViewKind::Icon { .. }
-            | ViewKind::Image { .. }
-            | ViewKind::EditableText { .. }
-            | ViewKind::SourceBlock { .. }
-            | ViewKind::SourceEditor { .. }
-            | ViewKind::StateToggle { .. }
-            | ViewKind::Checkbox { .. }
-            | ViewKind::TableRow { .. } => true,
-            // Wrappers / containers / unknowns: only substantive if a
-            // descendant is. An empty layout widget (e.g. `columns` with
-            // no children) is NOT substantive — that's the placeholder
-            // shape we're filtering out.
-            _ => {
-                let children = node.children();
-                !children.is_empty() && children.iter().any(has_substantive)
-            }
-        }
-    }
-    fn find_and_check(node: &holon_frontend::ViewModel, block_id: &str) -> Option<bool> {
-        if let ViewKind::LiveBlock {
-            block_id: id,
-            content,
-        } = &node.kind
-        {
-            if id == block_id {
-                return Some(has_substantive(content));
-            }
-        }
-        for child in node.children() {
-            if let Some(result) = find_and_check(child, block_id) {
-                return Some(result);
-            }
-        }
-        None
-    }
-    // Default to `true` when the VM doesn't even contain a LiveBlock for
-    // this id. Filtering it out would silently weaken vm-data-tracked-as-content; let it fall
-    // through to the original "no widget at all" warn/exemption path.
-    find_and_check(vm, block_id).unwrap_or(true)
-}
-
 /// One row of the `focus_roots` matview. Mirrored into a `LiveData<FocusRoot>`
 /// so inv-region-focus-roots-iter/8 can iterate by region in Rust without a per-region SQL query.
 #[derive(Clone, Debug)]
@@ -305,7 +245,8 @@ pub struct E2ESut<V: VariantMarker> {
     /// screenshot, and inv-frontend-engine reads it to assert that the UI isn't visually empty.
     pub frontend_visual_state: Option<crate::ui_driver::VisualState>,
     /// Root layout block ID used by the ReactiveEngine — set during StartApp,
-    /// used by `current_resolved_view_model()` and `current_reactive_tree()`.
+    /// used by `current_reactive_tree()` and the headless `wait_for_entity_*`
+    /// helpers.
     reactive_root_id: RefCell<Option<EntityUri>>,
     /// Headless live tree — persistent collection backed by the engine's live
     /// CDC data. Mirrors what the GPUI frontend sees: the collection driver
@@ -3552,42 +3493,6 @@ impl<V: VariantMarker> E2ESut<V> {
         }
     }
 
-    /// Fully resolved ViewModel snapshot — uses the same path as inv-viewmodel-state-toggle-correct:
-    /// `interpret_pure(render_expr, data_rows)` so that list/table items
-    /// are populated from the data snapshot. Waits for the UiWatcher to
-    /// deliver data rows if they haven't arrived yet.
-    async fn current_resolved_view_model(&self) -> Option<holon_frontend::ViewModel> {
-        let reactive = self.reactive_engine.borrow().clone()?;
-        let root_id = self
-            .reactive_root_id
-            .borrow()
-            .clone()
-            .unwrap_or_else(holon_api::root_layout_block_uri);
-
-        // Wait for data rows to arrive (UiWatcher loads asynchronously).
-        let results = reactive.ensure_watching(&root_id);
-        {
-            use futures::StreamExt;
-            let mut stream = reactive.watch(&root_id);
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                let (_, rows) = results.snapshot();
-                if !rows.is_empty() {
-                    break;
-                }
-                match tokio::time::timeout_at(deadline, stream.next()).await {
-                    Ok(Some(_)) => continue,
-                    _ => break,
-                }
-            }
-        }
-
-        let (render_expr, data_rows) = results.snapshot();
-        let services =
-            holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
-        Some(holon_frontend::interpret_pure(&render_expr, &data_rows, &services).snapshot())
-    }
-
     /// Initialize the ReactiveEngine — the same rendering pipeline GPUI uses.
     /// Must be called during StartApp so all subsequent transitions can read
     /// the reactive tree (ToggleState, EditViaDisplayTree, etc.).
@@ -3823,34 +3728,6 @@ impl<V: VariantMarker> E2ESut<V> {
         let engine = self.reactive_engine.borrow();
         let engine = engine.as_ref()?;
         engine.key_bindings().lock_ref().get(op_name).cloned()
-    }
-
-    /// Validate that a keychord resolves to the expected operation via the shadow index.
-    ///
-    /// Does NOT dispatch — only checks the keybinding → shadow index → bubble_input path.
-    /// Panics with diagnostics if the keychord doesn't match. Delegates to
-    /// `UserDriver::resolve_key_chord`.
-    fn assert_keychord_resolves(&self, op_name: &str, entity_id: &str, label: &str) {
-        let Some(chord) = self.find_keybinding_for_op(op_name) else {
-            return; // No keybinding registered — skip validation
-        };
-        let Some((root_id, root_tree)) = self.current_reactive_tree() else {
-            panic!("[{label}] No reactive tree available for keychord validation");
-        };
-        let Some(driver) = self.driver.as_ref() else {
-            panic!("[{label}] driver not installed");
-        };
-        match driver.resolve_key_chord(root_id.as_str(), &root_tree, entity_id, &chord) {
-            Some(matched_op) => {
-                eprintln!("[{label}] Keychord validation OK: chord matched op '{matched_op}'");
-            }
-            None => {
-                panic!(
-                    "[{label}] Keychord {chord:?} for '{op_name}' did NOT match on entity \
-                     {entity_id}. The keybinding was not joined into the operation."
-                );
-            }
-        }
     }
 }
 impl<V: VariantMarker> E2ESut<V> {
@@ -5461,53 +5338,16 @@ impl<V: VariantMarker> E2ESut<V> {
                         .map(|n| n == "tree")
                         .unwrap_or(false);
                     if is_tree {
-                        fn walk(
-                            node: &holon_frontend::ReactiveViewModel,
-                            found: &mut usize,
-                            without: &mut usize,
-                        ) {
-                            if let Some(ref view) = node.collection {
-                                let snap = view.children_snapshot();
-                                if snap.last().is_some_and(|last| {
-                                    last.entity_id()
-                                        .is_some_and(|id| id.contains(":__virtual:"))
-                                }) {
-                                    *found += 1;
-                                } else if view.layout().is_some_and(|l| l.name() == "tree") {
-                                    *without += 1;
-                                }
-                            }
-                            for child in &node.children {
-                                walk(child, found, without);
-                            }
-                            if let Some(ref slot) = node.slot {
-                                let guard = slot.content.lock_ref();
-                                walk(&guard, found, without);
-                            }
-                        }
-                        let found = 0usize;
-                        let without = 0usize;
                         // FIXME: display_tree must be obtained from
                         // wait_for_entity_in_resolved_view_model or similar
                         // before this invariant can meaningfully execute.
-                        // Blocked on inv-viewmodel-tree-virtual-slots wiring — see memory entry
-                        // pbt_zero_height_reproduction.md.
-                        let _ = (found, without);
+                        // Blocked on inv-viewmodel-tree-virtual-slots wiring — see
+                        // crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_tree_virtual_slots.rs
+                        // for the migrated (deferred) impl; promote when the
+                        // display_tree wiring lands.
                         eprintln!(
                             "[inv-viewmodel-tree-virtual-slots] SKIPPED — display_tree not wired in this scope"
                         );
-                        if found > 0 {
-                            eprintln!(
-                                "[inv-viewmodel-tree-virtual-slots] Virtual child slot(s): {found} OK"
-                            );
-                        }
-                        if without > 0 && found == 0 {
-                            eprintln!(
-                                "[inv-viewmodel-tree-virtual-slots] WARNING: {without} tree collection(s) \
-                                 with no virtual child — creation_slot may be \
-                                 inactive for this seed."
-                            );
-                        }
                     }
                 }
 
@@ -6042,30 +5882,60 @@ impl<V: VariantMarker> E2ESut<V> {
                 let vm = fe_engine.snapshot(&root_uri);
                 let root_kind = vm.widget_name().unwrap_or("?");
 
-                // 14a: Root widget must not be Error
-                assert_ne!(
-                    root_kind,
-                    "error",
-                    "[inv-frontend-root-not-error] Frontend root widget is Error: {:?}",
-                    vm.entity.get("error_message"),
-                );
-
-                // 14b: No Error widgets anywhere in the tree
-                let error_count = crate::display_assertions::count_error_nodes(&vm);
-                if error_count > 0 {
-                    let summaries = crate::display_assertions::collect_error_node_summaries(&vm);
-                    eprintln!(
-                        "[inv-frontend-no-error-widgets] {} Error widget(s) in ViewModel:",
-                        summaries.len()
-                    );
-                    for s in &summaries {
-                        eprintln!("    {s}");
+                // 14a: inv-frontend-root-not-error — Phase 10.1: migrated to
+                //      `InvFrontendRootNotError` via `SutViewModel`. We still
+                //      capture `error_message` here for diagnostic richness
+                //      because the migrated impl's message doesn't carry it.
+                {
+                    use crate::pbt::invariants::bodies::frontend_root_not_error::InvFrontendRootNotError;
+                    use holon_pbt_core::invariant::{Invariant, InvariantResult};
+                    match Invariant::<ReferenceState, Self>::check(
+                        &InvFrontendRootNotError,
+                        ref_state,
+                        self,
+                    )
+                    .await
+                    {
+                        InvariantResult::Ok => {}
+                        InvariantResult::Fail(msg) => panic!(
+                            "{msg} (root error_message = {:?})",
+                            vm.entity.get("error_message")
+                        ),
+                        InvariantResult::Skipped(_) => {}
                     }
                 }
-                assert!(
-                    error_count == 0,
-                    "[inv-frontend-no-error-widgets] Frontend ViewModel contains {error_count} Error widget(s)",
-                );
+
+                // 14b: inv-frontend-no-error-widgets — Phase 10.1: migrated to
+                //      `InvFrontendNoErrorWidgets` via `SutViewModel + SutLayout`.
+                //      We still emit per-node summaries on failure for diagnostic
+                //      detail before the migrated impl panics with its message.
+                {
+                    let error_count = crate::display_assertions::count_error_nodes(&vm);
+                    if error_count > 0 {
+                        let summaries =
+                            crate::display_assertions::collect_error_node_summaries(&vm);
+                        eprintln!(
+                            "[inv-frontend-no-error-widgets] {} Error widget(s) in ViewModel:",
+                            summaries.len()
+                        );
+                        for s in &summaries {
+                            eprintln!("    {s}");
+                        }
+                    }
+                    use crate::pbt::invariants::bodies::frontend_no_error_widgets::InvFrontendNoErrorWidgets;
+                    use holon_pbt_core::invariant::{Invariant, InvariantResult};
+                    match Invariant::<ReferenceState, Self>::check(
+                        &InvFrontendNoErrorWidgets,
+                        ref_state,
+                        self,
+                    )
+                    .await
+                    {
+                        InvariantResult::Ok => {}
+                        InvariantResult::Fail(msg) => panic!("{msg}"),
+                        InvariantResult::Skipped(_) => {}
+                    }
+                }
 
                 // 14c: BoundsRegistry assertions — verify GPUI actually laid out elements
                 let entity_ids = vm.collect_entity_ids();
@@ -6739,41 +6609,21 @@ impl<V: VariantMarker> E2ESut<V> {
         // NavigateFocus/ArrowNavigate), so the engine value carries the
         // resolved id while the ref tracks the unresolved seed. Compare via
         // `resolve_uri` to bridge that gap.
-        if let Some(ref engine) = self.frontend_engine
-            && let Some(ref ref_focused) = ref_state.focused_block
-            && ref_state.active_editor.is_none()
+        // inv-focus-matches-ref — Phase 10.1: migrated to `InvFocusMatchesRef`
+        // via `SutDriver`. All three skip conditions (no engine / no ref
+        // focus / active editor) are handled inside the migrated impl,
+        // matching the inline outer guards exactly. The 1s polling loop
+        // for chord-op focus propagation also lives in the migrated impl.
         {
-            let resolved_ref = self.resolve_uri(ref_focused);
-            // Poll briefly: chord ops like SplitBlock / JoinBlock fire
-            // editor_focus(new_block) as a follow-up that propagates through
-            // SQL → watch_editor_cursor → window.focus → InputEvent::Focus →
-            // set_focus. The new block's EditorView may not have mounted by
-            // the time this invariant runs; poll up to 1s for the chain to
-            // converge before failing.
-            let poll_deadline = std::time::Instant::now() + Duration::from_millis(1000);
-            let mut actual = engine.focused_block();
-            while actual
-                .as_ref()
-                .is_some_and(|u| u.as_str() != resolved_ref.as_str())
-                && std::time::Instant::now() < poll_deadline
+            use crate::pbt::invariants::bodies::focus_matches_ref::InvFocusMatchesRef;
+            use holon_pbt_core::invariant::{Invariant, InvariantResult};
+            match Invariant::<ReferenceState, Self>::check(&InvFocusMatchesRef, ref_state, self)
+                .await
             {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                actual = engine.focused_block();
+                InvariantResult::Ok => {}
+                InvariantResult::Fail(msg) => panic!("{msg}"),
+                InvariantResult::Skipped(_) => {}
             }
-            if let Some(ref actual_uri) = actual {
-                assert_eq!(
-                    actual_uri.as_str(),
-                    resolved_ref.as_str(),
-                    "[inv-focus-matches-ref] Global focus mismatch: reference model has {} \
-                     (resolved: {}), but engine.focused_block() has {} (polled 1s)",
-                    ref_focused,
-                    resolved_ref,
-                    actual_uri,
-                );
-            }
-            // If actual is None but ref has focus, that's allowed — the
-            // reference model sets focus in its apply() phase, but GPUI's
-            // focus update happens on a signal loop and may lag.
         }
 
         // ── inv-displayed-text: editable_text + text widgets show the right string ─
