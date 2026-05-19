@@ -18,7 +18,7 @@ use holon_api::EntityUri;
 use holon_api::streaming::{ChangeNotifications, ChangeSubscribers};
 use holon_api::{
     ApiError, Block, BlockContent, Change, ChangeOrigin, ContentType, SourceBlock, StreamPosition,
-    Value,
+    Tags, Value,
 };
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -155,6 +155,9 @@ pub fn read_marks_from_text(text: &loro::LoroText) -> Vec<holon_api::MarkSpan> {
         }
     }
 
+    // Overlapping runs close in `HashMap` iteration order; canonicalize so the
+    // result compares equal to the SQL-stored mark set for the same block.
+    holon_api::canonicalize_marks(&mut marks);
     marks
 }
 
@@ -340,11 +343,23 @@ fn read_content_from_meta(meta: &loro::LoroMap) -> BlockContent {
 }
 
 fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
-    match meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string())) {
-        Some(json) => serde_json::from_str(&json)
-            .unwrap_or_else(|e| panic!("Corrupt properties JSON in Loro tree: {json:?}: {e}")),
-        None => HashMap::new(),
-    }
+    let mut props: HashMap<String, Value> =
+        match meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string())) {
+            Some(json) => serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("Corrupt properties JSON in Loro tree: {json:?}: {e}")),
+            None => HashMap::new(),
+        };
+    // Edge-typed fields (`tags`, `requires`) are stored in dedicated meta keys
+    // and typed `Block` slots — never in the generic PROPERTIES blob. Strip any
+    // that leaked in (legacy pollution from an older build that flattened
+    // `requires` into PROPERTIES, e.g. as the debug string `"Array([])"`).
+    // Stripping here — the single PROPERTIES read boundary — keeps them out of
+    // params (avoids the `SqlOperationProvider` edge-partition panic) AND
+    // self-heals storage: the read-merge-write update paths re-persist without
+    // the stray keys.
+    props.remove("tags");
+    props.remove("requires");
+    props
 }
 
 /// Read the stable ID from a node's metadata.
@@ -369,6 +384,9 @@ fn read_block_from_tree(
         .get_meta(node)
         .unwrap_or_else(|_| panic!("get_meta failed for node {:?}", node));
     let content = read_content_from_meta(&meta);
+    // `read_properties_from_meta` already strips edge-typed keys (`tags`,
+    // `requires`) that legacy pollution may have flattened into the PROPERTIES
+    // blob — they live in dedicated meta keys + typed `Block` slots instead.
     let properties = read_properties_from_meta(&meta);
 
     let id = block_uri_from_meta(&meta, node);
@@ -390,6 +408,7 @@ fn read_block_from_tree(
         .unwrap_or(0);
 
     let tags = read_tags_from_meta(&meta);
+    let requires = read_requires_from_meta(&meta);
     // Phase 3.4: sort_key comes from Loro's internal fractional index
     // (`tree.fractional_index`), not a shadow meta key. Loro's hex format
     // matches `loro_fractional_index::FractionalIndex::to_string()` exactly
@@ -398,7 +417,8 @@ fn read_block_from_tree(
 
     let mut block = Block::from_block_content(id, parent_id, content);
     block.set_properties_map(properties);
-    block.tags = tags;
+    block.tags = tags.into();
+    block.requires = requires;
     block.created_at = created_at;
     block.updated_at = updated_at;
     if let Some(sk) = sort_key {
@@ -411,6 +431,16 @@ fn read_block_from_tree(
 /// `Vec` when the key is absent or malformed (treated as "no tags").
 fn read_tags_from_meta(meta: &loro::LoroMap) -> Vec<String> {
     meta.get_typed("tags", |val| val.as_string().map(|s| s.to_string()))
+        .map(|s| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// Read the `requires` JSON-encoded list (org-edna dependency edge field) from a
+/// node's metadata. Stored under a dedicated `requires` meta key — like `tags`,
+/// it is an edge field (the `block_requires` junction), never part of the
+/// generic `properties` blob. Returns an empty `Vec` when absent or malformed.
+fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<String> {
+    meta.get_typed("requires", |val| val.as_string().map(|s| s.to_string()))
         .map(|s| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default())
         .unwrap_or_default()
 }
@@ -626,6 +656,19 @@ pub fn snapshot_blocks_from_doc(doc: &loro::LoroDoc) -> HashMap<String, Block> {
             node.parent,
             loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
         ) {
+            continue;
+        }
+        // Skip nodes without a STABLE_ID. A snapshot is an eventually-consistent
+        // read of the convergent feed; when it runs concurrently with an
+        // in-flight mutation sequence (or reads a `fork_at` of a watermark whose
+        // tree linkage is transient — loro logs "Missing in parent's children"),
+        // a node can momentarily lack its meta. It is not a valid block to
+        // project; the next settled snapshot picks it up. Panicking here
+        // (`block_uri_from_meta`) would kill the projection task entirely.
+        let Ok(meta) = tree.get_meta(node.id) else {
+            continue;
+        };
+        if read_stable_id(&meta).is_none() {
             continue;
         }
         let parent_tid = get_node_parent(&tree, node.id);
@@ -1184,6 +1227,99 @@ impl LoroBackend {
         Ok(())
     }
 
+    /// Like the `create_block` trait method, but writes `properties` into the
+    /// new node's meta **in the same Loro commit** as the node, content, and
+    /// STABLE_ID. This keeps the Loro authority *complete at creation*: a block
+    /// born with drawer properties (org ingestion) carries them in Loro, so the
+    /// outbound projector reflects them to SQL instead of round-tripping an
+    /// empty `properties` over the row the create wrote (the `props_check` /
+    /// "Value::Object serialization" divergence). The trait `create_block`
+    /// delegates here with an empty map.
+    pub async fn create_block_with_properties(
+        &self,
+        parent_id: EntityUri,
+        content: BlockContent,
+        id: Option<EntityUri>,
+        properties: &HashMap<String, Value>,
+        tags: &Tags,
+        requires: &[String],
+    ) -> Result<Block, ApiError> {
+        let now = Self::now_millis();
+        let stable_id = match &id {
+            Some(uri) => uri.id().to_string(),
+            None => uuid::Uuid::new_v4().to_string(),
+        };
+
+        let id_cache = self.id_cache.clone();
+        let (created_block, tree_id) = self
+            .collab_doc
+            .with_write(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let parent_tree_id = resolve_parent_tree_id(&tree, &id_cache, &parent_id)?;
+
+                let node = tree.create(parent_tree_id)?;
+                let meta = tree.get_meta(node)?;
+                meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
+                write_content_to_meta(&meta, &content, None)?;
+                write_properties_to_meta(&meta, properties)?;
+                // Tags are edge fields (block_tags), stored in Loro meta as a
+                // JSON list under "tags" (mirrors `set_block_tags`). Carrying
+                // them in the create commit is essential: the downstream
+                // projection reads them via `read_block_from_tree` and writes
+                // `block_tags`. The `Page` tag in particular makes a document
+                // resolvable — dropping it here orphans every doc.
+                if !tags.is_empty() {
+                    let serialized = serde_json::to_string(tags)
+                        .map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
+                    meta.insert("tags", loro::LoroValue::from(serialized.as_str()))?;
+                }
+                // `requires` mirrors `tags`: an edge field carried in the create
+                // commit under its own meta key, so the downstream projection
+                // reads it via `read_block_from_tree` and writes `block_requires`.
+                // Dropping it here loses every org-edna dependency in Loro mode.
+                if !requires.is_empty() {
+                    let serialized = serde_json::to_string(requires)
+                        .map_err(|e| anyhow::anyhow!("serialize requires: {e}"))?;
+                    meta.insert("requires", loro::LoroValue::from(serialized.as_str()))?;
+                }
+                meta.insert("created_at", loro::LoroValue::from(now))?;
+                meta.insert("updated_at", loro::LoroValue::from(now))?;
+                doc.commit();
+
+                let block_id = EntityUri::block(&stable_id);
+                let parent_uri = match parent_tree_id {
+                    Some(pid) => {
+                        let parent_meta = tree.get_meta(pid)?;
+                        Ok::<_, anyhow::Error>(block_uri_from_meta(&parent_meta, pid))
+                    }
+                    None => Ok(EntityUri::no_parent()),
+                }?;
+
+                let mut block = Block::from_block_content(block_id, parent_uri, content);
+                block.set_properties_map(properties.clone());
+                block.tags = tags.clone();
+                block.requires = requires.to_vec();
+                block.created_at = now;
+                block.updated_at = now;
+                Ok((block, node))
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("Failed to create block: {}", e),
+            })?;
+
+        self.cache_stable_id(&stable_id, tree_id);
+
+        self.emit_change(Change::Created {
+            data: created_block.clone(),
+            origin: ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
+            },
+        });
+
+        Ok(created_block)
+    }
+
     pub async fn update_block_properties(
         &self,
         id: &str,
@@ -1432,6 +1568,34 @@ impl LoroBackend {
                 meta.delete("tags")?;
             } else {
                 meta.insert("tags", loro::LoroValue::from(serialized.as_str()))?;
+            }
+            doc.commit();
+            Ok(())
+        })
+    }
+
+    /// Set the `requires` edge field (org-edna dependencies) on a block's Loro
+    /// meta. Mirrors [`set_block_tags`](Self::set_block_tags): stored under a
+    /// dedicated `requires` meta key as a JSON list, read back by
+    /// `read_block_from_tree`, projected to the `block_requires` junction.
+    pub async fn set_block_requires(
+        &self,
+        tree_id_str: &str,
+        requires: &[String],
+    ) -> anyhow::Result<()> {
+        let tree_id = self.resolve_to_tree_id(tree_id_str).await.ok_or_else(|| {
+            anyhow::anyhow!("set_block_requires: block not found: {}", tree_id_str)
+        })?;
+
+        let serialized = serde_json::to_string(requires)?;
+
+        self.collab_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(tree_id)?;
+            if requires.is_empty() {
+                meta.delete("requires")?;
+            } else {
+                meta.insert("requires", loro::LoroValue::from(serialized.as_str()))?;
             }
             doc.commit();
             Ok(())
@@ -1997,56 +2161,15 @@ impl CoreOperations for LoroBackend {
         content: BlockContent,
         id: Option<EntityUri>,
     ) -> Result<Block, ApiError> {
-        let now = Self::now_millis();
-        let stable_id = match &id {
-            Some(uri) => uri.id().to_string(),
-            None => uuid::Uuid::new_v4().to_string(),
-        };
-
-        let id_cache = self.id_cache.clone();
-        let (created_block, tree_id) = self
-            .collab_doc
-            .with_write(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let parent_tree_id = resolve_parent_tree_id(&tree, &id_cache, &parent_id)?;
-
-                let node = tree.create(parent_tree_id)?;
-                let meta = tree.get_meta(node)?;
-                meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
-                write_content_to_meta(&meta, &content, None)?;
-                meta.insert("created_at", loro::LoroValue::from(now))?;
-                meta.insert("updated_at", loro::LoroValue::from(now))?;
-                doc.commit();
-
-                let block_id = EntityUri::block(&stable_id);
-                let parent_uri = match parent_tree_id {
-                    Some(pid) => {
-                        let parent_meta = tree.get_meta(pid)?;
-                        Ok::<_, anyhow::Error>(block_uri_from_meta(&parent_meta, pid))
-                    }
-                    None => Ok(EntityUri::no_parent()),
-                }?;
-
-                let mut block = Block::from_block_content(block_id, parent_uri, content);
-                block.created_at = now;
-                block.updated_at = now;
-                Ok((block, node))
-            })
-            .map_err(|e| ApiError::InternalError {
-                message: format!("Failed to create block: {}", e),
-            })?;
-
-        self.cache_stable_id(&stable_id, tree_id);
-
-        self.emit_change(Change::Created {
-            data: created_block.clone(),
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
-        });
-
-        Ok(created_block)
+        self.create_block_with_properties(
+            parent_id,
+            content,
+            id,
+            &HashMap::new(),
+            &Tags::default(),
+            &[],
+        )
+        .await
     }
 
     async fn update_block(&self, id: &str, content: BlockContent) -> Result<(), ApiError> {
@@ -2340,6 +2463,17 @@ mod tests {
             .unwrap()
     }
 
+    async fn create_text_block(backend: &LoroBackend, raw: &str) -> Block {
+        backend
+            .create_block(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: raw.into() },
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn create_and_get_block() {
         let backend = create_test_backend().await;
@@ -2364,14 +2498,7 @@ mod tests {
         // For a freshly-created block, Loro auto-assigns a fractional
         // index; the read path returns exactly that string.
         let backend = create_test_backend().await;
-        let block = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "x".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let block = create_text_block(&backend, "x").await;
         let fetched = backend.get_block(block.id.as_str()).await.unwrap();
         let tree_index = backend
             .collab_doc
@@ -2391,30 +2518,9 @@ mod tests {
         // it scans siblings to find the predecessor whose fractional_index
         // is closest below the hint and dispatches update_block_position.
         let backend = create_test_backend().await;
-        let first = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "a".into() },
-                None,
-            )
-            .await
-            .unwrap();
-        let second = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "b".into() },
-                None,
-            )
-            .await
-            .unwrap();
-        let third = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "c".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let first = create_text_block(&backend, "a").await;
+        let second = create_text_block(&backend, "b").await;
+        let third = create_text_block(&backend, "c").await;
         let first_fi = backend.get_block(first.id.as_str()).await.unwrap().sort_key;
         let second_fi = backend
             .get_block(second.id.as_str())
@@ -2458,30 +2564,9 @@ mod tests {
         // the resulting fractional index into Block.sort_key, so the SQL
         // ordering matches the chord-op intent.
         let backend = create_test_backend().await;
-        let first = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "a".into() },
-                None,
-            )
-            .await
-            .unwrap();
-        let third = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "c".into() },
-                None,
-            )
-            .await
-            .unwrap();
-        let second = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "b".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let first = create_text_block(&backend, "a").await;
+        let third = create_text_block(&backend, "c").await;
+        let second = create_text_block(&backend, "b").await;
         // `second` was created last, so it sits at the end. Move it to
         // sit immediately after `first` instead.
         backend
@@ -2514,22 +2599,8 @@ mod tests {
     #[tokio::test]
     async fn update_block_position_is_idempotent() {
         let backend = create_test_backend().await;
-        let first = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "a".into() },
-                None,
-            )
-            .await
-            .unwrap();
-        let second = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "b".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let first = create_text_block(&backend, "a").await;
+        let second = create_text_block(&backend, "b").await;
 
         // Place `second` after `first`.
         backend
@@ -2703,14 +2774,7 @@ mod tests {
         // (Phase 0.1 spike S3: re-config is silent no-op.)
         use holon_api::{InlineMark, MarkSpan};
         let backend = create_test_backend().await;
-        let block = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "x".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let block = create_text_block(&backend, "x").await;
         backend
             .update_block_marked(
                 block.id.as_str(),
@@ -2901,14 +2965,7 @@ mod tests {
         // until the text grows. The editor relies on this so a freshly-empty
         // block can park its caret without special-casing.
         let backend = create_test_backend().await;
-        let block = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let block = create_text_block(&backend, "").await;
 
         let cursor = backend
             .text_cursor_at(block.id.as_str(), 0, loro::cursor::Side::Middle)
@@ -3056,14 +3113,7 @@ mod tests {
         // Phase 3.2a: positions are Unicode scalars, not bytes — multibyte
         // chars don't break the offset model.
         let backend = create_test_backend().await;
-        let block = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "ab".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let block = create_text_block(&backend, "ab").await;
 
         // Insert "你好" at scalar position 1 (between 'a' and 'b').
         backend
@@ -3139,14 +3189,7 @@ mod tests {
     #[tokio::test]
     async fn create_nested_and_list_children() {
         let backend = create_test_backend().await;
-        let root = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "root".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let root = create_text_block(&backend, "root").await;
 
         let child = backend
             .create_block(
@@ -3195,14 +3238,7 @@ mod tests {
     #[tokio::test]
     async fn move_block_cycle_rejected() {
         let backend = create_test_backend().await;
-        let a = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "A".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let a = create_text_block(&backend, "A").await;
         let b = backend
             .create_block(a.id.clone(), BlockContent::Text { raw: "B".into() }, None)
             .await
@@ -3215,22 +3251,8 @@ mod tests {
     #[tokio::test]
     async fn move_block_valid() {
         let backend = create_test_backend().await;
-        let a = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "A".into() },
-                None,
-            )
-            .await
-            .unwrap();
-        let b = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "B".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let a = create_text_block(&backend, "A").await;
+        let b = create_text_block(&backend, "B").await;
 
         backend
             .move_block(b.id.as_str(), a.id.clone(), None)
@@ -3243,14 +3265,7 @@ mod tests {
     #[tokio::test]
     async fn delete_block_hides_it() {
         let backend = create_test_backend().await;
-        let root = backend
-            .create_block(
-                EntityUri::no_parent(),
-                BlockContent::Text { raw: "root".into() },
-                None,
-            )
-            .await
-            .unwrap();
+        let root = create_text_block(&backend, "root").await;
         let child = backend
             .create_block(
                 root.id.clone(),

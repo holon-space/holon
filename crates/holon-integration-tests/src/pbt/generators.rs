@@ -170,6 +170,12 @@ pub fn generate_org_file_content_with_keywords(
                 "[A-Z][a-z][a-zA-Z0-9 ]{0,19}",
                 "[a-z0-9-]+",
                 prop::bool::ANY,
+                // `make_requires`: when true (and a prior sibling exists), this
+                // heading gets a `:REQUIRES:` org-edna dependency on the
+                // immediately-preceding sibling. Exercises the `requires` edge
+                // field end-to-end (parser → Loro/SQL junction → projection →
+                // renderer) — the path that was previously never generated.
+                prop::bool::ANY,
             ),
             1..=5,
         ),
@@ -180,17 +186,29 @@ pub fn generate_org_file_content_with_keywords(
                 .as_ref()
                 .map(|set| set.all_keywords())
                 .unwrap_or_default();
+            // Sibling ids in document order, so a heading can depend on its
+            // predecessor by id. Collected up front because the dependency
+            // target (`ids[i-1]`) must be known while building block `i`.
+            let ids: Vec<String> = headings.iter().map(|(_, id, _, _)| id.clone()).collect();
             let blocks: Vec<Block> = headings
                 .into_iter()
                 .enumerate()
-                .map(|(i, (headline, id, make_task))| {
+                .map(|(i, (headline, id, make_task, make_requires))| {
                     let mut b = Block::new_text(EntityUri::block(&id), doc_uri.clone(), &headline);
-                    b.set_property("ID", Value::String(id));
+                    b.set_property("ID", Value::String(id.clone()));
                     // Assign a task keyword to ~50% of headlines when keywords exist.
                     // Cycle through keywords using the index for variety.
                     if make_task && !all_keywords.is_empty() {
                         let kw = &all_keywords[i % all_keywords.len()];
                         b.set_task_state(Some(TaskState::from_keyword(kw)));
+                    }
+                    // Single-element requires (depend on the previous sibling)
+                    // — kept to one entry so the order-insensitive junction read
+                    // can't false-diff against the parsed order. Skip self-refs
+                    // from duplicate ids. Stored as a `block:` URI to match the
+                    // parser boundary (`EntityUri::from_raw`).
+                    if make_requires && i > 0 && ids[i - 1] != id {
+                        b.requires = vec![EntityUri::block(&ids[i - 1]).to_string()];
                     }
                     b
                 })

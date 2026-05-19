@@ -231,10 +231,10 @@ fn block_to_headline_spec(block: &Block, all_blocks: &[Block]) -> HeadlineSpec {
         title,
         tags: {
             let tags = block.tags();
-            if tags.as_slice().is_empty() {
+            if tags.is_empty() {
                 None
             } else {
-                Some(tags.as_slice().to_vec())
+                Some(tags.to_vec())
             }
         },
         body,
@@ -713,7 +713,7 @@ fn apply_mutation(block: &mut Block, mutation: &BlockMutation) {
             block.set_tags(tags.clone());
         }
         BlockMutation::AddTag(tag) => {
-            let mut current = block.tags().as_slice().to_vec();
+            let mut current = block.tags().to_vec();
             current.push(tag.clone());
             block.set_tags(Tags::from(current));
         }
@@ -1217,7 +1217,7 @@ fn apply_equivalent_block_mutation(
             let section = &sections[*section_idx];
             if let Some(id) = &section.id {
                 if let Some(block) = blocks.iter_mut().find(|b| b.id.id() == id) {
-                    let mut current = block.tags().as_slice().to_vec();
+                    let mut current = block.tags().to_vec();
                     current.push(tag.clone());
                     block.set_tags(Tags::from(current));
                 }

@@ -16,7 +16,7 @@
 //!
 //! Extracted from `sut.rs` (Phase D3).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use holon_api::{QueryLanguage, Value};
@@ -28,7 +28,7 @@ use super::reference_state::ReferenceState;
 use super::sut::E2ESut;
 use super::types::*;
 
-#[async_trait::async_trait(?Send)]
+#[allow(async_fn_in_trait)]
 impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> {
     /// Override the default-panicking SutHandle stub: route the layout-PBT
     /// `Clickable::click_at_element` capability through the same
@@ -553,7 +553,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         );
         crate::pbt::transitions::toggle_state::apply_toggle_state_to_sut(
             self,
-            &resolved_block_id.to_string(),
+            &resolved_block_id,
             click_count,
         )
         .await;
@@ -911,37 +911,9 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         );
         crate::pbt::transitions::trigger_slash_command::apply_trigger_slash_command_to_sut(
             self,
-            &resolved_block_id.to_string(),
+            &resolved_block_id,
         )
         .await;
-    }
-
-    async fn apply_indent(&mut self, block_id: &holon_api::EntityUri) {
-        tracing::trace!("[apply] Indent: block={block_id}");
-        let resolved_id = self.resolve_uri(block_id);
-        self.dispatch_block_op_via_chord("indent", resolved_id.as_str(), HashMap::new())
-            .await;
-    }
-
-    async fn apply_outdent(&mut self, block_id: &holon_api::EntityUri) {
-        tracing::trace!("[apply] Outdent: block={block_id}");
-        let resolved_id = self.resolve_uri(block_id);
-        self.dispatch_block_op_via_chord("outdent", resolved_id.as_str(), HashMap::new())
-            .await;
-    }
-
-    async fn apply_move_up(&mut self, block_id: &holon_api::EntityUri) {
-        tracing::trace!("[apply] MoveUp: block={block_id}");
-        let resolved_id = self.resolve_uri(block_id);
-        self.dispatch_block_op_via_chord("move_up", resolved_id.as_str(), HashMap::new())
-            .await;
-    }
-
-    async fn apply_move_down(&mut self, block_id: &holon_api::EntityUri) {
-        tracing::trace!("[apply] MoveDown: block={block_id}");
-        let resolved_id = self.resolve_uri(block_id);
-        self.dispatch_block_op_via_chord("move_down", resolved_id.as_str(), HashMap::new())
-            .await;
     }
 
     async fn apply_drag_drop_block(
@@ -998,175 +970,12 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         crate::pbt::transitions::click_block::apply_click_block_to_sut(
             self,
             region.as_str(),
-            &resolved_id.to_string(),
+            &resolved_id,
         )
         .await;
         // Let CDC propagate (mirrors the yield_now dance ToggleState uses).
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
-    }
-
-    async fn apply_split_block(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        position: usize,
-        ref_state: &ReferenceState,
-    ) {
-        tracing::trace!("[apply] SplitBlock: block={block_id} position={position}");
-        let resolved_id = self.resolve_uri(block_id);
-
-        // Bounds pre-condition with SQL probe diagnostic on failure
-        // (more actionable than the bare bounds-timeout error).
-        if let Err(e) = self
-            .wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
-            .await
-        {
-            let sql_probe = self.probe_block_sql_state(resolved_id.as_str()).await;
-            panic!(
-                "[SplitBlock] bounds unavailable for {resolved_id}: {e:#}\nSQL probe for missing entity:\n{sql_probe}"
-            );
-        }
-        // Children-settled gate. `wait_for_entity_bounds` confirms the target
-        // appears *somewhere* in the geometry, but coords resolved against a
-        // partial first-render get invalidated by the next CDC batch that
-        // adds siblings. Wait until every non-Page child of this block's
-        // parent — as the PRE-transition ref-state predicted — has rendered
-        // so `require_element_center` returns stable bounds. Uses the
-        // pre-state instead of `ref_state` (post-transition) so the
-        // predicate matches what the user can see right now.
-        let parent_for_settle = self
-            .pre_ref_state
-            .as_ref()
-            .and_then(|s| s.block_state.blocks.get(block_id))
-            .map(|b| b.parent_id.clone());
-        if let Some(parent_id) = parent_for_settle {
-            self.wait_for_children_settled(&parent_id, Duration::from_secs(5))
-                .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "[SplitBlock] children of parent {parent_id} not settled before click: {e:#}"
-                    )
-                });
-        }
-        // Pre-Enter SQL snapshot: log the live content + length so panic-time
-        // analysis can distinguish "cursor position drift" from "content
-        // diverged before the split" cases.
-        {
-            let sql_pre = self.probe_block_sql_state(resolved_id.as_str()).await;
-            let ref_content_len = ref_state
-                .block_state
-                .blocks
-                .get(block_id)
-                .map(|b| b.content_text().len());
-            eprintln!(
-                "[SplitBlock-presplit] target={resolved_id} position={position} \
-                 ref_content_len={ref_content_len:?}\n{sql_pre}"
-            );
-        }
-        // Drive the input pipeline (widget-kind → click → focus → keys →
-        // Enter) through the capability-bound free helper.
-        crate::pbt::transitions::split_block::apply_split_block_input_pipeline_to_sut(
-            self,
-            &resolved_id.to_string(),
-            position,
-        )
-        .await;
-
-        let expected_count = Self::expected_content_block_count(ref_state);
-        let expected_ids = self.expected_block_ids(ref_state);
-        let timeout = std::time::Duration::from_secs(5);
-        let db_rows = self.wait_for_blocks_synced(&expected_ids, timeout).await;
-        if db_rows.len() != expected_count {
-            let id_vec: Vec<String> = db_rows
-                .iter()
-                .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
-                .collect();
-            let actual_ids: HashSet<String> = id_vec.iter().cloned().collect();
-            let mut id_counts: std::collections::HashMap<String, u32> = HashMap::new();
-            for id in &id_vec {
-                *id_counts.entry(id.clone()).or_insert(0) += 1;
-            }
-            let duplicates: Vec<(String, u32)> = id_counts
-                .iter()
-                .filter(|(_, c)| **c > 1)
-                .map(|(k, v)| (k.clone(), *v))
-                .collect();
-            let missing: Vec<&String> = expected_ids.difference(&actual_ids).collect();
-            let extra: Vec<&String> = actual_ids.difference(&expected_ids).collect();
-            eprintln!(
-                "[SplitBlock count-mismatch diag] expected={} db_rows={} unique_ids={} duplicates={:?} missing_from_block_raw={:?} extra_in_block_raw={:?}",
-                expected_count,
-                db_rows.len(),
-                actual_ids.len(),
-                duplicates,
-                missing,
-                extra,
-            );
-        }
-        assert_eq!(
-            db_rows.len(),
-            expected_count,
-            "[SplitBlock] Block count mismatch after split"
-        );
-
-        // Capture pre-split known real ids so we can identify the freshly
-        // created block among `db_rows` (mirrors map_unmapped_split_synthetic_ids).
-        let pre_known: HashSet<String> = {
-            let mut ids: HashSet<String> =
-                self.doc_uri_map.values().map(|u| u.to_string()).collect();
-            for ref_id in ref_state.block_state.blocks.keys() {
-                if !self.doc_uri_map.contains_key(ref_id) && !ref_id.as_str().contains(":split-") {
-                    ids.insert(ref_id.to_string());
-                }
-            }
-            ids
-        };
-        self.map_unmapped_split_synthetic_ids(ref_state, &db_rows, "[SplitBlock]");
-
-        // Production fires editor_focus(new_block) as a follow-up of
-        // split_block. The chain is: SQL editor_cursor write → watch_editor_cursor
-        // reactor → GPUI window.focus(new_input) → InputEvent::Focus →
-        // services.set_focus(new_block) → engine.focused_block mirrors new.
-        // This chain isn't synchronous with the Enter dispatch, so without
-        // an explicit wait the next inv-focus-matches-ref check sees the
-        // pre-split click_entity target (c2f12z-s) instead of the new block.
-        // Mirrors the wait_for_focus_to_match barriers used by ClickBlock /
-        // NavigateFocus.
-        let new_block_real_id: Option<String> = db_rows
-            .iter()
-            .filter_map(|row| row.get("id")?.as_string().map(|s| s.to_string()))
-            .find(|id| !pre_known.contains(id));
-        if self.frontend_geometry.is_some()
-            && let Some(new_id) = new_block_real_id.as_deref()
-        {
-            // Best-effort barrier: try to absorb the
-            // editor_cursor → window.focus(new) → InputEvent::Focus →
-            // set_focus(new) propagation chain before the next step. If
-            // it doesn't converge in 2s, fall through and let the
-            // downstream inv-focus-matches-ref polling catch real
-            // regressions — the new EditorView may not have mounted
-            // yet (a real, separate fragility worth surfacing there).
-            let _ = self
-                .wait_for_focus_to_match(new_id, Duration::from_secs(2))
-                .await;
-        }
-    }
-
-    async fn apply_join_block(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        ref_state: &ReferenceState,
-    ) {
-        tracing::trace!("[apply] JoinBlock: block={block_id}");
-        let resolved_id = self.resolve_uri(block_id);
-        let mut extra_params = HashMap::new();
-        extra_params.insert("position".into(), Value::Integer(0));
-        self.dispatch_block_op_via_chord("join_block", resolved_id.as_str(), extra_params)
-            .await;
-
-        let expected_ids = self.expected_block_ids(ref_state);
-        self.wait_for_blocks_synced(&expected_ids, Duration::from_secs(5))
-            .await;
     }
 
     async fn apply_undo_last_mutation(&mut self, ref_state: &ReferenceState) {
@@ -1207,48 +1016,14 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         tracing::trace!("[apply] FocusEditableText: block={block_id} (resolved={resolved_id})");
         crate::pbt::transitions::focus_editable_text::apply_focus_editable_text_to_sut(
             self,
-            &resolved_id.to_string(),
+            &resolved_id,
         )
         .await;
     }
 
-    async fn apply_move_cursor(&mut self, byte_position: usize) {
-        tracing::trace!("[apply] MoveCursor: byte_position={byte_position}");
-        let driver = self.driver.as_ref().expect("driver not installed");
-        driver
-            .send_raw_keystroke("home", &[])
-            .await
-            .expect("MoveCursor: home failed");
-        for _ in 0..byte_position {
-            driver
-                .send_raw_keystroke("right", &[])
-                .await
-                .expect("MoveCursor: right failed");
-        }
-    }
-
-    async fn apply_type_chars(&mut self, text: &str) {
-        tracing::trace!("[apply] TypeChars: {:?}", text);
-        let driver = self.driver.as_ref().expect("driver not installed");
-        for ch in text.chars() {
-            let keystroke = ch.to_string();
-            driver
-                .send_raw_keystroke(&keystroke, &[])
-                .await
-                .expect("TypeChars: send_raw_keystroke failed");
-        }
-    }
-
-    async fn apply_delete_backward(&mut self, count: usize) {
-        tracing::trace!("[apply] DeleteBackward: count={count}");
-        let driver = self.driver.as_ref().expect("driver not installed");
-        for _ in 0..count {
-            driver
-                .send_raw_keystroke("backspace", &[])
-                .await
-                .expect("DeleteBackward: backspace failed");
-        }
-    }
+    // `apply_type_chars` / `apply_delete_backward` / `apply_move_cursor`
+    // moved to `impl SutEditorMirrorWrite for E2ESut` (sut_capabilities.rs);
+    // `SutHandle` lists `SutEditorMirrorWrite` as a supertrait.
 
     async fn apply_press_key(&mut self, chord: &holon_api::KeyChord, ref_state: &ReferenceState) {
         tracing::trace!("[apply] PressKey: chord={:?}", chord);

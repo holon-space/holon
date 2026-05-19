@@ -6,16 +6,16 @@
 //! `sut.rs:2176-2359` (SUT apply), and
 //! `transition_budgets.rs:279-281` (expected SQL).
 
-use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
+use holon_pbt_core::capabilities::{SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 /// Production task-state cycle order, hardcoded in
 /// `sql_operation_provider.rs:1525-1526` (the `cycle_task_state` op
@@ -69,7 +69,7 @@ pub fn cycle_click_count(current: &str, target: &str) -> u8 {
 /// task_state cycle to the target.
 pub async fn apply_toggle_state_to_sut<S: SutLayout + SutDriver>(
     sut: &mut S,
-    id: &CapBlockId,
+    id: &EntityUri,
     click_count: u8,
 ) {
     sut.wait_for_widget_kind(id, &["state_toggle"], Duration::from_secs(2))
@@ -100,7 +100,8 @@ pub struct ToggleState {
     pub new_state: String,
 }
 
-impl E2ETransitionFactory for ToggleState {
+impl TransitionFactory<ReferenceState> for ToggleState {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let owned_render_expr = state
             .main_panel_render_expr()
@@ -184,8 +185,9 @@ impl E2ETransitionFactory for ToggleState {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for ToggleState {
+impl TransitionRef<ReferenceState> for ToggleState {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let checks: Vec<Validated<(), Reason>> = vec![
@@ -243,13 +245,18 @@ impl E2ETransitionImpl for ToggleState {
             },
         });
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ToggleState {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_toggle_state(&self.block_id, &self.new_state)
             .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for ToggleState {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let watches = state.active_watches.len();
         let blocks = state.block_state.blocks.len();

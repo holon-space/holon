@@ -985,6 +985,81 @@ pub fn run_pbt_with_driver_sync_callback(
     Ok(summary)
 }
 
+/// Replay a fixed sequence of `FixtureStep`s through a real frontend.
+///
+/// Mirrors [`run_pbt_with_driver_sync_callback`] but drives the *given* steps
+/// (from a Gherkin `.feature`) instead of generating random ones, with strict
+/// semantics: a failed precondition or assertion is a hard error. `on_ready`
+/// fires immediately after the StartApp transition is applied (when the
+/// `ReactiveEngine` exists), so the caller can launch a window and inject a
+/// real driver (e.g. `GpuiUserDriver`) — exactly as the random GPUI PBT does.
+pub fn replay_fixture_with_driver_sync_callback(
+    steps: Vec<crate::pbt::fixtures::FixtureStep>,
+    on_ready: impl FnOnce(&PbtReadyContext) -> Option<PbtReadyResult>,
+) -> anyhow::Result<String> {
+    struct PrintHistogramOnDrop;
+    impl Drop for PrintHistogramOnDrop {
+        fn drop(&mut self) {
+            crate::pbt::validation::print_rejection_histogram();
+        }
+    }
+    let _histogram_guard = PrintHistogramOnDrop;
+    crate::debug_pause::install_panic_pause_hook();
+
+    let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
+    let mut runner = create_runner()?;
+    let ref_state = create_initial_ref_state(&mut runner)?;
+    let sut = E2ESut::<Full>::new(runtime.clone())?;
+
+    let total = steps.len();
+    let runtime_for_hook = runtime.clone();
+    let mut on_ready = Some(on_ready);
+
+    // The medium-agnostic replay core (shared with the headless slice runner)
+    // drives the steps. This hook is the *only* GPUI-specific glue: right after
+    // StartApp it assembles the launch context, lets the caller open a window
+    // and return a real `GpuiUserDriver`, and installs it into the SUT. Every
+    // post-StartApp transition then dispatches through that driver.
+    let sut = crate::pbt::fixtures::replay_steps::<VariantRef<Full>, E2ESut<Full>, Full>(
+        "gpui-replay",
+        &steps,
+        ref_state,
+        sut,
+        |sut| {
+            let Some(callback) = on_ready.take() else {
+                return;
+            };
+            let ctx = PbtReadyContext {
+                engine: sut.ctx.engine().clone(),
+                session: sut.ctx.session_arc(),
+                reactive_engine: sut
+                    .ctx
+                    .reactive_engine
+                    .clone()
+                    .expect("ReactiveEngine not initialized after StartApp"),
+                runtime_handle: runtime_for_hook.handle().clone(),
+                debug_services: sut
+                    .ctx
+                    .debug_services()
+                    .cloned()
+                    .expect("DebugServices not populated by StartApp"),
+            };
+            if let Some(result) = callback(&ctx) {
+                if let Some(driver) = result.driver {
+                    sut.driver = Some(driver);
+                }
+                sut.frontend_engine = result.frontend_engine;
+                sut.frontend_geometry = result.frontend_geometry;
+                sut.frontend_visual_state = result.frontend_visual_state;
+            }
+        },
+    );
+
+    let summary = format!("replayed {total} fixture steps");
+    teardown_sut(sut);
+    Ok(summary)
+}
+
 /// Run the full phased PBT synchronously.
 ///
 /// Uses a single runtime and calls `block_on` per-step (like proptest does).

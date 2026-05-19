@@ -24,10 +24,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::value_fn_invariants::rhai_mentions;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
@@ -37,7 +37,8 @@ pub struct ExpandToggle {
     pub block_id: EntityUri,
 }
 
-impl E2ETransitionFactory for ExpandToggle {
+impl TransitionFactory<ReferenceState> for ExpandToggle {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let candidates: Vec<EntityUri> = state
             .render_expressions
@@ -59,8 +60,9 @@ impl E2ETransitionFactory for ExpandToggle {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for ExpandToggle {
+impl TransitionRef<ReferenceState> for ExpandToggle {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -88,12 +90,17 @@ impl E2ETransitionImpl for ExpandToggle {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.expanded_toggles.insert(self.block_id.clone());
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ExpandToggle {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_expand_toggle(&self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for ExpandToggle {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         // Pure frontend-state flip: no SQL traffic. The reactive base
         // captures any incidental watcher activity.

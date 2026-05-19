@@ -37,29 +37,17 @@
 //! Targets ~30 s wall for 16 cases × 1..10 steps. Reuses `E2ESut<SqlOnly>`
 //! init cost (~7-8 s/case), which is the dominant overhead.
 
-use std::marker::PhantomData;
-
 use holon_integration_tests::declare_pbt_slice;
-use holon_integration_tests::pbt::invariants::bodies::block_tags_references_exist::InvBlockTagsReferencesExist;
-use holon_integration_tests::pbt::invariants::bodies::loro_no_errors::InvLoroNoErrors;
 use holon_integration_tests::pbt::transitions::{
-    BulkExternalAdd, JoinBlock, RemoveWatch, SetupWatch, SplitBlock, StartApp, TypeChars,
-    WriteOrgFile,
+    BulkExternalAdd, JoinBlock, RemoveWatch, SetupWatch, SplitBlock, TypeChars,
 };
 
 declare_pbt_slice! {
     test_fn: cdc_delivery_pbt,
-    machine: CdcDeliveryMachine,
-    sut_wrapper: CdcDeliverySut,
     variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
     inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
     transitions: [
-        StartApp,
-        (
-            WriteOrgFile,
-            "skip index.org (CDC quiescence race)",
-            |t: &WriteOrgFile| t.filename != "index.org",
-        ),
+        preset lifecycle,
         BulkExternalAdd,
         SplitBlock,
         JoinBlock,
@@ -67,10 +55,7 @@ declare_pbt_slice! {
         SetupWatch,
         RemoveWatch,
     ],
-    invariants: [
-        InvLoroNoErrors,
-        InvBlockTagsReferencesExist(PhantomData::<holon_integration_tests::pbt::ReferenceState>),
-    ],
+    invariants: [preset storage],
     cases: 16,
     max_shrink_iters: 20,
     steps: 1..10,

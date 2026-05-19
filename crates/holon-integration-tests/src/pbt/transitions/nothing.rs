@@ -8,10 +8,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::Reason;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -22,7 +22,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Nothing;
 
-impl E2ETransitionFactory for Nothing {
+impl TransitionFactory<ReferenceState> for Nothing {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         Nothing.preconditions(state).map(|_| {
             let strat = Just(Nothing).boxed();
@@ -31,8 +32,9 @@ impl E2ETransitionFactory for Nothing {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for Nothing {
+impl TransitionRef<ReferenceState> for Nothing {
+    type Reason = Reason;
+
     fn preconditions(&self, _: &ReferenceState) -> Validated<(), Reason> {
         Validated::Good(())
     }
@@ -40,12 +42,17 @@ impl E2ETransitionImpl for Nothing {
     fn apply_to_ref(&self, _: &mut ReferenceState) {
         // No-op: reference state is unchanged
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, _: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for Nothing {
+    async fn apply_to_sut(&self, _: &ReferenceState, _: &mut S) {
         // No-op: SUT is unchanged
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for Nothing {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,

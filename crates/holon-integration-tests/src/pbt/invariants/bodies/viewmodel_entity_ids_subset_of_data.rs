@@ -43,7 +43,14 @@ where
 
         let root = sut.widget_tree_snapshot().await;
         let tree_ids = root.collect_entity_ids();
-        let data_ids = sut.root_data_row_ids().await;
+        // `data_ids` are `EntityUri`; widget-tree `entity_id`s are raw
+        // strings — compare on the string surface.
+        let data_ids: std::collections::BTreeSet<String> = sut
+            .root_data_row_ids()
+            .await
+            .iter()
+            .map(|u| u.as_str().to_string())
+            .collect();
 
         if tree_ids.is_empty() || data_ids.is_empty() {
             return InvariantResult::Ok;

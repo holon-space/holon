@@ -166,6 +166,24 @@ pub fn serialize_block_recursive(
     result.push_str(":PROPERTIES:\n");
     result.push_str(&format!(":ID: {}\n", block.id.id()));
 
+    // `:REQUIRES:` — the org-edna dependency edge field. Production's
+    // `OrgRenderer` emits it from `block.requires` (bare slugs, space-joined,
+    // scheme stripped); this serializer must match or a file reconstructed from
+    // blocks (e.g. BulkExternalAdd) silently drops the drawer and the next
+    // re-scan clears the `block_requires` junction.
+    if !block.requires.is_empty() {
+        let bare: Vec<String> = block
+            .requires
+            .iter()
+            .map(|r| {
+                EntityUri::parse(r)
+                    .map(|uri| uri.id().to_string())
+                    .unwrap_or_else(|_| r.clone())
+            })
+            .collect();
+        result.push_str(&format!(":REQUIRES: {}\n", bare.join(" ")));
+    }
+
     for (k, v) in &block.properties {
         if k != "ID" && k != "id" && !INTERNAL_PROPS.contains(&k.as_str()) {
             if matches!(

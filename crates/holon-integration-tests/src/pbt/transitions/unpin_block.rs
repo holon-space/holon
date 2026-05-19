@@ -15,9 +15,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, JOURNAL_READS, REACTIVE_BASE, docs_tolerance};
@@ -28,7 +28,8 @@ pub struct UnpinBlock {
     pub history_id: i64,
 }
 
-impl E2ETransitionFactory for UnpinBlock {
+impl TransitionFactory<ReferenceState> for UnpinBlock {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (all open pins) and let `preconditions`
         // be the single source of truth for which ones are actually unpinnable.
@@ -56,8 +57,9 @@ impl E2ETransitionFactory for UnpinBlock {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for UnpinBlock {
+impl TransitionRef<ReferenceState> for UnpinBlock {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -80,12 +82,17 @@ impl E2ETransitionImpl for UnpinBlock {
             pins.retain(|p| p.history_id != self.history_id);
         }
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for UnpinBlock {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_unpin_block(self.history_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for UnpinBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         // close = single UPDATE statement; reactive watchers re-run on the CDC
         // delta. No SELECT round-trip needed (the X button supplied the id).

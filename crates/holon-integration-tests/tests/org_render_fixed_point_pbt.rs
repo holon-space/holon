@@ -37,23 +37,14 @@
 
 use holon_integration_tests::declare_pbt_slice;
 use holon_integration_tests::pbt::invariants::bodies::org_render_fixed_point::InvOrgRenderFixedPoint;
-use holon_integration_tests::pbt::transitions::{
-    BulkExternalAdd, NavigateFocus, SplitBlock, StartApp, WriteOrgFile,
-};
+use holon_integration_tests::pbt::transitions::{BulkExternalAdd, NavigateFocus, SplitBlock};
 
 declare_pbt_slice! {
     test_fn: org_render_fixed_point_pbt,
-    machine: OrgRenderFixedPointMachine,
-    sut_wrapper: OrgRenderFixedPointSut,
     variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
     inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
     transitions: [
-        StartApp,
-        (
-            WriteOrgFile,
-            "skip index.org (CDC quiescence race)",
-            |t: &WriteOrgFile| t.filename != "index.org",
-        ),
+        preset lifecycle,
         BulkExternalAdd,
         NavigateFocus,
         SplitBlock,
@@ -62,6 +53,5 @@ declare_pbt_slice! {
     cases: 16,
     max_shrink_iters: 20,
     steps: 1..8,
-    fixtures_test_fn: org_render_fixed_point_fixtures,
     fixtures_dir: "tests/fixtures/org_render_fixed_point_pbt",
 }

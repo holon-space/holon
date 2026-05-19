@@ -39,9 +39,9 @@ fn _ref_state_impls_layout_ref_state(state: &ReferenceState) {
 /// GPUI layout PBT (`S = GpuiInteractionSession`) and the
 /// integration-tests PBT (`S = SutClickAdapter` wrapping
 /// `&mut dyn SutHandle`).
-async fn _shared_apply_drives_sut_handle(
+async fn _shared_apply_drives_sut_handle<H: SutHandle>(
     state: &ReferenceState,
-    handle: &mut dyn SutHandle,
+    handle: &mut H,
     action: &SwitchViewMode,
 ) {
     let ref_view = LayoutRef::new(state);

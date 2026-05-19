@@ -8,17 +8,16 @@
 
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefFocusMut,
-    RefLifecycle,
+    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefFocusMut, RefLifecycle,
+    SutBlockTreeWrite,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -35,7 +34,7 @@ pub struct JoinBlock {
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 
 pub fn join_block_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
-    block_id: &CapBlockId,
+    block_id: &EntityUri,
     state: &R,
 ) -> Validated<(), Reason> {
     let focus_roots = state.focus_root_ids(CapRegion::Main);
@@ -92,15 +91,15 @@ pub fn join_block_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
         return Validated::fail(Reason::NoFocusInMain);
     };
     join_block_preconditions(&focus_str, state).map(|()| {
-        let block_id =
-            EntityUri::parse(&focus_str).expect("focused id must parse as EntityUri in wide PBT");
-        let instance = JoinBlock { block_id };
+        let instance = JoinBlock {
+            block_id: focus_str,
+        };
         (1, Just(instance).boxed())
     })
 }
 
 pub fn join_block_apply_to_ref<R: RefBlockTree + RefBlockTreeMut + RefFocusMut>(
-    block_id: &CapBlockId,
+    block_id: &EntityUri,
     state: &mut R,
 ) {
     state.push_undo_snapshot();
@@ -120,27 +119,34 @@ pub fn join_block_apply_to_ref<R: RefBlockTree + RefBlockTreeMut + RefFocusMut>(
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl E2ETransitionFactory for JoinBlock {
+impl TransitionFactory<ReferenceState> for JoinBlock {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         join_block_weighted_generator(state)
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for JoinBlock {
+impl TransitionRef<ReferenceState> for JoinBlock {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        join_block_preconditions(&self.block_id.as_str().to_string(), state)
+        join_block_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        join_block_apply_to_ref(&self.block_id.as_str().to_string(), state);
+        join_block_apply_to_ref(&self.block_id, state);
     }
+}
 
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
-        sut.apply_join_block(&self.block_id, ref_state).await;
+#[allow(async_fn_in_trait)]
+impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for JoinBlock {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.apply_join_block(&self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for JoinBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let watches = state.active_watches.len();
         let blocks = state.block_state.blocks.len();

@@ -116,7 +116,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use holon::api::BackendEngine;
-use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
+use holon::storage::BLOCK_READ_TABLE;
 use holon::sync::PublishErrorTracker;
 
 /// Re-export of the block-table const so frontends that depend only on
@@ -410,7 +410,14 @@ impl<T> FrontendSession<T> {
     // =========================================================================
 
     fn default_doc_uri() -> holon_api::EntityUri {
-        holon_api::EntityUri::no_parent()
+        // A real block id, NOT the `sentinel:no_parent` marker. Using the
+        // sentinel here made the `__default__` doc a self-referential block
+        // (`id == parent == sentinel:no_parent`) that could never be a Loro
+        // node — it mangled to `block:no_parent` on any Loro round-trip and
+        // tripped `prepare_delete`'s cascade. The `__default__` page is hidden
+        // from the Pages sidebar by an explicit `b.id != 'block:__default__'`
+        // filter in `index.org`.
+        holon_api::EntityUri::block("__default__")
     }
 
     /// Seed a default layout into the database if no real layout exists.
@@ -430,217 +437,148 @@ impl<T> FrontendSession<T> {
     /// Available on native and wasm32-wasip1-threads (which has std::time and
     /// std::path). NOT available on wasm32-unknown-unknown (browser main thread)
     /// where the org parser's path/time dependencies are absent.
+    ///
+    /// Loro is the authority and is seeded DIRECTLY from the bundled Org assets
+    /// via intents (`BlockOrdering::create_in_tree`) — never from Turso. The
+    /// outbound projector writes `block_raw`. In SqlOnly mode (no Loro)
+    /// `create_in_tree` returns `false`, so each block falls back to the block
+    /// `OperationProvider`'s `create` (idempotent) to populate `block_raw`.
+    /// Document order is preserved (`create_in_tree` appends), so the layout
+    /// columns keep their order without a separate place pass.
     #[cfg(not(target_arch = "wasm32"))]
-    #[tracing::instrument(skip(engine), name = "seed_default_layout")]
-    pub async fn seed_default_layout(engine: &BackendEngine) -> Result<()> {
+    #[tracing::instrument(skip(engine, ordering), name = "seed_default_layout")]
+    pub async fn seed_default_layout(
+        engine: &BackendEngine,
+        ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
+    ) -> Result<()> {
+        use holon_api::block::Block;
+
         let db = engine.db_handle();
+        let default_doc_uri = Self::default_doc_uri();
 
-        // Seed fixed-ID document blocks from DEFAULT_ASSETS (idempotent via INSERT OR IGNORE).
-        // Must run BEFORE the early return so it executes even when root layout exists.
-        {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before epoch")
-                .as_millis() as i64;
-            for asset in crate::DEFAULT_ASSETS {
-                if let Some(doc_id) = asset.fixed_doc_id {
-                    let title = asset
-                        .filename
-                        .strip_suffix(".org")
-                        .unwrap_or(asset.filename);
-                    db.execute(
-                        &format!(
-                            "INSERT OR IGNORE INTO {BLOCK_WRITE_TABLE} (id, parent_id, content, content_type, sort_key, properties, created_at, updated_at) \
-                             VALUES ('{doc_id}', 'sentinel:no_parent', '{title}', 'text', 'A0', '{{}}', {now}, {now})"
-                        ),
-                        vec![],
-                    )
-                    .await?;
-                    // Ensure the Page tag is present in the junction table
-                    // (INSERT OR IGNORE skips the insert when the id collides,
-                    // so any previously-seeded row would keep its prior tags).
-                    db.execute(
-                        &format!(
-                            "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{doc_id}', 'Page')"
-                        ),
-                        vec![],
-                    )
-                    .await?;
-                }
-            }
-        }
-
-        // Check if seed blocks already exist (idempotent: don't re-seed on restart).
+        // Idempotent: the root layout existing means a prior boot already seeded.
         let root_id = holon_api::ROOT_LAYOUT_BLOCK_ID;
-        let rows = db
+        let fresh = db
             .query(
                 &format!("SELECT id FROM {BLOCK_READ_TABLE} WHERE id = '{root_id}'"),
                 HashMap::new(),
             )
-            .await?;
-        if !rows.is_empty() {
-            // Seed blocks or real layout already exist — nothing to do.
-            // If OrgSync later creates a real layout, the blocks with the same
-            // IDs get upserted. Seed siblings under sentinel:no_parent remain
-            // harmless orphans.
-            return Ok(());
+            .await?
+            .is_empty();
+
+        // Build the seed entries from the bundled Org assets.
+        let mut entries: Vec<Block> = Vec::new();
+
+        // Fixed-id document pages (e.g. block:journals). Seeded on every boot so
+        // a missing page shell is repaired; create_in_tree / the existence guard
+        // below make it idempotent.
+        for asset in crate::DEFAULT_ASSETS {
+            if let Some(doc_id) = asset.fixed_doc_id {
+                let title = asset
+                    .filename
+                    .strip_suffix(".org")
+                    .unwrap_or(asset.filename);
+                let mut page = Block::new_text(
+                    EntityUri::from_raw(doc_id),
+                    EntityUri::no_parent(),
+                    title.to_string(),
+                );
+                page.set_page(true);
+                entries.push(page);
+            }
         }
 
-        let content = include_str!("../../../assets/default/index.org");
-        let path = Path::new("index.org");
-        let root = Path::new("");
-        let default_doc_uri = Self::default_doc_uri();
-        let parse_result = holon_orgmode::parse_org_file(path, content, &default_doc_uri, root)?;
+        if fresh {
+            // The `__default__` page that owns the 3-column layout.
+            let mut def_page = Block::new_text(
+                default_doc_uri.clone(),
+                EntityUri::no_parent(),
+                "__default__".to_string(),
+            );
+            def_page.set_page(true);
+            entries.push(def_page);
 
-        // The parser generates doc URI from the file path (doc:index.org).
-        // We need to rewrite top-level block parent_ids to our well-known doc URI.
-        let file_doc_uri = parse_result.document.id.clone();
+            // The bundled `index.org` layout (root-layout + sidebars + sources).
+            // Top-level blocks reparent from the file doc to `__default__`.
+            let content = include_str!("../../../assets/default/index.org");
+            let parse_result = holon_orgmode::parse_org_file(
+                Path::new("index.org"),
+                content,
+                &default_doc_uri,
+                Path::new(""),
+            )?;
+            let file_doc_uri = parse_result.document.id.clone();
+            for mut block in parse_result.blocks {
+                if block.parent_id == file_doc_uri {
+                    block.parent_id = default_doc_uri.clone();
+                }
+                entries.push(block);
+            }
+        }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_millis() as i64;
-
-        // Create the seeded page block (tags ⊇ ["Page"]). The first content
-        // line is the title; we use `__default__` to match the existing fixture.
-        db.execute(
-            &format!(
-                "INSERT OR IGNORE INTO {BLOCK_WRITE_TABLE} (id, parent_id, sort_key, content, properties, created_at, updated_at) \
-                 VALUES ('{}', 'sentinel:no_parent', 'A0', '__default__', '{{}}', {}, {})",
-                default_doc_uri, now, now
-            ),
-            vec![],
-        )
-        .await?;
-        db.execute(
-            &format!(
-                "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{}', 'Page')",
-                default_doc_uri
-            ),
-            vec![],
-        )
-        .await?;
-
-        for block in &parse_result.blocks {
-            let parent_id = if block.parent_id == file_doc_uri {
-                default_doc_uri.clone()
-            } else {
-                block.parent_id.clone()
-            };
-            let params = holon_orgmode::build_block_params(block, &parent_id, &default_doc_uri);
-
-            // Partition params into known SQL columns and extra properties,
-            // mirroring SqlOperationProvider::partition_params behavior.
-            let known_columns: std::collections::HashSet<&str> = [
-                "id",
-                "parent_id",
-                "depth",
-                "sort_key",
-                "content",
-                "content_type",
-                "source_language",
-                "source_name",
-                "properties",
-                "collapsed",
-                "completed",
-                "block_type",
-                "created_at",
-                "updated_at",
-                "_change_origin",
-            ]
-            .into_iter()
-            .collect();
-
-            let mut columns = Vec::new();
-            let mut values = Vec::new();
-            let mut extra_props = HashMap::new();
-            let mut block_tags: Vec<String> = Vec::new();
-
-            for (key, value) in &params {
-                if key == "properties" {
-                    // Merge existing properties JSON into extra_props
-                    if let Some(s) = value.as_string() {
-                        if let Ok(map) =
-                            serde_json::from_str::<HashMap<String, serde_json::Value>>(s)
-                        {
-                            for (k, v) in map {
-                                extra_props.insert(k, serde_json::Value::from(v));
-                            }
-                        }
-                    }
-                } else if key == "tags" {
-                    if let Value::Array(arr) = value {
-                        for tag_val in arr {
-                            if let Some(tag) = tag_val.as_string() {
-                                block_tags.push(tag.to_string());
-                            }
-                        }
-                    }
-                } else if known_columns.contains(key.as_str()) {
-                    columns.push(format!("\"{}\"", key));
-                    values.push(holon::storage::sql_utils::value_to_sql_literal(value));
-                } else {
-                    let json_val = match value {
-                        Value::String(s) => serde_json::Value::String(s.clone()),
-                        Value::Integer(i) => serde_json::json!(i),
-                        Value::Float(f) => serde_json::json!(f),
-                        Value::Boolean(b) => serde_json::json!(b),
-                        _ => serde_json::Value::String(format!("{:?}", value)),
+        for block in &entries {
+            let persisted = ordering
+                .create_in_tree(
+                    &block.parent_id,
+                    None,
+                    &block.id,
+                    block.to_block_content(),
+                    &block.properties,
+                    &block.tags,
+                    &block.requires,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("seed create_in_tree({}): {e:#}", block.id))?;
+            if !persisted {
+                // SqlOnly: no Loro authority — write through the block
+                // OperationProvider, skipping rows that already exist.
+                let exists = !db
+                    .query(
+                        &format!(
+                            "SELECT 1 FROM {BLOCK_READ_TABLE} WHERE id = '{}'",
+                            block.id.as_str()
+                        ),
+                        HashMap::new(),
+                    )
+                    .await?
+                    .is_empty();
+                if !exists {
+                    let doc_uri = if block.parent_id.is_no_parent() {
+                        &block.id
+                    } else {
+                        &default_doc_uri
                     };
-                    extra_props.insert(key.clone(), json_val);
+                    let params =
+                        holon_orgmode::build_block_params(block, &block.parent_id, doc_uri);
+                    engine
+                        .execute_operation(&EntityName::from("block"), "create", params)
+                        .await?;
                 }
             }
-
-            if !extra_props.is_empty() {
-                let props_json =
-                    serde_json::to_string(&extra_props).unwrap_or_else(|_| "{}".to_string());
-                columns.push("\"properties\"".to_string());
-                values.push(format!("'{}'", props_json.replace('\'', "''")));
-            }
-
-            let sql = format!(
-                "INSERT OR REPLACE INTO {BLOCK_WRITE_TABLE} ({}) VALUES ({})",
-                columns.join(", "),
-                values.join(", ")
-            );
-            db.execute(&sql, vec![]).await?;
-
-            for tag in &block_tags {
-                let tag_sql = format!(
-                    "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{}', '{}')",
-                    block.id.as_str().replace('\'', "''"),
-                    tag.replace('\'', "''")
-                );
-                db.execute(&tag_sql, vec![]).await?;
-            }
         }
 
-        // FU-10: land first-launch users on the Journals overview block.
-        // The Journals page itself can later display all journal entries
-        // and create today's entry — that's a separate concern. Going
-        // through `navigation::focus` (rather than raw INSERT) keeps
-        // navigation_history and navigation_cursor atomically in sync, so
-        // the focus_roots / current_focus matviews resolve correctly on
-        // first render. Reached only on the fresh-DB path (after the
-        // early return above), so existing DBs preserve whatever the user
-        // last navigated to.
-        let mut nav_params: HashMap<String, holon_api::Value> = HashMap::new();
-        nav_params.insert(
-            "region".to_string(),
-            holon_api::Value::from(holon_api::Region::Main),
-        );
-        nav_params.insert(
-            "block_id".to_string(),
-            holon_api::Value::String(EntityUri::block("journals").as_str().to_string()),
-        );
-        engine
-            .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
-            .await?;
-
-        tracing::info!(
-            "[FrontendSession] Seeded default layout ({} blocks); main panel focused on block:journals",
-            parse_result.blocks.len()
-        );
+        if fresh {
+            // Land first-launch users on the Journals overview block. Going
+            // through `navigation::focus` keeps navigation_history + cursor
+            // atomically in sync so the focus matviews resolve on first render.
+            let mut nav_params: HashMap<String, holon_api::Value> = HashMap::new();
+            nav_params.insert(
+                "region".to_string(),
+                holon_api::Value::from(holon_api::Region::Main),
+            );
+            nav_params.insert(
+                "block_id".to_string(),
+                holon_api::Value::String(EntityUri::block("journals").as_str().to_string()),
+            );
+            engine
+                .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
+                .await?;
+            tracing::info!(
+                "[FrontendSession] Seeded default layout via intents ({} entries); \
+                 main panel focused on block:journals",
+                entries.len()
+            );
+        }
         Ok(())
     }
 

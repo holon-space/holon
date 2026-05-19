@@ -13,11 +13,9 @@
 //! **Decoupled from Loro/Turso**: uses `BlockReader` and `DocumentManager` traits.
 
 use anyhow::{Context, Result};
-use holon::core::datasource::OperationProvider;
-use holon::sync::event_bus::EventOrigin;
 use holon::sync::CanonicalPath;
 use holon_api::block::Block;
-use holon_api::{EntityName, EntityUri, Value};
+use holon_api::{EntityUri, Value};
 use holon_core::file_format::FileFormatAdapter;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,6 +23,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::DownstreamProjection;
 
 use crate::block_params::build_block_params;
 use crate::file_format::OrgFormatAdapter;
@@ -62,9 +61,6 @@ pub struct OrgSyncController {
     /// Reads blocks by document ID.
     block_reader: Arc<dyn BlockReader>,
 
-    /// Command bus for writing blocks (always SqlOperationProvider for read/write consistency).
-    command_bus: Arc<dyn OperationProvider>,
-
     /// Document entity CRUD (decoupled from Turso).
     doc_manager: Arc<dyn DocumentManager>,
 
@@ -91,6 +87,14 @@ pub struct OrgSyncController {
     /// Positional-intent writer. Used during disk-order replay to move
     /// misaligned blocks into the position recorded in the org file.
     ordering: Arc<dyn BlockOrdering>,
+
+    /// Downstream convergent feed (consolidator → SQL sink). Present when a
+    /// separate consolidator owns block storage; `None` when the SQL store
+    /// itself is the consolidator (degraded mode). After sending create /
+    /// relocate intents during a scan, the controller `flush()`es this so the
+    /// sink rows are written by the projection — the single sink-writer — never
+    /// by org directly.
+    downstream: Option<Arc<dyn DownstreamProjection>>,
 }
 
 /// Callback for registering doc_id → path aliases in the storage layer.
@@ -104,14 +108,12 @@ pub trait AliasRegistrar: Send + Sync {
 impl OrgSyncController {
     pub fn new(
         block_reader: Arc<dyn BlockReader>,
-        command_bus: Arc<dyn OperationProvider>,
         doc_manager: Arc<dyn DocumentManager>,
         root_dir: PathBuf,
         ordering: Arc<dyn BlockOrdering>,
     ) -> Self {
         Self::with_format(
             block_reader,
-            command_bus,
             doc_manager,
             root_dir,
             Arc::new(OrgFormatAdapter::new()),
@@ -124,7 +126,6 @@ impl OrgSyncController {
     /// notion / logseq wirings call this directly.
     pub fn with_format(
         block_reader: Arc<dyn BlockReader>,
-        command_bus: Arc<dyn OperationProvider>,
         doc_manager: Arc<dyn DocumentManager>,
         root_dir: PathBuf,
         format: Arc<dyn FileFormatAdapter>,
@@ -138,7 +139,6 @@ impl OrgSyncController {
             last_projection_hash: HashMap::new(),
             disk_signatures: HashMap::new(),
             block_reader,
-            command_bus,
             doc_manager,
             root_dir,
             alias_registrar: None,
@@ -146,11 +146,21 @@ impl OrgSyncController {
             image_data: None,
             format,
             ordering,
+            downstream: None,
         }
     }
 
     pub fn with_alias_registrar(mut self, registrar: Arc<dyn AliasRegistrar>) -> Self {
         self.alias_registrar = Some(registrar);
+        self
+    }
+
+    /// Wire the downstream consolidator→sink projection. Without it the
+    /// controller assumes the SQL store is itself the consolidator (degraded
+    /// mode) and `create_in_tree` returning `false` routes creates through the
+    /// command bus.
+    pub fn with_downstream_projection(mut self, projection: Arc<dyn DownstreamProjection>) -> Self {
+        self.downstream = Some(projection);
         self
     }
 
@@ -366,6 +376,27 @@ impl OrgSyncController {
         };
         let document_uri = document.id.clone();
 
+        // The document is a block too. Send it to the consolidator as a create
+        // intent so it becomes a real node carrying its content + `Page` tag —
+        // not a content-less placeholder auto-created when a child's
+        // `create_in_tree` can't resolve its parent. Without this, the
+        // downstream projection would write that empty placeholder over the
+        // document's real row (orphaning every doc). Idempotent on re-scan
+        // (the node already exists → position-only). No-op in degraded mode
+        // (`create_in_tree` returns false; the doc manager owns the row).
+        self.ordering
+            .create_in_tree(
+                &document.parent_id,
+                None,
+                &document_uri,
+                holon_api::BlockContent::text(document.content.clone()),
+                &document.properties,
+                &document.tags,
+                &document.requires,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("create_in_tree(document {document_uri}): {e:#}"))?;
+
         // Register UUID → file path alias (if Loro is available)
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, path).await;
@@ -490,7 +521,17 @@ impl OrgSyncController {
             last_block_per_parent.insert(parent_id.clone(), block.id.clone());
         }
 
-        // Creates pass.
+        // Creates pass. A block create is an INTENT to the consolidator: the
+        // ordering authority's `create_in_tree` persists the block and the
+        // downstream feed writes the SQL sink row — org never writes that sink
+        // directly. The return value is a contract: `true` means the
+        // consolidator persisted the create (the downstream flush will write
+        // the sink), `false` means the SQL store is itself the consolidator
+        // (degraded, no separate downstream) so org routes the create through
+        // the command bus as it does updates/deletes. No storage-mode branch
+        // here — only the contract. Exact positioning is the place loop's job,
+        // so `after_id` is `None`.
+        let mut consolidator_creates: usize = 0;
         for block in &new_blocks_vec {
             if !old_blocks.contains_key(&block.id) {
                 let parent_id = if block.parent_id == new_parse.document.id {
@@ -513,10 +554,37 @@ impl OrgSyncController {
                 if op == "create" {
                     has_structural_changes = true;
                     created_ids.push(block.id.to_string());
+                    let parent_uri = if block.parent_id == new_parse.document.id {
+                        EntityUri::from_raw(document_uri.as_str())
+                    } else {
+                        EntityUri::from_raw(block.parent_id.as_str())
+                    };
+                    let block_uri = EntityUri::from_raw(block.id.as_str());
+                    // Full typed content (`to_block_content` preserves source vs
+                    // text + language) so a `#+BEGIN_SRC` block isn't degraded
+                    // to text by the downstream projection.
+                    let persisted = self
+                        .ordering
+                        .create_in_tree(
+                            &parent_uri,
+                            None,
+                            &block_uri,
+                            block.to_block_content(),
+                            &block.properties,
+                            &block.tags,
+                            &block.requires,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("create_in_tree({}): {e:#}", block.id))?;
+                    if persisted {
+                        consolidator_creates += 1;
+                    } else {
+                        operations.push((op.to_string(), params));
+                    }
                 } else {
                     updated_via_conflict_ids.push(block.id.to_string());
+                    operations.push((op.to_string(), params));
                 }
-                operations.push((op.to_string(), params));
             }
         }
         tracing::debug!(
@@ -588,24 +656,42 @@ impl OrgSyncController {
             }
         }
 
-        // Execute all operations as a single batch (one transaction + one event batch).
-        // Tagged `EventOrigin::Org` so `LoroSyncController`'s inbound runtime gate
-        // (Phase 3.3 step 2) recognises file-watcher reflections as a legitimate
-        // post-startup SQL→Loro source and lets them through after the gate is
-        // flipped off. Untagged ("sql") events would be dropped as suspected
-        // chord-op SQL-direct writes.
-        let expected_block_count = new_blocks.len();
+        // Apply each operation through `BlockOrdering` — the single org→block
+        // write seam. There is no command bus: `update_in_tree` routes Loro-mode
+        // writes field-by-field into Loro (the outbound projector emits the SQL
+        // row) and SqlOnly writes straight to SQL; `delete_in_tree` deletes from
+        // Loro (projector emits the SQL DELETE) or from SQL directly. `"create"`
+        // ops only occur in SqlOnly (Loro creates persisted via `create_in_tree`
+        // returning true and were counted in `consolidator_creates`); they share
+        // the `update_in_tree` upsert path, which picks the right CDC op kind.
+        //
+        // `consolidator_creates` blocks were sent to the consolidator via
+        // `create_in_tree` — their sink rows are written by the downstream flush
+        // below, not here. Exclude them from the post-apply cache-catch-up
+        // expectation; the full "every block present" check happens after the
+        // flush.
+        let expected_block_count = new_blocks.len() - consolidator_creates;
         if !operations.is_empty() {
-            self.command_bus
-                .execute_batch_with_origin(&EntityName::new("block"), operations, EventOrigin::Org)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Batch block operations failed for {}: {}",
-                        path.display(),
-                        e
-                    )
-                })?;
+            for (op, params) in operations {
+                match op.as_str() {
+                    "create" | "update" => {
+                        self.ordering.update_in_tree(params).await.map_err(|e| {
+                            anyhow::anyhow!("update_in_tree for {}: {e:#}", path.display())
+                        })?;
+                    }
+                    "delete" => {
+                        self.ordering.delete_in_tree(params).await.map_err(|e| {
+                            anyhow::anyhow!("delete_in_tree for {}: {e:#}", path.display())
+                        })?;
+                    }
+                    other => {
+                        anyhow::bail!(
+                            "on_file_changed: unknown block op {other:?} for {}",
+                            path.display()
+                        );
+                    }
+                }
+            }
 
             // Phase 4: wait for the CDC-driven cache to reflect the committed
             // changes via the ack-watermark signal (push-based on CDC), not
@@ -637,6 +723,11 @@ impl OrgSyncController {
                 );
             }
         }
+
+        // (Block creates were already sent to the consolidator via
+        // `create_in_tree` in the creates pass above, so they're visible to
+        // `children()` before the place loop runs; the downstream flush below
+        // writes their sink rows.)
 
         // Disk-order replay: move any block that is not already in the position
         // recorded in the parsed org file. One `children()` call per distinct
@@ -755,25 +846,25 @@ impl OrgSyncController {
                     .get(parent.as_str())
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let Some(current_idx) = siblings.iter().position(|s| s == new_block.id.as_str())
-                else {
-                    // Wait-loop above guarantees newly-created blocks are
-                    // present in `live_children`; pre-existing blocks were
-                    // backfilled. Anything missing here is a real bug.
+                // Presence sanity only — the wait-loop guarantees newly-created
+                // blocks are in `live_children` and pre-existing ones were
+                // backfilled. Position is NOT read from this snapshot: it was
+                // captured once before the loop and goes stale after the first
+                // `place()` mutates the tree. Reading `current_prev` from it
+                // made the no-op check skip repositioning later siblings,
+                // scrambling sibling order (existing blocks stranded ahead of
+                // their new file predecessors — the BulkExternalAdd ordering
+                // divergence). Instead, `place()` unconditionally in document
+                // order: `update_block_position` reads the LIVE Loro tree and
+                // no-ops cheaply when already positioned, so doc-order placement
+                // is order-correct regardless of the initial layout.
+                if !siblings.iter().any(|s| s == new_block.id.as_str()) {
                     anyhow::bail!(
                         "[on_file_changed] block {} not found in live_children under {}: {:?}",
                         new_block.id.as_str(),
                         parent.as_str(),
                         siblings
                     );
-                };
-                let current_prev = if current_idx == 0 {
-                    None
-                } else {
-                    siblings.get(current_idx - 1).map(String::as_str)
-                };
-                if current_prev == want_after {
-                    continue;
                 }
 
                 self.ordering
@@ -781,6 +872,43 @@ impl OrgSyncController {
                     .await
                     .map_err(|e| anyhow::anyhow!("ordering.place failed: {e}"))?;
             }
+        }
+
+        // Downstream convergent feed: publish the consolidator's accumulated
+        // changes from this scan (creates + placements) to the SQL sink. This
+        // is the single sink-writer for consolidator-persisted creates — it
+        // writes their rows with the authoritative order key + properties,
+        // closing the projection-totality gap (a created-but-unmoved block
+        // still gets its real order key, not the struct default). Absent in
+        // degraded mode, where the command-bus batch + `place` already wrote
+        // the rows and their order keys directly.
+        match &self.downstream {
+            Some(downstream) => {
+                downstream
+                    .flush()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("downstream projection flush: {e}"))?;
+            }
+            None => {
+                // Fail loud: a create the consolidator persisted (create_in_tree
+                // returned true) has no command-bus row, so without a downstream
+                // feed its sink row would never be written. That's a wiring bug,
+                // not a degraded-but-fine state.
+                if consolidator_creates > 0 {
+                    anyhow::bail!(
+                        "[on_file_changed] {consolidator_creates} block create(s) were \
+                         persisted by a separate consolidator (create_in_tree returned \
+                         true) but no downstream projection is wired — their sink rows \
+                         would never be written. DI wiring bug."
+                    );
+                }
+            }
+        }
+        if !created_ids.is_empty() {
+            let writeback_ts = chrono::Utc::now().timestamp_millis();
+            self.block_reader
+                .wait_for_cache_caught_up(writeback_ts, 2000)
+                .await?;
         }
 
         // Ingest image files from disk into the image data provider (if any).
@@ -1462,7 +1590,7 @@ fn strip_unchanged_edge_fields(
     old_block: &Block,
     new_block: &Block,
 ) {
-    if set_eq(&old_block.tags, &new_block.tags) {
+    if old_block.tags == new_block.tags {
         params.remove("tags");
     }
     if set_eq(&old_block.requires, &new_block.requires) {

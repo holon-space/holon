@@ -11,7 +11,7 @@ This skeleton is the **forwarding-only product struct** the `PbtSlicing.md` desi
 ```rust
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapCursor, CapRegion,
+    EntityUri, CapCursor, CapRegion,
     RefBlockTree, RefBlockTreeMut, RefEditorMirror, RefEditorMirrorMut,
     RefFocus, RefFocusMut, RefLifecycle,
 };
@@ -19,8 +19,8 @@ use holon_pbt_core::capabilities::{
 /// In-memory block — narrow data the pure slice needs.
 #[derive(Debug, Clone)]
 struct PureBlock {
-    id: CapBlockId,
-    parent: Option<CapBlockId>,
+    id: EntityUri,
+    parent: Option<EntityUri>,
     content: String,
     sort_key: String,         // simple fractional index (e.g. "a", "b", "ab") — enough for ordering
     is_text: bool,
@@ -29,17 +29,17 @@ struct PureBlock {
 /// EditorMirror state — mirror of ActiveEditor.
 #[derive(Debug, Clone, Default)]
 struct PureEditor {
-    block_id: Option<CapBlockId>,
+    block_id: Option<EntityUri>,
     text: String,             // pending in-memory content (pre-commit)
     cursor: usize,             // byte offset
 }
 
 pub struct EditorPureRef {
-    blocks: BTreeMap<CapBlockId, PureBlock>,
+    blocks: BTreeMap<EntityUri, PureBlock>,
     /// Root id for the single doc this slice deals with.
-    root_id: CapBlockId,
+    root_id: EntityUri,
     editor: PureEditor,
-    focus_main: Option<CapBlockId>,
+    focus_main: Option<EntityUri>,
     focus_cursor_main: Option<CapCursor>,
     next_id: u64,
     last_transition_kind: Option<&'static str>,
@@ -70,7 +70,7 @@ impl EditorPureRef {
         }
     }
 
-    fn fresh_id(&mut self) -> CapBlockId {
+    fn fresh_id(&mut self) -> EntityUri {
         let id = format!("block:n{}", self.next_id);
         self.next_id += 1;
         id
@@ -90,13 +90,13 @@ impl RefLifecycle for EditorPureRef {
 }
 
 impl RefBlockTree for EditorPureRef {
-    fn block_content(&self, id: &CapBlockId) -> Option<&str> {
+    fn block_content(&self, id: &EntityUri) -> Option<&str> {
         self.blocks.get(id).map(|b| b.content.as_str())
     }
-    fn is_text_block(&self, id: &CapBlockId) -> bool {
+    fn is_text_block(&self, id: &EntityUri) -> bool {
         self.blocks.get(id).map_or(false, |b| b.is_text)
     }
-    fn main_editable_descendants(&self) -> Vec<CapBlockId> {
+    fn main_editable_descendants(&self) -> Vec<EntityUri> {
         // All text descendants of root_id; in pure slice this is everything reachable.
         let mut out = Vec::new();
         let mut stack = vec![self.root_id.clone()];
@@ -109,28 +109,28 @@ impl RefBlockTree for EditorPureRef {
         }
         out
     }
-    fn focus_root_ids(&self, _: CapRegion) -> BTreeSet<CapBlockId> {
+    fn focus_root_ids(&self, _: CapRegion) -> BTreeSet<EntityUri> {
         BTreeSet::from([self.root_id.clone()])
     }
-    fn previous_sibling(&self, id: &CapBlockId) -> Option<CapBlockId> {
+    fn previous_sibling(&self, id: &EntityUri) -> Option<EntityUri> {
         let block = self.blocks.get(id)?;
         let parent = block.parent.as_ref()?;
         let siblings = self.sorted_children(parent);
         let idx = siblings.iter().position(|s| s == id)?;
         if idx == 0 { None } else { Some(siblings[idx - 1].clone()) }
     }
-    fn next_sibling(&self, id: &CapBlockId) -> Option<CapBlockId> {
+    fn next_sibling(&self, id: &EntityUri) -> Option<EntityUri> {
         let block = self.blocks.get(id)?;
         let parent = block.parent.as_ref()?;
         let siblings = self.sorted_children(parent);
         let idx = siblings.iter().position(|s| s == id)?;
         siblings.get(idx + 1).cloned()
     }
-    fn grandparent(&self, id: &CapBlockId) -> Option<CapBlockId> {
+    fn grandparent(&self, id: &EntityUri) -> Option<EntityUri> {
         let parent = self.blocks.get(id)?.parent.as_ref()?;
         self.blocks.get(parent)?.parent.clone()
     }
-    fn sorted_children(&self, parent: &CapBlockId) -> Vec<CapBlockId> {
+    fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri> {
         let mut kids: Vec<&PureBlock> = self.blocks
             .values()
             .filter(|b| b.parent.as_ref() == Some(parent))
@@ -138,7 +138,7 @@ impl RefBlockTree for EditorPureRef {
         kids.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
         kids.into_iter().map(|b| b.id.clone()).collect()
     }
-    fn is_descendant_of_any(&self, id: &CapBlockId, ancestors: &BTreeSet<CapBlockId>) -> bool {
+    fn is_descendant_of_any(&self, id: &EntityUri, ancestors: &BTreeSet<EntityUri>) -> bool {
         let mut cursor = id.clone();
         loop {
             if ancestors.contains(&cursor) { return true; }
@@ -148,8 +148,8 @@ impl RefBlockTree for EditorPureRef {
             }
         }
     }
-    fn is_layout_block(&self, _: &CapBlockId) -> bool { false }
-    fn is_focusable(&self, id: &CapBlockId) -> bool {
+    fn is_layout_block(&self, _: &EntityUri) -> bool { false }
+    fn is_focusable(&self, id: &EntityUri) -> bool {
         self.is_text_block(id) && id != &self.root_id
     }
 }
@@ -157,13 +157,13 @@ impl RefBlockTree for EditorPureRef {
 impl RefBlockTreeMut for EditorPureRef {
     fn push_undo_snapshot(&mut self) { /* no undo in pure slice — no-op */ }
 
-    fn set_block_content(&mut self, id: &CapBlockId, text: &str) {
+    fn set_block_content(&mut self, id: &EntityUri, text: &str) {
         if let Some(b) = self.blocks.get_mut(id) {
             b.content = text.to_string();
         }
     }
 
-    fn split_block(&mut self, id: &CapBlockId, position: usize) -> CapBlockId {
+    fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
         let new_id = self.fresh_id();
         let (parent, tail, new_sort_key) = {
             let b = self.blocks.get_mut(id).expect("split target exists");
@@ -184,7 +184,7 @@ impl RefBlockTreeMut for EditorPureRef {
         new_id
     }
 
-    fn join_block(&mut self, id: &CapBlockId) -> usize {
+    fn join_block(&mut self, id: &EntityUri) -> usize {
         // Join `id` into its previous sibling (or parent if none).
         let into = self.previous_sibling(id).unwrap_or_else(|| {
             self.blocks.get(id).and_then(|b| b.parent.clone())
@@ -197,7 +197,7 @@ impl RefBlockTreeMut for EditorPureRef {
         cursor_at_join
     }
 
-    fn indent(&mut self, id: &CapBlockId) {
+    fn indent(&mut self, id: &EntityUri) {
         let prev = self.previous_sibling(id).expect("indent: previous sibling required");
         // Place under prev as new last child.
         let last_child_sort = self.sorted_children(&prev).last()
@@ -212,7 +212,7 @@ impl RefBlockTreeMut for EditorPureRef {
         }
     }
 
-    fn outdent(&mut self, id: &CapBlockId) {
+    fn outdent(&mut self, id: &EntityUri) {
         // Re-parent to grandparent; place immediately after current parent.
         let gp = self.grandparent(id);
         let parent_id = self.blocks.get(id).and_then(|b| b.parent.clone());
@@ -226,7 +226,7 @@ impl RefBlockTreeMut for EditorPureRef {
         }
     }
 
-    fn move_block(&mut self, id: &CapBlockId, new_parent: CapBlockId, after: Option<&CapBlockId>) {
+    fn move_block(&mut self, id: &EntityUri, new_parent: EntityUri, after: Option<&EntityUri>) {
         let after_sort = after.and_then(|a| self.blocks.get(a).map(|b| b.sort_key.clone()));
         let new_sort = match after_sort {
             Some(s) => format!("{}m", s),
@@ -238,7 +238,7 @@ impl RefBlockTreeMut for EditorPureRef {
         }
     }
 
-    fn swap_siblings(&mut self, a: &CapBlockId, b: &CapBlockId) {
+    fn swap_siblings(&mut self, a: &EntityUri, b: &EntityUri) {
         let sort_a = self.blocks.get(a).map(|x| x.sort_key.clone());
         let sort_b = self.blocks.get(b).map(|x| x.sort_key.clone());
         if let (Some(sa), Some(sb)) = (sort_a, sort_b) {
@@ -249,7 +249,7 @@ impl RefBlockTreeMut for EditorPureRef {
 }
 
 impl RefEditorMirror for EditorPureRef {
-    fn active_editor_block(&self) -> Option<CapBlockId> { self.editor.block_id.clone() }
+    fn active_editor_block(&self) -> Option<EntityUri> { self.editor.block_id.clone() }
     fn active_editor_text(&self) -> Option<&str> {
         self.editor.block_id.as_ref().map(|_| self.editor.text.as_str())
     }
@@ -276,21 +276,21 @@ impl RefEditorMirrorMut for EditorPureRef {
 }
 
 impl RefFocus for EditorPureRef {
-    fn current_focus(&self, region: CapRegion) -> Option<CapBlockId> {
+    fn current_focus(&self, region: CapRegion) -> Option<EntityUri> {
         match region { CapRegion::Main | CapRegion::Single => self.focus_main.clone(), _ => None }
     }
     fn focused_cursor(&self, _: CapRegion) -> Option<CapCursor> { self.focus_cursor_main }
 }
 
 impl RefFocusMut for EditorPureRef {
-    fn set_focus(&mut self, _: CapRegion, id: CapBlockId, cursor: CapCursor) {
+    fn set_focus(&mut self, _: CapRegion, id: EntityUri, cursor: CapCursor) {
         // Update editor mirror to reflect newly-focused block.
         let text = self.blocks.get(&id).map(|b| b.content.clone()).unwrap_or_default();
         self.editor = PureEditor { block_id: Some(id.clone()), text, cursor: 0 };
         self.focus_main = Some(id);
         self.focus_cursor_main = Some(cursor);
     }
-    fn clear_focus_if_deleted(&mut self, id: &CapBlockId) {
+    fn clear_focus_if_deleted(&mut self, id: &EntityUri) {
         if self.focus_main.as_ref() == Some(id) {
             self.focus_main = None;
             self.focus_cursor_main = None;
@@ -304,7 +304,7 @@ impl RefFocusMut for EditorPureRef {
 
 ```rust
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapRegion,
+    EntityUri, CapRegion,
     SutBlockTreeWrite, SutEditorMirrorWrite, SutFocusWrite, SutQuiesce,
 };
 
@@ -341,26 +341,26 @@ impl SutEditorMirrorWrite for EditorPureSut {
 }
 
 impl SutBlockTreeWrite for EditorPureSut {
-    async fn apply_split_block(&mut self, id: &CapBlockId, position: usize) {
+    async fn apply_split_block(&mut self, id: &EntityUri, position: usize) {
         let new_id = <EditorPureRef as RefBlockTreeMut>::split_block(&mut self.inner, id, position);
         // Pure-slice mirror of production's editor_focus_op follow-up.
         self.inner.set_focus(CapRegion::Main, new_id, Default::default());
     }
-    async fn apply_join_block(&mut self, id: &CapBlockId) {
+    async fn apply_join_block(&mut self, id: &EntityUri) {
         let _ = <EditorPureRef as RefBlockTreeMut>::join_block(&mut self.inner, id);
     }
-    async fn apply_indent(&mut self, id: &CapBlockId) {
+    async fn apply_indent(&mut self, id: &EntityUri) {
         <EditorPureRef as RefBlockTreeMut>::indent(&mut self.inner, id);
     }
-    async fn apply_outdent(&mut self, id: &CapBlockId) {
+    async fn apply_outdent(&mut self, id: &EntityUri) {
         <EditorPureRef as RefBlockTreeMut>::outdent(&mut self.inner, id);
     }
-    async fn apply_move_up(&mut self, id: &CapBlockId) {
+    async fn apply_move_up(&mut self, id: &EntityUri) {
         if let Some(prev) = self.inner.previous_sibling(id) {
             <EditorPureRef as RefBlockTreeMut>::swap_siblings(&mut self.inner, id, &prev);
         }
     }
-    async fn apply_move_down(&mut self, id: &CapBlockId) {
+    async fn apply_move_down(&mut self, id: &EntityUri) {
         if let Some(next) = self.inner.next_sibling(id) {
             <EditorPureRef as RefBlockTreeMut>::swap_siblings(&mut self.inner, id, &next);
         }
@@ -368,10 +368,10 @@ impl SutBlockTreeWrite for EditorPureSut {
 }
 
 impl SutFocusWrite for EditorPureSut {
-    async fn apply_navigate_focus(&mut self, region: CapRegion, id: &CapBlockId) {
+    async fn apply_navigate_focus(&mut self, region: CapRegion, id: &EntityUri) {
         self.inner.set_focus(region, id.clone(), Default::default());
     }
-    async fn apply_focus_editable_text(&mut self, id: &CapBlockId) {
+    async fn apply_focus_editable_text(&mut self, id: &EntityUri) {
         self.inner.set_focus(CapRegion::Main, id.clone(), Default::default());
     }
 }
@@ -413,7 +413,7 @@ pub fn check_text_trim_stable(_: &EditorPureRef, sut: &EditorPureSut) -> Result<
 
 /// inv-tree-structural-integrity: every block's parent (except root) exists.
 pub fn check_structural_integrity(_: &EditorPureRef, sut: &EditorPureSut) -> Result<(), String> {
-    let known_ids: HashSet<&CapBlockId> = sut.inner.blocks.keys().collect();
+    let known_ids: HashSet<&EntityUri> = sut.inner.blocks.keys().collect();
     for (id, block) in &sut.inner.blocks {
         if let Some(parent) = &block.parent {
             if !known_ids.contains(parent) {

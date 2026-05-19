@@ -21,7 +21,7 @@ use anyhow::{Result, anyhow};
 use loro::{LoroDoc, LoroText};
 
 use crate::api::repository::CoreOperations;
-use holon_api::{EntityUri, Value};
+use holon_api::{EntityUri, Tags, Value};
 use holon_core::cell::CellBacking;
 use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
 
@@ -368,37 +368,159 @@ impl EntityCellRegistry for BlockCellRegistry {
         parent_id: &EntityUri,
         after_id: Option<&EntityUri>,
         new_id: &EntityUri,
-        content: &str,
+        content: holon_api::BlockContent,
+        properties: &std::collections::HashMap<String, holon_api::Value>,
+        tags: &Tags,
+        requires: &[String],
     ) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
             BackingSource::SqlOnly => return Ok(false),
         };
-        let block_content = holon_api::BlockContent::text(content.to_string());
+        // Idempotent: if the node already exists in the tree (e.g. the org
+        // initial scan calls this for a block a prior scan/seed already
+        // placed), skip the create — `create_block` would mint a duplicate
+        // node for the same stable id. Still apply the requested position.
+        if backend.resolve_to_tree_id(new_id.id()).await.is_some() {
+            if let Some(after) = after_id {
+                backend
+                    .update_block_position(new_id.id(), parent_id.as_str(), Some(after.id()))
+                    .await
+                    .map_err(|e| anyhow!("update_block_position({new_id}): {e:#}"))?;
+            }
+            // The existing node may be a tagless placeholder root, auto-created
+            // (below) when a child's `create_in_tree` reached this id before its
+            // own create call. Reconcile the requested tags so a page document
+            // keeps its `Page` marker in Loro — otherwise the outbound projector
+            // diffs Loro(no tag) against SQL(Page) and wipes the SQL tag.
+            if !tags.is_empty() {
+                backend
+                    .set_block_tags(new_id.id(), &tags.to_vec())
+                    .await
+                    .map_err(|e| anyhow!("set_block_tags({new_id}): {e:#}"))?;
+            }
+            // Reconcile the `requires` edge field too (mirrors tags): a re-scan
+            // of an already-placed block must re-assert its org-edna deps so the
+            // projection writes `block_requires`. Skipped when empty to avoid
+            // clobbering deps set elsewhere with an empty list.
+            if !requires.is_empty() {
+                backend
+                    .set_block_requires(new_id.id(), requires)
+                    .await
+                    .map_err(|e| anyhow!("set_block_requires({new_id}): {e:#}"))?;
+            }
+            return Ok(true);
+        }
+        // Resolve the parent in the tree; if it's a real block not yet
+        // present (a child reached before its parent during the org scan),
+        // stand up a placeholder root — mirrors `apply_create` so the create
+        // is order-independent. The placeholder reconciles when the real
+        // parent arrives.
+        let resolved_parent = if parent_id.is_no_parent()
+            || parent_id.is_sentinel()
+            || backend.resolve_to_tree_id(parent_id.id()).await.is_some()
+        {
+            parent_id.clone()
+        } else {
+            let placeholder = backend
+                .create_placeholder_root(parent_id.id())
+                .await
+                .map_err(|e| anyhow!("create_placeholder_root({parent_id}): {e:#}"))?;
+            EntityUri::from_raw(&placeholder)
+        };
         backend
-            .create_block(parent_id.clone(), block_content, Some(new_id.clone()))
+            .create_block_with_properties(
+                resolved_parent,
+                content,
+                Some(new_id.clone()),
+                properties,
+                tags,
+                requires,
+            )
             .await
             .map_err(|e| anyhow!("create_block({new_id}): {e:#}"))?;
-        eprintln!(
-            "[create_entity-diag] create_block done new={} parent={} after={:?}",
-            new_id.as_str(),
-            parent_id.as_str(),
-            after_id.map(|a| a.as_str().to_string())
-        );
         if let Some(after) = after_id {
-            eprintln!(
-                "[create_entity-diag] calling update_block_position target_id={} parent={} pred_id={}",
-                new_id.id(),
-                parent_id.as_str(),
-                after.id()
-            );
             backend
                 .update_block_position(new_id.id(), parent_id.as_str(), Some(after.id()))
                 .await
                 .map_err(|e| anyhow!("update_block_position({new_id}): {e:#}"))?;
-            eprintln!("[create_entity-diag] update_block_position done");
         }
         Ok(true)
+    }
+}
+
+impl BlockCellRegistry {
+    /// True when this registry is Loro-backed (the outbound projector owns the
+    /// SQL `block_raw` row). False in SqlOnly mode.
+    pub fn is_loro_backed(&self) -> bool {
+        matches!(self.backing_source, BackingSource::Loro { .. })
+    }
+
+    /// Delete a block from the Loro tree (the authority) so the outbound
+    /// projector emits the SQL DELETE. Returns `Ok(true)` when Loro-backed
+    /// (the delete was applied, or the node was already absent — delete is
+    /// idempotent), `Ok(false)` in SqlOnly mode where the caller deletes from
+    /// SQL directly.
+    ///
+    /// Authority-first is essential: deleting only from SQL and relying on the
+    /// SQL→Loro mirror to catch up races the armed Loro→SQL projection, which
+    /// re-creates the still-present Loro node back into SQL — the block
+    /// resurrects. Deleting from Loro first makes the projection propagate the
+    /// delete the same way `create_entity` makes it propagate creates.
+    pub async fn delete_entity(&self, uri: &EntityUri) -> Result<bool> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly => return Ok(false),
+        };
+        // `tree.delete` removes the whole subtree, so a block may already be
+        // gone (deleted as part of an ancestor's delete). Deleting an absent
+        // node is success, not an error.
+        if backend.resolve_to_tree_id(uri.as_str()).await.is_none() {
+            return Ok(true);
+        }
+        backend
+            .delete_block(uri.as_str())
+            .await
+            .map_err(|e| anyhow!("delete_block({uri}): {e:#}"))?;
+        Ok(true)
+    }
+
+    /// Read a block's authoritative Loro fractional index — the value the
+    /// outbound projector writes to SQL `sort_key`. Returns `None` in SqlOnly
+    /// mode, where SQL itself owns `sort_key`. Used by the org-scan order
+    /// writeback (`BlockOrdering::project_sort_keys`) to project blocks that
+    /// were created but never repositioned: those emit no Loro mov delta, so
+    /// the projector never writes their fi and they would keep the default
+    /// `"A0"` and mis-sort against moved siblings.
+    pub async fn live_sort_key(&self, id: &str) -> Result<Option<String>> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly => return Ok(None),
+        };
+        let block = backend
+            .get_block(id)
+            .await
+            .map_err(|e| anyhow!("live_sort_key({id}): {e:#}"))?;
+        Ok(Some(block.sort_key))
+    }
+
+    /// Children of `parent_id` in authoritative Loro tree order (full-URI
+    /// form, e.g. `"block:foo"`). Returns `None` in SqlOnly mode, where the
+    /// SQL cache is the order authority. Used by `BlockOrdering::children`
+    /// so the org-scan place loop can observe blocks the instant they enter
+    /// the Loro tree via `create_in_tree` — during the initial scan the
+    /// outbound projector is not running yet, so the SQL cache is empty for
+    /// freshly-created blocks and a cache read would spuriously time out.
+    pub async fn live_children(&self, parent_id: &str) -> Result<Option<Vec<String>>> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly => return Ok(None),
+        };
+        let kids = backend
+            .list_children(parent_id)
+            .await
+            .map_err(|e| anyhow!("live_children({parent_id}): {e:#}"))?;
+        Ok(Some(kids))
     }
 }
 

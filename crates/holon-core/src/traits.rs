@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::cell_registry::EntityCellRegistryExt;
-use holon_api::{EntityUri, Operation, OperationDescriptor, Value};
+use holon_api::{EntityUri, Operation, OperationDescriptor, Tags, Value};
 
 // Define Result type using Send + Sync for error
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -228,11 +228,11 @@ pub trait BlockEntity: MaybeSendSync {
 
     /// Tags attached to this block. The literal `"Page"` tag marks the
     /// block as a page (org file root).
-    fn tags(&self) -> &[String];
+    fn tags(&self) -> Tags;
 
     /// Whether this block is a page (its `tags` contains `"Page"`).
     fn is_page(&self) -> bool {
-        self.tags().iter().any(|t| t == holon_api::PAGE_TAG)
+        self.tags().contains(holon_api::PAGE_TAG)
     }
 }
 
@@ -525,14 +525,22 @@ async fn create_block_via_cells(
     parent_id: &EntityUri,
     after_id: Option<&EntityUri>,
     new_id: &EntityUri,
-    content: &str,
+    content: holon_api::BlockContent,
 ) -> Result<bool> {
     let Some(reg) = registry else {
         return Ok(false);
     };
-    reg.create_entity(parent_id, after_id, new_id, content)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
+    reg.create_entity(
+        parent_id,
+        after_id,
+        new_id,
+        content,
+        &std::collections::HashMap::<String, holon_api::Value>::new(),
+        &Tags::default(),
+        &[],
+    )
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
 
 /// Hierarchical structure operations (for any block-like entity)
@@ -842,7 +850,10 @@ where
             &parent_for_split,
             Some(&after_uri),
             &new_block_uri,
-            &content_after,
+            // The new half of a split is always plain text — the reference
+            // model's `split_block` creates `Block::new_text`. (Splitting a
+            // source block is not a user-reachable op.)
+            holon_api::BlockContent::text(content_after.clone()),
         )
         .await?;
 
@@ -1501,8 +1512,8 @@ impl BlockEntity for holon_api::block::Block {
         &self.content
     }
 
-    fn tags(&self) -> &[String] {
-        &self.tags
+    fn tags(&self) -> Tags {
+        self.tags.clone()
     }
 }
 

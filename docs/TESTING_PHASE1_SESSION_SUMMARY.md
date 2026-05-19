@@ -77,6 +77,6 @@ Based on Phase 1 findings:
 
 ## Session notes
 
-- Capability trait draft built with stringly-typed `CapBlockId` to keep `holon-pbt-core` from acquiring a `holon-api` dep prematurely. Phase 2's blanket impls translate at the boundary.
+- Capability trait draft built with stringly-typed `EntityUri` to keep `holon-pbt-core` from acquiring a `holon-api` dep prematurely. Phase 2's blanket impls translate at the boundary.
 - The existing `docs/Testing/PbtSlicing.md` (uncommitted, 239 lines) is the canonical design rationale doc; my Phase 1 deliverables align with its conventions. Don't duplicate; cross-link.
 - `RefLifecycle` was a Phase 1 discovery; not in the plan's original 6 traits. Lightweight; treat as part of Stage A scope.

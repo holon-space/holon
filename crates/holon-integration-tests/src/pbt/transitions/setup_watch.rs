@@ -11,10 +11,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::query::WatchSpec;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
@@ -31,7 +31,8 @@ pub struct SetupWatch {
     pub language: QueryLanguage,
 }
 
-impl E2ETransitionFactory for SetupWatch {
+impl TransitionFactory<ReferenceState> for SetupWatch {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Create a dummy instance to validate preconditions (no query/language needed yet);
         // if they fail, the generator is disabled entirely (no weight=0 fallback).
@@ -61,8 +62,9 @@ impl E2ETransitionFactory for SetupWatch {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for SetupWatch {
+impl TransitionRef<ReferenceState> for SetupWatch {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -84,13 +86,18 @@ impl E2ETransitionImpl for SetupWatch {
             },
         );
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for SetupWatch {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_setup_watch(&self.query_id, &self.query, self.language)
             .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for SetupWatch {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let blocks = state.block_state.blocks.len();
         let _docs = state.documents.len();

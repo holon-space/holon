@@ -164,7 +164,7 @@ Migrated: ~115 LOC (adds `where` clauses, helper static method, drops a few impo
 +use validated::Validated;
 +
 +use holon_pbt_core::capabilities::{
-+    CapBlockId, CapCursor, CapRegion,
++    EntityUri, CapCursor, CapRegion,
 +    RefBlockTree, RefBlockTreeMut, RefFocus, RefFocusMut, RefLifecycle,
 +    SutBlockTreeWrite,
 +};
@@ -177,19 +177,19 @@ Migrated: ~115 LOC (adds `where` clauses, helper static method, drops a few impo
 ```diff
  pub struct SplitBlock {
 -    pub block_id: EntityUri,
-+    pub block_id: CapBlockId,   // String — wide PBT translates via .to_string() / .parse()
++    pub block_id: EntityUri,   // String — wide PBT translates via .to_string() / .parse()
      pub position: usize,
  }
 ```
 
-**Friction point**: `EntityUri` is structured; `CapBlockId = String` is stringly-typed. The wide PBT's existing `apply_split_block` takes `&holon_api::EntityUri`. Two options:
+**Friction point**: `EntityUri` is structured; `EntityUri = String` is stringly-typed. The wide PBT's existing `apply_split_block` takes `&holon_api::EntityUri`. Two options:
 
-- (A) Migrate `block_id` to `CapBlockId = String`, wide PBT parses back to `EntityUri` at SUT boundary. Loses the type-driven safety locally.
+- (A) Migrate `block_id` to `EntityUri = String`, wide PBT parses back to `EntityUri` at SUT boundary. Loses the type-driven safety locally.
 - (B) Keep `EntityUri` as the wide PBT's block-id type, parameterize the capability trait with an associated type `type Id`.
 
 Option B is type-purer; Option A is simpler. **Recommend Option A for Stage A** — minimal change; can promote to Option B later if friction grows. Cost: one `.to_string()` at the EntityUri boundary.
 
-Updating `capabilities.rs`'s `CapBlockId` doc to call this out.
+Updating `capabilities.rs`'s `EntityUri` doc to call this out.
 
 ### Factory
 
@@ -199,7 +199,7 @@ where R: RefBlockTree + RefLifecycle,
 {
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let candidates: Vec<(CapBlockId, usize)> = {
+        let candidates: Vec<(EntityUri, usize)> = {
             let editable = state.main_editable_descendants();
             let mut result = vec![];
             for id in editable {
@@ -318,11 +318,11 @@ The +5 LOC per file is structural overhead: `where` clauses, `preconditions_stat
 
 ## Open friction for next-session compile
 
-1. **`CapBlockId = String` vs `EntityUri`**: trait surface uses String; wide PBT's existing methods take `EntityUri`. The blanket impls on `ReferenceState` need to bridge:
+1. **`EntityUri = String` vs `EntityUri`**: trait surface uses String; wide PBT's existing methods take `EntityUri`. The blanket impls on `ReferenceState` need to bridge:
    ```rust
    impl RefBlockTreeMut for ReferenceState {
-       fn split_block(&mut self, id: &CapBlockId, position: usize) -> CapBlockId {
-           let uri = EntityUri::parse(id).expect("CapBlockId must parse as EntityUri in wide PBT");
+       fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
+           let uri = EntityUri::parse(id).expect("EntityUri must parse as EntityUri in wide PBT");
            self.split_block(&uri, position).to_string()
        }
        // ...

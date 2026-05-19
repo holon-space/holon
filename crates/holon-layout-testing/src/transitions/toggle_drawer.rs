@@ -4,7 +4,7 @@
 //! `on_mouse_down → set_widget_open` chain a real tap traverses.
 
 use holon_frontend::drawer_toggle_id_for;
-use holon_pbt_core::{ToggleDrawer, TransitionFactory, TransitionImpl};
+use holon_pbt_core::{ToggleDrawer, TransitionFactory, TransitionImpl, TransitionRef};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated::{self, Good};
@@ -39,16 +39,22 @@ where
     }
 }
 
-impl<R, S> TransitionImpl<LayoutRef<'_, R>, LayoutSut<'_, S>> for ToggleDrawer
+impl<R> TransitionRef<LayoutRef<'_, R>> for ToggleDrawer
 where
     R: LayoutRefState + ?Sized,
-    S: Clickable + ?Sized,
 {
     type Reason = ToggleDrawerReason;
     fn preconditions(&self, _: &LayoutRef<'_, R>) -> Validated<(), Self::Reason> {
         Good(())
     }
     fn apply_to_ref(&self, _: &mut LayoutRef<'_, R>) {}
+}
+
+impl<R, S> TransitionImpl<LayoutRef<'_, R>, LayoutSut<'_, S>> for ToggleDrawer
+where
+    R: LayoutRefState + ?Sized,
+    S: Clickable + ?Sized,
+{
     async fn apply_to_sut(&self, _: &LayoutRef<'_, R>, sut: &mut LayoutSut<'_, S>) {
         let toggle_id = drawer_toggle_id_for(&self.block_id);
         sut.click_at_element(&toggle_id);

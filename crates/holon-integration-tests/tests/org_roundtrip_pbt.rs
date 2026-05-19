@@ -219,7 +219,7 @@ fn lower_to_blocks(tops: &[GenBlock]) -> Vec<Block> {
             if let Some(kw) = &k.todo {
                 b.set_property("TODO", Value::String(kw.clone()));
             }
-            b.tags = k.tags.clone();
+            b.tags = k.tags.clone().into();
             b.sort_key = sort_key.clone();
             out.push(b);
             lower(out, &uri, &k.children, &format!("{sort_key}_"));
@@ -277,8 +277,9 @@ fn structural_view(doc: &Block, blocks: &[Block]) -> Vec<StructRow> {
     let mut rows: Vec<StructRow> = blocks
         .iter()
         .map(|b| {
-            let mut tags = b.tags.clone();
-            tags.sort();
+            // `Tags` is a `BTreeSet`, so iteration is already canonically
+            // ordered — collect to the `Vec<String>` the StructRow expects.
+            let tags: Vec<String> = b.tags.iter().cloned().collect();
             let mut properties: Vec<(String, String)> = b
                 .properties
                 .iter()

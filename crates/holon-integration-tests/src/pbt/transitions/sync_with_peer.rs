@@ -10,10 +10,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -24,7 +24,8 @@ pub struct SyncWithPeer {
     pub peer_idx: usize,
 }
 
-impl E2ETransitionFactory for SyncWithPeer {
+impl TransitionFactory<ReferenceState> for SyncWithPeer {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (peer indices) and let `preconditions`
         // be the single source of truth for which ones are actually syncable.
@@ -46,8 +47,9 @@ impl E2ETransitionFactory for SyncWithPeer {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for SyncWithPeer {
+impl TransitionRef<ReferenceState> for SyncWithPeer {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -70,12 +72,17 @@ impl E2ETransitionImpl for SyncWithPeer {
         // lives in `RefPeersMut::peer_sync_from_primary`.
         state.peer_sync_from_primary(self.peer_idx);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for SyncWithPeer {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_sync_with_peer(self.peer_idx).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for SyncWithPeer {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // SyncWithPeer: async CDC drain from previous transitions can land here.
         // In production, fires Loro's `subscribe_root` callback, which wakes

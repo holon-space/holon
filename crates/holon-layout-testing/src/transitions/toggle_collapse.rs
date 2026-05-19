@@ -3,7 +3,7 @@
 //! `expand_toggle_id_for(target_id)` widget.
 
 use holon_frontend::geometry::expand_toggle_id_for;
-use holon_pbt_core::{ToggleCollapse, TransitionFactory, TransitionImpl};
+use holon_pbt_core::{ToggleCollapse, TransitionFactory, TransitionImpl, TransitionRef};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated::{self, Good};
@@ -34,16 +34,22 @@ where
     }
 }
 
-impl<R, S> TransitionImpl<LayoutRef<'_, R>, LayoutSut<'_, S>> for ToggleCollapse
+impl<R> TransitionRef<LayoutRef<'_, R>> for ToggleCollapse
 where
     R: LayoutRefState + ?Sized,
-    S: Clickable + ?Sized,
 {
     type Reason = ToggleCollapseReason;
     fn preconditions(&self, _: &LayoutRef<'_, R>) -> Validated<(), Self::Reason> {
         Good(())
     }
     fn apply_to_ref(&self, _: &mut LayoutRef<'_, R>) {}
+}
+
+impl<R, S> TransitionImpl<LayoutRef<'_, R>, LayoutSut<'_, S>> for ToggleCollapse
+where
+    R: LayoutRefState + ?Sized,
+    S: Clickable + ?Sized,
+{
     async fn apply_to_sut(&self, _: &LayoutRef<'_, R>, sut: &mut LayoutSut<'_, S>) {
         let toggle_id = expand_toggle_id_for(&self.target_id);
         sut.click_at_element(&toggle_id);

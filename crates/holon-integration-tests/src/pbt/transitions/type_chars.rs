@@ -9,15 +9,14 @@
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::capabilities::{
     CapRegion, RefBlockTreeMut, RefEditorMirror, RefEditorMirrorMut, RefFocus, RefLifecycle,
-    commit_active_editor_if_changed,
+    SutEditorMirrorWrite, commit_active_editor_if_changed,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
@@ -31,8 +30,8 @@ pub struct TypeChars {
 
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 //
-// These are the canonical logic; `E2ETransitionImpl` below just delegates.
-// The pure slice can call these directly without `E2ETransitionImpl`.
+// These are the canonical logic; the `TransitionImpl` below just delegates.
+// The pure slice can call these directly without `TransitionImpl`.
 
 /// Preconditions for `TypeChars`, bound only on the capability traits it reads.
 pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
@@ -98,14 +97,16 @@ where
 
 // ── E2E trait impls (wide PBT entry point; delegate to _cap fns) ──
 
-impl E2ETransitionFactory for TypeChars {
+impl TransitionFactory<ReferenceState> for TypeChars {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         type_chars_weighted_generator(state)
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for TypeChars {
+impl TransitionRef<ReferenceState> for TypeChars {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         type_chars_preconditions(state)
     }
@@ -113,12 +114,17 @@ impl E2ETransitionImpl for TypeChars {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         type_chars_apply_to_ref(&self.text, state);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutEditorMirrorWrite> TransitionImpl<ReferenceState, S> for TypeChars {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_type_chars(&self.text).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for TypeChars {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE,

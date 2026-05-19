@@ -13,9 +13,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -31,7 +31,8 @@ pub struct NavigateBack {
     pub region: Region,
 }
 
-impl E2ETransitionFactory for NavigateBack {
+impl TransitionFactory<ReferenceState> for NavigateBack {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = NavigateBack {
             region: Region::Main,
@@ -43,8 +44,9 @@ impl E2ETransitionFactory for NavigateBack {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for NavigateBack {
+impl TransitionRef<ReferenceState> for NavigateBack {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -68,12 +70,17 @@ impl E2ETransitionImpl for NavigateBack {
         // Blur on nav: see `navigate_focus.rs` for verification.
         state.active_editor = None;
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for NavigateBack {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.navigate_back(self.region).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for NavigateBack {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS - 2,

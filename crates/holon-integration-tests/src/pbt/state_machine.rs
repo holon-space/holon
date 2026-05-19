@@ -210,10 +210,10 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
     }
 
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        // Dispatched through the per-transition `E2ETransitionImpl` trait;
-        // each variant's precondition lives in `transitions/<name>.rs`.
-        // VariantRef derefs to ReferenceState.
-        use crate::pbt::transitions::E2ETransitionImpl;
+        // Dispatched through the per-transition `TransitionRef` trait
+        // (ref-side, S-independent); each variant's precondition lives in
+        // `transitions/<name>.rs`. VariantRef derefs to ReferenceState.
+        use holon_pbt_core::TransitionRef;
         use validated::Validated;
         match transition.preconditions(state) {
             Validated::Good(()) => true,
@@ -224,7 +224,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
         }
     }
     fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
-        use crate::pbt::transitions::E2ETransitionImpl;
+        use holon_pbt_core::TransitionRef;
         transition.apply_to_ref(&mut state);
         state.last_transition_kind = Some(transition.variant_name());
         state

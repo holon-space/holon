@@ -153,9 +153,10 @@ impl HeadlessEditorMirror {
         if needs_mt && mt.is_none() {
             anyhow::bail!(
                 "headless send_raw_keystroke({keystroke:?}) — no MutableText for focused block \
-                 {block_id}. The loro consumer hasn't applied the block's create event yet. \
-                 The PBT runner's `pre_inv16_settle` barrier should have waited for it; \
-                 increase the consumer timeout or check why the loro consumer is stuck."
+                 {block_id}. Its Loro `content_raw` text container isn't resolvable yet (the \
+                 block's create intent hasn't landed in the Loro tree). The PBT runner's \
+                 `pre_inv16_settle` barrier should have waited for it; increase that timeout or \
+                 check why the block create is stuck."
             );
         }
         // SqlOnly variant has no `MutableText` — read the block's

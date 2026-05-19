@@ -1206,12 +1206,12 @@ impl<V: VariantMarker> E2ESut<V> {
     /// returned set is the synchronization predicate used by
     /// `wait_for_blocks_synced`: each id must appear in the all-blocks
     /// CDC accumulator before the wait succeeds.
-    pub(crate) fn expected_block_ids(&self, ref_state: &ReferenceState) -> HashSet<String> {
+    pub(crate) fn expected_block_ids(&self, ref_state: &ReferenceState) -> HashSet<EntityUri> {
         ref_state
             .block_state
             .blocks
             .values()
-            .map(|b| self.resolve_uri(&b.id).to_string())
+            .map(|b| self.resolve_uri(&b.id))
             .collect()
     }
 
@@ -1245,7 +1245,7 @@ impl<V: VariantMarker> E2ESut<V> {
     /// hold more ids), the count drives the post-condition assertion.
     pub(super) async fn await_block_count_or_panic(
         &mut self,
-        expected_ids: &HashSet<String>,
+        expected_ids: &HashSet<EntityUri>,
         expected_count: usize,
         timeout: Duration,
         context: &str,

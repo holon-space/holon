@@ -11,10 +11,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -49,14 +49,16 @@ pub fn add_peer_apply_to_ref<R: RefPeersMut>(state: &mut R) {
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl E2ETransitionFactory for AddPeer {
+impl TransitionFactory<ReferenceState> for AddPeer {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         add_peer_weighted_generator(state)
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for AddPeer {
+impl TransitionRef<ReferenceState> for AddPeer {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         add_peer_preconditions(state)
     }
@@ -64,12 +66,17 @@ impl E2ETransitionImpl for AddPeer {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         add_peer_apply_to_ref(state);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for AddPeer {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_add_peer().await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for AddPeer {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // AddPeer: export_snapshot triggers ~5 SQL reads (store persistence).
         // Others: async CDC drain from previous transitions can land here.

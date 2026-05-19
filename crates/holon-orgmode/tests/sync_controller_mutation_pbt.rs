@@ -12,15 +12,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use holon::core::datasource::{OperationProvider, OperationResult, Result as CoreResult};
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::render_types::OperationDescriptor;
 use holon_api::types::{ContentType, Priority, Tags, TaskState, Timestamp};
-use holon_api::{EntityName, Value};
+use holon_api::Value;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
-use holon_orgmode::models::{OrgBlockExt, DEFAULT_ACTIVE_KEYWORDS, DEFAULT_DONE_KEYWORDS};
+use holon_orgmode::models::{
+    OrgBlockExt, OrgDocumentExt, DEFAULT_ACTIVE_KEYWORDS, DEFAULT_DONE_KEYWORDS,
+};
 use holon_orgmode::org_renderer::OrgRenderer;
 use holon_orgmode::org_sync_controller::OrgSyncController;
 use holon_orgmode::parser::parse_org_file;
@@ -93,6 +93,22 @@ impl InMemoryBlockStore {
             blocks.retain(|b| b.id.as_str() != block_id);
         }
     }
+
+    /// Create-or-update: replace the block in place if it already exists under
+    /// any document, otherwise create it. Mirrors the SqlOnly `update_in_tree`
+    /// upsert the production `BlockOrdering` performs (the org write seam picks
+    /// create vs update by prior presence).
+    fn apply_upsert(&self, block: Block) {
+        let exists = {
+            let store = self.blocks.read().unwrap();
+            store.values().any(|v| v.iter().any(|b| b.id == block.id))
+        };
+        if exists {
+            self.apply_update(block);
+        } else {
+            self.apply_create(block);
+        }
+    }
 }
 
 #[async_trait]
@@ -117,47 +133,6 @@ impl BlockReader for InMemoryBlockStore {
     }
 
     // find_foreign_blocks: uses default implementation from BlockReader trait
-}
-
-struct MockOperationProvider {
-    store: Arc<InMemoryBlockStore>,
-}
-
-#[async_trait]
-impl OperationProvider for MockOperationProvider {
-    fn operations(&self) -> Vec<OperationDescriptor> {
-        Vec::new()
-    }
-
-    async fn execute_operation(
-        &self,
-        entity_name: &EntityName,
-        op_name: &str,
-        params: HashMap<String, Value>,
-    ) -> CoreResult<OperationResult> {
-        assert_eq!(entity_name, "block");
-
-        match op_name {
-            "create" | "update" => {
-                let block = block_from_params(&params);
-                if op_name == "create" {
-                    self.store.apply_create(block);
-                } else {
-                    self.store.apply_update(block);
-                }
-            }
-            "delete" => {
-                let id = params
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .expect("delete must have id param");
-                self.store.apply_delete(id);
-            }
-            other => panic!("unexpected operation: {other}"),
-        }
-
-        Ok(OperationResult::irreversible(Vec::new()))
-    }
 }
 
 fn block_from_params(params: &HashMap<String, Value>) -> Block {
@@ -309,13 +284,116 @@ impl DocumentManager for MockDocumentManager {
     }
 
     async fn update_metadata(&self, doc: &Block) -> Result<()> {
+        // Simulate the production SQL round-trip: build_block_params packs
+        // doc-level metadata (todo_keywords, etc.) into flat params; the
+        // SqlOperationProvider partitions known columns vs `properties` JSON;
+        // a subsequent read deserializes that row via Block::try_from. The
+        // previous stub stored the `Block` struct directly, which preserved
+        // every field by reference identity and masked any field that
+        // build_block_params silently drops on the way to SQL. The new flow
+        // round-trips through (params → SQL-shaped row → Block::try_from)
+        // so a dropped param surfaces as a missing field on read-back.
+        let params = holon_orgmode::block_params::build_block_params(doc, &doc.parent_id, &doc.id);
+        let row = simulate_sql_round_trip(doc, params);
+        let reconstructed = Block::try_from(row)
+            .map_err(|e| anyhow::anyhow!("simulated SQL round-trip failed: {e}"))?;
         let mut docs = self.documents.write().unwrap();
         if let Some(existing) = docs.iter_mut().find(|d| d.id == doc.id) {
-            *existing = doc.clone();
+            *existing = reconstructed;
         }
         Ok(())
     }
 }
+
+/// Mirror `SqlOperationProvider::partition_params` + `prepare_update`:
+/// flat params split into known columns (top-level) vs extras (merged
+/// into the `properties` JSON column). Any param key that
+/// `build_block_params` emits but is not a known column flows into the
+/// JSON blob; on read, `Block::try_from` only sees those keys via
+/// `block.properties`. This is the exact serialization seam where the
+/// `inv-org-render-fixed-point` flake's missing `todo_keywords` lives.
+fn simulate_sql_round_trip(doc: &Block, params: HashMap<String, Value>) -> HashMap<String, Value> {
+    // Matches BLOCKS_KNOWN_COLUMNS in crates/holon/src/core/sql_operation_provider.rs.
+    // Kept in sync by convention; if the production list changes, this list must
+    // change too — the PBT is the canary.
+    const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
+        "id",
+        "parent_id",
+        "depth",
+        "sort_key",
+        "content",
+        "content_type",
+        "source_language",
+        "source_name",
+        "properties",
+        "marks",
+        "collapsed",
+        "completed",
+        "block_type",
+        "created_at",
+        "updated_at",
+        "_change_origin",
+    ];
+    const EDGE_FIELDS: &[&str] = &["tags", "requires"];
+
+    let mut row: HashMap<String, Value> = HashMap::new();
+    let mut extras: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    // Seed extras with the doc's existing properties (mirrors the
+    // existing-properties merge in prepare_update). Without this, a single
+    // update would clobber keys set by an earlier write.
+    for (k, v) in &doc.properties {
+        extras.insert(k.clone(), value_to_serde_json(v));
+    }
+
+    for (key, value) in params.into_iter() {
+        if key == "properties" {
+            // Real provider merges; here we just take the param JSON as the
+            // existing-properties seed (params rarely contain a properties key).
+            continue;
+        }
+        if key == POSITION_AFTER_BLOCK_ID_PARAM
+            || key.starts_with("_routing_")
+            || key.starts_with("_expected_")
+        {
+            continue;
+        }
+        if BLOCKS_KNOWN_COLUMNS.contains(&key.as_str()) || EDGE_FIELDS.contains(&key.as_str()) {
+            row.insert(key, value);
+        } else {
+            extras.insert(key, value_to_serde_json(&value));
+        }
+    }
+
+    // Emit the merged properties JSON as a string Value — Block::try_from
+    // accepts both Value::String and Value::Json for the properties column.
+    let props_json = serde_json::to_string(&extras).expect("properties must serialize");
+    row.insert("properties".to_string(), Value::String(props_json));
+    row
+}
+
+fn value_to_serde_json(v: &Value) -> serde_json::Value {
+    match v {
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Integer(i) => serde_json::Value::Number((*i).into()),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::Boolean(b) => serde_json::Value::Bool(*b),
+        Value::Null => serde_json::Value::Null,
+        Value::DateTime(s) => serde_json::Value::String(s.clone()),
+        Value::Json(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect())
+        }
+        Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), value_to_serde_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+const POSITION_AFTER_BLOCK_ID_PARAM: &str = "_after_block_id";
 
 // ============================================================================
 // Stub BlockOrdering for tests
@@ -325,12 +403,16 @@ impl DocumentManager for MockDocumentManager {
 /// the existing PBT paths don't exercise positional reads.
 struct StubBlockOrdering {
     pub calls: Mutex<Vec<(EntityUri, String, Option<String>)>>,
+    /// Writes route here — the controller's only block sink now that the
+    /// command bus is gone. The test asserts against this same store.
+    store: Arc<InMemoryBlockStore>,
 }
 
 impl StubBlockOrdering {
-    fn new() -> Self {
+    fn new(store: Arc<InMemoryBlockStore>) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            store,
         }
     }
 }
@@ -378,6 +460,20 @@ impl BlockOrdering for StubBlockOrdering {
         // (they'll call place() once each). Tests that assert place() call count
         // should reflect this.
         Ok(vec![])
+    }
+
+    async fn update_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+        self.store.apply_upsert(block_from_params(&params));
+        Ok(())
+    }
+
+    async fn delete_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .expect("delete_in_tree: missing id");
+        self.store.apply_delete(id);
+        Ok(())
     }
 }
 
@@ -505,9 +601,6 @@ impl TestFixture {
             "path_segments must contain at least one segment"
         );
         let store = Arc::new(InMemoryBlockStore::new());
-        let op_provider = Arc::new(MockOperationProvider {
-            store: store.clone(),
-        });
         let doc_manager = Arc::new(MockDocumentManager::new());
 
         // Canonicalize so fixture-built paths match what OrgSyncController
@@ -515,10 +608,9 @@ impl TestFixture {
         let root_dir = temp_dir
             .canonicalize()
             .unwrap_or_else(|_| temp_dir.to_path_buf());
-        let ordering = Arc::new(StubBlockOrdering::new());
+        let ordering = Arc::new(StubBlockOrdering::new(store.clone()));
         let controller = OrgSyncController::new(
             store.clone(),
-            op_provider,
             doc_manager.clone(),
             root_dir.clone(),
             ordering,
@@ -709,7 +801,7 @@ fn apply_block_mutation(block: &mut Block, mutation: &BlockMutation) {
             block.set_tags(tags.clone());
         }
         BlockMutation::AddTag(tag) => {
-            let mut current = block.tags().as_slice().to_vec();
+            let mut current = block.tags().to_vec();
             current.push(tag.clone());
             block.set_tags(Tags::from(current));
         }
@@ -1363,6 +1455,162 @@ proptest! {
 }
 
 // ============================================================================
+// PBT: test_sync_todo_keywords_round_trip
+// ============================================================================
+//
+// Targets the `inv-org-render-fixed-point` flake surfaced by the wide
+// `general_e2e_pbt`: an org file with a `#+TODO:` header is ingested by
+// `on_file_changed`, but `block_raw.properties.todo_keywords` ends up
+// missing on the doc row — so a subsequent `OrgRenderer::render_document`
+// from SQL drops the `#+TODO:` line, the renderer's output differs from
+// the disk file, and the next `re_render_all_tracked` pass rewrites the
+// file (echo-suppression loop risk).
+//
+// Detection path here:
+//   1. Generate a varying TodoKeywordSet.
+//   2. Build a minimal org file: `#+ID: <doc_id>\n#+TODO: <active> | <done>\n…`.
+//   3. Run `on_file_changed`. Per the controller, this calls
+//      `doc_manager.update_metadata(doc_with_kws)`.
+//   4. The hardened mock routes the metadata write through
+//      `build_block_params` → simulate_sql_round_trip → `Block::try_from`,
+//      mirroring the real SQL serialization seam. Any field dropped by
+//      that seam surfaces as a missing key on read-back.
+//   5. Read the doc back from the mock store via `get_by_id` and assert
+//      `todo_keywords()` returns the same set we generated.
+
+fn arb_keyword() -> impl Strategy<Value = String> {
+    prop::sample::select(vec![
+        "TODO",
+        "DOING",
+        "NEXT",
+        "WAITING",
+        "DONE",
+        "CANCELLED",
+        "CLOSED",
+    ])
+    .prop_map(String::from)
+}
+
+fn arb_keyword_set() -> impl Strategy<Value = Vec<TaskState>> {
+    (
+        prop::collection::vec(arb_keyword(), 1..=3),
+        prop::collection::vec(arb_keyword(), 1..=2),
+    )
+        .prop_map(|(active, done)| {
+            let mut states = Vec::new();
+            for k in active {
+                states.push(TaskState::active(&k));
+            }
+            for k in done {
+                states.push(TaskState::done(&k));
+            }
+            states
+        })
+}
+
+fn format_todo_line(states: &[TaskState]) -> String {
+    let active: Vec<&str> = states
+        .iter()
+        .filter(|s| s.is_active())
+        .map(|s| s.keyword.as_str())
+        .collect();
+    let done: Vec<&str> = states
+        .iter()
+        .filter(|s| s.is_done())
+        .map(|s| s.keyword.as_str())
+        .collect();
+    let mut out = String::from("#+TODO:");
+    if !active.is_empty() {
+        out.push_str(&format!(" {}", active.join(" ")));
+    }
+    if !done.is_empty() {
+        out.push_str(&format!(" | {}", done.join(" ")));
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 50,
+        ..ProptestConfig::default()
+    })]
+
+    /// `#+TODO:` keyword set survives `on_file_changed` → metadata store
+    /// round-trip. Fails if `build_block_params` (or any intermediate
+    /// in the simulated SQL serialization) drops `todo_keywords` on the
+    /// way to `block_raw.properties`.
+    #[test]
+    fn test_sync_todo_keywords_round_trip(kws in arb_keyword_set()) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            // pre_seed_doc=true: the leaf doc is already in MockDocumentManager,
+            // so the doc-metadata path is exercised without the StubBlockOrdering
+            // misalignment-check timing out on a separate ordering bug
+            // (pre-existing infra issue in the ordering_replay tests).
+            let mut fixture = TestFixture::new_with(
+                temp_dir.path(),
+                vec!["todo_round_trip".to_string()],
+                true,
+            );
+            fixture.ensure_parent_dirs().await;
+            fixture.controller.initialize().await.expect("initialize must succeed");
+
+            let todo_line = format_todo_line(&kws);
+            // Header-only org file: no headlines. The doc-metadata branch in
+            // `on_file_changed` (compare parsed_kws vs existing_kws → call
+            // update_metadata) fires regardless, and we skip the ordering
+            // replay entirely.
+            let org = format!("#+ID: {}\n{}\n", fixture.doc_id.id(), todo_line);
+            tokio::fs::write(&fixture.file_path(), &org).await.unwrap();
+
+            fixture
+                .controller
+                .on_file_changed(&fixture.file_path())
+                .await
+                .unwrap();
+
+            let stored_doc = fixture
+                .doc_manager
+                .get_by_id(&fixture.doc_id)
+                .await
+                .unwrap()
+                .expect("doc must exist in MockDocumentManager after on_file_changed");
+
+            let actual_kws = stored_doc.todo_keywords();
+            prop_assert!(
+                actual_kws.is_some(),
+                "stored doc lost todo_keywords after on_file_changed → metadata round-trip.\n\
+                 Generated #+TODO line: {todo_line}\n\
+                 Stored doc.properties: {:?}",
+                stored_doc.properties,
+            );
+            let actual = actual_kws.unwrap();
+            // Compare as canonical-JSON to ignore Vec ordering jitter from
+            // parser internals (parser collects active then done; we generate
+            // the same shape so direct equality on (active_set, done_set) is
+            // also valid).
+            let to_pair = |v: &[TaskState]| {
+                let mut a: Vec<String> =
+                    v.iter().filter(|s| s.is_active()).map(|s| s.keyword.clone()).collect();
+                let mut d: Vec<String> =
+                    v.iter().filter(|s| s.is_done()).map(|s| s.keyword.clone()).collect();
+                a.sort();
+                d.sort();
+                (a, d)
+            };
+            prop_assert_eq!(
+                to_pair(&actual),
+                to_pair(&kws),
+                "stored doc todo_keywords differ from generated set",
+            );
+
+            Ok::<(), TestCaseError>(())
+        })?;
+    }
+}
+
+// ============================================================================
 // find_foreign_blocks regression tests
 // ============================================================================
 
@@ -1495,13 +1743,20 @@ mod ordering_replay_tests {
         /// Maps parent_id → ordered list of child ids representing the LIVE order.
         live_order: std::collections::HashMap<String, Vec<String>>,
         pub calls: Mutex<Vec<(EntityUri, String, Option<String>)>>,
+        /// Block sink — the controller's only write target now the command bus
+        /// is gone; tests assert against this same store.
+        store: Arc<InMemoryBlockStore>,
     }
 
     impl ConfigurableOrderingStub {
-        fn new(live_order: std::collections::HashMap<String, Vec<String>>) -> Self {
+        fn new(
+            live_order: std::collections::HashMap<String, Vec<String>>,
+            store: Arc<InMemoryBlockStore>,
+        ) -> Self {
             Self {
                 live_order,
                 calls: Mutex::new(Vec::new()),
+                store,
             }
         }
     }
@@ -1545,45 +1800,62 @@ mod ordering_replay_tests {
         async fn children(&self, parent_id: &str) -> BlockOrderingResult<Vec<String>> {
             Ok(self.live_order.get(parent_id).cloned().unwrap_or_default())
         }
+
+        async fn update_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+            self.store.apply_upsert(block_from_params(&params));
+            Ok(())
+        }
+
+        async fn delete_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("delete_in_tree: missing id");
+            self.store.apply_delete(id);
+            Ok(())
+        }
     }
 
-    fn build_controller_with_ordering(
+    fn build_controller_with_live_order(
         temp_dir: &std::path::Path,
-        ordering: Arc<dyn BlockOrdering>,
+        live_order: std::collections::HashMap<String, Vec<String>>,
     ) -> (
         Arc<InMemoryBlockStore>,
         Arc<MockDocumentManager>,
         OrgSyncController,
+        Arc<ConfigurableOrderingStub>,
         EntityUri,
         PathBuf,
     ) {
-        build_controller_with_ordering_and_doc_id(temp_dir, ordering, EntityUri::block_random())
+        build_controller_with_live_order_and_doc_id(temp_dir, live_order, EntityUri::block_random())
     }
 
-    fn build_controller_with_ordering_and_doc_id(
+    fn build_controller_with_live_order_and_doc_id(
         temp_dir: &std::path::Path,
-        ordering: Arc<dyn BlockOrdering>,
+        live_order: std::collections::HashMap<String, Vec<String>>,
         doc_id: EntityUri,
     ) -> (
         Arc<InMemoryBlockStore>,
         Arc<MockDocumentManager>,
         OrgSyncController,
+        Arc<ConfigurableOrderingStub>,
         EntityUri,
         PathBuf,
     ) {
         let store = Arc::new(InMemoryBlockStore::new());
-        let op_provider = Arc::new(MockOperationProvider {
-            store: store.clone(),
-        });
         let doc_manager = Arc::new(MockDocumentManager::new());
+
+        // The ordering stub is the controller's only block sink (no command
+        // bus). Share the store so the dispatched create/update/delete intents
+        // land where the test asserts.
+        let ordering = Arc::new(ConfigurableOrderingStub::new(live_order, store.clone()));
 
         let root_dir = temp_dir.to_path_buf();
         let controller = OrgSyncController::new(
             store.clone(),
-            op_provider,
             doc_manager.clone(),
             root_dir.clone(),
-            ordering,
+            ordering.clone(),
         );
 
         let doc_name = "order-test".to_string();
@@ -1593,7 +1865,7 @@ mod ordering_replay_tests {
         doc_manager.add_document(doc);
 
         let file_path = root_dir.join(format!("{doc_name}.org"));
-        (store, doc_manager, controller, doc_id, file_path)
+        (store, doc_manager, controller, ordering, doc_id, file_path)
     }
 
     /// Test 7a: file order matches live order → place() is never called.
@@ -1618,13 +1890,10 @@ mod ordering_replay_tests {
         let doc_id = EntityUri::block_random();
 
         // First pass: empty live_order → place() will be called (one block).
-        let ordering_first = Arc::new(ConfigurableOrderingStub::new(
-            std::collections::HashMap::new(),
-        ));
-        let (store, _doc_mgr, mut controller, _, file_path) =
-            build_controller_with_ordering_and_doc_id(
+        let (store, _doc_mgr, mut controller, _ordering_first, _, file_path) =
+            build_controller_with_live_order_and_doc_id(
                 temp_dir.path(),
-                ordering_first,
+                std::collections::HashMap::new(),
                 doc_id.clone(),
             );
 
@@ -1651,11 +1920,10 @@ mod ordering_replay_tests {
         // matches live order → place() must NOT be called.
         let mut live_order = std::collections::HashMap::new();
         live_order.insert(doc_id.id().to_string(), vec![block_id.clone()]);
-        let ordering_second = Arc::new(ConfigurableOrderingStub::new(live_order));
-        let (store2, _doc_mgr2, mut controller2, _, file_path2) =
-            build_controller_with_ordering_and_doc_id(
+        let (store2, _doc_mgr2, mut controller2, ordering_second, _, file_path2) =
+            build_controller_with_live_order_and_doc_id(
                 temp_dir.path(),
-                ordering_second.clone(),
+                live_order,
                 doc_id.clone(),
             );
         // Pre-seed the store so the parse sees an existing block → UPDATE path.
@@ -1708,19 +1976,15 @@ mod ordering_replay_tests {
 
         // We need the doc_id for the live_order key. Build a controller first
         // to learn the doc_id, then rebuild with the right live_order.
-        let ordering_probe = Arc::new(ConfigurableOrderingStub::new(
-            std::collections::HashMap::new(),
-        ));
-        let (_store, _doc_mgr, _ctrl, doc_id, _file_path) =
-            build_controller_with_ordering(temp_dir.path(), ordering_probe);
+        let (_store, _doc_mgr, _ctrl, _ordering_probe, doc_id, _file_path) =
+            build_controller_with_live_order(temp_dir.path(), std::collections::HashMap::new());
 
         // Build the real controller with a live_order that doesn't include our block.
         let dummy_other_id2 = "some-other-block-id".to_string();
         let mut live_order2 = std::collections::HashMap::new();
         live_order2.insert(doc_id.id().to_string(), vec![dummy_other_id2]);
-        let ordering = Arc::new(ConfigurableOrderingStub::new(live_order2));
-        let (_store2, _doc_mgr2, mut controller, _doc_id2, file_path2) =
-            build_controller_with_ordering(temp_dir.path(), ordering.clone());
+        let (_store2, _doc_mgr2, mut controller, ordering, _doc_id2, file_path2) =
+            build_controller_with_live_order(temp_dir.path(), live_order2);
 
         controller.initialize().await.expect("initialize");
         tokio::fs::write(&file_path2, single_block_org)

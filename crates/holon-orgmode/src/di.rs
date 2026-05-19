@@ -316,7 +316,8 @@ impl BlockReader for CacheBlockReader {
                    b.content_type, b.source_language, b.source_name, \
                    b.properties, b.marks, b.collapsed, b.completed, \
                    b.block_type, b.created_at, b.updated_at, \
-                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags \
+                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
+                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
             FROM {table} b \
             JOIN descendants d ON d.id = b.id",
             table = BLOCK_WRITE_TABLE,
@@ -889,6 +890,13 @@ impl Module for OrgModeModule {
                 let loro_ops_clone = loro_ops.clone();
                 let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
                 let ordering = resolver.resolve_async::<dyn BlockOrdering>().await;
+                // Downstream consolidator→sink projection. Present only when a
+                // separate consolidator owns block storage (registered by
+                // LoroModule); absent in the degraded SQL-only config, where
+                // the controller routes creates through the command bus.
+                let downstream = resolver
+                    .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
+                    .await;
                 let backend_provider =
                     resolver.resolve::<dyn holon::di::TursoBackendProvider>();
                 let backend_for_live_docs = backend_provider.backend();
@@ -913,7 +921,6 @@ impl Module for OrgModeModule {
 
                     let mut controller = OrgSyncController::new(
                         block_reader,
-                        command_bus,
                         doc_manager,
                         config_clone.root_directory.clone(),
                         ordering,
@@ -921,6 +928,10 @@ impl Module for OrgModeModule {
 
                     if let Some(hook_cmd) = config_clone.post_org_write_hook.clone() {
                         controller = controller.with_post_org_write_hook(hook_cmd);
+                    }
+
+                    if let Some(downstream) = downstream {
+                        controller = controller.with_downstream_projection(downstream);
                     }
 
                     if let Some(ref ops) = loro_ops_clone {
@@ -1030,15 +1041,13 @@ impl Module for OrgModeModule {
                             .instrument(tracing::info_span!("org.initial_scan.ingest"))
                             .await;
 
-                            // Project rule: fail loud, never fake. We log
-                            // each failure above at ERROR and propagate the
-                            // *summary* via PBT_FAIL_LOUD_INITIAL_SCAN=1 so a
-                            // dev investigating wedged matview consumers can
-                            // confirm the suspected upstream cause. Default
-                            // off: today's generator/parser combo legitimately
-                            // produces files whose `update_block_position`
-                            // races the block-create — a separate bug worth
-                            // fixing but not one we want to block every run on.
+                            // Project rule: fail loud, never fake. Any
+                            // initial-scan failure propagates as a startup
+                            // error — silently continuing past it hides
+                            // upstream bugs (e.g. Loro inbound runtime not
+                            // mirroring org-ingested blocks, surfacing later
+                            // as `update_block_position`/`resolve_parent_tree_id`
+                            // failures).
                             if !scan_failures.is_empty() {
                                 let summary = scan_failures
                                     .iter()
@@ -1050,19 +1059,13 @@ impl Module for OrgModeModule {
                                     scan_failures.len(),
                                     summary
                                 );
-                                error!("[OrgMode] {} (continuing; set PBT_FAIL_LOUD_INITIAL_SCAN=1 to propagate)", msg);
-                                if std::env::var("PBT_FAIL_LOUD_INITIAL_SCAN")
-                                    .ok()
-                                    .as_deref()
-                                    == Some("1")
+                                error!("[OrgMode] {}", msg);
+                                if let Some(sender) =
+                                    ready_sender_clone.lock().unwrap().take()
                                 {
-                                    if let Some(sender) =
-                                        ready_sender_clone.lock().unwrap().take()
-                                    {
-                                        sender.signal_error(msg);
-                                    }
-                                    return;
+                                    sender.signal_error(msg);
                                 }
+                                return;
                             }
 
                             // Phase 1 fix: signal_ready BEFORE arm(). The

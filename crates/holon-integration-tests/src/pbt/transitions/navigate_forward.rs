@@ -12,9 +12,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -28,7 +28,8 @@ pub struct NavigateForward {
     pub region: Region,
 }
 
-impl E2ETransitionFactory for NavigateForward {
+impl TransitionFactory<ReferenceState> for NavigateForward {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Restricted to Main — only TUI binding (leader+'f') targets
         // `region: "main"`. See `assets/default/keybindings.yaml`.
@@ -42,8 +43,9 @@ impl E2ETransitionFactory for NavigateForward {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for NavigateForward {
+impl TransitionRef<ReferenceState> for NavigateForward {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -70,12 +72,17 @@ impl E2ETransitionImpl for NavigateForward {
         // Blur on nav: see `navigate_focus.rs` for verification.
         state.active_editor = None;
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for NavigateForward {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_navigate_forward(self.region).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for NavigateForward {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS - 2,

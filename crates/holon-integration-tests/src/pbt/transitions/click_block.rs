@@ -7,15 +7,15 @@
 //! `transition_budgets.rs:190-196` (expected SQL).
 
 use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
+use holon_pbt_core::capabilities::{SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -46,7 +46,7 @@ use holon_api::{ContentType, EntityUri, Region};
 pub async fn apply_click_block_to_sut<S: SutLayout + SutDriver>(
     sut: &mut S,
     region: &str,
-    id: &CapBlockId,
+    id: &EntityUri,
 ) {
     sut.wait_for_bounds(id, Duration::from_secs(5))
         .await
@@ -67,7 +67,8 @@ pub struct ClickBlock {
     pub block_id: EntityUri,
 }
 
-impl E2ETransitionFactory for ClickBlock {
+impl TransitionFactory<ReferenceState> for ClickBlock {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let main_unfocused = state.current_focus(Region::Main).is_none();
         let mut arms: Vec<(u32, BoxedStrategy<ClickBlock>)> = Vec::new();
@@ -121,8 +122,9 @@ impl E2ETransitionFactory for ClickBlock {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for ClickBlock {
+impl TransitionRef<ReferenceState> for ClickBlock {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         // Visibility / rendered-set membership is no longer a precondition.
         // The driver's wait-for-bounds with scroll-into-view (sut.rs)
@@ -210,12 +212,17 @@ impl E2ETransitionImpl for ClickBlock {
             );
         }
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ClickBlock {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_click_block(self.region, &self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for ClickBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + 10,

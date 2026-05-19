@@ -483,9 +483,6 @@ pub trait OrgBlockExt {
     /// Get custom drawer properties (properties that are not internal org keys)
     fn drawer_properties(&self) -> HashMap<String, String>;
 
-    /// Get sort key as zero-padded sequence
-    fn computed_sort_key(&self) -> String;
-
     /// Parse tags from comma-separated string
     fn get_tags(&self) -> Vec<String>;
 
@@ -582,11 +579,11 @@ impl OrgBlockExt for Block {
     }
 
     fn tags(&self) -> Tags {
-        Tags::from(self.tags.clone())
+        self.tags.clone()
     }
 
     fn set_tags(&mut self, tags: Tags) {
-        self.tags = tags.as_slice().to_vec();
+        self.tags = tags;
     }
 
     fn scheduled(&self) -> Option<Timestamp> {
@@ -639,12 +636,8 @@ impl OrgBlockExt for Block {
         }
     }
 
-    fn computed_sort_key(&self) -> String {
-        format!("{:012}", self.sequence())
-    }
-
     fn get_tags(&self) -> Vec<String> {
-        self.tags().as_slice().to_vec()
+        self.tags().to_vec()
     }
 
     fn is_completed(&self) -> bool {
@@ -659,6 +652,7 @@ impl OrgBlockExt for Block {
             "task_state",
             "priority",
             "tags",
+            "requires",
             "scheduled",
             "deadline",
             "org_properties",
@@ -1155,18 +1149,6 @@ mod tests {
         assert!(doc.is_done("DONE"));
         assert!(doc.is_done("CANCELLED"));
         assert!(!doc.is_done("TODO"));
-    }
-
-    #[test]
-    fn test_block_computed_sort_key() {
-        let mut block = Block::new_text(
-            EntityUri::block("id1"),
-            EntityUri::block("parent1"),
-            "Test headline",
-        );
-        block.set_sequence(42);
-
-        assert_eq!(block.computed_sort_key(), "000000000042");
     }
 
     #[test]

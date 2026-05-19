@@ -8,8 +8,8 @@
 
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocusMut, RefLifecycle,
-    SutDriver, SutLayout,
+    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocusMut, RefLifecycle,
+    SutBlockTreeWrite, SutDriver, SutLayout,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
@@ -47,7 +47,7 @@ use validated::Validated;
 /// they read from E2ESut-internal state.
 pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
     sut: &mut S,
-    id: &CapBlockId,
+    id: &EntityUri,
     position: usize,
 ) {
     sut.wait_for_widget_kind(
@@ -83,10 +83,9 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
         .unwrap_or_else(|e| panic!("[SplitBlock] enter failed: {e}"));
 }
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -104,7 +103,7 @@ pub struct SplitBlock {
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 
 pub fn split_block_preconditions<R: RefBlockTree + RefLifecycle>(
-    block_id: &CapBlockId,
+    block_id: &EntityUri,
     position: usize,
     state: &R,
 ) -> Validated<(), Reason> {
@@ -141,10 +140,8 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
         if let Some(text) = state.block_content(&id) {
             let content_len = text.len();
             for position in 0..=content_len {
-                if split_block_preconditions(&id, position, state).is_good()
-                    && let Ok(uri) = EntityUri::parse(&id)
-                {
-                    candidates.push((uri, position));
+                if split_block_preconditions(&id, position, state).is_good() {
+                    candidates.push((id.clone(), position));
                 }
             }
         }
@@ -160,7 +157,7 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
 }
 
 pub fn split_block_apply_to_ref<R: RefBlockTreeMut + RefFocusMut>(
-    block_id: &CapBlockId,
+    block_id: &EntityUri,
     position: usize,
     state: &mut R,
 ) {
@@ -176,28 +173,34 @@ pub fn split_block_apply_to_ref<R: RefBlockTreeMut + RefFocusMut>(
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl E2ETransitionFactory for SplitBlock {
+impl TransitionFactory<ReferenceState> for SplitBlock {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         split_block_weighted_generator(state)
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for SplitBlock {
+impl TransitionRef<ReferenceState> for SplitBlock {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        split_block_preconditions(&self.block_id.as_str().to_string(), self.position, state)
+        split_block_preconditions(&self.block_id, self.position, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        split_block_apply_to_ref(&self.block_id.as_str().to_string(), self.position, state);
+        split_block_apply_to_ref(&self.block_id, self.position, state);
     }
+}
 
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
-        sut.apply_split_block(&self.block_id, self.position, ref_state)
-            .await;
+#[allow(async_fn_in_trait)]
+impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for SplitBlock {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.apply_split_block(&self.block_id, self.position).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for SplitBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let watches = state.active_watches.len();
         let blocks = state.block_state.blocks.len();

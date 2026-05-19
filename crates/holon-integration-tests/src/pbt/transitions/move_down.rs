@@ -7,16 +7,15 @@
 //! `transition_budgets.rs:298-302` (expected SQL).
 
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefLifecycle,
+    CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefLifecycle, SutBlockTreeWrite,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -32,7 +31,7 @@ pub struct MoveDown {
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 
 pub fn move_down_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
-    block_id: &CapBlockId,
+    block_id: &EntityUri,
     state: &R,
 ) -> Validated<(), Reason> {
     let focus_roots = state.focus_root_ids(CapRegion::Main);
@@ -86,15 +85,15 @@ pub fn move_down_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
         return Validated::fail(Reason::NoFocusInMain);
     };
     move_down_preconditions(&focus_str, state).map(|()| {
-        let block_id =
-            EntityUri::parse(&focus_str).expect("focused id must parse as EntityUri in wide PBT");
-        let instance = MoveDown { block_id };
+        let instance = MoveDown {
+            block_id: focus_str,
+        };
         (1, Just(instance).boxed())
     })
 }
 
 pub fn move_down_apply_to_ref<R: RefBlockTree + RefBlockTreeMut>(
-    block_id: &CapBlockId,
+    block_id: &EntityUri,
     state: &mut R,
 ) {
     state.push_undo_snapshot();
@@ -106,27 +105,34 @@ pub fn move_down_apply_to_ref<R: RefBlockTree + RefBlockTreeMut>(
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl E2ETransitionFactory for MoveDown {
+impl TransitionFactory<ReferenceState> for MoveDown {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         move_down_weighted_generator(state)
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for MoveDown {
+impl TransitionRef<ReferenceState> for MoveDown {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        move_down_preconditions(&self.block_id.as_str().to_string(), state)
+        move_down_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        move_down_apply_to_ref(&self.block_id.as_str().to_string(), state);
+        move_down_apply_to_ref(&self.block_id, state);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for MoveDown {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_move_down(&self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for MoveDown {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,

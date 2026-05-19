@@ -13,7 +13,7 @@
 //!   `set_field:task_state:` operation is bound
 //! - States list is non-empty for task blocks
 
-use holon_pbt_core::capabilities::{CapBlockId, RefBlockTree, RefTaskState, SutRenderer};
+use holon_pbt_core::capabilities::{EntityUri, RefBlockTree, RefTaskState, SutRenderer};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvViewmodelStateToggleCorrect;
@@ -55,7 +55,8 @@ where
                     "[inv-viewmodel-state-toggle-correct] StateToggle has no entity id".into(),
                 );
             };
-            let cap_id: CapBlockId = block_id.clone();
+            let cap_id: EntityUri = EntityUri::parse(block_id)
+                .expect("StateToggle entity_id must be a valid EntityUri");
 
             // Skip widgets for blocks not in the ref model (transient
             // pre-merge peer rows, etc.). Inline check at sut.rs:5220

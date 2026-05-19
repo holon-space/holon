@@ -46,6 +46,25 @@ pub(super) fn parse_block_row(row: &holon::storage::types::StorageEntity) -> Opt
             }
             _ => Vec::new(),
         })
+        .unwrap_or_default()
+        .into();
+
+    // `requires` (org-edna dependency edge field) is hydrated from the
+    // `block_requires` junction by the matview's json_group_array, exactly like
+    // `tags`. Parse it so the backend mirror carries the edge field for
+    // `inv-backend-blocks-match-ref` comparison.
+    block.requires = row
+        .get("requires")
+        .map(|v| match v {
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|x| x.as_string().map(|s| s.to_string()))
+                .collect(),
+            Value::Json(s) | Value::String(s) => {
+                serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        })
         .unwrap_or_default();
 
     if let Some(content_type) = row.get("content_type").and_then(|v| v.as_string()) {

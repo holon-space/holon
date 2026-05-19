@@ -11,10 +11,10 @@ use proptest::strategy::BoxedStrategy;
 use regex::Regex;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -58,7 +58,8 @@ fn parse_todo_directive(content: &str) -> Option<Vec<String>> {
     None
 }
 
-impl E2ETransitionFactory for WriteOrgFile {
+impl TransitionFactory<ReferenceState> for WriteOrgFile {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let pre_startup_file_count = state.documents.len();
         let file_weight = if pre_startup_file_count < 3 { 3 } else { 1 };
@@ -85,8 +86,9 @@ impl E2ETransitionFactory for WriteOrgFile {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for WriteOrgFile {
+impl TransitionRef<ReferenceState> for WriteOrgFile {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![];
 
@@ -170,6 +172,13 @@ impl E2ETransitionImpl for WriteOrgFile {
 
         // Parse block IDs from content and add to reference state
         let id_regex = Regex::new(r":ID:\s*(\S+)").unwrap();
+        // `:REQUIRES:` (org-edna dependency drawer key). The production org
+        // parser pulls this out of the drawer into `Block.requires` (a Vec of
+        // `block:` URIs); the reference model must mirror that so the
+        // `requires` edge field compares equal in `assert_blocks_equivalent`.
+        // Values are bare slugs (comma- or whitespace-separated), promoted to
+        // `block:` URIs at the boundary (matches `parser.rs` REQUIRES handling).
+        let requires_regex = Regex::new(r"(?i):REQUIRES:\s*(.+)").unwrap();
         let headline_regex = Regex::new(r"^\*+\s+(.+)$").unwrap();
         let src_begin_regex = Regex::new(r"(?i)#\+begin_src\s+(\w+)(?:\s.*)?$").unwrap();
         let src_id_regex = Regex::new(r":id\s+(\S+)").unwrap();
@@ -224,6 +233,23 @@ impl E2ETransitionImpl for WriteOrgFile {
                     .insert(block_uri.clone(), doc_uri.clone());
                 current_block_id = Some(block_uri.clone());
                 state.block_state.blocks.insert(block_uri, block);
+            } else if let Some(caps) = requires_regex.captures(line) {
+                // `:REQUIRES: a b` (or `a,b`) on the block whose drawer we're
+                // in. Bare slugs → `block:` URIs, matching the production
+                // parser. Single targets are the common generated shape.
+                if let Some(parent_key) = &current_block_id {
+                    let reqs: Vec<String> = caps
+                        .get(1)
+                        .unwrap()
+                        .as_str()
+                        .split(|c: char| c == ',' || c.is_whitespace())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| EntityUri::block(s).to_string())
+                        .collect();
+                    if let Some(block) = state.block_state.blocks.get_mut(parent_key) {
+                        block.requires = reqs;
+                    }
+                }
             } else if let Some(caps) = src_begin_regex.captures(line) {
                 in_source_block = true;
                 source_language = Some(caps.get(1).unwrap().as_str().to_string());
@@ -298,8 +324,11 @@ impl E2ETransitionImpl for WriteOrgFile {
         state.rebuild_profile_tracking();
         state.pre_startup_file_count += 1;
     }
+}
 
-    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for WriteOrgFile {
+    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
         // Pin the document's identity into the file so production's
         // org_sync_controller picks up the same `block:ref-doc-N` URI the
         // reference state minted, instead of falling back to name-chain
@@ -318,8 +347,10 @@ impl E2ETransitionImpl for WriteOrgFile {
         };
         sut.apply_write_org_file(&self.filename, &content).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for WriteOrgFile {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,

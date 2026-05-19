@@ -11,9 +11,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, docs_tolerance};
@@ -23,7 +23,8 @@ use crate::pbt::transition_budgets::{ExpectedSql, docs_tolerance};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EmitMcpData;
 
-impl E2ETransitionFactory for EmitMcpData {
+impl TransitionFactory<ReferenceState> for EmitMcpData {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Delegate all validation to preconditions — single source of truth.
         EmitMcpData
@@ -32,8 +33,9 @@ impl E2ETransitionFactory for EmitMcpData {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for EmitMcpData {
+impl TransitionRef<ReferenceState> for EmitMcpData {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
             vec![check(state.app_started, Reason::AppNotStarted)];
@@ -47,12 +49,17 @@ impl E2ETransitionImpl for EmitMcpData {
     fn apply_to_ref(&self, _: &mut ReferenceState) {
         // No reference state change — just triggers IVM re-evaluation.
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for EmitMcpData {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_emit_mcp_data().await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for EmitMcpData {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let blocks = state.block_state.blocks.len();
         ExpectedSql {

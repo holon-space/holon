@@ -609,7 +609,9 @@ pub fn eval_to_interp(
     }
 }
 
-pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
+/// Arithmetic ops (`+ - * /`). Type-mismatched or div-by-zero operands yield
+/// `Null`. Only called by `eval_binary_op` for arithmetic operators.
+fn eval_arithmetic(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
     match op {
         BinaryOperator::Add => match (left, right) {
             (Value::Integer(a), Value::Integer(b)) => Value::Integer(a + b),
@@ -632,8 +634,14 @@ pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value
             (Value::Float(a), Value::Float(b)) if *b != 0.0 => Value::Float(a / b),
             _ => Value::Null,
         },
-        BinaryOperator::Eq => Value::Boolean(left == right),
-        BinaryOperator::Neq => Value::Boolean(left != right),
+        other => unreachable!("eval_arithmetic called with non-arithmetic op {other:?}"),
+    }
+}
+
+/// Ordering comparisons (`> < >= <=`). Non-numeric or mismatched operands
+/// yield `Boolean(false)`. Only called by `eval_binary_op` for ordering ops.
+fn eval_ordering(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
+    match op {
         BinaryOperator::Gt => match (left, right) {
             (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a > b),
             (Value::Float(a), Value::Float(b)) => Value::Boolean(a > b),
@@ -654,14 +662,32 @@ pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value
             (Value::Float(a), Value::Float(b)) => Value::Boolean(a <= b),
             _ => Value::Boolean(false),
         },
-        BinaryOperator::And => match (left, right) {
-            (Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a && *b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Or => match (left, right) {
-            (Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a || *b),
-            _ => Value::Boolean(false),
-        },
+        other => unreachable!("eval_ordering called with non-ordering op {other:?}"),
+    }
+}
+
+/// Boolean ops (`&& ||`). Non-boolean operands yield `Boolean(false)`. Only
+/// called by `eval_binary_op` for logical operators.
+fn eval_logical(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
+    match (op, left, right) {
+        (BinaryOperator::And, Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a && *b),
+        (BinaryOperator::Or, Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a || *b),
+        (BinaryOperator::And | BinaryOperator::Or, _, _) => Value::Boolean(false),
+        (other, _, _) => unreachable!("eval_logical called with non-logical op {other:?}"),
+    }
+}
+
+pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
+    match op {
+        BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul | BinaryOperator::Div => {
+            eval_arithmetic(op, left, right)
+        }
+        BinaryOperator::Eq => Value::Boolean(left == right),
+        BinaryOperator::Neq => Value::Boolean(left != right),
+        BinaryOperator::Gt | BinaryOperator::Lt | BinaryOperator::Gte | BinaryOperator::Lte => {
+            eval_ordering(op, left, right)
+        }
+        BinaryOperator::And | BinaryOperator::Or => eval_logical(op, left, right),
     }
 }
 
@@ -759,6 +785,33 @@ mod tests {
                 &Value::Boolean(true)
             ),
             Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_eval_binary_op_type_mismatch_fallbacks() {
+        // Arithmetic on incompatible types -> Null.
+        assert_eq!(
+            eval_binary_op(
+                &BinaryOperator::Add,
+                &Value::Integer(1),
+                &Value::Boolean(true)
+            ),
+            Value::Null
+        );
+        // Ordering on non-numeric operands -> Boolean(false).
+        assert_eq!(
+            eval_binary_op(
+                &BinaryOperator::Gt,
+                &Value::String("a".into()),
+                &Value::String("b".into())
+            ),
+            Value::Boolean(false)
+        );
+        // Logical on non-boolean operands -> Boolean(false).
+        assert_eq!(
+            eval_binary_op(&BinaryOperator::And, &Value::Integer(1), &Value::Integer(0)),
+            Value::Boolean(false)
         );
     }
 

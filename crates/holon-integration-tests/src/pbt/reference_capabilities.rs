@@ -1,7 +1,7 @@
 //! Phase 2 — blanket impls of `holon_pbt_core::capabilities::*` on
 //! [`ReferenceState`].
 //!
-//! Translates between the capability traits' stringly-typed `CapBlockId`
+//! Translates between the capability traits' stringly-typed `EntityUri`
 //! surface and `ReferenceState`'s `EntityUri`-based internals. Zero
 //! behaviour change: every method delegates to an existing
 //! `ReferenceState` field or method.
@@ -10,7 +10,7 @@
 //! they pick these impls up automatically — no code in the transition
 //! changes beyond the trait-bound `where` clauses.
 //!
-//! ## Boundary translation: `CapBlockId` ↔ `EntityUri`
+//! ## Boundary translation: `EntityUri` ↔ `EntityUri`
 //!
 //! - Read methods returning ids: produce `String` via `EntityUri::as_str().to_string()`.
 //! - Read methods taking ids: parse via `EntityUri::from_str` and propagate `None`
@@ -23,9 +23,9 @@ use std::collections::BTreeSet;
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
-    RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
-    RefLifecycle, RefPeers, RefPeersMut, RefRender, RefTaskState, RefWatches,
+    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirror, RefEditorMirrorMut,
+    RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout, RefLifecycle, RefPeers,
+    RefPeersMut, RefRender, RefTaskState, RefWatches,
 };
 
 use super::peer_ops::PeerBlock;
@@ -35,25 +35,28 @@ use super::state_machine::{merge_peer_blocks_into_primary, refresh_peer_baseline
 use super::reference_state::{CursorPosition, ReferenceState};
 
 // ─── Helpers ──────────────────────────────────────────────────────────
+//
+// `CapBlockId` is now `holon_api::EntityUri` (the capability surface uses
+// the real domain type), so the former `EntityUri ↔ String` boundary
+// translation collapses to identity. These thin wrappers are kept so the
+// per-method call sites below don't all have to change shape.
 
-fn cap_id(uri: &EntityUri) -> CapBlockId {
-    uri.as_str().to_string()
+fn cap_id(uri: &EntityUri) -> EntityUri {
+    uri.clone()
 }
 
-fn cap_id_set(uris: BTreeSet<EntityUri>) -> BTreeSet<CapBlockId> {
-    uris.iter().map(cap_id).collect()
+fn cap_id_set(uris: BTreeSet<EntityUri>) -> BTreeSet<EntityUri> {
+    uris
 }
 
-/// Parse a `CapBlockId` back to `EntityUri`. Returns `None` if the
-/// string isn't a valid URI (e.g. a fresh id from a pure-slice test
-/// that doesn't match the wide-PBT format).
-fn parse_id(id: &CapBlockId) -> Option<EntityUri> {
-    EntityUri::parse(id).ok()
+/// Identity: a `CapBlockId` already *is* an `EntityUri`.
+fn parse_id(id: &EntityUri) -> Option<EntityUri> {
+    Some(id.clone())
 }
 
-/// Parse-or-panic: wide PBT only ever generates valid `EntityUri`s.
-fn parse_id_must(id: &CapBlockId) -> EntityUri {
-    parse_id(id).unwrap_or_else(|| panic!("CapBlockId must parse as EntityUri in wide PBT: {id:?}"))
+/// Identity: a `CapBlockId` already *is* an `EntityUri`.
+fn parse_id_must(id: &EntityUri) -> EntityUri {
+    id.clone()
 }
 
 fn from_cap_region(r: CapRegion) -> Region {
@@ -88,7 +91,7 @@ impl RefLifecycle for ReferenceState {
 // ─── RefBlockTree ─────────────────────────────────────────────────────
 
 impl RefBlockTree for ReferenceState {
-    fn block_content(&self, id: &CapBlockId) -> Option<&str> {
+    fn block_content(&self, id: &EntityUri) -> Option<&str> {
         let uri = parse_id(id)?;
         self.block_state
             .blocks
@@ -96,7 +99,7 @@ impl RefBlockTree for ReferenceState {
             .map(|b| b.content.as_str())
     }
 
-    fn is_text_block(&self, id: &CapBlockId) -> bool {
+    fn is_text_block(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
@@ -106,32 +109,32 @@ impl RefBlockTree for ReferenceState {
             .is_some_and(|b| b.content_type == holon_api::ContentType::Text)
     }
 
-    fn main_editable_descendants(&self) -> Vec<CapBlockId> {
+    fn main_editable_descendants(&self) -> Vec<EntityUri> {
         ReferenceState::main_editable_descendants(self)
             .iter()
             .map(cap_id)
             .collect()
     }
 
-    fn focus_root_ids(&self, region: CapRegion) -> BTreeSet<CapBlockId> {
+    fn focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
         cap_id_set(self.expected_focus_root_ids(from_cap_region(region)))
     }
 
-    fn previous_sibling(&self, id: &CapBlockId) -> Option<CapBlockId> {
+    fn previous_sibling(&self, id: &EntityUri) -> Option<EntityUri> {
         let uri = parse_id(id)?;
         ReferenceState::previous_sibling(self, &uri)
             .as_ref()
             .map(cap_id)
     }
 
-    fn next_sibling(&self, id: &CapBlockId) -> Option<CapBlockId> {
+    fn next_sibling(&self, id: &EntityUri) -> Option<EntityUri> {
         let uri = parse_id(id)?;
         ReferenceState::next_sibling(self, &uri)
             .as_ref()
             .map(cap_id)
     }
 
-    fn parent_of(&self, id: &CapBlockId) -> Option<CapBlockId> {
+    fn parent_of(&self, id: &EntityUri) -> Option<EntityUri> {
         let uri = parse_id(id)?;
         let b = self.block_state.blocks.get(&uri)?;
         if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
@@ -141,12 +144,12 @@ impl RefBlockTree for ReferenceState {
         }
     }
 
-    fn grandparent(&self, id: &CapBlockId) -> Option<CapBlockId> {
+    fn grandparent(&self, id: &EntityUri) -> Option<EntityUri> {
         let uri = parse_id(id)?;
         ReferenceState::grandparent(self, &uri).as_ref().map(cap_id)
     }
 
-    fn sorted_children(&self, parent: &CapBlockId) -> Vec<CapBlockId> {
+    fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri> {
         let Some(uri) = parse_id(parent) else {
             return vec![];
         };
@@ -156,7 +159,7 @@ impl RefBlockTree for ReferenceState {
             .collect()
     }
 
-    fn is_descendant_of_any(&self, id: &CapBlockId, ancestors: &BTreeSet<CapBlockId>) -> bool {
+    fn is_descendant_of_any(&self, id: &EntityUri, ancestors: &BTreeSet<EntityUri>) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
@@ -164,21 +167,21 @@ impl RefBlockTree for ReferenceState {
         ReferenceState::is_descendant_of_any(self, &uri, &ancestor_uris)
     }
 
-    fn is_layout_block(&self, id: &CapBlockId) -> bool {
+    fn is_layout_block(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
         self.layout_blocks.contains(&uri)
     }
 
-    fn is_focusable(&self, id: &CapBlockId) -> bool {
+    fn is_focusable(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
         self.layout_blocks.is_focusable(&uri)
     }
 
-    fn is_no_content_update(&self, id: &CapBlockId) -> bool {
+    fn is_no_content_update(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
@@ -187,7 +190,7 @@ impl RefBlockTree for ReferenceState {
             || self.profile_block_ids.contains(&uri)
     }
 
-    fn is_page_block(&self, id: &CapBlockId) -> bool {
+    fn is_page_block(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
@@ -197,7 +200,7 @@ impl RefBlockTree for ReferenceState {
             .is_some_and(|b| b.is_page())
     }
 
-    fn all_non_seed_block_ids(&self) -> BTreeSet<CapBlockId> {
+    fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri> {
         self.block_state
             .blocks
             .keys()
@@ -221,25 +224,25 @@ impl RefBlockTreeMut for ReferenceState {
         ReferenceState::push_undo_snapshot(self);
     }
 
-    fn set_block_content(&mut self, id: &CapBlockId, text: &str) {
+    fn set_block_content(&mut self, id: &EntityUri, text: &str) {
         let uri = parse_id_must(id);
         if let Some(b) = self.block_state.blocks.get_mut(&uri) {
             b.content = text.to_string();
         }
     }
 
-    fn split_block(&mut self, id: &CapBlockId, position: usize) -> CapBlockId {
+    fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
         let uri = parse_id_must(id);
         let new_uri = ReferenceState::split_block(self, &uri, position);
         cap_id(&new_uri)
     }
 
-    fn join_block(&mut self, id: &CapBlockId) -> usize {
+    fn join_block(&mut self, id: &EntityUri) -> usize {
         let uri = parse_id_must(id);
         ReferenceState::join_block(self, &uri)
     }
 
-    fn indent(&mut self, id: &CapBlockId) {
+    fn indent(&mut self, id: &EntityUri) {
         // Mirror `transitions/indent.rs::apply_to_ref`:
         //   prev = previous_sibling
         //   after = sorted_children_of(prev).last().id
@@ -253,19 +256,19 @@ impl RefBlockTreeMut for ReferenceState {
         ReferenceState::move_block(self, &uri, prev, after.as_ref());
     }
 
-    fn outdent(&mut self, id: &CapBlockId) {
+    fn outdent(&mut self, id: &EntityUri) {
         let uri = parse_id_must(id);
         ReferenceState::outdent_block(self, &uri);
     }
 
-    fn move_block(&mut self, id: &CapBlockId, new_parent: CapBlockId, after: Option<&CapBlockId>) {
+    fn move_block(&mut self, id: &EntityUri, new_parent: EntityUri, after: Option<&EntityUri>) {
         let uri = parse_id_must(id);
         let parent_uri = parse_id_must(&new_parent);
         let after_uri = after.map(parse_id_must);
         ReferenceState::move_block(self, &uri, parent_uri, after_uri.as_ref());
     }
 
-    fn swap_siblings(&mut self, a: &CapBlockId, b: &CapBlockId) {
+    fn swap_siblings(&mut self, a: &EntityUri, b: &EntityUri) {
         let a_uri = parse_id_must(a);
         let b_uri = parse_id_must(b);
         ReferenceState::swap_sequence(self, &a_uri, &b_uri);
@@ -275,7 +278,7 @@ impl RefBlockTreeMut for ReferenceState {
 // ─── RefEditorMirror ──────────────────────────────────────────────────
 
 impl RefEditorMirror for ReferenceState {
-    fn active_editor_block(&self) -> Option<CapBlockId> {
+    fn active_editor_block(&self) -> Option<EntityUri> {
         self.active_editor.as_ref().map(|e| cap_id(&e.block_id))
     }
 
@@ -315,7 +318,7 @@ impl RefEditorMirrorMut for ReferenceState {
 // ─── RefFocus ─────────────────────────────────────────────────────────
 
 impl RefFocus for ReferenceState {
-    fn current_focus(&self, region: CapRegion) -> Option<CapBlockId> {
+    fn current_focus(&self, region: CapRegion) -> Option<EntityUri> {
         ReferenceState::current_focus(self, from_cap_region(region))
             .as_ref()
             .map(cap_id)
@@ -333,7 +336,7 @@ impl RefFocus for ReferenceState {
 // ─── RefFocusMut ──────────────────────────────────────────────────────
 
 impl RefFocusMut for ReferenceState {
-    fn set_focus(&mut self, region: CapRegion, id: CapBlockId, cursor: CapCursor) {
+    fn set_focus(&mut self, region: CapRegion, id: EntityUri, cursor: CapCursor) {
         let uri = parse_id_must(&id);
         let r = from_cap_region(region);
         self.focused_entity_id.insert(r, uri.clone());
@@ -349,7 +352,7 @@ impl RefFocusMut for ReferenceState {
         }
     }
 
-    fn clear_focus_if_deleted(&mut self, id: &CapBlockId) {
+    fn clear_focus_if_deleted(&mut self, id: &EntityUri) {
         let uri = parse_id_must(id);
         ReferenceState::clear_focus_if_deleted(self, &uri);
     }
@@ -553,14 +556,14 @@ impl RefPeersMut for ReferenceState {
 // ─── Phase 7 Stage B — extended ref-side cap impls ───────────────────
 
 impl RefFocusRoots for ReferenceState {
-    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<CapBlockId> {
+    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
         let api_region = from_cap_region(region);
         cap_id_set(self.expected_focus_root_ids(api_region))
     }
 }
 
 impl RefLayout for ReferenceState {
-    fn layout_block_ids(&self) -> BTreeSet<CapBlockId> {
+    fn layout_block_ids(&self) -> BTreeSet<EntityUri> {
         let ids: BTreeSet<&holon_api::entity_uri::EntityUri> = self
             .layout_blocks
             .headline_ids
@@ -571,7 +574,7 @@ impl RefLayout for ReferenceState {
         ids.into_iter().map(cap_id).collect()
     }
 
-    fn profile_block_ids(&self) -> BTreeSet<CapBlockId> {
+    fn profile_block_ids(&self) -> BTreeSet<EntityUri> {
         self.profile_block_ids.iter().map(cap_id).collect()
     }
 
@@ -600,13 +603,13 @@ impl RefWatches for ReferenceState {
 }
 
 impl RefGlobalFocus for ReferenceState {
-    fn global_focused_block(&self) -> Option<CapBlockId> {
+    fn global_focused_block(&self) -> Option<EntityUri> {
         self.focused_block.as_ref().map(cap_id)
     }
 }
 
 impl RefTaskState for ReferenceState {
-    fn task_state_of(&self, id: &CapBlockId) -> Option<String> {
+    fn task_state_of(&self, id: &EntityUri) -> Option<String> {
         let uri = parse_id(id)?;
         let block = self.block_state.blocks.get(&uri)?;
         block

@@ -38,8 +38,6 @@ pub mod event_infra_module;
 pub mod event_subscriber;
 #[cfg(test)]
 mod fork_at_test;
-#[cfg(test)]
-mod inbound_parent_id_test;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -113,7 +111,10 @@ pub use loro_blocks_datasource::LoroBlocksDataSource;
 pub use loro_document::*;
 pub use loro_document_store::*;
 pub use loro_module::{LoroConfig, LoroModule};
-pub use loro_sync_controller::{LoroSyncController, LoroSyncControllerHandle, block_to_params};
+pub use loro_sync_controller::{
+    LoroProjection, LoroSyncController, LoroSyncControllerHandle, SinkReader, TursoSinkReader,
+    block_to_params,
+};
 pub use matview_manager::{MatviewHook, MatviewManager, WatchResult, reconcile_named_view};
 pub use turso_command_log::TursoCommandLog;
 pub use turso_event_bus::TursoEventBus;

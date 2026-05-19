@@ -137,6 +137,15 @@ pub fn build_block_params(
     params.insert("ID".to_string(), Value::String(id));
 
     for (k, v) in block.drawer_properties() {
+        // `drawer_properties()` emits `REQUIRES` for org *rendering* (the
+        // org-edna dependency drawer). Here it must be skipped: `requires` is
+        // an edge field already emitted as the typed `Value::Array` param above
+        // (routed to the `block_requires` junction). Re-inserting it as a flat
+        // string property would pollute `block.properties` with a stray
+        // uppercase `REQUIRES` key that the reference model never has.
+        if k.eq_ignore_ascii_case("requires") {
+            continue;
+        }
         params.insert(k, Value::String(v));
     }
 

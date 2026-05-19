@@ -8,8 +8,9 @@ use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use holon_pbt_core::capabilities::{
-    CapBlockId, SutCdc, SutDriver, SutLayout, SutLifecycle, SutLoro, SutLoroLog, SutLoroTaskState,
-    SutOrgFileWrite, SutOrgRender, SutQueryCompile, SutRenderer, SutSqlProjection, SutViewModel,
+    EntityUri, SutBlockTreeWrite, SutCdc, SutDriver, SutEditorMirrorWrite, SutLayout, SutLifecycle,
+    SutLoro, SutLoroLog, SutLoroTaskState, SutOrgFileWrite, SutOrgRender, SutQueryCompile,
+    SutRenderer, SutSqlProjection, SutViewModel,
 };
 
 use super::sut::E2ESut;
@@ -203,8 +204,8 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
     /// Queries the `block` materialized view for a single row and returns its
     /// fields as strings. Same data path as `check_invariants_async`'s
     /// `inv-backend-blocks-match-ref` block matview read (sut.rs:4807).
-    async fn block_row(&self, id: &CapBlockId) -> Option<Vec<String>> {
-        let escaped = id.replace('\'', "''");
+    async fn block_row(&self, id: &EntityUri) -> Option<Vec<String>> {
+        let escaped = id.as_str().replace('\'', "''");
         let sql = format!("SELECT * FROM block WHERE id = '{escaped}'");
         let rows = self
             .ctx
@@ -224,14 +225,40 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
     /// Returns all non-deleted block IDs from `block_raw`. Mirrors the
     /// `SELECT id FROM block_raw` query in `check_invariants_async`
     /// (sut.rs:4228).
-    async fn all_block_ids(&self) -> BTreeSet<CapBlockId> {
+    async fn all_block_ids(&self) -> BTreeSet<EntityUri> {
         let rows = self
             .ctx
             .query_sql("SELECT id FROM block_raw")
             .await
             .expect("SutSqlProjection::all_block_ids query failed");
         rows.into_iter()
-            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .filter_map(|r| {
+                r.get("id").and_then(|v| v.as_string()).map(|s| {
+                    EntityUri::parse(s).expect("block id from SQL must be a valid EntityUri")
+                })
+            })
+            .collect()
+    }
+
+    /// `SELECT id FROM block_raw WHERE parent_id = ? ORDER BY sort_key, id`
+    /// — the SQL projection's per-parent sibling order, the same ordering the
+    /// org renderer and UI tree consume. Compared against the ref model's
+    /// `sorted_children` by `inv-live-children-match-ref`.
+    async fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri> {
+        let escaped = parent.as_str().replace('\'', "''");
+        let sql =
+            format!("SELECT id FROM block_raw WHERE parent_id = '{escaped}' ORDER BY sort_key, id");
+        let rows = self
+            .ctx
+            .query_sql(&sql)
+            .await
+            .expect("SutSqlProjection::sorted_children query failed");
+        rows.into_iter()
+            .filter_map(|r| {
+                r.get("id").and_then(|v| v.as_string()).map(|s| {
+                    EntityUri::parse(s).expect("block id from SQL must be a valid EntityUri")
+                })
+            })
             .collect()
     }
 
@@ -245,8 +272,8 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
     /// Queries `block_raw` (write-side base table, no matview hydration) for a
     /// single row. Used by the WARN/SKIP CDC-lag classifier in
     /// `check_invariants_async` (sut.rs:3189–3206 pattern).
-    async fn block_raw_row(&self, id: &CapBlockId) -> Option<Vec<String>> {
-        let escaped = id.replace('\'', "''");
+    async fn block_raw_row(&self, id: &EntityUri) -> Option<Vec<String>> {
+        let escaped = id.as_str().replace('\'', "''");
         let sql = format!("SELECT * FROM block_raw WHERE id = '{escaped}'");
         let rows = self
             .ctx
@@ -266,8 +293,8 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
     /// `block_raw.content` for `id`. Returns `None` if the block doesn't
     /// exist. Used by the split-block content-routing slice
     /// (`inv-block-content-matches-ref`).
-    async fn block_content(&self, id: &CapBlockId) -> Option<String> {
-        let escaped = id.replace('\'', "''");
+    async fn block_content(&self, id: &EntityUri) -> Option<String> {
+        let escaped = id.as_str().replace('\'', "''");
         let sql = format!("SELECT content FROM block_raw WHERE id = '{escaped}'");
         let rows = self
             .ctx
@@ -284,7 +311,7 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
     /// Returns all distinct block_id values from `block_tags`. Mirrors
     /// `SELECT DISTINCT block_id FROM block_tags` — same table used by
     /// `inv-block-tags-references-exist`.
-    async fn block_tag_block_ids(&self) -> BTreeSet<CapBlockId> {
+    async fn block_tag_block_ids(&self) -> BTreeSet<EntityUri> {
         let rows = self
             .ctx
             .query_sql("SELECT DISTINCT block_id FROM block_tags")
@@ -292,9 +319,9 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
             .expect("SutSqlProjection::block_tag_block_ids query failed");
         rows.into_iter()
             .filter_map(|r| {
-                r.get("block_id")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
+                r.get("block_id").and_then(|v| v.as_string()).map(|s| {
+                    EntityUri::parse(s).expect("block_tags.block_id must be a valid EntityUri")
+                })
             })
             .collect()
     }
@@ -302,8 +329,8 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
     /// Reads `json_extract(properties, '$.task_state')` from `block_raw`
     /// for the given block id. Returns `None` when the block doesn't exist
     /// or the property is absent/null.
-    async fn block_task_state(&self, id: &CapBlockId) -> Option<String> {
-        let escaped = id.replace('\'', "''");
+    async fn block_task_state(&self, id: &EntityUri) -> Option<String> {
+        let escaped = id.as_str().replace('\'', "''");
         let sql = format!(
             "SELECT json_extract(properties, '$.task_state') AS task_state \
              FROM block_raw WHERE id = '{escaped}'"
@@ -427,19 +454,47 @@ impl<V: VariantMarker> SutViewModel for E2ESut<V> {
 
 // ─── SutRenderer ──────────────────────────────────────────────────────
 
+impl<V: VariantMarker> E2ESut<V> {
+    /// Resolve a ready reactive watch for `uri`.
+    ///
+    /// With an installed `frontend_engine` (phased/GPUI harness) this keeps the
+    /// original semantics: return `None` immediately if the watch is still
+    /// loading. Without one (the `declare_pbt_slice!` harness has no GPUI), it
+    /// falls back to the lazily-created headless `reactive_engine` and polls
+    /// until its first results load (or a short timeout), since that engine
+    /// fills from background tasks on the shared runtime. This lets widget
+    /// assertions render headlessly without changing the frontend path.
+    async fn resolve_watch(
+        &self,
+        uri: &holon_api::EntityUri,
+    ) -> Option<std::sync::Arc<holon_frontend::reactive::ReactiveQueryResults>> {
+        if let Some(engine) = self.frontend_engine.clone() {
+            let rqr = engine.ensure_watching(uri);
+            return (!rqr.is_loading()).then_some(rqr);
+        }
+        self.ensure_reactive_engine(uri).await;
+        let engine = self.reactive_engine.borrow().clone()?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let rqr = engine.ensure_watching(uri);
+            if !rqr.is_loading() {
+                return Some(rqr);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+}
+
 #[allow(async_fn_in_trait)]
 impl<V: VariantMarker> SutRenderer for E2ESut<V> {
-    /// Returns a debug-formatted render-tree string for `id` via
-    /// `frontend_engine` (pub). `reactive_engine` (private, sut.rs:291)
-    /// would provide a fallback path, but is not accessible here.
-    /// Add a pub accessor in Phase 7 to wire the headless fallback.
-    async fn render_tree_of(&self, id: &CapBlockId) -> Option<String> {
-        let engine = self.frontend_engine.clone()?;
-        let uri = holon_api::EntityUri::parse(id).ok()?;
-        let rqr = engine.ensure_watching(&uri);
-        if rqr.is_loading() {
-            return None;
-        }
+    /// Returns a debug-formatted render-tree string for `id`. Uses the
+    /// installed `frontend_engine` when present, else the headless
+    /// `reactive_engine` fallback (see [`E2ESut::resolve_watch`]).
+    async fn render_tree_of(&self, id: &EntityUri) -> Option<String> {
+        let rqr = self.resolve_watch(id).await?;
         let (render_expr, data_rows) = rqr.snapshot();
         let services =
             holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
@@ -459,14 +514,10 @@ impl<V: VariantMarker> SutRenderer for E2ESut<V> {
             operations: Vec::new(),
             children: Vec::new(),
         };
-        let Some(engine) = self.frontend_engine.clone() else {
+        let root_uri = holon_api::root_layout_block_uri();
+        let Some(rqr) = self.resolve_watch(&root_uri).await else {
             return empty();
         };
-        let root_uri = holon_api::root_layout_block_uri();
-        let rqr = engine.ensure_watching(&root_uri);
-        if rqr.is_loading() {
-            return empty();
-        }
         let (render_expr, data_rows) = rqr.snapshot();
         let services =
             holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
@@ -481,14 +532,9 @@ impl<V: VariantMarker> SutRenderer for E2ESut<V> {
     /// block isn't watchable yet.
     async fn widget_tree_for(
         &self,
-        block_id: &CapBlockId,
+        block_id: &EntityUri,
     ) -> Option<holon_pbt_core::capabilities::WidgetSnapshot> {
-        let engine = self.frontend_engine.clone()?;
-        let uri = holon_api::EntityUri::parse(block_id).ok()?;
-        let rqr = engine.ensure_watching(&uri);
-        if rqr.is_loading() {
-            return None;
-        }
+        let rqr = self.resolve_watch(block_id).await?;
         let (render_expr, data_rows) = rqr.snapshot();
         let services =
             holon_frontend::reactive::HeadlessBuilderServices::new(self.engine().clone());
@@ -498,19 +544,19 @@ impl<V: VariantMarker> SutRenderer for E2ESut<V> {
 
     /// Extracts the `id` column from the layout root's data_rows.
     /// Returns empty set if the layout root isn't watchable yet.
-    async fn root_data_row_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
-        let Some(engine) = self.frontend_engine.clone() else {
+    async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let Some(rqr) = self.resolve_watch(&root_uri).await else {
             return Default::default();
         };
-        let root_uri = holon_api::root_layout_block_uri();
-        let rqr = engine.ensure_watching(&root_uri);
-        if rqr.is_loading() {
-            return Default::default();
-        }
         let (_, data_rows) = rqr.snapshot();
         data_rows
             .iter()
-            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
+            .filter_map(|r| {
+                r.get("id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| EntityUri::parse(s).expect("data_row id must be a valid EntityUri"))
+            })
             .collect()
     }
 }
@@ -609,7 +655,7 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
     /// True if any element carrying `id` as its `entity_id` is currently
     /// in the BoundsRegistry. Mirrors the `lookup_entity` helper used in
     /// `inv-frontend-bounds-rendered` (sut.rs:6093–6105).
-    async fn has_registered_bounds(&self, id: &CapBlockId) -> bool {
+    async fn has_registered_bounds(&self, id: &EntityUri) -> bool {
         let Some(ref geometry) = self.frontend_geometry else {
             return false;
         };
@@ -618,7 +664,7 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
             .or_else(|| geometry.element_info(&format!("live-block-{id}")))
             .or_else(|| geometry.element_info(&format!("selectable-{id}")))
             .or_else(|| geometry.element_info(&format!("editable-text-{id}")))
-            .or_else(|| geometry.find_by_entity_id(id))
+            .or_else(|| geometry.find_by_entity_id(id.as_str()))
             .is_some()
     }
 
@@ -626,7 +672,7 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
     /// Mirrors the `tree_draggable` collection in `inv-editable-text-has-draggable`
     /// (sut.rs:6634–6643): an element whose widget_type == "draggable" and
     /// entity_id == id.
-    async fn has_draggable_handle(&self, id: &CapBlockId) -> bool {
+    async fn has_draggable_handle(&self, id: &EntityUri) -> bool {
         let Some(ref geometry) = self.frontend_geometry else {
             return false;
         };
@@ -656,7 +702,7 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
 
     /// Delegate to `E2ESut::wait_for_entity_bounds` (sut.rs:613), which
     /// owns the polling loop + scroll-into-view RPC + diagnostic dump.
-    async fn wait_for_bounds(&self, id: &CapBlockId, timeout: Duration) -> Result<(), String> {
+    async fn wait_for_bounds(&self, id: &EntityUri, timeout: Duration) -> Result<(), String> {
         self.wait_for_entity_bounds(id.as_str(), timeout)
             .await
             .map_err(|e| format!("{e:#}"))
@@ -665,7 +711,7 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
     /// Delegate to `E2ESut::wait_for_widget_kind` (sut.rs:735).
     async fn wait_for_widget_kind(
         &self,
-        id: &CapBlockId,
+        id: &EntityUri,
         accepted: &[&str],
         timeout: Duration,
     ) -> Result<(), String> {
@@ -679,6 +725,156 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
 // ─── SutDriver ────────────────────────────────────────────────────────
 
 #[allow(async_fn_in_trait)]
+/// Editor-text capability: per-keystroke editing through the real driver.
+/// These have identical signatures to the (removed) `SutHandle` methods —
+/// `SutHandle` now lists `SutEditorMirrorWrite` as a supertrait, so the
+/// E2E enum's `S: SutHandle` dispatch still satisfies the `TypeChars` /
+/// `DeleteBackward` / `MoveCursor` variants that narrow to
+/// `S: SutEditorMirrorWrite`. The same variant structs thus run on any
+/// SUT supplying this cap (e.g. the pure editor), not just `E2ESut`.
+impl<V: VariantMarker> SutEditorMirrorWrite for E2ESut<V> {
+    async fn apply_type_chars(&mut self, text: &str) {
+        tracing::trace!("[apply] TypeChars: {:?}", text);
+        let driver = self.driver.as_ref().expect("driver not installed");
+        for ch in text.chars() {
+            let keystroke = ch.to_string();
+            driver
+                .send_raw_keystroke(&keystroke, &[])
+                .await
+                .expect("TypeChars: send_raw_keystroke failed");
+        }
+    }
+
+    async fn apply_delete_backward(&mut self, count: usize) {
+        tracing::trace!("[apply] DeleteBackward: count={count}");
+        let driver = self.driver.as_ref().expect("driver not installed");
+        for _ in 0..count {
+            driver
+                .send_raw_keystroke("backspace", &[])
+                .await
+                .expect("DeleteBackward: backspace failed");
+        }
+    }
+
+    async fn apply_move_cursor(&mut self, byte_position: usize) {
+        tracing::trace!("[apply] MoveCursor: byte_position={byte_position}");
+        let driver = self.driver.as_ref().expect("driver not installed");
+        driver
+            .send_raw_keystroke("home", &[])
+            .await
+            .expect("MoveCursor: home failed");
+        for _ in 0..byte_position {
+            driver
+                .send_raw_keystroke("right", &[])
+                .await
+                .expect("MoveCursor: right failed");
+        }
+    }
+}
+
+/// Block-tree mutation capability: structural edits driven through the
+/// real chord/driver pipeline. These are pure ACTIONS — no `ref_state`
+/// parameter. The `ref_state`-dependent post-action work (block-count
+/// sync barrier, synthetic-id reconciliation onto `doc_uri_map`) lives in
+/// `E2ESut::block_tree_post_action`, called by the harness after
+/// `apply_to_sut`. `SutHandle` lists `SutBlockTreeWrite` as a supertrait,
+/// so the E2E enum's `S: SutHandle` dispatch still satisfies the
+/// SplitBlock / JoinBlock / Indent / Outdent / MoveUp / MoveDown variants
+/// that narrow to `S: SutBlockTreeWrite`.
+#[allow(async_fn_in_trait)]
+impl<V: VariantMarker> SutBlockTreeWrite for E2ESut<V> {
+    async fn apply_split_block(&mut self, block_id: &EntityUri, position: usize) {
+        tracing::trace!("[apply] SplitBlock: block={block_id} position={position}");
+        let resolved_id = self.resolve_uri(block_id);
+
+        // Bounds pre-condition with SQL probe diagnostic on failure
+        // (more actionable than the bare bounds-timeout error).
+        if let Err(e) = self
+            .wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
+            .await
+        {
+            let sql_probe = self.probe_block_sql_state(resolved_id.as_str()).await;
+            panic!(
+                "[SplitBlock] bounds unavailable for {resolved_id}: {e:#}\nSQL probe for missing entity:\n{sql_probe}"
+            );
+        }
+        // Children-settled gate. `wait_for_entity_bounds` confirms the target
+        // appears *somewhere* in the geometry, but coords resolved against a
+        // partial first-render get invalidated by the next CDC batch that
+        // adds siblings. Wait until every non-Page child of this block's
+        // parent — as the PRE-transition ref-state predicted — has rendered
+        // so `require_element_center` returns stable bounds. Uses the
+        // pre-state instead of `ref_state` (post-transition) so the
+        // predicate matches what the user can see right now.
+        let parent_for_settle = self
+            .pre_ref_state
+            .as_ref()
+            .and_then(|s| s.block_state.blocks.get(block_id))
+            .map(|b| b.parent_id.clone());
+        if let Some(parent_id) = parent_for_settle {
+            self.wait_for_children_settled(&parent_id, Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "[SplitBlock] children of parent {parent_id} not settled before click: {e:#}"
+                    )
+                });
+        }
+        // Pre-Enter SQL snapshot: log the live content + length so panic-time
+        // analysis can distinguish "cursor position drift" from "content
+        // diverged before the split" cases.
+        {
+            let sql_pre = self.probe_block_sql_state(resolved_id.as_str()).await;
+            eprintln!("[SplitBlock-presplit] target={resolved_id} position={position}\n{sql_pre}");
+        }
+        // Drive the input pipeline (widget-kind → click → focus → keys →
+        // Enter) through the capability-bound free helper.
+        crate::pbt::transitions::split_block::apply_split_block_input_pipeline_to_sut(
+            self,
+            &resolved_id,
+            position,
+        )
+        .await;
+    }
+
+    async fn apply_join_block(&mut self, block_id: &EntityUri) {
+        tracing::trace!("[apply] JoinBlock: block={block_id}");
+        let resolved_id = self.resolve_uri(block_id);
+        let mut extra_params = std::collections::HashMap::new();
+        extra_params.insert("position".to_string(), holon_api::Value::Integer(0));
+        self.dispatch_block_op_via_chord("join_block", resolved_id.as_str(), extra_params)
+            .await;
+    }
+
+    async fn apply_indent(&mut self, block_id: &EntityUri) {
+        tracing::trace!("[apply] Indent: block={block_id}");
+        let resolved_id = self.resolve_uri(block_id);
+        self.dispatch_block_op_via_chord("indent", resolved_id.as_str(), Default::default())
+            .await;
+    }
+
+    async fn apply_outdent(&mut self, block_id: &EntityUri) {
+        tracing::trace!("[apply] Outdent: block={block_id}");
+        let resolved_id = self.resolve_uri(block_id);
+        self.dispatch_block_op_via_chord("outdent", resolved_id.as_str(), Default::default())
+            .await;
+    }
+
+    async fn apply_move_up(&mut self, block_id: &EntityUri) {
+        tracing::trace!("[apply] MoveUp: block={block_id}");
+        let resolved_id = self.resolve_uri(block_id);
+        self.dispatch_block_op_via_chord("move_up", resolved_id.as_str(), Default::default())
+            .await;
+    }
+
+    async fn apply_move_down(&mut self, block_id: &EntityUri) {
+        tracing::trace!("[apply] MoveDown: block={block_id}");
+        let resolved_id = self.resolve_uri(block_id);
+        self.dispatch_block_op_via_chord("move_down", resolved_id.as_str(), Default::default())
+            .await;
+    }
+}
+
 impl<V: VariantMarker> SutDriver for E2ESut<V> {
     /// Send a raw key chord to the currently focused entity.
     /// Not wired: SutDriver::driver_send_key_chord needs a KeyChord
@@ -699,7 +895,7 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
     /// Click an entity by id via the installed UserDriver. Defaults to
     /// region "main" — the convenience wrapper around `click_entity` used
     /// by SplitBlock / ClickBlock-style transitions.
-    async fn driver_click(&mut self, id: &CapBlockId) {
+    async fn driver_click(&mut self, id: &EntityUri) {
         <Self as SutDriver>::click_entity(self, id, "main")
             .await
             .unwrap_or_else(|e| panic!("SutDriver::driver_click failed for {id}: {e}"));
@@ -708,7 +904,7 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
     /// Region-aware click via the installed UserDriver. Returns the
     /// driver error verbatim so callers attach their own
     /// transition-specific diagnostic.
-    async fn click_entity(&mut self, id: &CapBlockId, region: &str) -> Result<(), String> {
+    async fn click_entity(&mut self, id: &EntityUri, region: &str) -> Result<(), String> {
         let driver = self
             .driver
             .as_ref()
@@ -721,11 +917,7 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
 
     /// Delegate to `E2ESut::wait_for_focus_to_match` (sut.rs:793), which
     /// owns the polling loop + focus-and-render diagnostic dump.
-    async fn wait_for_engine_focus(
-        &self,
-        id: &CapBlockId,
-        timeout: Duration,
-    ) -> Result<(), String> {
+    async fn wait_for_engine_focus(&self, id: &EntityUri, timeout: Duration) -> Result<(), String> {
         self.wait_for_focus_to_match(id.as_str(), timeout)
             .await
             .map_err(|e| format!("{e:#}"))
@@ -736,7 +928,7 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
     /// `current_focus()` verb); instead reads the authoritative SQL view,
     /// matching the prod path used in `check_invariants_async` (sut.rs:4665).
     /// Returns the Main-region focus id, or `None` when the matview is empty.
-    async fn driver_current_focus(&self) -> Option<CapBlockId> {
+    async fn driver_current_focus(&self) -> Option<EntityUri> {
         let rows = self
             .ctx
             .query_sql("SELECT region, block_id FROM current_focus")
@@ -750,9 +942,9 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
                     .unwrap_or(false)
             })
             .and_then(|row| {
-                row.get("block_id")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
+                row.get("block_id").and_then(|v| v.as_string()).map(|s| {
+                    EntityUri::parse(s).expect("current_focus.block_id must be a valid EntityUri")
+                })
             })
     }
 
@@ -760,19 +952,17 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
     /// engine's `focused_block()` field. Returns `None` in SqlOnly mode
     /// (no `frontend_engine` installed) or when the engine has no focus.
     /// Mirrors `inv-focus-matches-ref` (sut.rs:6750): `engine.focused_block()`.
-    async fn engine_focused_block(&self) -> Option<CapBlockId> {
+    async fn engine_focused_block(&self) -> Option<EntityUri> {
         self.frontend_engine
             .as_ref()
             .and_then(|engine| engine.focused_block())
-            .map(|uri| uri.as_str().to_string())
     }
 
     /// Translate a reference-model synthetic block id (e.g. `block:ref-doc-0`)
     /// to the resolved UUID-based id the SUT engine tracks. Delegates to
     /// `E2ESut::resolve_uri`, which consults `doc_uri_map`.
-    fn resolve_ref_block_id(&self, id: &CapBlockId) -> CapBlockId {
-        let uri = holon_api::EntityUri::from_raw(id);
-        self.resolve_uri(&uri).as_str().to_string()
+    fn resolve_ref_block_id(&self, id: &EntityUri) -> EntityUri {
+        self.resolve_uri(id)
     }
 
     /// Delegate to the installed UserDriver. Returns the driver error

@@ -46,7 +46,7 @@ fn forward_sync_pre_existing_file_syncs_on_startup() {
 
         let rows = env
             .query(
-                "from block | filter id == \"block-1\" | select {id, content}",
+                "from block | filter id == \"block:block-1\" | select {id, content}",
                 QueryLanguage::HolonPrql,
             )
             .await
@@ -121,7 +121,7 @@ fn forward_sync_external_edit_updates_content() {
         loop {
             let rows = env
                 .query(
-                    "from block | filter id == \"block-1\" | select {id, content}",
+                    "from block | filter id == \"block:block-1\" | select {id, content}",
                     QueryLanguage::HolonPrql,
                 )
                 .await
@@ -173,7 +173,7 @@ fn forward_sync_external_delete_removes_block() {
                 .iter()
                 .filter_map(|r| r.get("id").and_then(|v| v.as_string()))
                 .collect();
-            if ids.contains(&"block-1") && !ids.contains(&"block-2") {
+            if ids.contains(&"block:block-1") && !ids.contains(&"block:block-2") {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
@@ -202,18 +202,19 @@ fn forward_sync_source_block() {
 
         env.wait_for_block("block-1", SYNC_TIMEOUT).await;
 
-        // Wait for the source block to appear
+        // Wait for the source block to appear. The env seeds the default
+        // layout (which contains its own source blocks), so select the test's
+        // python block specifically rather than `rows.first()`.
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
             let rows = env
                 .query("from block | filter content_type == \"source\" | select {id, content, source_language}", QueryLanguage::HolonPrql)
                 .await
                 .expect("query failed");
-            if let Some(row) = rows.first() {
-                assert_eq!(
-                    row.get("source_language").and_then(|v| v.as_string()),
-                    Some("python")
-                );
+            let python_row = rows.iter().find(|row| {
+                row.get("source_language").and_then(|v| v.as_string()) == Some("python")
+            });
+            if let Some(row) = python_row {
                 let content = row.get("content").and_then(|v| v.as_string()).unwrap_or("");
                 assert_eq!(content.trim(), "print('hello')");
                 break;
@@ -248,7 +249,7 @@ fn backward_sync_ui_create_writes_to_org_file() {
         // Get document URI for block-1's parent
         let rows = env
             .query(
-                "from block | filter id == \"block-1\" | select {parent_id}",
+                "from block | filter id == \"block:block-1\" | select {parent_id}",
                 QueryLanguage::HolonPrql,
             )
             .await
@@ -464,7 +465,7 @@ fn roundtrip_ui_create_then_external_update_then_verify_backend() {
         // Step 1: UI creates block-2
         let rows = env
             .query(
-                "from block | filter id == \"block-1\" | select {parent_id}",
+                "from block | filter id == \"block:block-1\" | select {parent_id}",
                 QueryLanguage::HolonPrql,
             )
             .await
@@ -511,7 +512,7 @@ fn roundtrip_ui_create_then_external_update_then_verify_backend() {
         loop {
             let rows = env
                 .query(
-                    "from block | filter id == \"block-2\" | select {content}",
+                    "from block | filter id == \"block:block-2\" | select {content}",
                     QueryLanguage::HolonPrql,
                 )
                 .await
@@ -583,9 +584,22 @@ fn stability_no_duplicate_blocks_after_ui_mutation() {
             .filter_map(|r| r.get("id").and_then(|v| v.as_string()))
             .collect();
 
-        assert_eq!(ids.len(), 2, "Expected exactly 2 blocks, got: {:?}", ids);
-        assert!(ids.contains(&"block-1"));
-        assert!(ids.contains(&"block-2"));
+        // The env seeds the default layout, so `ids` holds those blocks too —
+        // assert the test's own blocks each appear exactly once (the actual
+        // "no duplicate after UI mutation" property), not a total count.
+        let count = |target: &str| ids.iter().filter(|id| **id == target).count();
+        assert_eq!(
+            count("block:block-1"),
+            1,
+            "block-1 should appear exactly once, got ids: {:?}",
+            ids
+        );
+        assert_eq!(
+            count("block:block-2"),
+            1,
+            "block-2 should appear exactly once, got ids: {:?}",
+            ids
+        );
     });
 }
 
@@ -630,24 +644,48 @@ fn stability_multiple_rapid_ui_updates_converge() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Verify backend also has the final state
-        let rows = env
-            .query(
-                "from block | filter id == \"block-1\" | select {content}",
-                QueryLanguage::HolonPrql,
-            )
-            .await
-            .expect("query failed");
-        assert_eq!(
-            rows[0].get("content").and_then(|v| v.as_string()),
-            Some("Update 5")
-        );
+        // Verify backend also has the final state. The `block` matview is an
+        // async IVM projection of `block_raw`, so poll for convergence rather
+        // than reading once (the org file converging above only proves the
+        // block reader / cache caught up, not the matview).
+        let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
+        loop {
+            let rows = env
+                .query(
+                    "from block | filter id == \"block:block-1\" | select {content}",
+                    QueryLanguage::HolonPrql,
+                )
+                .await
+                .expect("query failed");
+            let content = rows
+                .first()
+                .and_then(|r| r.get("content").and_then(|v| v.as_string()));
+            if content == Some("Update 5") {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("Backend did not converge to 'Update 5', last content: {content:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
-        // Verify no duplicates
+        // Verify no duplicates: block-1 appears exactly once (the env also
+        // seeds the default layout, so a total count would be wrong).
         let all = env
             .query("from block | select {id}", QueryLanguage::HolonPrql)
             .await
             .expect("query failed");
-        assert_eq!(all.len(), 1, "Expected 1 block, got: {}", all.len());
+        let block_1_count = all
+            .iter()
+            .filter(|r| r.get("id").and_then(|v| v.as_string()) == Some("block:block-1"))
+            .count();
+        assert_eq!(
+            block_1_count,
+            1,
+            "block-1 should appear exactly once, got ids: {:?}",
+            all.iter()
+                .filter_map(|r| r.get("id").and_then(|v| v.as_string()))
+                .collect::<Vec<_>>()
+        );
     });
 }

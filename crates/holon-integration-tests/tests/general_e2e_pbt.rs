@@ -137,6 +137,7 @@ use std::path::PathBuf;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
+use holon_integration_tests::declare_pbt_slice;
 use holon_integration_tests::pbt::{
     CrossExecutor, E2ESut, Full, SqlOnly, enable_atomic_editor_if_unset,
 };
@@ -202,40 +203,39 @@ fn pbt_config() -> ProptestConfig {
     }
 }
 
-proptest_state_machine::prop_state_machine! {
-    #![proptest_config(pbt_config())]
-
-    #[test]
-    fn general_e2e_pbt(sequential 3..20 => E2ESut<Full>);
+declare_pbt_slice! {
+    test_fn: general_e2e_pbt,
+    inner_sut: E2ESut<Full>,
+    proptest_config: pbt_config(),
+    steps: 3..20,
 }
 
-proptest_state_machine::prop_state_machine! {
-    #![proptest_config(pbt_config())]
-
-    #[test]
-    fn general_e2e_pbt_sql_only(sequential 3..20 => E2ESut<SqlOnly>);
+declare_pbt_slice! {
+    test_fn: general_e2e_pbt_sql_only,
+    inner_sut: E2ESut<SqlOnly>,
+    proptest_config: pbt_config(),
+    steps: 3..20,
 }
 
-proptest_state_machine::prop_state_machine! {
-    #![proptest_config(pbt_config())]
-
-    /// Same as general_e2e_pbt but receives watch_ui events on
-    /// futures::executor (not tokio). Catches cross-executor waker bugs
-    /// like GPUI blank screen where tokio mpsc wakers don't wake a
-    /// non-tokio event loop.
-    ///
-    /// `#[ignore]` by default: this variant is non-deterministic by
-    /// construction — tokio mpsc wakers don't reliably wake the
-    /// `futures::executor::block_on` thread, so the same seed can
-    /// pass or fail depending on scheduler timing. That's exactly
-    /// the bug class it exists to surface, but it also means it is
-    /// unsuitable for the default regression sweep (where we want
-    /// "fixed seed → fixed outcome"). Run explicitly when you need
-    /// to investigate a cross-executor waker issue:
-    ///
-    ///   cargo nextest run -p holon-integration-tests \
-    ///       general_e2e_pbt_cross_executor --run-ignored only
-    #[test]
+// Same as general_e2e_pbt but receives watch_ui events on
+// futures::executor (not tokio). Catches cross-executor waker bugs like
+// GPUI blank screen where tokio mpsc wakers don't wake a non-tokio event
+// loop.
+//
+// `#[ignore]` by default: this variant is non-deterministic by
+// construction — tokio mpsc wakers don't reliably wake the
+// `futures::executor::block_on` thread, so the same seed can pass or fail
+// depending on scheduler timing. That's exactly the bug class it exists to
+// surface, but it also means it is unsuitable for the default regression
+// sweep (where we want "fixed seed → fixed outcome"). Run explicitly when
+// you need to investigate a cross-executor waker issue:
+//
+//   cargo nextest run -p holon-integration-tests \
+//       general_e2e_pbt_cross_executor --run-ignored only
+declare_pbt_slice! {
+    test_fn: general_e2e_pbt_cross_executor,
     #[ignore = "non-deterministic by design; run with --ignored to opt in"]
-    fn general_e2e_pbt_cross_executor(sequential 3..20 => E2ESut<CrossExecutor>);
+    inner_sut: E2ESut<CrossExecutor>,
+    proptest_config: pbt_config(),
+    steps: 3..20,
 }

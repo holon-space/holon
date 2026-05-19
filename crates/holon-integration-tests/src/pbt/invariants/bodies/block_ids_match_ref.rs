@@ -18,7 +18,7 @@
 
 use std::collections::BTreeSet;
 
-use holon_pbt_core::capabilities::{RefBlockTree, SutSqlProjection};
+use holon_pbt_core::capabilities::{EntityUri, RefBlockTree, SutSqlProjection};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvBlockIdsMatchRef;
@@ -48,8 +48,8 @@ where
         let ref_ids = ref_.all_non_seed_block_ids();
         let sql_ids: BTreeSet<_> = sut.all_block_ids().await;
 
-        let missing_in_sql: Vec<&String> = ref_ids.difference(&sql_ids).collect();
-        let extra_in_sql: Vec<&String> = sql_ids.difference(&ref_ids).collect();
+        let missing_in_sql: Vec<&EntityUri> = ref_ids.difference(&sql_ids).collect();
+        let extra_in_sql: Vec<&EntityUri> = sql_ids.difference(&ref_ids).collect();
 
         if missing_in_sql.is_empty() && extra_in_sql.is_empty() {
             return InvariantResult::Ok;

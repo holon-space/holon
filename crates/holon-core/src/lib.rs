@@ -9,6 +9,7 @@ pub mod block_ordering;
 pub mod cell;
 pub mod cell_registry;
 pub mod core;
+pub mod downstream_projection;
 pub mod file_format;
 pub mod fractional_index;
 pub mod operation_log;
@@ -16,6 +17,7 @@ pub mod storage;
 pub mod traits;
 pub mod undo;
 
+pub use downstream_projection::DownstreamProjection;
 pub use file_format::{FileFormatAdapter, FileFormatParseResult};
 
 #[cfg(test)]

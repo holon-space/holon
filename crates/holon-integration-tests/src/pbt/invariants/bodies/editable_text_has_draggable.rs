@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use holon_pbt_core::capabilities::{CapBlockId, RefLayout, SutRenderer};
+use holon_pbt_core::capabilities::{EntityUri, RefLayout, SutRenderer};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvEditableTextHasDraggable;
@@ -54,10 +54,10 @@ where
 
         let root = sut.widget_tree_snapshot().await;
         let mut missing: BTreeSet<String> = BTreeSet::new();
-        let mut visited: HashSet<CapBlockId> = HashSet::new();
+        let mut visited: HashSet<EntityUri> = HashSet::new();
 
         // Inspect root first; harvest discovered live_block refs.
-        let mut worklist: Vec<CapBlockId> = Vec::new();
+        let mut worklist: Vec<EntityUri> = Vec::new();
         inspect_tree(&root, &mut missing, &mut worklist);
 
         // BFS through discovered live_block trees. Each `widget_tree_for`
@@ -92,7 +92,7 @@ where
 fn inspect_tree(
     tree: &holon_pbt_core::capabilities::WidgetSnapshot,
     missing: &mut BTreeSet<String>,
-    worklist: &mut Vec<CapBlockId>,
+    worklist: &mut Vec<EntityUri>,
 ) {
     let mut draggable: BTreeSet<String> = BTreeSet::new();
     let mut editable: BTreeSet<String> = BTreeSet::new();
@@ -110,7 +110,10 @@ fn inspect_tree(
             }
             "live_block" => {
                 if let Some(id) = &node.entity_id {
-                    worklist.push(id.clone());
+                    worklist.push(
+                        EntityUri::parse(id)
+                            .expect("live_block entity_id must be a valid EntityUri"),
+                    );
                 }
             }
             _ => {}

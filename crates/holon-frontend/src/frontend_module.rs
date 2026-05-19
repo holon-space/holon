@@ -287,14 +287,62 @@ impl FrontendInjectorExt for Injector {
 
                 // Seed default layout (native only — org parser pulls notify which
                 // has no wasm backend; wasi path uses seed.rs in holon-worker instead).
+                // Seeds the bundled Org assets into Loro via `BlockOrdering`
+                // intents (Loro is the authority; SQL is the projection).
                 #[cfg(not(target_arch = "wasm32"))]
                 async {
-                    FrontendSession::<()>::seed_default_layout(&engine)
+                    let ordering = resolver
+                        .resolve_async::<dyn holon_core::block_ordering::BlockOrdering>()
+                        .await;
+                    FrontendSession::<()>::seed_default_layout(&engine, ordering)
                         .await
                         .expect("Failed to seed default layout");
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.seed_default_layout"
+                ))
+                .await;
+
+                // Project the freshly-seeded layout into the SQL sink (`block_raw`)
+                // immediately, so the 3-column shell renders without waiting for
+                // the org initial scan or the (ready-gated) projection run-loop.
+                //
+                // `seed_default_layout` writes the layout into Loro (the
+                // authority) via `create_in_tree` but does not itself project to
+                // SQL; previously the layout only reached `block_raw` once the
+                // org scan's first flush ran (seconds in) or the run-loop started
+                // after orgmode readiness — so the UI shell appeared empty for
+                // seconds after launch. This flush uses the shared, *unarmed*
+                // projection (creates flow, deletes withheld) — the same instance
+                // the scan flushes and the controller later runs — so it is a
+                // safe bootstrap projection of the seed layout.
+                #[cfg(not(target_arch = "wasm32"))]
+                async {
+                    // Optional: a `DownstreamProjection` is only registered by
+                    // `LoroModule`. In the degraded SQL-only config (no Loro)
+                    // it's absent — skip the best-effort seed flush rather than
+                    // panic; the run-loop reconciles either way. Mirrors
+                    // `holon-orgmode`'s `optional_resolve_async` for the same
+                    // service.
+                    if let Some(projection) = resolver
+                        .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
+                        .await
+                    {
+                        if let Err(e) = projection.flush().await {
+                            tracing::warn!(
+                                "[FrontendSession] seed-layout projection flush failed \
+                                 (run-loop will reconcile): {e:#}"
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            "[FrontendSession] no DownstreamProjection registered \
+                             (SQL-only/no-Loro); skipping seed-layout flush"
+                        );
+                    }
+                }
+                .instrument(tracing::info_span!(
+                    "di.factory.FrontendSession.flush_seed_layout"
                 ))
                 .await;
 
@@ -313,12 +361,8 @@ impl FrontendInjectorExt for Injector {
                 .await;
 
                 // Wait for orgmode readiness, then resolve the Loro sync
-                // controller. The Loro controller's factory runs
-                // `seed_loro_from_persistent_store`, which mirrors every row
-                // in the `block` table into Loro — so it must wait until the
-                // OrgMode initial scan has populated SQL. Otherwise the
-                // mirror sees an incomplete table and later share/accept ops
-                // fail with "block X not found in Loro tree".
+                // controller so its outbound Loro → SQL projector starts after
+                // the bundled Org assets have been seeded into Loro via intents.
                 //
                 // Production (`wait_for_ready=false`): spawn this in the
                 // background so the window paints immediately and data

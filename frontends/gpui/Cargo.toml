@@ -39,6 +39,11 @@ harness = false
 required-features = ["pbt"]
 
 [[test]]
+name = "gpui_gherkin_replay"
+harness = false
+required-features = ["pbt"]
+
+[[test]]
 name = "reactive_vm_realwindow_test"
 harness = false
 

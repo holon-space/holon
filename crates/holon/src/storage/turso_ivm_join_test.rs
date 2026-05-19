@@ -10,7 +10,7 @@
 //!   turso_core::storage::btree::PageStack::top
 //!   assertion failed: self.current_page >= 0
 
-use crate::storage::test_helpers::create_test_backend_at_path;
+use crate::storage::test_helpers::{create_test_backend_at_path, create_test_backend_with_tempdir};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -18,10 +18,7 @@ use tokio::sync::RwLock;
 /// Minimal reproducer: CREATE MATERIALIZED VIEW with JOIN panics
 #[tokio::test]
 async fn test_matview_with_join_panics() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Create base tables
@@ -79,10 +76,7 @@ async fn test_matview_with_join_panics() {
 /// Test if the issue is related to NULL foreign keys
 #[tokio::test]
 async fn test_matview_with_join_and_data() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Create base tables
@@ -137,10 +131,7 @@ async fn test_matview_with_join_and_data() {
 /// Simplest possible JOIN materialized view
 #[tokio::test]
 async fn test_simplest_join_matview() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     db.execute("CREATE TABLE a (id INTEGER PRIMARY KEY, val TEXT)", vec![])
@@ -180,6 +171,7 @@ async fn test_matview_join_block_in_place() {
     let backend = Arc::new(RwLock::new(create_test_backend_at_path(&db_path).await));
 
     tokio::task::block_in_place(|| {
+        // ALLOW(block_on): test deliberately reproduces the sync/async bridge pattern
         tokio::runtime::Handle::current().block_on(async {
             let backend_guard = backend.read().await;
             let db = backend_guard.handle();
@@ -235,10 +227,7 @@ async fn test_matview_join_block_in_place() {
 /// This tests if previous views affect JOIN view creation
 #[tokio::test]
 async fn test_multiple_matviews_then_join() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Create events table and matview (like TursoEventBus does)
@@ -304,10 +293,7 @@ async fn test_multiple_matviews_then_join() {
 /// This tests if a previous failure corrupts state
 #[tokio::test]
 async fn test_failed_view_then_join_view() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Create tables
@@ -358,10 +344,7 @@ async fn test_failed_view_then_join_view() {
 /// Run with: cargo test -p holon turso_ivm_join_test::test_join_matview_insert_panics -- --nocapture
 #[tokio::test]
 async fn test_join_matview_insert_panics() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Step 1: Create two tables
@@ -404,10 +387,7 @@ async fn test_join_matview_insert_panics() {
 /// Run with: cargo test -p holon turso_ivm_join_test::test_navigation_schema_panics -- --nocapture
 #[tokio::test]
 async fn test_navigation_schema_panics() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Exact schema from navigation/schema.rs
@@ -499,10 +479,7 @@ async fn test_navigation_schema_panics() {
 /// Run with: cargo test -p holon turso_ivm_join_test::test_watch_query_join_insert_in_transaction -- --nocapture
 #[tokio::test]
 async fn test_watch_query_join_insert_in_transaction() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Setup tables and views
@@ -583,10 +560,7 @@ async fn test_watch_query_join_insert_in_transaction() {
 /// Run with: cargo test -p holon turso_ivm_join_test::test_watch_query_join_insert_panics -- --nocapture
 #[tokio::test]
 async fn test_watch_query_join_insert_panics() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Step 1: Create blocks table
@@ -679,10 +653,7 @@ async fn test_watch_query_join_insert_panics() {
 /// Run with: cargo test -p holon turso_ivm_join_test::test_full_holon_schema_panic -- --nocapture
 #[tokio::test]
 async fn test_full_holon_schema_panic() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Full blocks schema from holon
@@ -822,10 +793,7 @@ async fn test_full_holon_schema_panic() {
 /// Run with: cargo test -p holon turso_ivm_join_test::test_nested_matview_joins_panic -- --nocapture
 #[tokio::test]
 async fn test_nested_matview_joins_panic() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Step 1: Create base tables
@@ -894,10 +862,7 @@ async fn test_nested_matview_joins_panic() {
 /// Run with: cargo test -p holon turso_ivm_join_test::test_multiple_matviews_with_join -- --nocapture
 #[tokio::test]
 async fn test_multiple_matviews_with_join() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-
-    let backend = create_test_backend_at_path(&db_path).await;
+    let (_temp_dir, backend) = create_test_backend_with_tempdir().await;
     let db = backend.handle();
 
     // Create events table and matview (like TursoEventBus)

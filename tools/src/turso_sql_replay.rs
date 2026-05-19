@@ -1261,6 +1261,252 @@ async fn cmd_replay_via_actor(args: &ReplayArgs, replay_file: &str) -> anyhow::R
     Ok(())
 }
 
+/// Coarse classification of a SQL statement, used to decide whether a
+/// statement needs a matview-consistency check (DML), should be run as a
+/// query that drains its rows (Query), or is DDL/other (Other).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StmtKind {
+    Dml,
+    Query,
+    Other,
+}
+
+fn statement_kind(sql: &str) -> StmtKind {
+    let upper = sql.trim().to_uppercase();
+    if upper.starts_with("INSERT ")
+        || upper.starts_with("UPDATE ")
+        || upper.starts_with("DELETE ")
+        || upper.starts_with("REPLACE ")
+    {
+        StmtKind::Dml
+    } else if upper.starts_with("SELECT ") || upper.starts_with("WITH ") {
+        StmtKind::Query
+    } else {
+        StmtKind::Other
+    }
+}
+
+/// The terminal verdict of a replay, derived from whether data mismatched,
+/// a panic was captured, and whether any (non-mismatch) inconsistencies were
+/// recorded. Pure so it can be unit-tested without running a replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayVerdict {
+    /// A matview/assertion data mismatch was observed — the bug reproduced.
+    BugReproduced,
+    /// No data mismatch, but a panic fired (caught by the panic hook).
+    PanicCaptured,
+    /// Nothing went wrong.
+    Clean,
+    /// No data mismatch and no panic, but some query errors were logged.
+    QueryErrorsOnly,
+}
+
+fn replay_verdict(
+    has_data_mismatch: bool,
+    has_panics: bool,
+    has_inconsistencies: bool,
+) -> ReplayVerdict {
+    if has_data_mismatch {
+        ReplayVerdict::BugReproduced
+    } else if has_panics {
+        ReplayVerdict::PanicCaptured
+    } else if !has_inconsistencies {
+        ReplayVerdict::Clean
+    } else {
+        ReplayVerdict::QueryErrorsOnly
+    }
+}
+
+/// Mutable state accumulated across one replay loop. Owned by `cmd_replay`
+/// and threaded by `&mut` into the per-directive handlers so the Sql and
+/// Assert arms can record executed SQL, inconsistencies, and tracker state.
+struct ReplayProgress {
+    executed_sqls: Vec<String>,
+    all_inconsistencies: Vec<String>,
+    has_data_mismatch: bool,
+    stmt_idx: usize,
+    tracker_prev: Vec<Option<Vec<bool>>>,
+}
+
+impl ReplayProgress {
+    fn new(tracker_count: usize) -> Self {
+        Self {
+            executed_sqls: Vec::new(),
+            all_inconsistencies: Vec::new(),
+            has_data_mismatch: false,
+            stmt_idx: 0,
+            tracker_prev: vec![None; tracker_count],
+        }
+    }
+}
+
+/// Whether the replay loop should advance to the next directive or stop.
+enum LoopControl {
+    Continue,
+    Break,
+}
+
+/// Execute one `Directive::Sql`. Handles transaction-boundary tags
+/// (`actor_tx_begin` / `actor_tx_commit`) specially, runs queries vs.
+/// statements, probes id trackers, and—when `--check-after-each`—diffs
+/// matviews after each DML. Returns `Break` only when an inconsistency was
+/// found and the caller asked to stop on the first one.
+async fn replay_sql_directive(
+    conn: &turso::Connection,
+    args: &ReplayArgs,
+    progress: &mut ReplayProgress,
+    cdc_count: &Arc<AtomicUsize>,
+    background_read_targets: &[String],
+    trackers: &[IdTracker],
+    tag: &str,
+    sql: &str,
+    sql_count: usize,
+) -> anyhow::Result<LoopControl> {
+    progress.stmt_idx += 1;
+    let stmt_idx = progress.stmt_idx;
+
+    // Handle transaction boundaries faithfully
+    if tag == "actor_tx_begin" {
+        let sql_preview: String = sql.chars().take(100).collect();
+        println!(
+            "[{stmt_idx}/{sql_count}] [{tag}] {sql_preview}  (CDC: {})",
+            cdc_count.load(Ordering::SeqCst)
+        );
+        match conn.execute("BEGIN TRANSACTION", ()).await {
+            Ok(_) => {
+                progress.executed_sqls.push("BEGIN TRANSACTION".to_string());
+            }
+            Err(e) => {
+                println!("!!! [{stmt_idx}] BEGIN TRANSACTION failed: {e}");
+            }
+        }
+        return Ok(LoopControl::Continue);
+    }
+    if tag == "actor_tx_commit" {
+        println!(
+            "[{stmt_idx}/{sql_count}] [{tag}] COMMIT  (CDC: {})",
+            cdc_count.load(Ordering::SeqCst)
+        );
+        match conn.execute("COMMIT", ()).await {
+            Ok(_) => {
+                progress.executed_sqls.push("COMMIT".to_string());
+            }
+            Err(e) => {
+                println!("!!! [{stmt_idx}] COMMIT failed: {e}");
+            }
+        }
+        // Post-commit settle window: give the async DBSP consolidation queued
+        // by this commit a chance to run before the next BEGIN, and issue one
+        // read against each background-read target so a cursor is open during
+        // the consolidation. This is what makes post-commit panics (e.g.
+        // multiset-went-negative) visible in the replay's panic hook.
+        if args.post_commit_poll_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(args.post_commit_poll_ms)).await;
+            for target in background_read_targets {
+                let sql = format!("SELECT COUNT(*) FROM {target}");
+                if let Ok(mut rows) = conn.query(&sql, ()).await {
+                    while let Ok(Some(_)) = rows.next().await {}
+                }
+            }
+        }
+        return Ok(LoopControl::Continue);
+    }
+
+    let kind = statement_kind(sql);
+    let is_dml = kind == StmtKind::Dml;
+    let is_query = kind == StmtKind::Query;
+
+    if stmt_idx % 500 == 0 || stmt_idx >= args.check_from.saturating_sub(10) {
+        let sql_preview: String = sql.chars().take(100).collect();
+        println!(
+            "[{stmt_idx}/{sql_count}] [{tag}] {sql_preview}  (CDC: {})",
+            cdc_count.load(Ordering::SeqCst)
+        );
+    }
+
+    let result = if is_query {
+        match conn.query(sql, ()).await {
+            Ok(mut rows) => {
+                while let Ok(Some(_)) = rows.next().await {}
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    } else {
+        conn.execute(sql, ()).await.map(|_| ())
+    };
+
+    match result {
+        Ok(_) => {
+            progress.executed_sqls.push(sql.to_string());
+        }
+        Err(e) => {
+            let sql_preview: String = sql.chars().take(120).collect();
+            println!("!!! [{stmt_idx}] ERROR in [{tag}]: {e}\n    SQL: {sql_preview}...");
+        }
+    }
+
+    if !trackers.is_empty() && is_dml {
+        let preview: String = sql.chars().take(60).collect();
+        probe_trackers(
+            conn,
+            trackers,
+            &mut progress.tracker_prev,
+            stmt_idx,
+            &preview,
+        )
+        .await;
+    }
+
+    if args.check_after_each && is_dml && stmt_idx >= args.check_from {
+        let matview_names = extract_matview_names(&progress.executed_sqls);
+        if !matview_names.is_empty() {
+            let label = format!("stmt#{stmt_idx}");
+            let result = check_matview_consistency(conn, &matview_names, &label).await?;
+            if result.has_data_mismatch {
+                let was_first = !progress.has_data_mismatch;
+                progress.has_data_mismatch = true;
+                progress.all_inconsistencies.extend(result.inconsistencies);
+                if was_first {
+                    println!("\n=== BUG REPRODUCED at statement {stmt_idx}! ===");
+                    let sql_preview: String = sql.chars().take(200).collect();
+                    println!("    SQL: {sql_preview}");
+                    println!();
+                }
+                if !args.no_break_on_inconsistency {
+                    return Ok(LoopControl::Break);
+                }
+            }
+        }
+    }
+
+    Ok(LoopControl::Continue)
+}
+
+/// Run one `Directive::Assert`, recording failures and errors into `progress`.
+async fn replay_assert_directive(
+    conn: &turso::Connection,
+    progress: &mut ReplayProgress,
+    kind: &AssertKind,
+) {
+    match run_assertion(conn, kind).await {
+        Ok(true) => {
+            println!("[assert] OK: {}", describe_assertion(kind));
+        }
+        Ok(false) => {
+            let msg = format!("FAIL: {}", describe_assertion(kind));
+            println!("!!! [assert] {msg}");
+            progress.all_inconsistencies.push(msg);
+            progress.has_data_mismatch = true;
+        }
+        Err(e) => {
+            let msg = format!("ERROR running assertion {}: {e}", describe_assertion(kind));
+            println!("!!! [assert] {msg}");
+            progress.all_inconsistencies.push(msg);
+        }
+    }
+}
+
 async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> {
     if args.via_holon_actor {
         return cmd_replay_via_actor(args, replay_file).await;
@@ -1275,30 +1521,7 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     // catch_unwind never surface and the replay verdict reads "no mismatch"
     // even when a `json_group_array multiset went negative` or similar
     // invariant-violation panic was raised on a worker thread.
-    let panic_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let panic_log_hook = panic_log.clone();
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "<non-string panic payload>".to_string()
-        };
-        let location = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "<unknown>".to_string());
-        let thread = std::thread::current()
-            .name()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("{:?}", std::thread::current().id()));
-        let entry = format!("[panic] thread={thread} at {location}: {payload}");
-        eprintln!("{entry}");
-        panic_log_hook.lock().unwrap().push(entry);
-        default_hook(info);
-    }));
+    let panic_log = install_panic_hook();
 
     let directives = parse_replay_file(replay_file)?;
     let sql_count = directives
@@ -1388,10 +1611,6 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
 
     let cdc_count = Arc::new(AtomicUsize::new(0));
     let mut cdc_registered = false;
-    let mut executed_sqls: Vec<String> = Vec::new();
-    let mut all_inconsistencies: Vec<String> = Vec::new();
-    let mut has_data_mismatch = false;
-    let mut stmt_idx = 0;
     let replay_start = std::time::Instant::now();
     let mut hit_max_stmts = false;
     let mut hit_max_secs = false;
@@ -1402,18 +1621,21 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     if !trackers.is_empty() {
         println!("  Tracking ids: {trackers:?}\n");
     }
-    let mut tracker_prev: Vec<Option<Vec<bool>>> = vec![None; trackers.len()];
+    let mut progress = ReplayProgress::new(trackers.len());
 
     for directive in &directives {
         if let Some(max) = args.max_secs
             && replay_start.elapsed().as_secs() >= max
         {
             hit_max_secs = true;
-            println!("\n!!! max-secs ({max}) reached at stmt {stmt_idx}; bailing out");
+            println!(
+                "\n!!! max-secs ({max}) reached at stmt {}; bailing out",
+                progress.stmt_idx
+            );
             break;
         }
         if let Some(max) = args.max_stmts
-            && stmt_idx >= max
+            && progress.stmt_idx >= max
         {
             hit_max_stmts = true;
             println!("\n!!! max-stmts ({max}) reached; bailing out");
@@ -1447,151 +1669,24 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
                 }
             }
             Directive::Sql { tag, sql } => {
-                stmt_idx += 1;
-
-                // Handle transaction boundaries faithfully
-                if tag == "actor_tx_begin" {
-                    let sql_preview: String = sql.chars().take(100).collect();
-                    println!(
-                        "[{stmt_idx}/{sql_count}] [{tag}] {sql_preview}  (CDC: {})",
-                        cdc_count.load(Ordering::SeqCst)
-                    );
-                    match conn.execute("BEGIN TRANSACTION", ()).await {
-                        Ok(_) => {
-                            executed_sqls.push("BEGIN TRANSACTION".to_string());
-                        }
-                        Err(e) => {
-                            println!("!!! [{stmt_idx}] BEGIN TRANSACTION failed: {e}");
-                        }
-                    }
-                    continue;
-                }
-                if tag == "actor_tx_commit" {
-                    println!(
-                        "[{stmt_idx}/{sql_count}] [{tag}] COMMIT  (CDC: {})",
-                        cdc_count.load(Ordering::SeqCst)
-                    );
-                    match conn.execute("COMMIT", ()).await {
-                        Ok(_) => {
-                            executed_sqls.push("COMMIT".to_string());
-                        }
-                        Err(e) => {
-                            println!("!!! [{stmt_idx}] COMMIT failed: {e}");
-                        }
-                    }
-                    // Post-commit settle window: give the async DBSP
-                    // consolidation queued by this commit a chance to run
-                    // before the next BEGIN, and issue one read against
-                    // each background-read target so a cursor is open
-                    // during the consolidation. This is what makes
-                    // post-commit panics (e.g. multiset-went-negative)
-                    // visible in the replay's panic hook.
-                    if args.post_commit_poll_ms > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            args.post_commit_poll_ms,
-                        ))
-                        .await;
-                        for target in &background_read_targets {
-                            let sql = format!("SELECT COUNT(*) FROM {target}");
-                            if let Ok(mut rows) = conn.query(&sql, ()).await {
-                                while let Ok(Some(_)) = rows.next().await {}
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                let is_dml = {
-                    let upper = sql.trim().to_uppercase();
-                    upper.starts_with("INSERT ")
-                        || upper.starts_with("UPDATE ")
-                        || upper.starts_with("DELETE ")
-                        || upper.starts_with("REPLACE ")
-                };
-                let is_query = {
-                    let upper = sql.trim().to_uppercase();
-                    upper.starts_with("SELECT ") || upper.starts_with("WITH ")
-                };
-
-                if stmt_idx % 500 == 0 || stmt_idx >= args.check_from.saturating_sub(10) {
-                    let sql_preview: String = sql.chars().take(100).collect();
-                    println!(
-                        "[{stmt_idx}/{sql_count}] [{tag}] {sql_preview}  (CDC: {})",
-                        cdc_count.load(Ordering::SeqCst)
-                    );
-                }
-
-                let result = if is_query {
-                    match conn.query(sql, ()).await {
-                        Ok(mut rows) => {
-                            while let Ok(Some(_)) = rows.next().await {}
-                            Ok(())
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    conn.execute(sql, ()).await.map(|_| ())
-                };
-
-                match result {
-                    Ok(_) => {
-                        executed_sqls.push(sql.clone());
-                    }
-                    Err(e) => {
-                        let sql_preview: String = sql.chars().take(120).collect();
-                        println!(
-                            "!!! [{stmt_idx}] ERROR in [{tag}]: {e}\n    SQL: {sql_preview}..."
-                        );
-                    }
-                }
-
-                if !trackers.is_empty() && is_dml {
-                    let preview: String = sql.chars().take(60).collect();
-                    probe_trackers(&conn, &trackers, &mut tracker_prev, stmt_idx, &preview).await;
-                }
-
-                if args.check_after_each && is_dml && stmt_idx >= args.check_from {
-                    let matview_names = extract_matview_names(&executed_sqls);
-                    if !matview_names.is_empty() {
-                        let label = format!("stmt#{stmt_idx}");
-                        let result =
-                            check_matview_consistency(&conn, &matview_names, &label).await?;
-                        if result.has_data_mismatch {
-                            let was_first = !has_data_mismatch;
-                            has_data_mismatch = true;
-                            all_inconsistencies.extend(result.inconsistencies);
-                            if was_first {
-                                println!("\n=== BUG REPRODUCED at statement {stmt_idx}! ===");
-                                let sql_preview: String = sql.chars().take(200).collect();
-                                println!("    SQL: {sql_preview}");
-                                println!();
-                            }
-                            if !args.no_break_on_inconsistency {
-                                break;
-                            }
-                        }
-                    }
+                let control = replay_sql_directive(
+                    &conn,
+                    args,
+                    &mut progress,
+                    &cdc_count,
+                    &background_read_targets,
+                    &trackers,
+                    tag,
+                    sql,
+                    sql_count,
+                )
+                .await?;
+                if let LoopControl::Break = control {
+                    break;
                 }
             }
             Directive::Assert(kind) => {
-                let result = run_assertion(&conn, kind).await;
-                match result {
-                    Ok(true) => {
-                        println!("[assert] OK: {}", describe_assertion(kind));
-                    }
-                    Ok(false) => {
-                        let msg = format!("FAIL: {}", describe_assertion(kind));
-                        println!("!!! [assert] {msg}");
-                        all_inconsistencies.push(msg);
-                        has_data_mismatch = true;
-                    }
-                    Err(e) => {
-                        let msg =
-                            format!("ERROR running assertion {}: {e}", describe_assertion(kind));
-                        println!("!!! [assert] {msg}");
-                        all_inconsistencies.push(msg);
-                    }
-                }
+                replay_assert_directive(&conn, &mut progress, kind).await;
             }
         }
     }
@@ -1604,18 +1699,21 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     }
 
     println!("\n=== Final Consistency Check ===");
-    let matview_names = extract_matview_names(&executed_sqls);
+    let matview_names = extract_matview_names(&progress.executed_sqls);
     println!("Active matviews: {:?}", matview_names);
 
     let final_result = check_matview_consistency(&conn, &matview_names, "FINAL").await?;
-    let has_data_mismatch = has_data_mismatch || final_result.has_data_mismatch;
-    all_inconsistencies.extend(final_result.inconsistencies);
+    let has_data_mismatch = progress.has_data_mismatch || final_result.has_data_mismatch;
+    progress
+        .all_inconsistencies
+        .extend(final_result.inconsistencies);
+    let all_inconsistencies = progress.all_inconsistencies;
 
     let captured_panics = panic_log.lock().unwrap().clone();
     let has_panics = !captured_panics.is_empty();
 
     println!("\n=== SUMMARY ===");
-    println!("  Statements executed: {stmt_idx}");
+    println!("  Statements executed: {}", progress.stmt_idx);
     println!("  CDC events total: {}", cdc_count.load(Ordering::SeqCst));
     println!("  Issues found: {}", all_inconsistencies.len());
     println!("  Panics captured: {}", captured_panics.len());
@@ -1626,36 +1724,45 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
         println!("  Budget: max-secs hit (partial replay)");
     }
 
-    if has_data_mismatch {
-        println!("\n  VERDICT: IVM BUG REPRODUCED!");
-        for issue in &all_inconsistencies {
-            println!("    - {issue}");
-        }
-        if has_panics {
-            println!("  Panics captured during replay:");
-            for p in &captured_panics {
-                println!("    - {p}");
-            }
-        }
-        std::process::exit(1);
-    } else if has_panics {
-        println!("\n  VERDICT: PANIC CAPTURED (IVM bug reproduced via panic hook)");
-        for p in &captured_panics {
-            println!("    - {p}");
-        }
-        if !all_inconsistencies.is_empty() {
-            println!("  Other issues:");
+    match replay_verdict(
+        has_data_mismatch,
+        has_panics,
+        !all_inconsistencies.is_empty(),
+    ) {
+        ReplayVerdict::BugReproduced => {
+            println!("\n  VERDICT: IVM BUG REPRODUCED!");
             for issue in &all_inconsistencies {
                 println!("    - {issue}");
             }
+            if has_panics {
+                println!("  Panics captured during replay:");
+                for p in &captured_panics {
+                    println!("    - {p}");
+                }
+            }
+            std::process::exit(1);
         }
-        std::process::exit(1);
-    } else if all_inconsistencies.is_empty() {
-        println!("\n  VERDICT: No IVM inconsistencies detected.");
-    } else {
-        println!("\n  VERDICT: No data mismatches (query errors only).");
-        for issue in &all_inconsistencies {
-            println!("    - {issue}");
+        ReplayVerdict::PanicCaptured => {
+            println!("\n  VERDICT: PANIC CAPTURED (IVM bug reproduced via panic hook)");
+            for p in &captured_panics {
+                println!("    - {p}");
+            }
+            if !all_inconsistencies.is_empty() {
+                println!("  Other issues:");
+                for issue in &all_inconsistencies {
+                    println!("    - {issue}");
+                }
+            }
+            std::process::exit(1);
+        }
+        ReplayVerdict::Clean => {
+            println!("\n  VERDICT: No IVM inconsistencies detected.");
+        }
+        ReplayVerdict::QueryErrorsOnly => {
+            println!("\n  VERDICT: No data mismatches (query errors only).");
+            for issue in &all_inconsistencies {
+                println!("    - {issue}");
+            }
         }
     }
 
@@ -1964,32 +2071,24 @@ fn write_directives(path: &str, directives: &[Directive]) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
-    let directives = parse_replay_file(&args.replay_file)?;
-    let output_path = args
-        .output
-        .clone()
-        .unwrap_or_else(|| args.replay_file.replace(".sql", "-minimal.sql"));
-    let crash_pattern = match &args.crash_pattern {
-        Some(p) => p.clone(),
-        None => detect_crash_pattern(&directives),
-    };
+/// A minimizer phase: take the current directive set, try to shrink it while
+/// preserving the crash, and return the shrunk set plus how many it removed.
+type MinimizePhase = fn(Vec<Directive>, &str, bool) -> (Vec<Directive>, usize);
 
-    let total = directives.len();
-    println!("=== Minimizer: {total} directives ===");
-    println!("  Crash pattern: {crash_pattern}\n");
-
-    let needs_per_stmt_check = probe_needs_per_stmt_check(&directives, &crash_pattern);
-
-    // Phase 1: Binary search for minimal prefix
+/// Phase 1: binary-search the shortest directive prefix that still crashes.
+fn minimize_find_prefix(
+    directives: &[Directive],
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> Vec<Directive> {
     println!("--- Phase 1: Find minimal prefix ---");
+    let total = directives.len();
     let mut lo: usize = 1;
     let mut hi: usize = total;
-
     while lo < hi {
         let mid = (lo + hi) / 2;
         print!("  Prefix [{mid}/{total}]... ");
-        if crashes_with_subprocess(&directives[..mid], &crash_pattern, needs_per_stmt_check) {
+        if crashes_with_subprocess(&directives[..mid], crash_pattern, needs_per_stmt_check) {
             println!("CRASHES");
             hi = mid;
         } else {
@@ -1997,155 +2096,174 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
             lo = mid + 1;
         }
     }
-
-    let mut kept: Vec<Directive> = directives[..lo].to_vec();
+    let kept = directives[..lo].to_vec();
     println!("Minimal prefix: {lo} directives\n");
+    kept
+}
 
-    // Phase 2: Remove entire table groups at once
+/// Best-effort table/view name for grouping a statement in Phase 2 — covers
+/// DML (via `extract_table_name`) plus DDL and `SELECT ... FROM` forms.
+fn group_table_name(sql: &str) -> Option<String> {
+    if let Some(name) = extract_table_name(sql) {
+        return Some(name);
+    }
+    let upper = sql.trim().to_uppercase();
+    for kw in [
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS ",
+        "CREATE MATERIALIZED VIEW ",
+        "CREATE TABLE IF NOT EXISTS ",
+        "CREATE TABLE ",
+        "CREATE INDEX IF NOT EXISTS ",
+        "CREATE INDEX ",
+        "DROP VIEW IF EXISTS ",
+        "DROP VIEW ",
+        "DROP TABLE IF EXISTS ",
+        "DROP TABLE ",
+    ] {
+        if upper.starts_with(kw) {
+            let rest = sql.trim()[kw.len()..].trim_start();
+            let name = rest
+                .split(|c: char| c.is_whitespace() || c == '(' || c == '"' || c == ';')
+                .next()
+                .filter(|s| !s.is_empty());
+            if let Some(n) = name {
+                return Some(n.to_string());
+            }
+        }
+    }
+    if upper.starts_with("SELECT ")
+        && let Some(from_pos) = upper.find(" FROM ")
+    {
+        let rest = sql.trim()[from_pos + 6..].trim_start();
+        let name = rest
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
+            .next()
+            .filter(|s| !s.is_empty());
+        if let Some(n) = name {
+            return Some(n.to_string());
+        }
+    }
+    None
+}
+
+/// Phase 2: drop every statement touching one table/view in a single batch,
+/// largest groups first.
+fn minimize_table_groups(
+    mut kept: Vec<Directive>,
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> (Vec<Directive>, usize) {
     println!("--- Phase 2: Remove table groups ---");
     let mut removed = 0;
-    {
-        let mut table_groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-        for (i, d) in kept.iter().enumerate() {
-            if let Directive::Sql { sql, .. } = d {
-                let upper = sql.trim().to_uppercase();
-                let table = extract_table_name(sql).or_else(|| {
-                    for kw in [
-                        "CREATE MATERIALIZED VIEW IF NOT EXISTS ",
-                        "CREATE MATERIALIZED VIEW ",
-                        "CREATE TABLE IF NOT EXISTS ",
-                        "CREATE TABLE ",
-                        "CREATE INDEX IF NOT EXISTS ",
-                        "CREATE INDEX ",
-                        "DROP VIEW IF EXISTS ",
-                        "DROP VIEW ",
-                        "DROP TABLE IF EXISTS ",
-                        "DROP TABLE ",
-                    ] {
-                        if upper.starts_with(kw) {
-                            let rest = sql.trim()[kw.len()..].trim_start();
-                            let name = rest
-                                .split(|c: char| {
-                                    c.is_whitespace() || c == '(' || c == '"' || c == ';'
-                                })
-                                .next()
-                                .filter(|s| !s.is_empty());
-                            if let Some(n) = name {
-                                return Some(n.to_string());
-                            }
-                        }
-                    }
-                    if upper.starts_with("SELECT ")
-                        && let Some(from_pos) = upper.find(" FROM ")
-                    {
-                        let rest = sql.trim()[from_pos + 6..].trim_start();
-                        let name = rest
-                            .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
-                            .next()
-                            .filter(|s| !s.is_empty());
-                        if let Some(n) = name {
-                            return Some(n.to_string());
-                        }
-                    }
-                    None
-                });
-                if let Some(t) = table {
-                    table_groups.entry(t.to_lowercase()).or_default().push(i);
-                }
-            }
+    let mut table_groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, d) in kept.iter().enumerate() {
+        if let Directive::Sql { sql, .. } = d
+            && let Some(t) = group_table_name(sql)
+        {
+            table_groups.entry(t.to_lowercase()).or_default().push(i);
         }
-
-        let mut groups: Vec<(String, Vec<usize>)> = table_groups.into_iter().collect();
-        groups.sort_by_key(|g| std::cmp::Reverse(g.1.len()));
-
-        println!("  Found {} table groups", groups.len());
-        for (table, indices) in &groups {
-            let last_idx = kept.len() - 1;
-            if indices.contains(&last_idx) {
-                println!(
-                    "  [{table}] ({} stmts) — contains crashing stmt, skip",
-                    indices.len()
-                );
-                continue;
-            }
-
-            print!(
-                "  [{table}] ({} stmts, indices {}..{})... ",
-                indices.len(),
-                indices.first().unwrap(),
-                indices.last().unwrap()
-            );
-
-            if let Some(candidate) =
-                try_remove_batch(&kept, indices, &crash_pattern, needs_per_stmt_check)
-            {
-                println!("REMOVED all {} stmts", indices.len());
-                removed += indices.len();
-                kept = candidate;
-            } else {
-                println!("needed");
-            }
-        }
-        println!(
-            "  Removed {removed} via table groups, {} remaining\n",
-            kept.len()
-        );
     }
 
-    // Phase 3: ddmin-style chunk removal
-    println!("--- Phase 3: Chunk removal (ddmin) ---");
-    let phase3_start = removed;
-    {
-        let mut chunk_size = kept.len() / 2;
-        while chunk_size >= 1 {
-            let mut offset = 0;
-            let mut any_removed = false;
-            while offset < kept.len().saturating_sub(1) {
-                let end = (offset + chunk_size).min(kept.len() - 1);
-                if offset >= end {
-                    offset += chunk_size;
-                    continue;
-                }
-                let indices: Vec<usize> = (offset..end).collect();
-                let chunk_preview = if let Directive::Sql { sql, .. } = &kept[offset] {
-                    let p: String = sql.chars().take(40).collect();
-                    format!("{p}...")
-                } else {
-                    format!("{:?}", kept[offset])
-                };
+    let mut groups: Vec<(String, Vec<usize>)> = table_groups.into_iter().collect();
+    groups.sort_by_key(|g| std::cmp::Reverse(g.1.len()));
 
-                print!(
-                    "  chunk [{offset}..{end}) of {} (size {chunk_size}): {chunk_preview} ",
-                    kept.len()
-                );
+    println!("  Found {} table groups", groups.len());
+    for (table, indices) in &groups {
+        let last_idx = kept.len() - 1;
+        if indices.contains(&last_idx) {
+            println!(
+                "  [{table}] ({} stmts) — contains crashing stmt, skip",
+                indices.len()
+            );
+            continue;
+        }
 
-                if let Some(candidate) =
-                    try_remove_batch(&kept, &indices, &crash_pattern, needs_per_stmt_check)
-                {
-                    println!("REMOVED {} stmts", indices.len());
-                    removed += indices.len();
-                    kept = candidate;
-                    any_removed = true;
-                } else {
-                    println!("needed");
-                    offset += chunk_size;
-                }
-            }
-            if !any_removed {
-                chunk_size /= 2;
-            }
+        print!(
+            "  [{table}] ({} stmts, indices {}..{})... ",
+            indices.len(),
+            indices.first().unwrap(),
+            indices.last().unwrap()
+        );
+
+        if let Some(candidate) =
+            try_remove_batch(&kept, indices, crash_pattern, needs_per_stmt_check)
+        {
+            println!("REMOVED all {} stmts", indices.len());
+            removed += indices.len();
+            kept = candidate;
+        } else {
+            println!("needed");
         }
     }
     println!(
-        "  Removed {} via chunks, {} remaining\n",
-        removed - phase3_start,
+        "  Removed {removed} via table groups, {} remaining\n",
         kept.len()
     );
+    (kept, removed)
+}
 
-    // Phase 4: Remove individual DML statements
+/// Phase 3: ddmin-style chunk removal, halving the chunk size when a pass
+/// removes nothing.
+fn minimize_chunks(
+    mut kept: Vec<Directive>,
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> (Vec<Directive>, usize) {
+    println!("--- Phase 3: Chunk removal (ddmin) ---");
+    let mut removed = 0;
+    let mut chunk_size = kept.len() / 2;
+    while chunk_size >= 1 {
+        let mut offset = 0;
+        let mut any_removed = false;
+        while offset < kept.len().saturating_sub(1) {
+            let end = (offset + chunk_size).min(kept.len() - 1);
+            if offset >= end {
+                offset += chunk_size;
+                continue;
+            }
+            let indices: Vec<usize> = (offset..end).collect();
+            let chunk_preview = if let Directive::Sql { sql, .. } = &kept[offset] {
+                let p: String = sql.chars().take(40).collect();
+                format!("{p}...")
+            } else {
+                format!("{:?}", kept[offset])
+            };
+
+            print!(
+                "  chunk [{offset}..{end}) of {} (size {chunk_size}): {chunk_preview} ",
+                kept.len()
+            );
+
+            if let Some(candidate) =
+                try_remove_batch(&kept, &indices, crash_pattern, needs_per_stmt_check)
+            {
+                println!("REMOVED {} stmts", indices.len());
+                removed += indices.len();
+                kept = candidate;
+                any_removed = true;
+            } else {
+                println!("needed");
+                offset += chunk_size;
+            }
+        }
+        if !any_removed {
+            chunk_size /= 2;
+        }
+    }
+    println!("  Removed {removed} via chunks, {} remaining\n", kept.len());
+    (kept, removed)
+}
+
+/// Phase 4: remove individual non-structural (DML) statements, walking from
+/// the end toward the start.
+fn minimize_individual_dml(
+    mut kept: Vec<Directive>,
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> (Vec<Directive>, usize) {
     println!("--- Phase 4: Remove individual DML statements ---");
-    let phase4_start = removed;
+    let mut removed = 0;
     let mut i = kept.len().saturating_sub(2);
     loop {
         if is_structural(&kept[i]) || matches!(kept[i], Directive::SetChangeCallback) {
@@ -2159,7 +2277,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         let preview = directive_preview(&kept[i]);
         print!("  [{i}/{}] remove: {preview}... ", kept.len());
 
-        if let Some(candidate) = try_remove(&kept, i, &crash_pattern, needs_per_stmt_check) {
+        if let Some(candidate) = try_remove(&kept, i, crash_pattern, needs_per_stmt_check) {
             println!("REMOVED");
             kept = candidate;
             removed += 1;
@@ -2173,14 +2291,21 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         i -= 1;
     }
     println!(
-        "  Removed {} DML statements, {} remaining\n",
-        removed - phase4_start,
+        "  Removed {removed} DML statements, {} remaining\n",
         kept.len()
     );
+    (kept, removed)
+}
 
-    // Phase 5: Remove individual DDL statements
+/// Phase 5: remove individual structural (DDL) statements, attempting to drop
+/// each together with the statements that reference its table first.
+fn minimize_individual_ddl(
+    mut kept: Vec<Directive>,
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> (Vec<Directive>, usize) {
     println!("--- Phase 5: Remove individual DDL statements ---");
-    let phase5_start = removed;
+    let mut removed = 0;
     let mut i = kept.len().saturating_sub(2);
     loop {
         if !is_structural(&kept[i]) || matches!(kept[i], Directive::SetChangeCallback) {
@@ -2224,7 +2349,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
             let mut all_indices = batch_indices.clone();
             all_indices.push(i);
             if let Some(candidate) =
-                try_remove_batch(&kept, &all_indices, &crash_pattern, needs_per_stmt_check)
+                try_remove_batch(&kept, &all_indices, crash_pattern, needs_per_stmt_check)
             {
                 println!("REMOVED (+ {} dependents)", batch_indices.len());
                 removed += all_indices.len();
@@ -2234,7 +2359,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         }
 
         if !did_remove {
-            if let Some(candidate) = try_remove(&kept, i, &crash_pattern, needs_per_stmt_check) {
+            if let Some(candidate) = try_remove(&kept, i, crash_pattern, needs_per_stmt_check) {
                 println!("REMOVED");
                 kept = candidate;
                 removed += 1;
@@ -2253,14 +2378,21 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         }
     }
     println!(
-        "  Removed {} DDL statements, {} remaining\n",
-        removed - phase5_start,
+        "  Removed {removed} DDL statements, {} remaining\n",
         kept.len()
     );
+    (kept, removed)
+}
 
-    // Phase 6: Final cleanup
+/// Phase 6: final pass removing any remaining directive except the CDC
+/// callback registration.
+fn minimize_final_cleanup(
+    mut kept: Vec<Directive>,
+    crash_pattern: &str,
+    needs_per_stmt_check: bool,
+) -> (Vec<Directive>, usize) {
     println!("--- Phase 6: Final cleanup ---");
-    let phase6_start = removed;
+    let mut removed = 0;
     let mut i = kept.len().saturating_sub(2);
     loop {
         if matches!(kept[i], Directive::SetChangeCallback) {
@@ -2274,7 +2406,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         let preview = directive_preview(&kept[i]);
         print!("  [{i}/{}] remove: {preview}... ", kept.len());
 
-        if let Some(candidate) = try_remove(&kept, i, &crash_pattern, needs_per_stmt_check) {
+        if let Some(candidate) = try_remove(&kept, i, crash_pattern, needs_per_stmt_check) {
             println!("REMOVED");
             kept = candidate;
             removed += 1;
@@ -2288,21 +2420,16 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         i -= 1;
     }
     println!(
-        "  Removed {} more statements, {} remaining\n",
-        removed - phase6_start,
+        "  Removed {removed} more statements, {} remaining\n",
         kept.len()
     );
+    (kept, removed)
+}
 
-    println!(
-        "=== Minimized: {} directives (removed {removed} total) ===",
-        kept.len()
-    );
-
-    write_directives(&output_path, &kept)?;
-    println!("Written to: {output_path}");
-
+/// Print the minimized reproducer as replay-file directives on stdout.
+fn print_minimal_reproducer(kept: &[Directive]) {
     println!("\n--- Minimal SQL reproducer ---");
-    for d in &kept {
+    for d in kept {
         match d {
             Directive::SetChangeCallback => println!("-- !SET_CHANGE_CALLBACK"),
             Directive::Wait(ms) => println!("-- Wait {ms}ms"),
@@ -2317,6 +2444,48 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
+    let directives = parse_replay_file(&args.replay_file)?;
+    let output_path = args
+        .output
+        .clone()
+        .unwrap_or_else(|| args.replay_file.replace(".sql", "-minimal.sql"));
+    let crash_pattern = match &args.crash_pattern {
+        Some(p) => p.clone(),
+        None => detect_crash_pattern(&directives),
+    };
+
+    println!("=== Minimizer: {} directives ===", directives.len());
+    println!("  Crash pattern: {crash_pattern}\n");
+
+    let needs = probe_needs_per_stmt_check(&directives, &crash_pattern);
+
+    let mut kept = minimize_find_prefix(&directives, &crash_pattern, needs);
+    let mut removed = 0;
+    let phases: [MinimizePhase; 5] = [
+        minimize_table_groups,
+        minimize_chunks,
+        minimize_individual_dml,
+        minimize_individual_ddl,
+        minimize_final_cleanup,
+    ];
+    for phase in phases {
+        let (next, n) = phase(kept, &crash_pattern, needs);
+        kept = next;
+        removed += n;
+    }
+
+    println!(
+        "=== Minimized: {} directives (removed {removed} total) ===",
+        kept.len()
+    );
+
+    write_directives(&output_path, &kept)?;
+    println!("Written to: {output_path}");
+
+    print_minimal_reproducer(&kept);
 
     Ok(())
 }
@@ -2358,4 +2527,294 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statement_kind_classifies_dml_query_other() {
+        assert_eq!(statement_kind("INSERT INTO t VALUES (1)"), StmtKind::Dml);
+        assert_eq!(statement_kind("  update t set x = 1"), StmtKind::Dml);
+        assert_eq!(statement_kind("DELETE FROM t"), StmtKind::Dml);
+        assert_eq!(statement_kind("REPLACE INTO t VALUES (1)"), StmtKind::Dml);
+        assert_eq!(statement_kind("SELECT * FROM t"), StmtKind::Query);
+        assert_eq!(
+            statement_kind("WITH cte AS (SELECT 1) SELECT * FROM cte"),
+            StmtKind::Query
+        );
+        assert_eq!(statement_kind("CREATE TABLE t (id TEXT)"), StmtKind::Other);
+        assert_eq!(statement_kind(""), StmtKind::Other);
+        // A bare identifier prefix must not be mistaken for a keyword.
+        assert_eq!(statement_kind("INSERTED something"), StmtKind::Other);
+    }
+
+    #[test]
+    fn replay_verdict_priority_order() {
+        // data mismatch dominates everything.
+        assert_eq!(
+            replay_verdict(true, true, true),
+            ReplayVerdict::BugReproduced
+        );
+        // panic without mismatch.
+        assert_eq!(
+            replay_verdict(false, true, true),
+            ReplayVerdict::PanicCaptured
+        );
+        // nothing wrong.
+        assert_eq!(replay_verdict(false, false, false), ReplayVerdict::Clean);
+        // only non-mismatch inconsistencies (e.g. query errors).
+        assert_eq!(
+            replay_verdict(false, false, true),
+            ReplayVerdict::QueryErrorsOnly
+        );
+    }
+
+    #[test]
+    fn escape_sql_string_doubles_quotes() {
+        assert_eq!(escape_sql_string("abc"), "'abc'");
+        assert_eq!(escape_sql_string("O'Brien"), "'O''Brien'");
+        assert_eq!(escape_sql_string(""), "''");
+    }
+
+    #[test]
+    fn sql_has_open_literal_counts_quotes() {
+        assert!(!sql_has_open_literal("SELECT 'abc'"));
+        assert!(sql_has_open_literal("SELECT 'abc"));
+        // SQLite escapes an apostrophe as '' — an even number of quotes.
+        assert!(!sql_has_open_literal("INSERT INTO t VALUES ('a''b')"));
+        assert!(!sql_has_open_literal("no quotes here"));
+    }
+
+    #[test]
+    fn extract_matview_names_create_and_drop() {
+        let names =
+            extract_matview_names(&["CREATE MATERIALIZED VIEW foo AS SELECT 1".to_string()]);
+        assert_eq!(names, vec!["foo"]);
+
+        let names = extract_matview_names(&[
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS bar AS SELECT 1".to_string(),
+        ]);
+        assert_eq!(names, vec!["bar"]);
+
+        // DROP removes a previously created matview from the active set.
+        let names = extract_matview_names(&[
+            "CREATE MATERIALIZED VIEW foo AS SELECT 1".to_string(),
+            "DROP VIEW foo".to_string(),
+        ]);
+        assert!(names.is_empty());
+
+        let names = extract_matview_names(&[
+            "CREATE MATERIALIZED VIEW foo AS SELECT 1".to_string(),
+            "DROP MATERIALIZED VIEW IF EXISTS foo;".to_string(),
+        ]);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn parse_track_id_args_with_and_without_tables() {
+        let trackers = parse_track_id_args(&["abc".to_string()]);
+        assert_eq!(trackers.len(), 1);
+        assert_eq!(trackers[0].id, "abc");
+        assert_eq!(trackers[0].tables, vec!["block_raw", "block"]);
+
+        let trackers = parse_track_id_args(&["block_raw,block=xyz".to_string()]);
+        assert_eq!(trackers[0].id, "xyz");
+        assert_eq!(trackers[0].tables, vec!["block_raw", "block"]);
+    }
+
+    #[test]
+    fn parse_assert_directive_variants_and_errors() {
+        match parse_assert_directive("ROW-EXISTS block 'block:abc'").unwrap() {
+            AssertKind::RowExists { table, id } => {
+                assert_eq!(table, "block");
+                assert_eq!(id, "block:abc");
+            }
+            other => panic!("expected RowExists, got {other:?}"),
+        }
+        match parse_assert_directive("row-absent block xyz").unwrap() {
+            AssertKind::RowAbsent { table, id } => {
+                assert_eq!(table, "block");
+                assert_eq!(id, "xyz");
+            }
+            other => panic!("expected RowAbsent, got {other:?}"),
+        }
+        match parse_assert_directive("ROW-COUNT block 17").unwrap() {
+            AssertKind::RowCount { table, count } => {
+                assert_eq!(table, "block");
+                assert_eq!(count, 17);
+            }
+            other => panic!("expected RowCount, got {other:?}"),
+        }
+        assert!(parse_assert_directive("ROW-COUNT block notanumber").is_err());
+        assert!(parse_assert_directive("BOGUS table value").is_err());
+        assert!(parse_assert_directive("ROW-EXISTS onlyonearg").is_err());
+    }
+
+    #[test]
+    fn describe_assertion_round_trips_through_parse() {
+        for kind in [
+            AssertKind::RowExists {
+                table: "block".into(),
+                id: "abc".into(),
+            },
+            AssertKind::RowAbsent {
+                table: "block".into(),
+                id: "abc".into(),
+            },
+            AssertKind::RowCount {
+                table: "block".into(),
+                count: 5,
+            },
+        ] {
+            let described = describe_assertion(&kind);
+            let reparsed = parse_assert_directive(&described).unwrap();
+            assert_eq!(describe_assertion(&reparsed), described);
+        }
+    }
+
+    #[test]
+    fn is_structural_classifies_directives() {
+        assert!(is_structural(&Directive::SetChangeCallback));
+        assert!(is_structural(&Directive::Assert(AssertKind::RowCount {
+            table: "t".into(),
+            count: 0,
+        })));
+        assert!(!is_structural(&Directive::Wait(5)));
+        assert!(is_structural(&Directive::Sql {
+            tag: "t".into(),
+            sql: "CREATE TABLE t (id TEXT)".into(),
+        }));
+        assert!(!is_structural(&Directive::Sql {
+            tag: "t".into(),
+            sql: "INSERT INTO t VALUES (1)".into(),
+        }));
+    }
+
+    #[test]
+    fn group_table_name_covers_dml_ddl_and_select() {
+        assert_eq!(
+            group_table_name("INSERT INTO block VALUES (1)").as_deref(),
+            Some("block")
+        );
+        assert_eq!(
+            group_table_name("CREATE TABLE IF NOT EXISTS foo (id TEXT)").as_deref(),
+            Some("foo")
+        );
+        assert_eq!(
+            group_table_name("CREATE MATERIALIZED VIEW bar AS SELECT 1").as_deref(),
+            Some("bar")
+        );
+        assert_eq!(
+            group_table_name("CREATE INDEX idx_foo ON foo(a, b)").as_deref(),
+            Some("idx_foo")
+        );
+        assert_eq!(group_table_name("DROP TABLE foo").as_deref(), Some("foo"));
+        assert_eq!(
+            group_table_name("SELECT * FROM block WHERE id = 'x'").as_deref(),
+            Some("block")
+        );
+        assert_eq!(group_table_name("PRAGMA foreign_keys = ON"), None);
+    }
+
+    #[test]
+    fn extract_table_name_for_dml() {
+        assert_eq!(
+            extract_table_name("INSERT INTO block (id) VALUES ('x')").as_deref(),
+            Some("block")
+        );
+        assert_eq!(
+            extract_table_name("INSERT OR REPLACE INTO block VALUES ('x')").as_deref(),
+            Some("block")
+        );
+        assert_eq!(
+            extract_table_name("DELETE FROM block WHERE id = 'x'").as_deref(),
+            Some("block")
+        );
+        assert_eq!(
+            extract_table_name("UPDATE block SET x = 1").as_deref(),
+            Some("block")
+        );
+        assert_eq!(extract_table_name("SELECT * FROM block"), None);
+    }
+
+    #[test]
+    fn should_include_filters_by_table_ignoring_string_literals() {
+        let block = vec!["block".to_string()];
+        let other = vec!["other".to_string()];
+        let empty: Vec<String> = vec![];
+
+        assert!(should_include("SELECT * FROM block", &block, &empty));
+        assert!(!should_include("SELECT * FROM block", &other, &empty));
+        assert!(!should_include("SELECT * FROM block", &empty, &block));
+        assert!(should_include("SELECT * FROM block", &empty, &other));
+        assert!(should_include("SELECT * FROM block", &empty, &empty));
+
+        // A table name appearing only inside a quoted string must not match.
+        assert!(!should_include(
+            "INSERT INTO foo VALUES ('block')",
+            &block,
+            &empty
+        ));
+    }
+
+    #[test]
+    fn inline_named_params_substitutes() {
+        let out = inline_named_params("SELECT $id, $name", r#"id=Integer(5) name=String("bob")"#);
+        assert_eq!(out, "SELECT 5, 'bob'");
+        assert_eq!(inline_named_params("SELECT $x", "x=Null"), "SELECT NULL");
+    }
+
+    #[test]
+    fn inline_positional_params_substitutes_in_order() {
+        let out = inline_positional_params(
+            "INSERT INTO t VALUES (?, ?, ?)",
+            r#"[Text("a"), Integer(5), Null]"#,
+        );
+        assert_eq!(out, "INSERT INTO t VALUES ('a', 5, NULL)");
+    }
+
+    #[test]
+    fn parse_timestamp_truncates_submicros_and_rejects_garbage() {
+        assert!(parse_timestamp("2026-03-19T17:16:01.730043").is_ok());
+        // >6 fractional digits are truncated to microseconds, still valid.
+        assert!(parse_timestamp("2026-03-19T17:16:01.730043999").is_ok());
+        assert!(parse_timestamp("not-a-timestamp").is_err());
+    }
+
+    #[test]
+    fn directive_preview_renders_sql_and_others() {
+        assert_eq!(
+            directive_preview(&Directive::Sql {
+                tag: "t".into(),
+                sql: "SELECT 1".into(),
+            }),
+            "SELECT 1"
+        );
+        assert_eq!(directive_preview(&Directive::Wait(5)), "Wait(5)");
+    }
+
+    #[test]
+    fn write_then_parse_round_trips_directives() {
+        let original = vec![
+            Directive::SetChangeCallback,
+            Directive::Wait(5),
+            Directive::Sql {
+                tag: "actor_exec".into(),
+                sql: "INSERT INTO t VALUES (1)".into(),
+            },
+            Directive::Assert(AssertKind::RowCount {
+                table: "t".into(),
+                count: 1,
+            }),
+        ];
+        let tmp = tempfile::NamedTempFile::with_suffix(".sql").unwrap();
+        let path = tmp.path().to_str().unwrap();
+        write_directives(path, &original).unwrap();
+
+        let parsed = parse_replay_file(path).unwrap();
+        let fmt = |ds: &[Directive]| ds.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>();
+        assert_eq!(fmt(&parsed), fmt(&original));
+    }
 }

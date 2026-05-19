@@ -7,11 +7,11 @@
 :ID: default-left-sidebar
 :collapse_to: drawer
 :END:
-#+BEGIN_SRC render :id block:left_sidebar::render::0
+#+BEGIN_SRC render :id left_sidebar::render::0
 tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
 #+END_SRC
-#+BEGIN_SRC holon_sql :id block:left_sidebar::src::0
-SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'sentinel:no_parent'
+#+BEGIN_SRC holon_sql :id left_sidebar::src::0
+SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__'
 #+END_SRC
 ** Main Panel
 :PROPERTIES:

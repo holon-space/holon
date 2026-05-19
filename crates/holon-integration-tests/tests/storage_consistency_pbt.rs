@@ -34,7 +34,6 @@
 
 #![cfg(feature = "pbt")]
 
-use std::marker::PhantomData;
 use std::time::Instant;
 
 use proptest::strategy::Strategy;
@@ -42,26 +41,17 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
 use holon_integration_tests::declare_pbt_slice;
 use holon_integration_tests::pbt::enable_atomic_editor_if_unset;
-use holon_integration_tests::pbt::invariants::bodies::block_tags_references_exist::InvBlockTagsReferencesExist;
-use holon_integration_tests::pbt::invariants::bodies::loro_no_errors::InvLoroNoErrors;
 use holon_integration_tests::pbt::transitions::{
     AddPeer, BulkExternalAdd, DeleteBackward, Indent, JoinBlock, MergeFromPeer, MoveDown, MoveUp,
-    Outdent, PeerCharEdit, PeerEdit, SplitBlock, StartApp, SyncWithPeer, TypeChars, WriteOrgFile,
+    Outdent, PeerCharEdit, PeerEdit, SplitBlock, SyncWithPeer, TypeChars,
 };
 
 declare_pbt_slice! {
     test_fn: storage_consistency_pbt,
-    machine: StorageConsistencyMachine,
-    sut_wrapper: StorageConsistencySut,
     variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
     inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
     transitions: [
-        StartApp,
-        (
-            WriteOrgFile,
-            "skip index.org (CDC quiescence race)",
-            |t: &WriteOrgFile| t.filename != "index.org",
-        ),
+        preset lifecycle,
         BulkExternalAdd,
         AddPeer,
         PeerEdit,
@@ -77,10 +67,7 @@ declare_pbt_slice! {
         TypeChars,
         DeleteBackward,
     ],
-    invariants: [
-        InvLoroNoErrors,
-        InvBlockTagsReferencesExist(PhantomData::<holon_integration_tests::pbt::ReferenceState>),
-    ],
+    invariants: [preset storage],
     cases: 16,
     max_shrink_iters: 20,
     steps: 1..10,
@@ -103,27 +90,28 @@ fn storage_consistency_microbenchmark() {
     let mut runner = proptest::test_runner::TestRunner::default();
 
     for _ in 0..cases {
-        let state_tree = match StorageConsistencyMachine::init_state().new_tree(&mut runner) {
+        let state_tree = match StorageConsistencyPbtMachine::init_state().new_tree(&mut runner) {
             Ok(t) => t,
             Err(_) => continue,
         };
         let mut ref_state = state_tree.current();
 
-        let sut = StorageConsistencySut::init_test(&ref_state);
+        let sut = StorageConsistencyPbtSut::init_test(&ref_state);
         let mut sut = sut;
 
         for _ in 0..steps_per_case {
-            let strategy = StorageConsistencyMachine::transitions(&ref_state);
+            let strategy = StorageConsistencyPbtMachine::transitions(&ref_state);
             let transition = match strategy.new_tree(&mut runner) {
                 Ok(t) => t.current(),
                 Err(_) => break,
             };
-            if !StorageConsistencyMachine::preconditions(&ref_state, &transition) {
+            if !StorageConsistencyPbtMachine::preconditions(&ref_state, &transition) {
                 break;
             }
-            ref_state = StorageConsistencyMachine::apply(ref_state, &transition);
-            sut = <StorageConsistencySut as StateMachineTest>::apply(sut, &ref_state, transition);
-            <StorageConsistencySut as StateMachineTest>::check_invariants(&sut, &ref_state);
+            ref_state = StorageConsistencyPbtMachine::apply(ref_state, &transition);
+            sut =
+                <StorageConsistencyPbtSut as StateMachineTest>::apply(sut, &ref_state, transition);
+            <StorageConsistencyPbtSut as StateMachineTest>::check_invariants(&sut, &ref_state);
             total_transitions += 1;
         }
     }

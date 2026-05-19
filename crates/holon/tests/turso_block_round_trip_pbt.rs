@@ -149,9 +149,6 @@ proptest! {
     }
 
     /// Full Block round-trip via `CacheBlockReader::get_blocks(doc_id)`.
-    /// **Currently red on tag mismatch** — the production hydration bug
-    /// that this PBT exists to gate. Will go green after Task #5
-    /// (CacheBlockReader hydration) lands.
     #[test]
     fn block_round_trips_through_cache_block_reader(headlines in root_headlines_strategy()) {
         let rt = Runtime::new().unwrap();

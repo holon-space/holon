@@ -103,12 +103,14 @@ impl LayoutRefState for ReferenceState {
     }
 }
 
-/// Wrap `&mut dyn SutHandle` so it satisfies the capability traits the
-/// shared `apply_to_sut` bodies require. Construct at the dispatch
-/// site: `let mut sut = SutClickAdapter(handle); let mut layout_sut = LayoutSut::new(&mut sut);`.
-pub struct SutClickAdapter<'a>(pub &'a mut dyn SutHandle);
+/// Wrap `&mut S` (any `S: SutHandle`) so it satisfies the capability
+/// traits the shared `apply_to_sut` bodies require. Construct at the
+/// dispatch site: `let mut sut = SutClickAdapter(handle); let mut
+/// layout_sut = LayoutSut::new(&mut sut);`. Generic over `S` since
+/// `SutHandle` is no longer `dyn`-dispatched (concrete-`S` dispatch).
+pub struct SutClickAdapter<'a, S: SutHandle>(pub &'a mut S);
 
-impl Clickable for SutClickAdapter<'_> {
+impl<S: SutHandle> Clickable for SutClickAdapter<'_, S> {
     fn click_at_element(&mut self, element_id: &str) {
         // The shared `apply_to_sut` bodies are async; the SutHandle method is
         // too. We're already inside a tokio runtime (the integration-tests
@@ -121,7 +123,7 @@ impl Clickable for SutClickAdapter<'_> {
     }
 }
 
-impl LiveBlockSink for SutClickAdapter<'_> {
+impl<S: SutHandle> LiveBlockSink for SutClickAdapter<'_, S> {
     fn deliver_block_content_loaded(&mut self, block_id: &str) {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()

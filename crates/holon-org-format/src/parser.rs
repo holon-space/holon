@@ -842,13 +842,18 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Parse `content` as `/test/file.org` rooted at `/test` with no parent —
+    /// the standard fixture for parser unit tests.
+    fn parse_test_org(content: &str) -> ParseResult {
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap()
+    }
+
     #[test]
     fn test_parse_simple_headlines() {
         let content = "* First headline\n** Nested headline\n* Second headline";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         assert_eq!(result.blocks.len(), 3);
         assert_eq!(result.blocks[0].org_title(), "First headline");
@@ -860,10 +865,7 @@ mod tests {
     #[test]
     fn test_parse_todo_and_priority() {
         let content = "* TODO [#A] Important task :work:urgent:";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         assert_eq!(result.blocks.len(), 1);
         let h = &result.blocks[0];
@@ -877,9 +879,7 @@ mod tests {
         // Bare slugs in :REQUIRES: must be promoted to `block:` URIs so the
         // junction table's required_id matches block.id at JOIN time.
         let content = "* TODO Task\n:PROPERTIES:\n:ID: t1\n:REQUIRES: foo, bar baz\n:END:\n";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         let h = result.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
         assert_eq!(
@@ -896,9 +896,7 @@ mod tests {
     #[test]
     fn test_parse_requires_preserves_existing_block_uris() {
         let content = "* TODO Task\n:PROPERTIES:\n:ID: t2\n:REQUIRES: block:foo\n:END:\n";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
         assert_eq!(h.requires, vec!["block:foo".to_string()]);
@@ -908,10 +906,7 @@ mod tests {
     fn test_default_keywords_without_todo_config() {
         // Files without #+TODO: should still recognize DOING from DEFAULT_ACTIVE_KEYWORDS
         let content = "* DOING Work in progress\n* DONE Finished task\n* CANCELLED Dropped task";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         assert_eq!(result.blocks.len(), 3);
         assert_eq!(
@@ -931,10 +926,7 @@ mod tests {
     #[test]
     fn test_parse_title_and_todo_keywords() {
         let content = "#+TITLE: My Document\n#+TODO: TODO INPROGRESS | DONE CANCELLED\n* Task";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         assert_eq!(
             result.document.file_title(),
@@ -977,10 +969,7 @@ mod tests {
     #[test]
     fn test_parse_hyphenated_drawer_property() {
         let content = "* Y1\n:PROPERTIES:\n:ID: bulk-3-0\n:column-order: 6gnLm\n:END:\n";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
         assert_eq!(result.blocks.len(), 1);
         let block = &result.blocks[0];
         eprintln!("properties: {:?}", block.properties);
@@ -997,10 +986,7 @@ mod tests {
     #[test]
     fn test_parse_existing_id_property() {
         let content = "* Headline\n:PROPERTIES:\n:ID: existing-uuid-here\n:END:";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         assert_eq!(result.blocks.len(), 1);
         assert_eq!(result.blocks[0].id.id(), "existing-uuid-here");
@@ -1010,10 +996,7 @@ mod tests {
     #[test]
     fn test_headlines_without_id_need_writeback() {
         let content = "* Headline without ID";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         assert_eq!(result.blocks.len(), 1);
         assert!(!result.headlines_needing_ids.is_empty());
@@ -1027,10 +1010,7 @@ def hello():
     print("Hello, world!")
 #+END_SRC
 "#;
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         // Should have 2 blocks: headline + source block
         assert_eq!(result.blocks.len(), 2);
@@ -1058,10 +1038,7 @@ from tasks
 filter completed == false
 #+END_SRC
 "#;
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         // Should have 2 blocks: headline + source block
         assert_eq!(result.blocks.len(), 2);
@@ -1103,10 +1080,7 @@ from users | take 10
 
 Outro text.
 "#;
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         // Should have 3 blocks: headline + 2 source blocks
         assert_eq!(result.blocks.len(), 3);
@@ -1144,10 +1118,7 @@ Outro text.
 from tasks
 #+END_SRC
 "#;
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         // Should have 2 blocks: headline + source block
         assert_eq!(result.blocks.len(), 2);
@@ -1191,10 +1162,7 @@ from users
 print("hello")
 #+END_SRC
 "#;
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         // Should have 4 blocks: headline + 3 source blocks
         assert_eq!(result.blocks.len(), 4);
@@ -1253,10 +1221,7 @@ select {id, parent_id, content, content_type}
     fn test_image_block_parse() {
         let content =
             "* Heading with image\n:PROPERTIES:\n:ID: h1\n:END:\n[[file:attachments/photo.png]]\n";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         assert_eq!(result.blocks.len(), 2, "Expected headline + image block");
         let heading = &result.blocks[0];
@@ -1322,10 +1287,7 @@ select {id, parent_id, content, content_type}
     #[test]
     fn test_non_image_file_link_preserved_as_text() {
         let content = "* With PDF link\n:PROPERTIES:\n:ID: h1\n:END:\n[[file:docs/report.pdf]]\n";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         // PDF links should NOT create image blocks (the original test intent).
         assert_eq!(result.blocks.len(), 1, "Only the heading, no image block");
@@ -1362,9 +1324,7 @@ select {id, parent_id, content, content_type}
 
 paragraph with *bold* and /italic/ words
 ";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         let heading = &result.blocks[0];
         assert_eq!(heading.content_text(), heading.content_text());
@@ -1400,9 +1360,7 @@ paragraph with *bold* and /italic/ words
         use crate::models::ToOrg;
 
         let original = "* heading\n:PROPERTIES:\n:ID: h3\n:END:\n\nthis is *bold* and /italic/\n";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-        let result = parse_org_file(&path, original, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(original);
 
         let heading = &result.blocks[0];
         assert!(heading.marks.is_some(), "marks extracted");
@@ -1433,9 +1391,7 @@ paragraph with *bold* and /italic/ words
 
 just plain text here
 ";
-        let path = PathBuf::from("/test/file.org");
-        let root = PathBuf::from("/test");
-        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let result = parse_test_org(content);
 
         let heading = &result.blocks[0];
         assert!(heading.marks.is_none(), "no inline marks → marks=None");

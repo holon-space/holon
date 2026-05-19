@@ -9,15 +9,15 @@
 use crate::pbt::validation::{Reason, check};
 use holon_api::ContentType;
 use holon_api::entity_uri::EntityUri;
-use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
+use holon_pbt_core::capabilities::{SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::{ActiveEditor, ReferenceState};
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
@@ -34,7 +34,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
 /// scroll-into-view RPC, then keeps polling).
 pub async fn apply_focus_editable_text_to_sut<S: SutLayout + SutDriver>(
     sut: &mut S,
-    id: &CapBlockId,
+    id: &EntityUri,
 ) {
     sut.wait_for_bounds(id, Duration::from_secs(5))
         .await
@@ -51,7 +51,8 @@ pub struct FocusEditableText {
     pub block_id: EntityUri,
 }
 
-impl E2ETransitionFactory for FocusEditableText {
+impl TransitionFactory<ReferenceState> for FocusEditableText {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (text blocks in main panel) and let
         // `preconditions` be the single source of truth for which ones are
@@ -89,8 +90,9 @@ impl E2ETransitionFactory for FocusEditableText {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for FocusEditableText {
+impl TransitionRef<ReferenceState> for FocusEditableText {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let no_content_update: std::collections::HashSet<EntityUri> = state
@@ -170,12 +172,17 @@ impl E2ETransitionImpl for FocusEditableText {
         // whether the GPUI window has fully painted). inv-focus-matches-ref is gated on
         // `active_editor.is_none()` to skip exactly this window.
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for FocusEditableText {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_focus_editable_text(&self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for FocusEditableText {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE,

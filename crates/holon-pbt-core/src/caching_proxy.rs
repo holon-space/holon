@@ -27,7 +27,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use crate::capabilities::{CapBlockId, SutCdc, SutSqlProjection, SutViewModel};
+use crate::capabilities::{EntityUri, SutCdc, SutSqlProjection, SutViewModel};
 
 /// A per-tick caching view over a SUT.
 ///
@@ -41,7 +41,7 @@ pub struct CachingProxy<'a, S> {
     /// (the caller already drained, or there's nothing to drain).
     vm_emissions_cache: Option<Vec<String>>,
     cdc_in_flight_cache: RefCell<Option<bool>>,
-    all_block_ids_cache: RefCell<Option<BTreeSet<CapBlockId>>>,
+    all_block_ids_cache: RefCell<Option<BTreeSet<EntityUri>>>,
 }
 
 impl<'a, S> CachingProxy<'a, S> {
@@ -117,12 +117,12 @@ impl<'a, S: SutCdc> CachingProxy<'a, S> {
 #[allow(async_fn_in_trait)]
 impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
     /// Per-id read — no drain-once issue, uncached.
-    async fn block_row(&self, id: &CapBlockId) -> Option<Vec<String>> {
+    async fn block_row(&self, id: &EntityUri) -> Option<Vec<String>> {
         self.inner.block_row(id).await
     }
 
     /// Memoised set snapshot.
-    async fn all_block_ids(&self) -> BTreeSet<CapBlockId> {
+    async fn all_block_ids(&self) -> BTreeSet<EntityUri> {
         {
             let guard = self.all_block_ids_cache.borrow();
             if let Some(ids) = guard.clone() {
@@ -134,23 +134,27 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
         ids
     }
 
+    async fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri> {
+        self.inner.sorted_children(parent).await
+    }
+
     async fn watch_row_count(&self, query_id: &str) -> Option<usize> {
         self.inner.watch_row_count(query_id).await
     }
 
-    async fn block_raw_row(&self, id: &CapBlockId) -> Option<Vec<String>> {
+    async fn block_raw_row(&self, id: &EntityUri) -> Option<Vec<String>> {
         self.inner.block_raw_row(id).await
     }
 
-    async fn block_tag_block_ids(&self) -> BTreeSet<CapBlockId> {
+    async fn block_tag_block_ids(&self) -> BTreeSet<EntityUri> {
         self.inner.block_tag_block_ids().await
     }
 
-    async fn block_task_state(&self, id: &CapBlockId) -> Option<String> {
+    async fn block_task_state(&self, id: &EntityUri) -> Option<String> {
         self.inner.block_task_state(id).await
     }
 
-    async fn block_content(&self, id: &CapBlockId) -> Option<String> {
+    async fn block_content(&self, id: &EntityUri) -> Option<String> {
         self.inner.block_content(id).await
     }
 }

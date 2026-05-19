@@ -11,9 +11,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -22,7 +22,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JjGitInit;
 
-impl E2ETransitionFactory for JjGitInit {
+impl TransitionFactory<ReferenceState> for JjGitInit {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         JjGitInit
             .preconditions(state)
@@ -30,8 +31,9 @@ impl E2ETransitionFactory for JjGitInit {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for JjGitInit {
+impl TransitionRef<ReferenceState> for JjGitInit {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(!state.app_started, Reason::AppAlreadyStarted),
@@ -48,12 +50,17 @@ impl E2ETransitionImpl for JjGitInit {
         state.jj_initialized = true;
         state.git_initialized = true; // jj git init also creates .git
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for JjGitInit {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_jj_git_init().await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for JjGitInit {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,

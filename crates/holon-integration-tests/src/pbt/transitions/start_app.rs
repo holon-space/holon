@@ -13,10 +13,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -31,7 +31,8 @@ pub struct StartApp {
     pub enable_loro: bool,
 }
 
-impl E2ETransitionFactory for StartApp {
+impl TransitionFactory<ReferenceState> for StartApp {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = StartApp {
             wait_for_ready: true,
@@ -52,8 +53,9 @@ impl E2ETransitionFactory for StartApp {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for StartApp {
+impl TransitionRef<ReferenceState> for StartApp {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(!state.app_started, Reason::AppAlreadyStarted),
@@ -80,11 +82,19 @@ impl E2ETransitionImpl for StartApp {
             .insert("block:default-right-sidebar".to_string(), true);
 
         // The production system always seeds default layout blocks on first startup.
+        // `default_doc_uri` is the *document* the seed layout belongs to (the
+        // no-parent sentinel) — used below as the parent/doc for the index.org
+        // layout blocks and to classify them as seeds. The default page block
+        // itself has the stable id `block:__default__` (matches prod's
+        // `FrontendSession::default_doc_uri()` after the sentinel root-fix);
+        // its *document* is still the sentinel so the truth check classifies it
+        // as a seed and excludes it from the user-content comparison.
         let default_doc_uri = EntityUri::no_parent();
+        let default_doc_id = EntityUri::block("__default__");
         {
             // Add the seed page block itself (tags ⊇ ["Page"])
             let mut seed_doc_block = Block::new_text(
-                default_doc_uri.clone(),
+                default_doc_id.clone(),
                 EntityUri::no_parent(),
                 "__default__",
             );
@@ -98,11 +108,11 @@ impl E2ETransitionImpl for StartApp {
             state
                 .block_state
                 .blocks
-                .insert(default_doc_uri.clone(), seed_doc_block);
+                .insert(default_doc_id.clone(), seed_doc_block);
             state
                 .block_state
                 .block_documents
-                .insert(default_doc_uri.clone(), default_doc_uri.clone());
+                .insert(default_doc_id.clone(), default_doc_uri.clone());
 
             // Seed fixed-ID document blocks from DEFAULT_ASSETS
             for asset in holon_frontend::DEFAULT_ASSETS {
@@ -271,8 +281,11 @@ impl E2ETransitionImpl for StartApp {
             added_ts_logical,
         });
     }
+}
 
-    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for StartApp {
+    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
         sut.apply_start_app(
             state,
             self.wait_for_ready,
@@ -281,8 +294,10 @@ impl E2ETransitionImpl for StartApp {
         )
         .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for StartApp {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 200,

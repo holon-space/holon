@@ -11,9 +11,9 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, expected_mutation_sql};
@@ -35,7 +35,8 @@ pub struct ApplyMutation {
     pub event: MutationEvent,
 }
 
-impl E2ETransitionFactory for ApplyMutation {
+impl TransitionFactory<ReferenceState> for ApplyMutation {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let checks: Vec<Validated<(), Reason>> =
             vec![check(state.app_started, Reason::AppNotStarted)];
@@ -241,8 +242,9 @@ impl E2ETransitionFactory for ApplyMutation {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for ApplyMutation {
+impl TransitionRef<ReferenceState> for ApplyMutation {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> =
             vec![check(state.app_started, Reason::AppNotStarted)];
@@ -366,13 +368,18 @@ impl E2ETransitionImpl for ApplyMutation {
             _ => {}
         }
     }
+}
 
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ApplyMutation {
+    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
         sut.apply_apply_mutation(self.event.clone(), ref_state)
             .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for ApplyMutation {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let watches = state.active_watches.len();
         let blocks = state.block_state.blocks.len();

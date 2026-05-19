@@ -10,11 +10,11 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::transitions::{PeerEditOp, deterministic_peer_block_id};
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -26,7 +26,8 @@ pub struct PeerEdit {
     pub op: PeerEditOp,
 }
 
-impl E2ETransitionFactory for PeerEdit {
+impl TransitionFactory<ReferenceState> for PeerEdit {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Early gate: app started, Loro enabled, peers available.
         // `preconditions` checks peer_idx bounds and op validity.
@@ -124,8 +125,9 @@ impl E2ETransitionFactory for PeerEdit {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for PeerEdit {
+impl TransitionRef<ReferenceState> for PeerEdit {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -176,12 +178,17 @@ impl E2ETransitionImpl for PeerEdit {
             PeerEditOp::Delete { stable_id } => state.peer_apply_delete(self.peer_idx, stable_id),
         }
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for PeerEdit {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_peer_edit(self.peer_idx, &self.op).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for PeerEdit {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // PeerEdit: async CDC drain from previous transitions can land here.
         ExpectedSql {

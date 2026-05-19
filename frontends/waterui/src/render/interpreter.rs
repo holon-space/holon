@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use holon_api::render_types::{Arg, BinaryOperator, RenderExpr};
-use holon_api::{is_template_arg, Value};
+use holon_api::render_types::{Arg, RenderExpr};
+use holon_api::{eval_binary_op, is_template_arg, Value};
 use waterui::prelude::*;
 
 use super::builders;
@@ -156,62 +156,6 @@ pub fn eval_to_value(expr: &RenderExpr, ctx: &RenderContext) -> Value {
                 .collect(),
         ),
         RenderExpr::LiveBlock { block_id } => Value::String(format!("[LiveBlock: {}]", block_id)),
-    }
-}
-
-fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
-    match op {
-        BinaryOperator::Add => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a + b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
-            (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}")),
-            _ => Value::Null,
-        },
-        BinaryOperator::Sub => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a - b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
-            _ => Value::Null,
-        },
-        BinaryOperator::Mul => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a * b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
-            _ => Value::Null,
-        },
-        BinaryOperator::Div => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) if *b != 0 => Value::Integer(a / b),
-            (Value::Float(a), Value::Float(b)) if *b != 0.0 => Value::Float(a / b),
-            _ => Value::Null,
-        },
-        BinaryOperator::Eq => Value::Boolean(left == right),
-        BinaryOperator::Neq => Value::Boolean(left != right),
-        BinaryOperator::Gt => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a > b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a > b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Lt => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a < b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a < b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Gte => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a >= b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a >= b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Lte => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a <= b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a <= b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::And => match (left, right) {
-            (Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a && *b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Or => match (left, right) {
-            (Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a || *b),
-            _ => Value::Boolean(false),
-        },
     }
 }
 

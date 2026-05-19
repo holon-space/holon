@@ -199,6 +199,7 @@ Detailed documentation lives in `docs/arch/`:
 | [schema.md](docs/Architecture/Schema.md) | SchemaModule System, Entity Type System, FieldLifetime, Value Types |
 | [engine.md](docs/Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
 | [sync.md](docs/Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, EventBus, P2P, Consistency Model |
+| [replication.md](docs/Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
 | [archlint.md](docs/Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
 
 See also [wiki/overview.md](wiki/overview.md) for the navigational layer and [wiki/index.md](wiki/index.md) for per-crate / per-concept pages.

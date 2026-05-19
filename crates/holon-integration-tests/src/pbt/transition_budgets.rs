@@ -82,6 +82,15 @@ pub struct ExpectedSql {
     pub tolerance: usize,
 }
 
+/// Per-transition SQL budget. Separated from the behaviour trait
+/// (`holon_pbt_core::TransitionImpl`) because the budget is an
+/// integration-test concern that has no meaning for the layout /
+/// editor-pure PBTs — those slices never touch SQL. Each transition
+/// variant implements this; the `E2ETransition` enum dispatches it.
+pub trait SqlBudget {
+    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql;
+}
+
 /// Compute expected SQL counts for a transition given the current reference state.
 ///
 /// The formulas are derived from SQL span analysis (HOLON_PERF_DETAIL=1, 2026-04-05).
@@ -97,7 +106,6 @@ pub fn expected_sql(
     transition: &crate::pbt::transitions::E2ETransition,
     ref_state: &ReferenceState,
 ) -> ExpectedSql {
-    use crate::pbt::transitions::E2ETransitionImpl;
     transition.expected_sql(ref_state)
 }
 

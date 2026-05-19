@@ -35,14 +35,15 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-// NOTE — Phase 1 draft uses stringly-typed identifiers and owned values
-// so this crate doesn't grow `holon-api` as a dep before the migration
-// commits to it. Phase 2's blanket impls translate at the boundary.
+pub use holon_api::EntityUri;
 
-/// Stringly-typed block identifier as carried in capability-trait
-/// signatures. The wide PBT uses `holon_api::EntityUri`; the pure slice
-/// can use any `Into<String>` newtype. Concrete impls translate.
-pub type CapBlockId = String;
+/// Block identifier carried in capability-trait signatures. Aliased to
+/// the real domain type [`holon_api::EntityUri`] — the wide PBT and the
+/// pure slice both construct ids via `EntityUri::parse` / `EntityUri::block`,
+/// so no boundary translation is needed. Kept as an alias (rather than a
+/// bare `EntityUri`) so the capability surface reads as "block id" at the
+/// call sites and so the type can be revisited centrally.
+pub type CapBlockId = holon_api::EntityUri;
 
 /// Symbolic region. Wide PBT uses `holon_api::Region` (Main / Sidebar);
 /// pure slice has only a single region — its impl ignores the value.
@@ -69,57 +70,57 @@ pub struct CapCursor {
 /// generators.
 pub trait RefBlockTree {
     /// Returns block content text. `None` if the block does not exist.
-    fn block_content(&self, id: &CapBlockId) -> Option<&str>;
+    fn block_content(&self, id: &EntityUri) -> Option<&str>;
 
     /// True if the block exists and is a Text-typed block (the only kind
     /// editor transitions care about).
-    fn is_text_block(&self, id: &CapBlockId) -> bool;
+    fn is_text_block(&self, id: &EntityUri) -> bool;
 
     /// Editable Text descendants of the focus root in `Main` region.
     /// Empty in pure slice if the test fixture didn't seed any.
-    fn main_editable_descendants(&self) -> Vec<CapBlockId>;
+    fn main_editable_descendants(&self) -> Vec<EntityUri>;
 
     /// Block ids of the current focus roots in `region`. Wide PBT
     /// computes from `expected_focus_root_ids`; pure slice may just
     /// return the root id of its single doc.
-    fn focus_root_ids(&self, region: CapRegion) -> BTreeSet<CapBlockId>;
+    fn focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
 
     /// Sibling navigation.
-    fn previous_sibling(&self, id: &CapBlockId) -> Option<CapBlockId>;
-    fn next_sibling(&self, id: &CapBlockId) -> Option<CapBlockId>;
+    fn previous_sibling(&self, id: &EntityUri) -> Option<EntityUri>;
+    fn next_sibling(&self, id: &EntityUri) -> Option<EntityUri>;
 
     /// Parent of `id`. `None` if `id` is root or has a sentinel parent
     /// (wide PBT: `EntityUri::is_no_parent` / `is_sentinel`; pure slice:
     /// `parent: None`).
-    fn parent_of(&self, id: &CapBlockId) -> Option<CapBlockId>;
+    fn parent_of(&self, id: &EntityUri) -> Option<EntityUri>;
 
     /// Grandparent for outdent.
-    fn grandparent(&self, id: &CapBlockId) -> Option<CapBlockId>;
+    fn grandparent(&self, id: &EntityUri) -> Option<EntityUri>;
 
     /// Children of a parent, sorted by sort_key. Returns ids only —
     /// callers join back through `block_content` if they need data.
-    fn sorted_children(&self, parent: &CapBlockId) -> Vec<CapBlockId>;
+    fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri>;
 
     /// True if `id` is a descendant of any ancestor in `ancestors`.
-    fn is_descendant_of_any(&self, id: &CapBlockId, ancestors: &BTreeSet<CapBlockId>) -> bool;
+    fn is_descendant_of_any(&self, id: &EntityUri, ancestors: &BTreeSet<EntityUri>) -> bool;
 
     /// Layout blocks (the layout scaffolding the user can't focus into).
     /// Wide PBT: `layout_blocks` set; pure slice: empty.
-    fn is_layout_block(&self, id: &CapBlockId) -> bool;
+    fn is_layout_block(&self, id: &EntityUri) -> bool;
 
     /// True if `id` exists and is focusable (i.e. not a layout block,
     /// not immutable, has the right content type).
-    fn is_focusable(&self, id: &CapBlockId) -> bool;
+    fn is_focusable(&self, id: &EntityUri) -> bool;
 
     /// True if `id` is in the "no content update" set — render sources,
     /// query sources, profile blocks. Wide PBT consults
     /// `layout_blocks.render_source_ids` + `layout_blocks.query_source_ids`
     /// + `profile_block_ids`. Pure slice has no such concept → returns `false`.
-    fn is_no_content_update(&self, id: &CapBlockId) -> bool;
+    fn is_no_content_update(&self, id: &EntityUri) -> bool;
 
     /// True if `id` is a Page block (tagged `Page`). Mirrors
     /// `Block::is_page()`. Pure slice has no pages → returns `false`.
-    fn is_page_block(&self, id: &CapBlockId) -> bool;
+    fn is_page_block(&self, id: &EntityUri) -> bool;
 
     /// All block ids tracked by the reference model, EXCLUDING seed
     /// blocks (those with sentinel/no_parent docs — they're inserted
@@ -129,7 +130,7 @@ pub trait RefBlockTree {
     /// Used by `inv-block-ids-match-ref` to compare against
     /// `SutSqlProjection::all_block_ids()` for set-equality drift
     /// detection at the storage layer.
-    fn all_non_seed_block_ids(&self) -> BTreeSet<CapBlockId>;
+    fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri>;
 }
 
 /// Block-tree mutations. Concrete impls maintain whatever bookkeeping
@@ -142,32 +143,32 @@ pub trait RefBlockTreeMut: RefBlockTree {
 
     /// Set the content text of `id`. Used by `commit_active_editor_if_changed`
     /// and any future direct-write transitions.
-    fn set_block_content(&mut self, id: &CapBlockId, text: &str);
+    fn set_block_content(&mut self, id: &EntityUri, text: &str);
 
     /// Split `id` at `position`. Returns the id of the newly-created
     /// block holding the tail.
-    fn split_block(&mut self, id: &CapBlockId, position: usize) -> CapBlockId;
+    fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri;
 
     /// Join `id` into its previous sibling (or parent if no previous
     /// sibling). Returns the cursor position of the join point in the
     /// merged block's content.
-    fn join_block(&mut self, id: &CapBlockId) -> usize;
+    fn join_block(&mut self, id: &EntityUri) -> usize;
 
     /// Indent `id` — re-parent under previous sibling.
-    fn indent(&mut self, id: &CapBlockId);
+    fn indent(&mut self, id: &EntityUri);
 
     /// Outdent `id` — move up to grandparent level.
-    fn outdent(&mut self, id: &CapBlockId);
+    fn outdent(&mut self, id: &EntityUri);
 
     /// Re-parent `id` under `new_parent`, placing it after `after` (or
     /// first if `after` is None). Used by Indent/Outdent helpers when
     /// they don't want to bake the parent-discovery logic into the
     /// transition body. The wide-PBT impl is
     /// `ReferenceState::move_block`.
-    fn move_block(&mut self, id: &CapBlockId, new_parent: CapBlockId, after: Option<&CapBlockId>);
+    fn move_block(&mut self, id: &EntityUri, new_parent: EntityUri, after: Option<&EntityUri>);
 
     /// Swap two siblings (used by MoveUp / MoveDown).
-    fn swap_siblings(&mut self, a: &CapBlockId, b: &CapBlockId);
+    fn swap_siblings(&mut self, a: &EntityUri, b: &EntityUri);
 }
 
 // ─── Reference-side: EditorMirror ────────────────────────────────────
@@ -177,7 +178,7 @@ pub trait RefEditorMirror {
     /// Block id whose editor is currently active, or `None` if no editor
     /// is open. Pure slice typically has this populated by a setup
     /// transition; wide PBT mirrors GPUI's `InputState`.
-    fn active_editor_block(&self) -> Option<CapBlockId>;
+    fn active_editor_block(&self) -> Option<EntityUri>;
 
     /// Live in-memory editor text. Pre-blur, this can diverge from
     /// `block_content(active_editor_block())` — the divergence is what
@@ -201,7 +202,7 @@ pub trait RefEditorMirrorMut: RefEditorMirror {
 pub trait RefFocus {
     /// Currently focused block in `region`. Wide PBT: per-region map;
     /// pure slice: returns from a single field.
-    fn current_focus(&self, region: CapRegion) -> Option<CapBlockId>;
+    fn current_focus(&self, region: CapRegion) -> Option<EntityUri>;
 
     /// Cursor position of the focused block's editor (if known).
     fn focused_cursor(&self, region: CapRegion) -> Option<CapCursor>;
@@ -210,10 +211,10 @@ pub trait RefFocus {
 /// Focus mutations.
 pub trait RefFocusMut: RefFocus {
     /// Set focus to `id` in `region`, resetting cursor to `cursor`.
-    fn set_focus(&mut self, region: CapRegion, id: CapBlockId, cursor: CapCursor);
+    fn set_focus(&mut self, region: CapRegion, id: EntityUri, cursor: CapCursor);
 
     /// Clear focus if it currently points at a now-deleted block.
-    fn clear_focus_if_deleted(&mut self, id: &CapBlockId);
+    fn clear_focus_if_deleted(&mut self, id: &EntityUri);
 }
 
 // ─── Reference-side: Lifecycle (admin gates) ─────────────────────────
@@ -245,12 +246,12 @@ pub trait RefLifecycle {
 /// mapping in interior state (e.g. `doc_uri_map`).
 #[allow(async_fn_in_trait)]
 pub trait SutBlockTreeWrite {
-    async fn apply_split_block(&mut self, id: &CapBlockId, position: usize);
-    async fn apply_join_block(&mut self, id: &CapBlockId);
-    async fn apply_indent(&mut self, id: &CapBlockId);
-    async fn apply_outdent(&mut self, id: &CapBlockId);
-    async fn apply_move_up(&mut self, id: &CapBlockId);
-    async fn apply_move_down(&mut self, id: &CapBlockId);
+    async fn apply_split_block(&mut self, id: &EntityUri, position: usize);
+    async fn apply_join_block(&mut self, id: &EntityUri);
+    async fn apply_indent(&mut self, id: &EntityUri);
+    async fn apply_outdent(&mut self, id: &EntityUri);
+    async fn apply_move_up(&mut self, id: &EntityUri);
+    async fn apply_move_down(&mut self, id: &EntityUri);
 }
 
 #[allow(async_fn_in_trait)]
@@ -262,8 +263,8 @@ pub trait SutEditorMirrorWrite {
 
 #[allow(async_fn_in_trait)]
 pub trait SutFocusWrite {
-    async fn apply_navigate_focus(&mut self, region: CapRegion, id: &CapBlockId);
-    async fn apply_focus_editable_text(&mut self, id: &CapBlockId);
+    async fn apply_navigate_focus(&mut self, region: CapRegion, id: &EntityUri);
+    async fn apply_focus_editable_text(&mut self, id: &EntityUri);
 }
 
 /// Uniform quiescence abstraction. Pure slice: no-op. Wide PBT: drains
@@ -423,32 +424,38 @@ pub trait SutSqlProjection {
     /// present (deleted or never inserted). The flat Vec is the row's
     /// fields as Strings in matview-column-declaration order — concrete
     /// impls expose accessor helpers; the trait surface stays generic.
-    async fn block_row(&self, id: &CapBlockId) -> Option<Vec<String>>;
+    async fn block_row(&self, id: &EntityUri) -> Option<Vec<String>>;
 
     /// All non-deleted block IDs visible in the projection.
-    async fn all_block_ids(&self) -> BTreeSet<CapBlockId>;
+    async fn all_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Child block IDs of `parent` in the SQL projection, ordered by
+    /// `sort_key` (the authoritative fractional index). Used by
+    /// `inv-live-children-match-ref` to compare per-parent sibling order
+    /// against the reference model's `RefBlockTree::sorted_children`.
+    async fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri>;
 
     /// Row count for a watched query (used by `inv-watch-rows-match-ref`).
     async fn watch_row_count(&self, query_id: &str) -> Option<usize>;
 
     /// Raw block table read (no matview hydration). Used by WARN/SKIP
     /// classifier's `block_raw` truth-check.
-    async fn block_raw_row(&self, id: &CapBlockId) -> Option<Vec<String>>;
+    async fn block_raw_row(&self, id: &EntityUri) -> Option<Vec<String>>;
 
     /// Distinct block_id values present in the `block_tags` junction table.
     /// Used by `inv-block-tags-references-exist` to check for orphan rows
     /// (tag references whose block_id doesn't exist in block_raw).
-    async fn block_tag_block_ids(&self) -> BTreeSet<CapBlockId>;
+    async fn block_tag_block_ids(&self) -> BTreeSet<EntityUri>;
 
     /// `task_state` JSON property for `id` from `block_raw.properties`.
     /// Returns `None` if the block doesn't exist or has no `task_state`
     /// property. Used by `inv-task-state-storage-coherence`.
-    async fn block_task_state(&self, id: &CapBlockId) -> Option<String>;
+    async fn block_task_state(&self, id: &EntityUri) -> Option<String>;
 
     /// `content` column of `block_raw` for `id`. Returns `None` if the block
     /// doesn't exist. Used by `inv-block-content-matches-ref` (split-block
     /// content-routing slice).
-    async fn block_content(&self, id: &CapBlockId) -> Option<String>;
+    async fn block_content(&self, id: &EntityUri) -> Option<String>;
 }
 
 /// Loro-side task_state projection. Phase 7 addition for
@@ -591,7 +598,7 @@ impl<'a> Iterator for WidgetSnapshotIter<'a> {
 pub trait SutRenderer {
     /// Stringified render-tree for a block id (debug-formatted).
     /// Used by `inv-displayed-text` and OrgRender fixed-point checks.
-    async fn render_tree_of(&self, id: &CapBlockId) -> Option<String>;
+    async fn render_tree_of(&self, id: &EntityUri) -> Option<String>;
 
     /// Frontend-agnostic snapshot of the current widget tree. Any slice
     /// with a renderer (wide PBT, hypothetical Phase 9 in-memory + GPUI)
@@ -606,7 +613,7 @@ pub trait SutRenderer {
     /// results. Used by `inv-viewmodel-entity-ids-subset-of-data` to
     /// assert tree-referenced entity_ids are a subset of available
     /// data rows.
-    async fn root_data_row_ids(&self) -> BTreeSet<CapBlockId>;
+    async fn root_data_row_ids(&self) -> BTreeSet<EntityUri>;
 
     /// Widget tree for a SPECIFIC block id — the snapshot the renderer
     /// would produce if that block were the root of its own subtree.
@@ -619,7 +626,7 @@ pub trait SutRenderer {
     /// another tree's snapshot is the typical input: caller BFS-es by
     /// following live_block children, calling this method per discovered
     /// block id.
-    async fn widget_tree_for(&self, block_id: &CapBlockId) -> Option<WidgetSnapshot>;
+    async fn widget_tree_for(&self, block_id: &EntityUri) -> Option<WidgetSnapshot>;
 }
 
 // ─── Phase 6d — Layout/Bounds cluster ────────────────────────────────
@@ -631,10 +638,10 @@ pub trait SutRenderer {
 #[allow(async_fn_in_trait)]
 pub trait SutLayout {
     /// True if a widget for `id` is currently registered with bounds.
-    async fn has_registered_bounds(&self, id: &CapBlockId) -> bool;
+    async fn has_registered_bounds(&self, id: &EntityUri) -> bool;
 
     /// True if a draggable handle is wired for `id`.
-    async fn has_draggable_handle(&self, id: &CapBlockId) -> bool;
+    async fn has_draggable_handle(&self, id: &EntityUri) -> bool;
 
     /// True if any rendered widget is an Error variant.
     async fn any_error_widget(&self) -> bool;
@@ -644,7 +651,7 @@ pub trait SutLayout {
     /// callers panic for input-bearing transitions per fail-loud policy.
     /// Implementations may issue a scroll-into-view RPC if the bounds are
     /// missing (virtualized lists do not prepaint offscreen rows).
-    async fn wait_for_bounds(&self, id: &CapBlockId, timeout: Duration) -> Result<(), String>;
+    async fn wait_for_bounds(&self, id: &EntityUri, timeout: Duration) -> Result<(), String>;
 
     /// Wait until the widget rendered at `id` matches one of `accepted`
     /// kinds (e.g. `["editable_text", "rendered_text"]`), or `timeout`
@@ -656,7 +663,7 @@ pub trait SutLayout {
     /// don't need widget-kind gating).
     async fn wait_for_widget_kind(
         &self,
-        id: &CapBlockId,
+        id: &EntityUri,
         accepted: &[&str],
         timeout: Duration,
     ) -> Result<(), String>;
@@ -671,35 +678,34 @@ pub trait SutLayout {
 #[allow(async_fn_in_trait)]
 pub trait SutDriver {
     async fn driver_send_key_chord(&mut self, chord: &str);
-    async fn driver_click(&mut self, id: &CapBlockId);
+    async fn driver_click(&mut self, id: &EntityUri);
     /// Region-aware click. Mirrors `UserDriver::click_entity(entity_id,
     /// region)` (`region` is "main", "left_sidebar", ...). `driver_click`
     /// is the region-defaulted convenience wrapper that panics on error;
     /// `click_entity` returns the result so callers can attach their own
     /// transition-specific diagnostic.
-    async fn click_entity(&mut self, id: &CapBlockId, region: &str) -> Result<(), String>;
+    async fn click_entity(&mut self, id: &EntityUri, region: &str) -> Result<(), String>;
     /// Poll until `engine_focused_block` returns `Some(id)` or `timeout`
     /// elapses. Used as a post-click barrier — GPUI's mouse-click goes
     /// through `dispatch_intent` (fire-and-forget), so subsequent
     /// transitions need an explicit gate before they read focus.
-    async fn wait_for_engine_focus(&self, id: &CapBlockId, timeout: Duration)
-        -> Result<(), String>;
+    async fn wait_for_engine_focus(&self, id: &EntityUri, timeout: Duration) -> Result<(), String>;
     /// Send a single raw key with modifiers. `key` is a key name like
     /// `"home"`, `"right"`, `"enter"`, `"backspace"`, or a single
     /// character (`"a"`). `modifiers` is a slice of `"cmd"`, `"ctrl"`,
     /// `"alt"`, `"shift"`. Mirrors `UserDriver::send_raw_keystroke`.
     async fn send_raw_keystroke(&mut self, key: &str, modifiers: &[&str]) -> Result<(), String>;
-    async fn driver_current_focus(&self) -> Option<CapBlockId>;
+    async fn driver_current_focus(&self) -> Option<EntityUri>;
     /// The globally focused block id as tracked by the reactive/frontend
     /// engine (distinct from the per-region SQL `current_focus` matview).
     /// Set by click handlers; read by `inv-focus-matches-ref`.
     /// Returns `None` when no frontend engine is installed (SqlOnly mode).
-    async fn engine_focused_block(&self) -> Option<CapBlockId>;
+    async fn engine_focused_block(&self) -> Option<EntityUri>;
     /// Translate a reference-model block id (which may be a synthetic URI
     /// like `block:ref-doc-0`) to the resolved UUID-based id that the SUT
     /// engine tracks. Wide PBT: delegates to `E2ESut::resolve_uri` via
     /// `doc_uri_map`; pure slice: returns the id unchanged (no synthetic URIs).
-    fn resolve_ref_block_id(&self, id: &CapBlockId) -> CapBlockId;
+    fn resolve_ref_block_id(&self, id: &EntityUri) -> EntityUri;
 }
 
 // ─── Phase 6f — OrgRender cluster ────────────────────────────────────
@@ -757,7 +763,7 @@ pub trait SutLifecycle {
 pub trait RefFocusRoots {
     /// Expected focus-root block ids for `region`. Wide PBT reads from
     /// `ReferenceState::expected_focus_root_ids`; pure slice: empty set.
-    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<CapBlockId>;
+    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
 }
 
 /// Layout-block metadata needed by matview + ViewModel invariants.
@@ -765,10 +771,10 @@ pub trait RefLayout {
     /// All block ids that are part of the layout scaffolding (headline,
     /// query-source, render-source). `is_layout_block` on `RefBlockTree`
     /// is the per-id predicate; this gives the full set for iteration.
-    fn layout_block_ids(&self) -> BTreeSet<CapBlockId>;
+    fn layout_block_ids(&self) -> BTreeSet<EntityUri>;
 
     /// Block ids of the active profile blocks (from `profile_block_ids`).
-    fn profile_block_ids(&self) -> BTreeSet<CapBlockId>;
+    fn profile_block_ids(&self) -> BTreeSet<EntityUri>;
 
     /// True if the test has an active "block" profile override.
     /// Wide PBT: `ReferenceState::has_blocks_profile()`; pure slice: `false`.
@@ -800,7 +806,7 @@ pub trait RefWatches {
 pub trait RefGlobalFocus {
     /// The globally focused block id, or `None` if nothing is focused.
     /// Wide PBT: `ReferenceState::focused_block`; pure slice: `None`.
-    fn global_focused_block(&self) -> Option<CapBlockId>;
+    fn global_focused_block(&self) -> Option<EntityUri>;
 }
 
 /// Task-state read-side projection. Used by `inv-viewmodel-state-toggle-correct`
@@ -808,7 +814,7 @@ pub trait RefGlobalFocus {
 pub trait RefTaskState {
     /// Task state string for `id` (`"TODO"`, `"DONE"`, etc.), or `None`
     /// if the block has no task_state property.
-    fn task_state_of(&self, id: &CapBlockId) -> Option<String>;
+    fn task_state_of(&self, id: &EntityUri) -> Option<String>;
 }
 
 // ─── Cross-cut helpers ───────────────────────────────────────────────
@@ -846,7 +852,7 @@ where
 //   `state.focused_block = Some(new_id)` after mutation — pattern
 //   already in `split_block.rs:123-129`). Currently inlined per
 //   transition; could become a free function
-//   `fn refocus_after_split<R: RefFocusMut>(state: &mut R, new_id: CapBlockId, region: CapRegion)`.
+//   `fn refocus_after_split<R: RefFocusMut>(state: &mut R, new_id: EntityUri, region: CapRegion)`.
 // - sibling re-key on join (join_block mutates parent's child order;
 //   pure-slice impl can keep a Vec and recompute, wide PBT uses
 //   gen_key_between).

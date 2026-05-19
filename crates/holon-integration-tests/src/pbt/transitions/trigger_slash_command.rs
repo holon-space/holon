@@ -6,16 +6,16 @@
 //! `sut.rs:3250-3362` (SUT apply), and
 //! `transition_budgets.rs:284-286` (expected SQL).
 
-use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
+use holon_pbt_core::capabilities::{SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -46,7 +46,7 @@ use holon_api::{ContentType, EntityUri};
 /// the delete op, then presses Enter.
 pub async fn apply_trigger_slash_command_to_sut<S: SutLayout + SutDriver>(
     sut: &mut S,
-    id: &CapBlockId,
+    id: &EntityUri,
 ) {
     sut.wait_for_widget_kind(
         id,
@@ -78,7 +78,7 @@ pub async fn apply_trigger_slash_command_to_sut<S: SutLayout + SutDriver>(
     // Confirm Enter would actually fire `delete` — i.e. the filter
     // narrowed the popup to a state where the selected item is "delete".
     // Headless: no-op (popup doesn't reach BoundsRegistry).
-    let delete_id: CapBlockId = "delete".to_string();
+    let delete_id: EntityUri = EntityUri::block("delete");
     sut.wait_for_widget_kind(&delete_id, &["popup_item_selected"], Duration::from_secs(2))
         .await
         .unwrap_or_else(|e| {
@@ -97,7 +97,8 @@ pub struct TriggerSlashCommand {
     pub block_id: EntityUri,
 }
 
-impl E2ETransitionFactory for TriggerSlashCommand {
+impl TransitionFactory<ReferenceState> for TriggerSlashCommand {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let focused_in_main = state.focused_entity(holon_api::Region::Main).cloned();
         let candidates: Vec<EntityUri> = focused_in_main
@@ -120,8 +121,9 @@ impl E2ETransitionFactory for TriggerSlashCommand {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for TriggerSlashCommand {
+impl TransitionRef<ReferenceState> for TriggerSlashCommand {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let mut checks: Vec<Validated<(), Reason>> = vec![
@@ -176,12 +178,17 @@ impl E2ETransitionImpl for TriggerSlashCommand {
         });
         state.clear_focus_if_deleted(&self.block_id);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for TriggerSlashCommand {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_trigger_slash_command(&self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for TriggerSlashCommand {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         expected_sql_for_kind(
             MutationKind::Delete,

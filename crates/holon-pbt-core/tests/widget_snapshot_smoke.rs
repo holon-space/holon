@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapCursor, CapRegion, RefBlockTree, RefTaskState, SutLoroTaskState, SutRenderer,
+    CapCursor, CapRegion, EntityUri, RefBlockTree, RefTaskState, SutLoroTaskState, SutRenderer,
     SutSqlProjection, WidgetSnapshot,
 };
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
@@ -44,63 +44,63 @@ fn root_with(children: Vec<WidgetSnapshot>) -> WidgetSnapshot {
 // ── Toy ref + SUT mirroring the production trait shape ───────────────
 
 struct ToyRef {
-    task_states: std::collections::HashMap<String, String>,
+    task_states: std::collections::HashMap<EntityUri, String>,
 }
 
 impl RefBlockTree for ToyRef {
-    fn block_content(&self, id: &CapBlockId) -> Option<&str> {
+    fn block_content(&self, id: &EntityUri) -> Option<&str> {
         self.task_states.get(id).map(String::as_str)
     }
-    fn is_text_block(&self, _: &CapBlockId) -> bool {
+    fn is_text_block(&self, _: &EntityUri) -> bool {
         true
     }
-    fn main_editable_descendants(&self) -> Vec<CapBlockId> {
+    fn main_editable_descendants(&self) -> Vec<EntityUri> {
         vec![]
     }
-    fn focus_root_ids(&self, _: CapRegion) -> std::collections::BTreeSet<CapBlockId> {
+    fn focus_root_ids(&self, _: CapRegion) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
     }
-    fn previous_sibling(&self, _: &CapBlockId) -> Option<CapBlockId> {
+    fn previous_sibling(&self, _: &EntityUri) -> Option<EntityUri> {
         None
     }
-    fn next_sibling(&self, _: &CapBlockId) -> Option<CapBlockId> {
+    fn next_sibling(&self, _: &EntityUri) -> Option<EntityUri> {
         None
     }
-    fn parent_of(&self, _: &CapBlockId) -> Option<CapBlockId> {
+    fn parent_of(&self, _: &EntityUri) -> Option<EntityUri> {
         None
     }
-    fn grandparent(&self, _: &CapBlockId) -> Option<CapBlockId> {
+    fn grandparent(&self, _: &EntityUri) -> Option<EntityUri> {
         None
     }
-    fn sorted_children(&self, _: &CapBlockId) -> Vec<CapBlockId> {
+    fn sorted_children(&self, _: &EntityUri) -> Vec<EntityUri> {
         vec![]
     }
     fn is_descendant_of_any(
         &self,
-        _: &CapBlockId,
-        _: &std::collections::BTreeSet<CapBlockId>,
+        _: &EntityUri,
+        _: &std::collections::BTreeSet<EntityUri>,
     ) -> bool {
         false
     }
-    fn is_layout_block(&self, _: &CapBlockId) -> bool {
+    fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }
-    fn is_focusable(&self, _: &CapBlockId) -> bool {
+    fn is_focusable(&self, _: &EntityUri) -> bool {
         true
     }
-    fn is_no_content_update(&self, _: &CapBlockId) -> bool {
+    fn is_no_content_update(&self, _: &EntityUri) -> bool {
         false
     }
-    fn is_page_block(&self, _: &CapBlockId) -> bool {
+    fn is_page_block(&self, _: &EntityUri) -> bool {
         false
     }
-    fn all_non_seed_block_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+    fn all_non_seed_block_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
     }
 }
 
 impl RefTaskState for ToyRef {
-    fn task_state_of(&self, id: &CapBlockId) -> Option<String> {
+    fn task_state_of(&self, id: &EntityUri) -> Option<String> {
         self.task_states.get(id).cloned()
     }
 }
@@ -111,41 +111,44 @@ struct ToySut {
 
 #[allow(async_fn_in_trait)]
 impl SutRenderer for ToySut {
-    async fn render_tree_of(&self, _: &CapBlockId) -> Option<String> {
+    async fn render_tree_of(&self, _: &EntityUri) -> Option<String> {
         None
     }
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
         self.root.clone()
     }
-    async fn root_data_row_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+    async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
     }
-    async fn widget_tree_for(&self, _: &CapBlockId) -> Option<WidgetSnapshot> {
+    async fn widget_tree_for(&self, _: &EntityUri) -> Option<WidgetSnapshot> {
         None
     }
 }
 
 #[allow(async_fn_in_trait)]
 impl SutSqlProjection for ToySut {
-    async fn block_row(&self, _: &CapBlockId) -> Option<Vec<String>> {
+    async fn block_row(&self, _: &EntityUri) -> Option<Vec<String>> {
         None
     }
-    async fn all_block_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+    async fn all_block_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
+    }
+    async fn sorted_children(&self, _: &EntityUri) -> Vec<EntityUri> {
+        vec![]
     }
     async fn watch_row_count(&self, _: &str) -> Option<usize> {
         None
     }
-    async fn block_raw_row(&self, _: &CapBlockId) -> Option<Vec<String>> {
+    async fn block_raw_row(&self, _: &EntityUri) -> Option<Vec<String>> {
         None
     }
-    async fn block_tag_block_ids(&self) -> std::collections::BTreeSet<CapBlockId> {
+    async fn block_tag_block_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
     }
-    async fn block_task_state(&self, _: &CapBlockId) -> Option<String> {
+    async fn block_task_state(&self, _: &EntityUri) -> Option<String> {
         None
     }
-    async fn block_content(&self, _: &CapBlockId) -> Option<String> {
+    async fn block_content(&self, _: &EntityUri) -> Option<String> {
         None
     }
 }
@@ -179,13 +182,15 @@ where
             if node.kind != "state_toggle" {
                 continue;
             }
-            let Some(block_id) = node.entity_id.as_ref() else {
+            let Some(block_id_str) = node.entity_id.as_ref() else {
                 return InvariantResult::Fail("no entity id".into());
             };
-            if ref_.block_content(block_id).is_none() {
+            let block_id = EntityUri::parse(block_id_str)
+                .expect("widget snapshot entity_id must be a valid EntityUri");
+            if ref_.block_content(&block_id).is_none() {
                 continue;
             }
-            let expected = ref_.task_state_of(block_id).unwrap_or_default();
+            let expected = ref_.task_state_of(&block_id).unwrap_or_default();
             let current = node.props.get("current").map(String::as_str).unwrap_or("");
             if current != expected {
                 return InvariantResult::Fail(format!(
@@ -217,7 +222,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 #[test]
 fn state_toggle_correct_passes_on_matching_state() {
     let ref_state = ToyRef {
-        task_states: [("block:a".to_string(), "TODO".to_string())]
+        task_states: [(EntityUri::parse("block:a").unwrap(), "TODO".to_string())]
             .into_iter()
             .collect(),
     };
@@ -231,7 +236,7 @@ fn state_toggle_correct_passes_on_matching_state() {
 #[test]
 fn state_toggle_fails_on_state_drift() {
     let ref_state = ToyRef {
-        task_states: [("block:a".to_string(), "DONE".to_string())]
+        task_states: [(EntityUri::parse("block:a").unwrap(), "DONE".to_string())]
             .into_iter()
             .collect(),
     };
@@ -248,7 +253,7 @@ fn state_toggle_fails_on_state_drift() {
 #[test]
 fn state_toggle_fails_on_missing_set_field_op() {
     let ref_state = ToyRef {
-        task_states: [("block:a".to_string(), "TODO".to_string())]
+        task_states: [(EntityUri::parse("block:a").unwrap(), "TODO".to_string())]
             .into_iter()
             .collect(),
     };

@@ -13,11 +13,11 @@
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::transitions::TextOp;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -30,7 +30,8 @@ pub struct PeerCharEdit {
     pub op: TextOp,
 }
 
-impl E2ETransitionFactory for PeerCharEdit {
+impl TransitionFactory<ReferenceState> for PeerCharEdit {
+    type Reason = Reason;
     fn weighted_generator(_: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // The legacy generator never emits PeerCharEdit — it has no
         // `strategies.add_weighted("peer_char_edit", ...)` call. Mirror that
@@ -39,8 +40,9 @@ impl E2ETransitionFactory for PeerCharEdit {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for PeerCharEdit {
+impl TransitionRef<ReferenceState> for PeerCharEdit {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
             check(ReferenceState::mutable_text_enabled(), Reason::Unmigrated),
@@ -74,13 +76,18 @@ impl E2ETransitionImpl for PeerCharEdit {
         // text-convergence after SyncWithPeer.
         let _ = (&self.peer_idx, &self.block_id);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for PeerCharEdit {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_peer_char_edit(self.peer_idx, &self.block_id, &self.op)
             .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for PeerCharEdit {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // PeerCharEdit: async CDC drain from previous transitions can land here.
         ExpectedSql {

@@ -11,9 +11,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -22,7 +22,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConcurrentSchemaInit;
 
-impl E2ETransitionFactory for ConcurrentSchemaInit {
+impl TransitionFactory<ReferenceState> for ConcurrentSchemaInit {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         ConcurrentSchemaInit
             .preconditions(state)
@@ -30,8 +31,9 @@ impl E2ETransitionFactory for ConcurrentSchemaInit {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for ConcurrentSchemaInit {
+impl TransitionRef<ReferenceState> for ConcurrentSchemaInit {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -52,12 +54,17 @@ impl E2ETransitionImpl for ConcurrentSchemaInit {
         // ConcurrentSchemaInit doesn't change reference state - it only tests
         // that the database doesn't get locked when schema init runs concurrently.
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ConcurrentSchemaInit {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_concurrent_schema_init().await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for ConcurrentSchemaInit {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 100,

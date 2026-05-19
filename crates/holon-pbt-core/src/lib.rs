@@ -47,17 +47,30 @@ pub trait TransitionFactory<Ref>: Sized {
     fn weighted_generator(state: &Ref) -> Validated<(u32, BoxedStrategy<Self>), Self::Reason>;
 }
 
-/// Per-variant behaviour: preconditions against the reference model,
-/// apply-to-reference, apply-to-SUT. Generic over both `Ref` (the PBT's
-/// reference-state type) and `Sut` (the PBT's SUT handle, which may be
-/// a concrete struct or `dyn SomeTrait`).
+/// Ref-side per-variant behaviour: preconditions against the reference
+/// model + apply-to-reference. Generic over `Ref` only — **independent
+/// of the SUT type** — so S-less contexts (a `TransitionFactory`'s
+/// generator, the proptest state-machine driver) can call these without
+/// naming a SUT.
 ///
-/// `Sut: ?Sized` so impls can be written against `dyn SutHandle` as
-/// well as concrete types.
-#[allow(async_fn_in_trait)]
-pub trait TransitionImpl<Ref, Sut: ?Sized>: Clone + std::fmt::Debug + Send + Sync {
+/// Split out of `TransitionImpl` (which keeps only the SUT-parameterised
+/// `apply_to_sut`) so concrete-`S` dispatch works: a transition whose
+/// `apply_to_sut` is bound on fine-grained capabilities still has its
+/// ref logic defined once, callable from anywhere.
+pub trait TransitionRef<Ref>: Clone + std::fmt::Debug + Send + Sync {
     type Reason;
     fn preconditions(&self, state: &Ref) -> Validated<(), Self::Reason>;
     fn apply_to_ref(&self, state: &mut Ref);
+}
+
+/// SUT-side per-variant behaviour: drive the system under test. Generic
+/// over `Ref` and `Sut` (the PBT's SUT handle, concrete or `dyn`). The
+/// `Sut` bound is where a transition declares which SUT capabilities it
+/// needs, so the same struct runs on any SUT supplying them.
+///
+/// `Sut: ?Sized` so impls can be written against `dyn SomeTrait` as well
+/// as concrete types.
+#[allow(async_fn_in_trait)]
+pub trait TransitionImpl<Ref, Sut: ?Sized> {
     async fn apply_to_sut(&self, state: &Ref, sut: &mut Sut);
 }

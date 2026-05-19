@@ -117,8 +117,8 @@ impl holon::core::datasource::BlockEntity for TodoistTask {
     fn content(&self) -> &str {
         &self.content
     }
-    fn tags(&self) -> &[String] {
-        &[]
+    fn tags(&self) -> holon_api::Tags {
+        holon_api::Tags::default()
     }
 }
 

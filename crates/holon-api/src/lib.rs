@@ -46,7 +46,9 @@ pub use types::{
 pub use entity_uri::EntityUri;
 
 // Re-export inline-mark types (rich text)
-pub use inline_mark::{marks_from_json, marks_to_json, EntityRef, InlineMark, MarkSpan};
+pub use inline_mark::{
+    canonicalize_marks, marks_from_json, marks_to_json, EntityRef, InlineMark, MarkSpan,
+};
 
 // Re-export entity types (for Entity derive macro)
 pub use entity::{

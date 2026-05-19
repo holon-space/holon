@@ -1,8 +1,8 @@
 //! Shared validation helpers for PBT transitions.
 //!
 //! Replaces the opaque `Option<...>` / `bool` returns of
-//! `E2ETransitionFactory::weighted_generator` and
-//! `E2ETransitionImpl::preconditions` with `Validated<_, Reason>` so a PBT run
+//! `TransitionFactory::weighted_generator` and
+//! `TransitionImpl::preconditions` with `Validated<_, Reason>` so a PBT run
 //! can surface *why* each transition was rejected.
 //!
 //! Rejections accumulate in a thread-local counter and the runner prints a

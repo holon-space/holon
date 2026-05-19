@@ -77,3 +77,15 @@ pub async fn create_test_backend_at_path(db_path: &Path) -> TursoBackend {
 
     backend
 }
+
+/// Create a test backend backed by a fresh temporary directory, returning both
+/// so the caller can keep the `TempDir` alive for the test's duration.
+///
+/// Use this for the common repro/test pattern that needs a real on-disk DB but
+/// doesn't care about the exact path.
+pub async fn create_test_backend_with_tempdir() -> (TempDir, TursoBackend) {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
+    let backend = create_test_backend_at_path(&db_path).await;
+    (temp_dir, backend)
+}

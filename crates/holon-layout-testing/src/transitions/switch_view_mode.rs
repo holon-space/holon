@@ -4,7 +4,7 @@
 //! click pipeline the frontend's `Clickable` impl runs.
 
 use holon_frontend::vms_button_id_for;
-use holon_pbt_core::{SwitchViewMode, TransitionFactory, TransitionImpl};
+use holon_pbt_core::{SwitchViewMode, TransitionFactory, TransitionImpl, TransitionRef};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated::{self, Good};
@@ -52,16 +52,22 @@ where
     }
 }
 
-impl<R, S> TransitionImpl<LayoutRef<'_, R>, LayoutSut<'_, S>> for SwitchViewMode
+impl<R> TransitionRef<LayoutRef<'_, R>> for SwitchViewMode
 where
     R: LayoutRefState + ?Sized,
-    S: Clickable + ?Sized,
 {
     type Reason = SwitchViewModeReason;
     fn preconditions(&self, _: &LayoutRef<'_, R>) -> Validated<(), Self::Reason> {
         Good(())
     }
     fn apply_to_ref(&self, _: &mut LayoutRef<'_, R>) {}
+}
+
+impl<R, S> TransitionImpl<LayoutRef<'_, R>, LayoutSut<'_, S>> for SwitchViewMode
+where
+    R: LayoutRefState + ?Sized,
+    S: Clickable + ?Sized,
+{
     async fn apply_to_sut(&self, _: &LayoutRef<'_, R>, sut: &mut LayoutSut<'_, S>) {
         let button_id = vms_button_id_for(&self.block_id, &self.target_mode);
         sut.click_at_element(&button_id);

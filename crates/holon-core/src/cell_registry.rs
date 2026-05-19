@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use holon_api::EntityUri;
+use holon_api::{BlockContent, EntityUri, Tags};
 
 use crate::cell::{Cell, CellBacking};
 
@@ -78,7 +78,10 @@ pub trait EntityCellRegistry: Send + Sync {
         _: &EntityUri,
         _: Option<&EntityUri>,
         _: &EntityUri,
-        _: &str,
+        _: BlockContent,
+        _: &std::collections::HashMap<String, holon_api::Value>,
+        _: &Tags,
+        _: &[String],
     ) -> Result<bool> {
         Ok(false)
     }

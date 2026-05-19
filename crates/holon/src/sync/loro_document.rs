@@ -118,12 +118,19 @@ impl LoroDocument {
         self.doc.set_next_commit_origin(origin);
         let result = f(&self.doc)?;
 
-        let updates = self
-            .doc
-            .export(loro::ExportMode::updates_owned(Default::default()))?;
-
-        if !updates.is_empty() {
-            debug!("Write committed, {} bytes to sync", updates.len());
+        // Diagnostic only: exporting the owned update log is O(doc-size), and
+        // this ran on EVERY write purely to log a byte count — making bulk
+        // writes O(N²) (a 614-block org-file scan spent ~11s here, dominating
+        // cold start). Gate behind the debug level so production (warn/info)
+        // skips the export entirely; the commit itself already happened in the
+        // closure, so this has no functional effect.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let updates = self
+                .doc
+                .export(loro::ExportMode::updates_owned(Default::default()))?;
+            if !updates.is_empty() {
+                debug!("Write committed, {} bytes to sync", updates.len());
+            }
         }
 
         Ok(result)

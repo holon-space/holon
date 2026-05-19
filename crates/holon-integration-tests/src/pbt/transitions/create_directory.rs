@@ -10,10 +10,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -24,7 +24,8 @@ pub struct CreateDirectory {
     pub path: String,
 }
 
-impl E2ETransitionFactory for CreateDirectory {
+impl TransitionFactory<ReferenceState> for CreateDirectory {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Test the preconditions on a dummy instance to ensure state is valid
         // for creating any directory; the specific path is generated randomly.
@@ -41,8 +42,9 @@ impl E2ETransitionFactory for CreateDirectory {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for CreateDirectory {
+impl TransitionRef<ReferenceState> for CreateDirectory {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(!state.app_started, Reason::AppAlreadyStarted),
@@ -60,12 +62,17 @@ impl E2ETransitionImpl for CreateDirectory {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.pre_startup_directories.push(self.path.clone());
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for CreateDirectory {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_create_directory(&self.path).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for CreateDirectory {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,

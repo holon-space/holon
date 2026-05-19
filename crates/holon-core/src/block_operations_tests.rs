@@ -35,8 +35,8 @@ mod tests {
         fn content(&self) -> &str {
             &self.content
         }
-        fn tags(&self) -> &[String] {
-            &[]
+        fn tags(&self) -> holon_api::Tags {
+            holon_api::Tags::default()
         }
     }
 
@@ -292,6 +292,53 @@ mod tests {
                 .into_iter()
                 .map(|b| b.id)
                 .collect())
+        }
+
+        async fn update_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| anyhow::anyhow!("MemStore::update_in_tree: missing id"))?
+                .to_string();
+            let mut blocks = self.blocks.lock().unwrap();
+            let block = match blocks.iter_mut().find(|b| b.id == id) {
+                Some(b) => b,
+                None => {
+                    drop(blocks);
+                    self.insert(TestBlock {
+                        id: id.clone(),
+                        parent_id: params
+                            .get("parent_id")
+                            .and_then(|v| v.as_string())
+                            .map(|s| s.to_string()),
+                        sort_key: gen_key_between(None, None).map_err(|e| format!("{e:#}"))?,
+                        depth: 0,
+                        content: params
+                            .get("content")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+                    return Ok(());
+                }
+            };
+            if let Some(c) = params.get("content").and_then(|v| v.as_string()) {
+                block.content = c.to_string();
+            }
+            if let Some(p) = params.get("parent_id").and_then(|v| v.as_string()) {
+                block.parent_id = Some(p.to_string());
+            }
+            Ok(())
+        }
+
+        async fn delete_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| anyhow::anyhow!("MemStore::delete_in_tree: missing id"))?
+                .to_string();
+            self.blocks.lock().unwrap().retain(|b| b.id != id);
+            Ok(())
         }
     }
 

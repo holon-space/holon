@@ -8,16 +8,15 @@
 
 use holon_api::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapBlockId, CapRegion, RefBlockTree, RefBlockTreeMut, RefLifecycle,
+    CapRegion, RefBlockTree, RefBlockTreeMut, RefLifecycle, SutBlockTreeWrite,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -32,7 +31,7 @@ pub struct Outdent {
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 
 pub fn outdent_preconditions<R: RefBlockTree + RefLifecycle>(
-    block_id: &CapBlockId,
+    block_id: &EntityUri,
     state: &R,
 ) -> Validated<(), Reason> {
     let focus_roots = state.focus_root_ids(CapRegion::Main);
@@ -70,7 +69,6 @@ pub fn outdent_weighted_generator<R: RefBlockTree + RefLifecycle>(
         .main_editable_descendants()
         .into_iter()
         .filter(|id| outdent_preconditions(id, state).is_good())
-        .filter_map(|id| EntityUri::parse(&id).ok())
         .collect();
     check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
         let strat = prop::sample::select(candidates)
@@ -80,34 +78,41 @@ pub fn outdent_weighted_generator<R: RefBlockTree + RefLifecycle>(
     })
 }
 
-pub fn outdent_apply_to_ref<R: RefBlockTreeMut>(block_id: &CapBlockId, state: &mut R) {
+pub fn outdent_apply_to_ref<R: RefBlockTreeMut>(block_id: &EntityUri, state: &mut R) {
     state.push_undo_snapshot();
     state.outdent(block_id);
 }
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl E2ETransitionFactory for Outdent {
+impl TransitionFactory<ReferenceState> for Outdent {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         outdent_weighted_generator(state)
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for Outdent {
+impl TransitionRef<ReferenceState> for Outdent {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        outdent_preconditions(&self.block_id.as_str().to_string(), state)
+        outdent_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        outdent_apply_to_ref(&self.block_id.as_str().to_string(), state);
+        outdent_apply_to_ref(&self.block_id, state);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for Outdent {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_outdent(&self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for Outdent {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,

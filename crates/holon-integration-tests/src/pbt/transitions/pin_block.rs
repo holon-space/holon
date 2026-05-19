@@ -18,9 +18,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::{OpenPinEntry, ReferenceState};
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -34,7 +34,8 @@ pub struct PinBlock {
     pub block_id: EntityUri,
 }
 
-impl E2ETransitionFactory for PinBlock {
+impl TransitionFactory<ReferenceState> for PinBlock {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Candidate set: Main's editable descendants. Per-precondition
         // filter narrows to pinnable subset.
@@ -65,8 +66,9 @@ impl E2ETransitionFactory for PinBlock {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for PinBlock {
+impl TransitionRef<ReferenceState> for PinBlock {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let block = state.block_state.blocks.get(&self.block_id);
         let mut checks: Vec<Validated<(), Reason>> = vec![
@@ -123,12 +125,17 @@ impl E2ETransitionImpl for PinBlock {
                 });
         }
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for PinBlock {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_pin_block(self.region, &self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for PinBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         // focus_pin = SELECT (existence check) + INSERT or UPDATE.
         // Two round-trips total — one read and one write. The reactive base

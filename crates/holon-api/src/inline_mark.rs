@@ -148,8 +148,34 @@ pub fn marks_to_json(marks: &[MarkSpan]) -> String {
 
 /// Parse marks from the JSON wire format. Errors surface as `ApiError`
 /// rather than silently returning empty — fail-loud per project policy.
+///
+/// The result is canonicalized (see [`canonicalize_marks`]) so that equal mark
+/// sets compare equal regardless of the order the storage backend emitted them.
 pub fn marks_from_json(s: &str) -> Result<Vec<MarkSpan>, serde_json::Error> {
-    serde_json::from_str(s)
+    let mut marks: Vec<MarkSpan> = serde_json::from_str(s)?;
+    canonicalize_marks(&mut marks);
+    Ok(marks)
+}
+
+/// Sort marks into a canonical order: by `(start, end)`, then mark kind, then
+/// full serialized form as a total-order tiebreaker.
+///
+/// Storage backends emit equal mark *sets* in different *orders* — the Loro
+/// Peritext reader closes overlapping runs in `HashMap` iteration order, while
+/// the SQL JSON column preserves insertion order. The projection's content
+/// diff compares `Block.marks` as a `Vec`, so without a canonical order two
+/// faithful round-trips of the same block would diff spuriously and fire a
+/// redundant update. Canonicalizing at every read boundary makes that compare
+/// order-insensitive.
+pub fn canonicalize_marks(marks: &mut [MarkSpan]) {
+    marks.sort_by(|a, b| {
+        (a.start, a.end)
+            .cmp(&(b.start, b.end))
+            .then_with(|| a.mark.loro_key().cmp(b.mark.loro_key()))
+            .then_with(|| {
+                marks_to_json(std::slice::from_ref(a)).cmp(&marks_to_json(std::slice::from_ref(b)))
+            })
+    });
 }
 
 // --- Value <-> MarkSpan conversions for the entity framework ---
@@ -188,6 +214,32 @@ mod tests {
         let json = marks_to_json(&marks);
         let back = marks_from_json(&json).expect("round-trip");
         assert_eq!(marks, back);
+    }
+
+    #[test]
+    fn canonicalize_makes_equal_sets_compare_equal_regardless_of_input_order() {
+        // Same mark set, two emission orders (as a Loro HashMap scan vs a SQL
+        // JSON column might produce). After canonicalization they must be
+        // identical so the projection's `Vec<MarkSpan>` compare is a no-op.
+        let a = vec![
+            MarkSpan::new(6, 11, InlineMark::Italic),
+            MarkSpan::new(0, 5, InlineMark::Bold),
+            MarkSpan::new(0, 5, InlineMark::Underline),
+        ];
+        let b = vec![
+            MarkSpan::new(0, 5, InlineMark::Underline),
+            MarkSpan::new(0, 5, InlineMark::Bold),
+            MarkSpan::new(6, 11, InlineMark::Italic),
+        ];
+        let mut a_canon = a.clone();
+        let mut b_canon = b.clone();
+        canonicalize_marks(&mut a_canon);
+        canonicalize_marks(&mut b_canon);
+        assert_eq!(a_canon, b_canon);
+        // And the order is the expected (start, end, kind) order.
+        assert_eq!(a_canon[0], MarkSpan::new(0, 5, InlineMark::Bold));
+        assert_eq!(a_canon[1], MarkSpan::new(0, 5, InlineMark::Underline));
+        assert_eq!(a_canon[2], MarkSpan::new(6, 11, InlineMark::Italic));
     }
 
     #[test]

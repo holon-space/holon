@@ -1202,7 +1202,7 @@ pub fn widget_gallery_rows() -> Vec<std::sync::Arc<HashMap<String, Value>>> {
     vec![
         // Root item (tree parent)
         std::sync::Arc::new(HashMap::from([
-            ("id".into(), Value::String("root".into())),
+            ("id".into(), Value::String("block:root".into())),
             ("parent_id".into(), Value::Null),
             ("sort_key".into(), Value::Integer(0)),
             ("name".into(), Value::String("Block editor".into())),
@@ -1231,8 +1231,8 @@ pub fn widget_gallery_rows() -> Vec<std::sync::Arc<HashMap<String, Value>>> {
         ])),
         // Child of root
         std::sync::Arc::new(HashMap::from([
-            ("id".into(), Value::String("child1".into())),
-            ("parent_id".into(), Value::String("root".into())),
+            ("id".into(), Value::String("block:child1".into())),
+            ("parent_id".into(), Value::String("block:root".into())),
             ("sort_key".into(), Value::Integer(0)),
             ("name".into(), Value::String("Sync engine".into())),
             ("status".into(), Value::String("Beta".into())),
@@ -1247,8 +1247,8 @@ pub fn widget_gallery_rows() -> Vec<std::sync::Arc<HashMap<String, Value>>> {
         ])),
         // Another child of root
         std::sync::Arc::new(HashMap::from([
-            ("id".into(), Value::String("child2".into())),
-            ("parent_id".into(), Value::String("root".into())),
+            ("id".into(), Value::String("block:child2".into())),
+            ("parent_id".into(), Value::String("block:root".into())),
             ("sort_key".into(), Value::Integer(1)),
             ("name".into(), Value::String("Query compiler".into())),
             ("status".into(), Value::String("Stable".into())),

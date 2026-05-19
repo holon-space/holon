@@ -11,9 +11,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -34,7 +34,8 @@ pub struct BulkExternalAdd {
     pub blocks: Vec<Block>,
 }
 
-impl E2ETransitionFactory for BulkExternalAdd {
+impl TransitionFactory<ReferenceState> for BulkExternalAdd {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let doc_uris: Vec<EntityUri> = state.documents.keys().cloned().collect();
         check(!doc_uris.is_empty(), Reason::NoDocumentsAvailable).map(|_| {
@@ -104,8 +105,9 @@ impl E2ETransitionFactory for BulkExternalAdd {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for BulkExternalAdd {
+impl TransitionRef<ReferenceState> for BulkExternalAdd {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -149,13 +151,18 @@ impl E2ETransitionImpl for BulkExternalAdd {
         state.rebuild_profile_tracking();
         state.block_state.next_id += self.blocks.len();
     }
+}
 
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for BulkExternalAdd {
+    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
         sut.apply_bulk_external_add(&self.doc_uri, &self.blocks, ref_state)
             .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for BulkExternalAdd {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let n = self.blocks.len();
         let watches = state.active_watches.len();

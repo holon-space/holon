@@ -85,14 +85,31 @@ impl StubSut {
     /// (Re)start the `LoroSyncController`. Used by `Restart` and `OfflineMerge`.
     async fn start_controller(&mut self) -> Result<()> {
         let command_bus: Arc<dyn OperationProvider> = self.stub_ops.clone();
-        let event_bus_arc: Arc<dyn EventBus> = self.event_bus.clone();
-        let controller = LoroSyncController::new(
+        let sink_reader: Arc<dyn holon::sync::SinkReader> = self.stub_ops.clone();
+        let projection = Arc::new(holon::sync::LoroProjection::from_storage(
             self.doc_store.clone(),
             command_bus,
-            event_bus_arc,
-            self.storage_dir.clone(),
-        );
-        let handle = controller.start().await?;
+            sink_reader,
+            &self.storage_dir,
+        ));
+        let controller = LoroSyncController::new(self.doc_store.clone(), projection);
+        // The stub exercises the EventBus inbound/outbound path with in-memory
+        // stores and no MatviewManager, so the Phase 4 block mirror is fed an
+        // empty, unsubscribed `LiveData<Block>` (no source) — a no-op mirror.
+        let block_live: std::sync::Arc<holon::sync::live_data::LiveData<holon_api::block::Block>> =
+            holon::sync::live_data::LiveData::new(
+                Vec::new(),
+                |row: &holon::storage::types::StorageEntity| {
+                    row.get("id")
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| anyhow::anyhow!("block row missing id"))
+                },
+                |_: &holon::storage::types::StorageEntity| {
+                    Err(anyhow::anyhow!("stub block feed is empty; parse_fn unused"))
+                },
+            );
+        let handle = controller.start(block_live).await?;
         self.controller_handle = Some(handle);
         Ok(())
     }
@@ -281,8 +298,11 @@ impl LoroSyncSut for StubSut {
 /// `LoroSyncController` calls. Other methods panic loudly so we catch
 /// unexpected usage.
 pub struct StubOperationProvider {
-    /// Primary block store: stable_id → BlockSnapshot.
-    blocks: Mutex<BTreeMap<String, BlockSnapshot>>,
+    /// Primary block store: stable_id → merged param map. Stores the raw
+    /// param maps (not a projected snapshot) so the same instance can serve
+    /// as the projection's `SinkReader` — the compare-and-skip diff reads
+    /// these back as full `Block`s via `Block::try_from`.
+    blocks: Mutex<BTreeMap<String, StorageEntity>>,
     /// Number of batches received (for sanity asserts in tests).
     pub batches_received: Mutex<usize>,
 }
@@ -302,7 +322,43 @@ impl StubOperationProvider {
     }
 
     pub async fn snapshot(&self) -> BTreeMap<String, BlockSnapshot> {
-        self.blocks.lock().await.clone()
+        self.blocks
+            .lock()
+            .await
+            .iter()
+            .map(|(id, params)| {
+                let get = |k: &str| {
+                    params
+                        .get(k)
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                };
+                (
+                    id.clone(),
+                    BlockSnapshot {
+                        id: id.clone(),
+                        parent_id: get("parent_id"),
+                        content: get("content"),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl holon::sync::SinkReader for StubOperationProvider {
+    async fn read_blocks(
+        &self,
+    ) -> Result<std::collections::HashMap<String, holon_api::block::Block>> {
+        let blocks = self.blocks.lock().await;
+        let mut out = std::collections::HashMap::with_capacity(blocks.len());
+        for (id, params) in blocks.iter() {
+            let block = holon_api::block::Block::try_from(params.clone())?;
+            out.insert(id.clone(), block);
+        }
+        Ok(out)
     }
 }
 
@@ -314,9 +370,9 @@ impl OperationProvider for StubOperationProvider {
 
     async fn execute_operation(
         &self,
-        _entity_name: &EntityName,
-        _op_name: &str,
-        _params: StorageEntity,
+        _: &EntityName,
+        _: &str,
+        _: StorageEntity,
     ) -> DatasourceResult<OperationResult> {
         panic!(
             "StubOperationProvider::execute_operation is not implemented; use execute_batch_with_origin"
@@ -327,7 +383,7 @@ impl OperationProvider for StubOperationProvider {
         &self,
         entity_name: &EntityName,
         operations: Vec<(String, StorageEntity)>,
-        _origin: EventOrigin,
+        _: EventOrigin,
     ) -> DatasourceResult<Vec<OperationResult>> {
         assert_eq!(
             entity_name, "block",
@@ -342,24 +398,15 @@ impl OperationProvider for StubOperationProvider {
                         .and_then(|v| v.as_string())
                         .map(|s| s.to_string())
                         .expect("create/update missing 'id'");
-                    let parent_id = params
-                        .get("parent_id")
-                        .and_then(|v| v.as_string())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    let content = params
-                        .get("content")
-                        .and_then(|v| v.as_string())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    blocks.insert(
-                        id.clone(),
-                        BlockSnapshot {
-                            id,
-                            parent_id,
-                            content,
-                        },
-                    );
+                    // Merge: create supplies a full param map; update supplies
+                    // only changed fields. Merging onto the existing entry
+                    // mirrors how the SQL sink's UPSERT/diff-guarded UPDATE
+                    // preserves untouched columns, so the read-back `Block` is
+                    // faithful for the compare-and-skip diff.
+                    let entry = blocks.entry(id).or_default();
+                    for (k, v) in params {
+                        entry.insert(k.clone(), v.clone());
+                    }
                 }
                 "delete" => {
                     let id = params
@@ -411,45 +458,33 @@ impl StubEventBus {
 
 #[async_trait]
 impl EventBus for StubEventBus {
-    async fn publish(
-        &self,
-        _event: Event,
-        _command_id: Option<CommandId>,
-    ) -> StorageResult<EventId> {
+    async fn publish(&self, _: Event, _: Option<CommandId>) -> StorageResult<EventId> {
         // The controller only ever publishes via `execute_batch_with_origin`,
         // which goes through the stub `OperationProvider`. A real EventBus
         // publish is never called in the stub path.
         Ok("stub".to_string())
     }
 
-    async fn subscribe(
-        &self,
-        _filter: EventFilter,
-        _consumer: Consumer,
-    ) -> StorageResult<EventStream> {
+    async fn subscribe(&self, _: EventFilter, _: Consumer) -> StorageResult<EventStream> {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         *self.tx.lock().await = Some(tx);
         Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 
-    async fn mark_processed(&self, _event_id: &EventId, _consumer: Consumer) -> StorageResult<()> {
+    async fn mark_processed(&self, _: &EventId, _: Consumer) -> StorageResult<()> {
         Ok(())
     }
 
     async fn update_status(
         &self,
-        _event_id: &EventId,
-        _status: holon::sync::event_bus::EventStatus,
-        _rejection_reason: Option<String>,
+        _: &EventId,
+        _: holon::sync::event_bus::EventStatus,
+        _: Option<String>,
     ) -> StorageResult<()> {
         Ok(())
     }
 
-    async fn link_speculative(
-        &self,
-        _confirmed_event_id: &EventId,
-        _speculative_event_id: &EventId,
-    ) -> StorageResult<()> {
+    async fn link_speculative(&self, _: &EventId, _: &EventId) -> StorageResult<()> {
         Ok(())
     }
 }

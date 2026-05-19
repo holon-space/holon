@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::entity_uri::EntityUri;
 use crate::inline_mark::MarkSpan;
-use crate::types::{ContentType, SourceLanguage};
+use crate::types::{ContentType, SourceLanguage, Tags};
 use crate::{row_id, uri_from_row, Value};
 
 // =============================================================================
@@ -279,9 +279,9 @@ pub struct Block {
     /// Tags attached to this block. The literal tag `"Page"` marks the block
     /// as a page (formerly `is_document()`). Other tags are user-defined.
     /// Managed through the block_tags junction table (edge field), not a
-    /// direct column.
+    /// direct column. An unordered, duplicate-free set ([`Tags`]).
     #[serde(skip, default)]
-    pub tags: Vec<String>,
+    pub tags: Tags,
 
     /// Block IDs this block requires (depends on / is blocked by) before it
     /// can be acted upon. Stored in the `block_requires` junction table
@@ -357,7 +357,7 @@ impl Default for Block {
         Self {
             id: EntityUri::block_random(),
             parent_id: EntityUri::no_parent(),
-            tags: Vec::new(),
+            tags: Tags::default(),
             requires: Vec::new(),
             content: String::new(),
             content_type: ContentType::Text,
@@ -379,16 +379,15 @@ impl Block {
     /// Whether this block is a page. A block is a page iff its `tags` list
     /// contains the literal string [`PAGE_TAG`].
     pub fn is_page(&self) -> bool {
-        self.tags.iter().any(|t| t == PAGE_TAG)
+        self.tags.contains(PAGE_TAG)
     }
 
     /// Mark or unmark this block as a page by toggling [`PAGE_TAG`] in `tags`.
     pub fn set_page(&mut self, is_page: bool) {
-        let already = self.is_page();
-        if is_page && !already {
-            self.tags.push(PAGE_TAG.to_string());
-        } else if !is_page && already {
-            self.tags.retain(|t| t != PAGE_TAG);
+        if is_page {
+            self.tags.insert(PAGE_TAG);
+        } else {
+            self.tags.remove(PAGE_TAG);
         }
     }
 
@@ -760,7 +759,7 @@ impl TryFrom<HashMap<String, Value>> for Block {
         let created_at = row.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
         let updated_at = row.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
 
-        let tags = row
+        let tags: Tags = row
             .get("tags")
             .cloned()
             .map(|v| match v {
@@ -779,6 +778,7 @@ impl TryFrom<HashMap<String, Value>> for Block {
                 Value::Null => Vec::new(),
                 _ => Vec::new(),
             })
+            .map(Tags::from)
             .unwrap_or_default();
         let requires = row
             .get("requires")
@@ -806,9 +806,9 @@ impl TryFrom<HashMap<String, Value>> for Block {
             .map(|s| s.to_string())
             .unwrap_or_else(default_sort_key);
         let marks = row.get("marks").cloned().and_then(|v| match v {
-            Value::Json(s) => Some(
-                serde_json::from_str::<Vec<MarkSpan>>(&s).expect("stored marks JSON must be valid"),
-            ),
+            Value::Json(s) => {
+                Some(crate::marks_from_json(&s).expect("stored marks JSON must be valid"))
+            }
             Value::Null => None,
             _ => None,
         });

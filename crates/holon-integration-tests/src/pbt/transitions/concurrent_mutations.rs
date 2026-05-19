@@ -15,9 +15,9 @@ use crate::pbt::validation::{Reason, check};
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, expected_mutation_sql};
@@ -37,7 +37,8 @@ pub struct ConcurrentMutations {
     pub external_mutation: MutationEvent,
 }
 
-impl E2ETransitionFactory for ConcurrentMutations {
+impl TransitionFactory<ReferenceState> for ConcurrentMutations {
+    type Reason = Reason;
     fn weighted_generator(_: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // DISABLED: reference model assumes External always wins (LWW),
         // but actual CRDT resolution is timing-dependent. The legacy generator
@@ -88,8 +89,9 @@ fn mutation_precondition(event: &MutationEvent, state: &ReferenceState) -> bool 
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for ConcurrentMutations {
+impl TransitionRef<ReferenceState> for ConcurrentMutations {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> =
             vec![check(state.app_started, Reason::AppNotStarted)];
@@ -191,8 +193,11 @@ impl E2ETransitionImpl for ConcurrentMutations {
         state.rebuild_profile_tracking();
         state.block_state.next_id += 2;
     }
+}
 
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ConcurrentMutations {
+    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
         sut.apply_concurrent_mutations(
             self.ui_mutation.clone(),
             self.external_mutation.clone(),
@@ -200,8 +205,10 @@ impl E2ETransitionImpl for ConcurrentMutations {
         )
         .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for ConcurrentMutations {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let watches = state.active_watches.len();
         let blocks = state.block_state.blocks.len();

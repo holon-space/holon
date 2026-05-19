@@ -354,48 +354,7 @@ impl HolonMcpServer {
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
         let include_profile = params.include_profile.unwrap_or(false);
-
-        let json_rows: Vec<HashMap<String, serde_json::Value>> = query_result
-            .rows
-            .iter()
-            .map(|row| {
-                let mut json_row: HashMap<String, serde_json::Value> = row
-                    .iter()
-                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
-                    .collect();
-
-                if include_profile {
-                    let profile = self.engine().profile_resolver().resolve(row);
-                    json_row.insert(
-                        "_profile".to_string(),
-                        serde_json::json!({
-                            "name": profile.name,
-                            "render": format!("{:?}", profile.render),
-                            "operations": profile.operations.iter()
-                                .map(|op| format!("{}.{}", op.entity_name, op.name))
-                                .collect::<Vec<_>>(),
-                        }),
-                    );
-                }
-
-                json_row
-            })
-            .collect();
-
-        let result = QueryResult {
-            rows: json_rows.clone(),
-            row_count: json_rows.len(),
-            duration_ms: Some(duration_ms),
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string(&result).map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    "serialization_failed",
-                    Some(serde_json::json!({"error": e.to_string()})),
-                )
-            })?,
-        )]))
+        self.finalize_query_response(&query_result.rows, Some(duration_ms), include_profile)
     }
 
     #[tool(
@@ -479,48 +438,7 @@ impl HolonMcpServer {
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
         let include_profile = params.include_profile.unwrap_or(false);
-
-        let json_rows: Vec<HashMap<String, serde_json::Value>> = query_result
-            .rows
-            .iter()
-            .map(|row| {
-                let mut json_row: HashMap<String, serde_json::Value> = row
-                    .iter()
-                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
-                    .collect();
-
-                if include_profile {
-                    let profile = self.engine().profile_resolver().resolve(row);
-                    json_row.insert(
-                        "_profile".to_string(),
-                        serde_json::json!({
-                            "name": profile.name,
-                            "render": format!("{:?}", profile.render),
-                            "operations": profile.operations.iter()
-                                .map(|op| format!("{}.{}", op.entity_name, op.name))
-                                .collect::<Vec<_>>(),
-                        }),
-                    );
-                }
-
-                json_row
-            })
-            .collect();
-
-        let result = QueryResult {
-            rows: json_rows.clone(),
-            row_count: json_rows.len(),
-            duration_ms: Some(duration_ms),
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string(&result).map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    "serialization_failed",
-                    Some(serde_json::json!({"error": e.to_string()})),
-                )
-            })?,
-        )]))
+        self.finalize_query_response(&query_result.rows, Some(duration_ms), include_profile)
     }
 
     #[tool(
@@ -943,31 +861,7 @@ impl HolonMcpServer {
             })?;
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
-
-        let json_rows: Vec<HashMap<String, serde_json::Value>> = query_result
-            .rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
-                    .collect()
-            })
-            .collect();
-
-        let result = QueryResult {
-            rows: json_rows.clone(),
-            row_count: json_rows.len(),
-            duration_ms: Some(duration_ms),
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string(&result).map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    "serialization_failed",
-                    Some(serde_json::json!({"error": e.to_string()})),
-                )
-            })?,
-        )]))
+        self.finalize_query_response(&query_result.rows, Some(duration_ms), false)
     }
 
     // --- Debug / inspection tools ---
@@ -1228,28 +1122,7 @@ impl HolonMcpServer {
                 )
             })?;
 
-        let json_rows: Vec<HashMap<String, serde_json::Value>> = rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
-                    .collect()
-            })
-            .collect();
-
-        let result = QueryResult {
-            rows: json_rows.clone(),
-            row_count: json_rows.len(),
-            duration_ms: None,
-        };
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string(&result).map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    "serialization_failed",
-                    Some(serde_json::json!({"error": e.to_string()})),
-                )
-            })?,
-        )]))
+        self.finalize_query_response(&rows, None, false)
     }
 
     #[tool(
@@ -2298,6 +2171,56 @@ fn capture_window_as_png(window_title: Option<&str>) -> Result<Vec<u8>, String> 
 
 // --- Helper methods for debug tools ---
 impl HolonMcpServer {
+    /// Build the standard `QueryResult` JSON response from a set of holon rows,
+    /// optionally annotating each row with profile metadata.
+    fn finalize_query_response(
+        &self,
+        rows: &[HashMap<String, Value>],
+        duration_ms: Option<f64>,
+        include_profile: bool,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let json_rows: Vec<HashMap<String, serde_json::Value>> = rows
+            .iter()
+            .map(|row| {
+                let mut json_row: HashMap<String, serde_json::Value> = row
+                    .iter()
+                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
+                    .collect();
+
+                if include_profile {
+                    let profile = self.engine().profile_resolver().resolve(row);
+                    json_row.insert(
+                        "_profile".to_string(),
+                        serde_json::json!({
+                            "name": profile.name,
+                            "render": format!("{:?}", profile.render),
+                            "operations": profile.operations.iter()
+                                .map(|op| format!("{}.{}", op.entity_name, op.name))
+                                .collect::<Vec<_>>(),
+                        }),
+                    );
+                }
+
+                json_row
+            })
+            .collect();
+
+        let result = QueryResult {
+            rows: json_rows.clone(),
+            row_count: json_rows.len(),
+            duration_ms,
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&result).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+
     /// Resolve a doc_id (UUID or file path) to blocks from Loro.
     async fn get_loro_blocks(&self, doc_id: &str) -> Result<Vec<Block>, rmcp::ErrorData> {
         let store = self.debug.loro_doc_store.get().ok_or_else(|| {

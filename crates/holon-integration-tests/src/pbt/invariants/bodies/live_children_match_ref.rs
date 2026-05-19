@@ -1,30 +1,79 @@
-//! Phase 7 — `inv-live-children-match-ref` (DEFERRED).
+//! `inv-live-children-match-ref` (FUNCTIONAL).
 //!
-//! Inline body lives at `sut.rs:4370–4413` (called via
-//! `self.assert_live_children_match_ref(ref_state)` at sut.rs:4378).
-//! The helper's full body is at sut.rs:7047–7105.
+//! Per-parent sibling-order equality between the SQL projection and the
+//! reference model. For every parent of a non-seed block, the projection's
+//! `sorted_children` (ordered by `sort_key`, the authoritative fractional
+//! index) must equal the ref model's `sorted_children` (document order),
+//! restricted to non-seed blocks.
 //!
-//! # Why deferred
+//! This is the functional successor to the deferred skeleton: it became
+//! cheap once `RefBlockTree::sorted_children` (ref side) and
+//! `SutSqlProjection::sorted_children` (SQL `ORDER BY sort_key`) existed.
 //!
-//! The body requires:
-//! - `ref_state.block_state.blocks` — to enumerate parent URIs; no Ref* cap today
-//! - `self.resolve_uri` (private) — to translate synthetic parent IDs to real UUIDs
-//! - Direct engine SQL via `engine.execute_query("SELECT id FROM block_raw … ORDER BY sort_key")`
-//!   — `SutSqlProjection` provides `all_block_ids` and `block_raw_row` but not a
-//!   per-parent ordered-children query
-//! - `ref_state.children_of(parent)` — no `RefBlockTree::sorted_children` cap yet
-//!   bound to the wide-PBT's `ReferenceState`
-//!
-//! Also gated on `!nav_only` in `check_invariants_async` — `nav_only` is a
-//! private field on `E2ESut`. Wire when: `SutSqlProjection` grows
-//! `children_of_ordered(parent_id)`, `RefBlockTree` impl covers
-//! `ReferenceState::children_of`, and resolve-uri is exposed via a cap accessor.
+//! Bug class caught: org-ingested blocks whose Loro fractional index never
+//! reaches SQL `sort_key` (left at the default `"A0"`) and therefore
+//! mis-sort against moved siblings carrying a real fi — the
+//! projection-totality gap. Runs in any slice that is `RefBlockTree` +
+//! `SutSqlProjection` (e.g. `org_create_ordering_pbt`).
+
+use std::collections::BTreeSet;
+
+use holon_pbt_core::capabilities::{EntityUri, RefBlockTree, SutSqlProjection};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvLiveChildrenMatchRef;
 
 impl InvLiveChildrenMatchRef {
-    pub const ID: holon_pbt_core::invariant::InvariantId =
-        holon_pbt_core::invariant::InvariantId("inv-live-children-match-ref");
+    pub const ID: InvariantId = InvariantId("inv-live-children-match-ref");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+#[allow(async_fn_in_trait)]
+impl<R, S> Invariant<R, S> for InvLiveChildrenMatchRef
+where
+    R: RefBlockTree,
+    S: SutSqlProjection,
+{
+    fn id(&self) -> InvariantId {
+        Self::ID
+    }
+
+    fn mode(&self) -> RunMode {
+        RunMode::Strict
+    }
+
+    async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
+        let non_seed = ref_.all_non_seed_block_ids();
+
+        // Parents to verify: the distinct parents of every non-seed block.
+        let mut parents: BTreeSet<EntityUri> = BTreeSet::new();
+        for id in &non_seed {
+            if let Some(parent) = ref_.parent_of(id) {
+                parents.insert(parent);
+            }
+        }
+
+        for parent in &parents {
+            let ref_children: Vec<EntityUri> = ref_
+                .sorted_children(parent)
+                .into_iter()
+                .filter(|c| non_seed.contains(c))
+                .collect();
+            let sql_children: Vec<EntityUri> = sut
+                .sorted_children(parent)
+                .await
+                .into_iter()
+                .filter(|c| non_seed.contains(c))
+                .collect();
+
+            if ref_children != sql_children {
+                return InvariantResult::Fail(format!(
+                    "[inv-live-children-match-ref] sibling order diverges under parent \
+                     {parent}.\n  ref (doc order): {ref_children:?}\n  \
+                     sql (ORDER BY sort_key): {sql_children:?}"
+                ));
+            }
+        }
+
+        InvariantResult::Ok
+    }
+}

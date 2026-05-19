@@ -29,6 +29,105 @@ use super::sut_row_parsing::parse_block_row;
 use super::types::*;
 
 impl<V: VariantMarker> E2ESut<V> {
+    /// `ref_state`-dependent post-action for block-mutating transitions.
+    ///
+    /// The cap-trait SUT methods (`SutBlockTreeWrite::apply_split_block`
+    /// / `apply_join_block` / indent / outdent / move_*) are pure actions
+    /// with no `ref_state` parameter. The sync barrier + block-count check
+    /// + synthetic-id reconciliation that used to live inside the old
+    /// `SutHandle::apply_split_block`/`apply_join_block` tails are
+    /// `ref_state`-dependent, so they move here, where the harness owns
+    /// `ref_state`. No behaviour loss: the sync still happens, the count
+    /// is still asserted, and `map_unmapped_split_synthetic_ids` still
+    /// mutates `doc_uri_map` so later transitions resolve the new block.
+    async fn block_tree_post_action(
+        &mut self,
+        ref_state: &ReferenceState,
+        transition: &crate::pbt::transitions::E2ETransition,
+    ) {
+        use crate::pbt::transitions::E2ETransition;
+        match transition {
+            E2ETransition::SplitBlock(_) => {
+                let expected_count = Self::expected_content_block_count(ref_state);
+                let expected_ids = self.expected_block_ids(ref_state);
+                let timeout = std::time::Duration::from_secs(5);
+                let db_rows = self.wait_for_blocks_synced(&expected_ids, timeout).await;
+                if db_rows.len() != expected_count {
+                    let id_vec: Vec<String> = db_rows
+                        .iter()
+                        .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
+                        .collect();
+                    let actual_ids: HashSet<EntityUri> =
+                        id_vec.iter().map(|s| EntityUri::from_raw(s)).collect();
+                    let mut id_counts: std::collections::HashMap<String, u32> = HashMap::new();
+                    for id in &id_vec {
+                        *id_counts.entry(id.clone()).or_insert(0) += 1;
+                    }
+                    let duplicates: Vec<(String, u32)> = id_counts
+                        .iter()
+                        .filter(|(_, c)| **c > 1)
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
+                    let missing: Vec<&EntityUri> = expected_ids.difference(&actual_ids).collect();
+                    let extra: Vec<&EntityUri> = actual_ids.difference(&expected_ids).collect();
+                    eprintln!(
+                        "[SplitBlock count-mismatch diag] expected={} db_rows={} unique_ids={} duplicates={:?} missing_from_block_raw={:?} extra_in_block_raw={:?}",
+                        expected_count,
+                        db_rows.len(),
+                        actual_ids.len(),
+                        duplicates,
+                        missing,
+                        extra,
+                    );
+                }
+                assert_eq!(
+                    db_rows.len(),
+                    expected_count,
+                    "[SplitBlock] Block count mismatch after split"
+                );
+
+                // Capture pre-split known real ids so we can identify the freshly
+                // created block among `db_rows` (mirrors map_unmapped_split_synthetic_ids).
+                let pre_known: HashSet<String> = {
+                    let mut ids: HashSet<String> =
+                        self.doc_uri_map.values().map(|u| u.to_string()).collect();
+                    for ref_id in ref_state.block_state.blocks.keys() {
+                        if !self.doc_uri_map.contains_key(ref_id)
+                            && !ref_id.as_str().contains(":split-")
+                        {
+                            ids.insert(ref_id.to_string());
+                        }
+                    }
+                    ids
+                };
+                self.map_unmapped_split_synthetic_ids(ref_state, &db_rows, "[SplitBlock]");
+
+                // Production fires editor_focus(new_block) as a follow-up of
+                // split_block; the chain isn't synchronous with the Enter
+                // dispatch. Best-effort barrier so the next
+                // inv-focus-matches-ref check sees the new block, not the
+                // pre-split click target.
+                let new_block_real_id: Option<String> = db_rows
+                    .iter()
+                    .filter_map(|row| row.get("id")?.as_string().map(|s| s.to_string()))
+                    .find(|id| !pre_known.contains(id));
+                if self.frontend_geometry.is_some()
+                    && let Some(new_id) = new_block_real_id.as_deref()
+                {
+                    let _ = self
+                        .wait_for_focus_to_match(new_id, Duration::from_secs(2))
+                        .await;
+                }
+            }
+            E2ETransition::JoinBlock(_) => {
+                let expected_ids = self.expected_block_ids(ref_state);
+                self.wait_for_blocks_synced(&expected_ids, Duration::from_secs(5))
+                    .await;
+            }
+            _ => {}
+        }
+    }
+
     /// Lazy accessor for the CDC-driven `LiveData<Block>` mirroring the `block`
     /// matview. Built on first use because we need an async `watch_view` call and
     /// the SUT struct can't carry a started engine at construction time. The
@@ -39,7 +138,7 @@ impl<V: VariantMarker> E2ESut<V> {
             return live;
         }
         let sql = format!(
-            "SELECT id, content, content_type, source_language, parent_id, properties, tags \
+            "SELECT id, content, content_type, source_language, parent_id, properties, tags, requires \
              FROM {BLOCK_READ_TABLE}"
         );
         let watch = self
@@ -127,13 +226,43 @@ impl<V: VariantMarker> E2ESut<V> {
         ref_state: &ReferenceState,
         transition: &crate::pbt::transitions::E2ETransition,
     ) {
-        use crate::pbt::transitions::E2ETransitionImpl;
+        use holon_pbt_core::TransitionImpl;
         transition.apply_to_sut(ref_state, self).await;
+
+        // Block-mutating transitions that mint or delete blocks need a
+        // `ref_state`-dependent post-action that the action method itself
+        // can't carry (the cap-trait `apply_split_block`/`apply_join_block`
+        // are pure actions). SplitBlock additionally reconciles the
+        // freshly-minted prod UUID back onto the synthetic `block:split-N`
+        // slot the ref-state allocated (`doc_uri_map` bookkeeping) — drop
+        // this and later transitions can't resolve the new block. Run it
+        // here, where the harness has `ref_state`.
+        self.block_tree_post_action(ref_state, transition).await;
+
         // Stash the post-transition ref-state so the NEXT call can read it
         // as its pre-transition state. The framework hands us only the
         // post-state, so we have to carry the previous post forward
         // ourselves. See `pre_ref_state` field doc for the rationale.
         self.pre_ref_state = Some(ref_state.clone());
+
+        // File-writing transitions (WriteOrgFile / CreateDocument) reach the
+        // SQL sink via the OS file-watcher → `on_file_changed` → projection
+        // chain. None of the settle barriers below await that FS-event round
+        // trip — they cover the EventBus (`org`/`cache`) and Loro paths only.
+        // For a post-StartApp `index.org` *swap*, `apply_write_org_file`
+        // resolves the already-seeded doc URI instantly and returns before the
+        // watcher ingests the new content, so the watermark in
+        // `assert_cdc_quiescent` is sampled too early: the legitimate one-time
+        // block `Created` lands at `seq > target` and is misreported as churn.
+        // Wait for the file's blocks to reach `block_raw` first. (Diagnosed
+        // 2026-05-22; the slices' `index.org` filter is the same race.)
+        if self.ctx.is_running()
+            && matches!(transition.variant_name(), "WriteOrgFile" | "CreateDocument")
+        {
+            let expected_ids = self.expected_block_ids(ref_state);
+            self.wait_for_blocks_synced(&expected_ids, std::time::Duration::from_secs(5))
+                .await;
+        }
 
         // Yield to let tokio schedule CDC forwarding tasks before we drain.
         tokio::task::yield_now().await;
@@ -149,16 +278,16 @@ impl<V: VariantMarker> E2ESut<V> {
         // when they're really just causally-related writes that haven't
         // settled yet.
         //
-        // Round-trip path that has to converge before the assert:
-        //   SQL write → CDC → EventBus event → `loro` consumer writes Loro
-        //   → `subscribe_root` fires → `on_loro_changed` → more SQL writes
-        //
-        // Echo suppression (`event.origin == EventOrigin::Loro`) breaks
-        // the cycle in 1–2 hops, so a single drain pair is enough.
+        // Settle path that has to converge before the assert: a Loro write
+        // (org intent / chord op) → `subscribe_root` → `on_loro_changed`
+        // projects the SQL rows → CDC → cache/watch consumers. Loro is the
+        // authority; there is no SQL→Loro reflection, so the cycle is one-way
+        // and a single drain pair suffices. The inbound EventBus `loro`
+        // consumer was removed, so it is NOT waited on here.
         {
             use tracing::Instrument;
             // Per-step settle barriers. Timeouts sized for Full+atomic-editor PBT runs
-            // where BulkExternalAdd produces bursts the loro consumer applies serially:
+            // where BulkExternalAdd produces bursts the mirror applies serially:
             // 500ms wasn't enough to land all create events, leaving subsequent TypeChars
             // dispatched against blocks not-yet-in-the-Loro-tree (silent-drop in
             // `headless_editor_mirror.rs` because `editable_text(...)` returned Err).
@@ -168,10 +297,7 @@ impl<V: VariantMarker> E2ESut<V> {
                     .wait_for_loro_quiescence(std::time::Duration::from_secs(2))
                     .await;
                 self.ctx
-                    .wait_for_consumers(
-                        &["loro", "org", "cache"],
-                        std::time::Duration::from_secs(5),
-                    )
+                    .wait_for_consumers(&["org", "cache"], std::time::Duration::from_secs(5))
                     .await;
                 self.ctx
                     .wait_for_loro_quiescence(std::time::Duration::from_secs(2))
@@ -379,6 +505,60 @@ impl<V: VariantMarker> E2ESut<V> {
         // skip — the mirror is stale and any structural assertion (orphan
         // checks, focus_roots intersection, etc.) would just re-fail on
         // the same lag.
+        // Eventual-consistency convergence wait.
+        //
+        // An external org-file rewrite (e.g. swapping one `index.org` layout
+        // for another) is ingested by `OrgSyncController` and projected to
+        // `block_raw` by the asynchronous Loro→SQL projection. That projection
+        // can run via the lazy `on_block_changed` "pending external change
+        // before re-render" path, which the pre-invariant quiescence
+        // (`wait_for_org_files_stable`, keyed on the *org* consumer) does not
+        // await. So `block_raw` may legitimately lag the Loro authority for a
+        // short window after such a rewrite. `block_raw` is a *convergent*
+        // projection (it always reaches the Loro state), so poll it for a
+        // bounded window before asserting divergence — asserting too early
+        // reports a false half-applied state (new heading present, its source
+        // children missing, old blocks not yet deleted). If `block_raw`
+        // converges here, the live_blocks (matview mirror) lag below is handled
+        // by the existing truth-check downgrade.
+        if backend_ids != ref_ids {
+            for _ in 0..60u64 {
+                let rows = self
+                    .ctx
+                    .query_sql("SELECT id FROM block_raw")
+                    .await
+                    .unwrap_or_default();
+                let truth: HashSet<EntityUri> = rows
+                    .iter()
+                    .filter_map(|r| {
+                        r.get("id")
+                            .and_then(|v| v.as_string())
+                            .and_then(|s| EntityUri::parse(s).ok())
+                    })
+                    .filter(|id| !seed_block_ids.contains(id))
+                    .collect();
+                if truth == ref_ids {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+
+        // Re-fetch the live mirror after the convergence wait so a matview that
+        // caught up during the wait takes the clean full-comparison path rather
+        // than the lag downgrade.
+        let backend_blocks: Vec<Block> =
+            self.live_blocks().await.read().values().cloned().collect();
+        let backend_blocks_no_seed: Vec<_> = backend_blocks
+            .iter()
+            .filter(|b| !seed_block_ids.contains(&b.id))
+            .cloned()
+            .collect();
+        let backend_ids: HashSet<EntityUri> = backend_blocks_no_seed
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
+
         let live_blocks_stale = if backend_ids != ref_ids {
             let truth_rows = self
                 .ctx

@@ -658,45 +658,68 @@ impl FromStr for Timestamp {
 // Tags
 // =============================================================================
 
-/// Parsed tag set. Stored as comma-separated string in SQL, displayed as
-/// `:tag1:tag2:` in org-mode. Parsed eagerly at entry boundaries.
+/// Parsed tag set. Tags are an unordered, duplicate-free set: the order they
+/// appear in is semantically irrelevant. Backed by a `BTreeSet` so order-
+/// independence and de-duplication hold *by construction* — every consumer
+/// (diffing, comparison, rendering) gets canonical behaviour for free instead
+/// of having to remember to normalize. Iteration yields a deterministic
+/// (lexicographically sorted) order. Stored as comma-separated string in SQL,
+/// displayed as `:tag1:tag2:` in org-mode. Parsed eagerly at entry boundaries.
 ///
 /// flutter_rust_bridge:ignore
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Tags(Vec<String>);
+pub struct Tags(std::collections::BTreeSet<String>);
 
 impl Tags {
     /// Parse from a comma-separated string (the SQL/properties storage format).
     pub fn from_csv(s: &str) -> Self {
-        let tags: Vec<String> = s
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        Tags(tags)
+        s.split(',').map(|t| t.to_string()).collect()
     }
 
     /// Build from an iterator of individual tag strings (e.g. from orgize).
     pub fn from_tag_iter(iter: impl IntoIterator<Item = String>) -> Self {
-        let tags: Vec<String> = iter
-            .into_iter()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        Tags(tags)
+        iter.into_iter().collect()
     }
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    pub fn as_slice(&self) -> &[String] {
-        &self.0
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn contains(&self, tag: &str) -> bool {
+        self.0.contains(tag)
+    }
+
+    /// Insert a tag (trimmed; empty is ignored). Returns whether it was new.
+    pub fn insert(&mut self, tag: impl Into<String>) -> bool {
+        let tag = tag.into().trim().to_string();
+        if tag.is_empty() {
+            return false;
+        }
+        self.0.insert(tag)
+    }
+
+    /// Remove a tag. Returns whether it was present.
+    pub fn remove(&mut self, tag: &str) -> bool {
+        self.0.remove(tag)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &String> {
+        self.0.iter()
+    }
+
+    /// Owned `Vec` in canonical (sorted) order — for the few APIs that still
+    /// require a `Vec` (e.g. `Value::Array` construction).
+    pub fn to_vec(&self) -> Vec<String> {
+        self.0.iter().cloned().collect()
     }
 
     /// Comma-separated string for SQL/properties storage.
     pub fn to_csv(&self) -> String {
-        self.0.join(",")
+        self.0.iter().cloned().collect::<Vec<_>>().join(",")
     }
 
     /// Org-mode tag format: `:tag1:tag2:`
@@ -704,12 +727,12 @@ impl Tags {
         if self.0.is_empty() {
             return String::new();
         }
-        format!(":{}:", self.0.join(":"))
+        format!(":{}:", self.0.iter().cloned().collect::<Vec<_>>().join(":"))
     }
 
-    /// Convert to a `BTreeSet` for order-independent comparison.
+    /// The underlying `BTreeSet` (clone) for order-independent comparison.
     pub fn to_set(&self) -> std::collections::BTreeSet<String> {
-        self.0.iter().cloned().collect()
+        self.0.clone()
     }
 }
 
@@ -735,7 +758,36 @@ impl From<Tags> for Value {
 
 impl From<Vec<String>> for Tags {
     fn from(v: Vec<String>) -> Self {
-        Tags(v)
+        v.into_iter().collect()
+    }
+}
+
+/// Normalizing collector: trims each tag and drops empties, so a `Tags` can
+/// never hold an untrimmed or empty tag (parse-don't-validate invariant).
+impl FromIterator<String> for Tags {
+    fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
+        Tags(
+            iter.into_iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
+        )
+    }
+}
+
+impl IntoIterator for Tags {
+    type Item = String;
+    type IntoIter = std::collections::btree_set::IntoIter<String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Tags {
+    type Item = &'a String;
+    type IntoIter = std::collections::btree_set::Iter<'a, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -1001,10 +1053,12 @@ mod tests {
 
     #[test]
     fn tags_from_csv() {
-        let tags = Tags::from_csv("foo, bar ,baz");
-        assert_eq!(tags.as_slice(), &["foo", "bar", "baz"]);
-        assert_eq!(tags.to_csv(), "foo,bar,baz");
-        assert_eq!(tags.to_org(), ":foo:bar:baz:");
+        // Tags are a set: input is trimmed, de-duplicated, and iterated in
+        // canonical (sorted) order regardless of source order.
+        let tags = Tags::from_csv("foo, bar ,baz, foo");
+        assert_eq!(tags.to_vec(), vec!["bar", "baz", "foo"]);
+        assert_eq!(tags.to_csv(), "bar,baz,foo");
+        assert_eq!(tags.to_org(), ":bar:baz:foo:");
     }
 
     #[test]
@@ -1024,7 +1078,7 @@ mod tests {
     #[test]
     fn tags_from_str() {
         let tags: Tags = "x,y,z".parse().unwrap();
-        assert_eq!(tags.as_slice(), &["x", "y", "z"]);
+        assert_eq!(tags.to_vec(), vec!["x", "y", "z"]);
     }
 
     #[test]

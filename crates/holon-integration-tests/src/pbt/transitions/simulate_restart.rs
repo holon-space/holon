@@ -10,10 +10,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
@@ -23,7 +23,8 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimulateRestart;
 
-impl E2ETransitionFactory for SimulateRestart {
+impl TransitionFactory<ReferenceState> for SimulateRestart {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         SimulateRestart
             .preconditions(state)
@@ -31,8 +32,9 @@ impl E2ETransitionFactory for SimulateRestart {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for SimulateRestart {
+impl TransitionRef<ReferenceState> for SimulateRestart {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -51,12 +53,17 @@ impl E2ETransitionImpl for SimulateRestart {
         // SimulateRestart doesn't change reference state - blocks should be preserved.
         // The SUT will clear last_projection and trigger file re-processing.
     }
+}
 
-    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for SimulateRestart {
+    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
         sut.apply_simulate_restart(state).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for SimulateRestart {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE + 4,

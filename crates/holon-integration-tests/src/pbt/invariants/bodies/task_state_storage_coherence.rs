@@ -56,7 +56,7 @@ where
 
         for id in &all_ids {
             let sql_state = sut.block_task_state(id).await;
-            let loro_state = sut.loro_task_state_of(id).await;
+            let loro_state = sut.loro_task_state_of(id.as_str()).await;
 
             if sql_state != loro_state {
                 mismatches.push(format!("  {id}: sql={:?} loro={:?}", sql_state, loro_state));

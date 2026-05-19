@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
-use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::capabilities::{EntityUri, SutSqlProjection};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 
 pub struct InvBlockTagsReferencesExist<R>(pub PhantomData<R>);
@@ -43,7 +43,7 @@ where
         let all_ids: BTreeSet<_> = sut.all_block_ids().await;
         let tag_ids: BTreeSet<_> = sut.block_tag_block_ids().await;
 
-        let orphans: Vec<&String> = tag_ids.difference(&all_ids).collect();
+        let orphans: Vec<&EntityUri> = tag_ids.difference(&all_ids).collect();
 
         if orphans.is_empty() {
             return InvariantResult::Ok;

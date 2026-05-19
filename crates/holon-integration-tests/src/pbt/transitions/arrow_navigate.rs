@@ -13,9 +13,9 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::{CursorPosition, ReferenceState};
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -30,7 +30,8 @@ pub struct ArrowNavigate {
     pub steps: u8,
 }
 
-impl E2ETransitionFactory for ArrowNavigate {
+impl TransitionFactory<ReferenceState> for ArrowNavigate {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let regions = [Region::Main, Region::LeftSidebar, Region::RightSidebar];
         let mut arms: Vec<(u32, BoxedStrategy<ArrowNavigate>)> = Vec::new();
@@ -77,8 +78,9 @@ impl E2ETransitionFactory for ArrowNavigate {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for ArrowNavigate {
+impl TransitionRef<ReferenceState> for ArrowNavigate {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -221,13 +223,18 @@ impl E2ETransitionImpl for ArrowNavigate {
         state.focused_entity_id.insert(self.region, current_id);
         state.focused_cursor.insert(self.region, cursor);
     }
+}
 
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ArrowNavigate {
+    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
         sut.apply_arrow_navigate(self.region, self.direction, self.steps, ref_state)
             .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for ArrowNavigate {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + (self.steps as usize * 2),

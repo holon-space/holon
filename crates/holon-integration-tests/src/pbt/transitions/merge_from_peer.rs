@@ -10,10 +10,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -24,7 +24,8 @@ pub struct MergeFromPeer {
     pub peer_idx: usize,
 }
 
-impl E2ETransitionFactory for MergeFromPeer {
+impl TransitionFactory<ReferenceState> for MergeFromPeer {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (peer indices) and let `preconditions` be the
         // single source of truth for which ones are actually mergeable. Avoids
@@ -47,8 +48,9 @@ impl E2ETransitionFactory for MergeFromPeer {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for MergeFromPeer {
+impl TransitionRef<ReferenceState> for MergeFromPeer {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -73,12 +75,17 @@ impl E2ETransitionImpl for MergeFromPeer {
         // round-trip (see `assertions.rs:117`).
         state.peer_merge_into_primary(self.peer_idx);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for MergeFromPeer {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_merge_from_peer(self.peer_idx).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for MergeFromPeer {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         // MergeFromPeer: async CDC drain from previous transitions can land here.
         // In production, fires Loro's `subscribe_root` callback, which wakes

@@ -10,10 +10,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -29,7 +29,8 @@ pub struct DragDropBlock {
     pub target: EntityUri,
 }
 
-impl E2ETransitionFactory for DragDropBlock {
+impl TransitionFactory<ReferenceState> for DragDropBlock {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let drag_source: Option<EntityUri> = state.focused_main_editable();
         if drag_source.is_none() {
@@ -73,8 +74,9 @@ impl E2ETransitionFactory for DragDropBlock {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for DragDropBlock {
+impl TransitionRef<ReferenceState> for DragDropBlock {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let mut checks: Vec<Validated<(), Reason>> = vec![
@@ -164,12 +166,17 @@ impl E2ETransitionImpl for DragDropBlock {
         // the beginning of the target's children.
         state.move_block(&self.source, self.target.clone(), None);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for DragDropBlock {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_drag_drop_block(&self.source, &self.target).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for DragDropBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,

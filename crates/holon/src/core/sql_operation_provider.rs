@@ -21,7 +21,7 @@ use crate::sync::event_bus::{
 };
 use holon_api::{EntityName, OperationDescriptor, OperationParam, TypeHint, Value};
 
-fn value_to_json(v: &Value) -> serde_json::Value {
+pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
     match v {
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Integer(i) => serde_json::Value::Number((*i).into()),
@@ -904,6 +904,13 @@ impl SqlOperationProvider {
 
         let mut queue = vec![id.to_string()];
         let mut all_ids = Vec::new();
+        // Cycle guard: a block tree has exactly one parent per block, so a
+        // block appearing twice in a descendant walk means a parent cycle
+        // (e.g. a self-referential `parent_id == id` row). Without this the
+        // cascade `queue.extend(children)` loops forever. Fail loud — a cycle
+        // is corrupt state, not a recoverable condition.
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(id.to_string());
         while let Some(parent) = queue.pop() {
             let children_sql = format!(
                 "SELECT id FROM {} WHERE parent_id = '{}'",
@@ -922,8 +929,17 @@ impl SqlOperationProvider {
                         .map(|s| s.to_string())
                 })
                 .collect();
-            queue.extend(children.iter().cloned());
-            all_ids.extend(children);
+            for child in children {
+                if !visited.insert(child.clone()) {
+                    return Err(format!(
+                        "prepare_delete: parent cycle detected while cascading delete of \
+                         '{id}' — block '{child}' is its own ancestor (corrupt block tree)"
+                    )
+                    .into());
+                }
+                queue.push(child.clone());
+                all_ids.push(child);
+            }
         }
 
         // Document-routing intent lives on the typed `Event::routing_doc_uri`
@@ -1621,10 +1637,13 @@ impl OperationProvider for SqlOperationProvider {
             count,
             all_sql.len()
         );
+        let _tx_t0 = std::time::Instant::now();
+        let _sql_count = all_sql.len();
         self.db_handle
             .transaction(all_sql)
             .await
             .map_err(|e| format!("Batch transaction failed: {}", e))?;
+        let _tx_ms = _tx_t0.elapsed().as_millis();
 
         // Phase 2b: Build events for update ops by reading the post-update rows.
         // prepare_update doesn't emit events (params may be partial); we read
@@ -1660,11 +1679,19 @@ impl OperationProvider for SqlOperationProvider {
         }
 
         // Phase 3: Publish all events in a single batch
+        let _pub_t0 = std::time::Instant::now();
         if let Some(ref bus) = self.event_bus {
             bus.publish_batch(all_events)
                 .await
                 .map_err(|e| format!("Batch event publish failed: {}", e))?;
         }
+        tracing::info!(
+            "[SqlOperationProvider] batch timing: {} ops, {} sql stmts → tx {}ms, publish {}ms",
+            count,
+            _sql_count,
+            _tx_ms,
+            _pub_t0.elapsed().as_millis(),
+        );
 
         Ok(vec![OperationResult::irreversible(Vec::new()); count])
     }

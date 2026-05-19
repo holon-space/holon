@@ -175,7 +175,39 @@ analyze-crap:
             -E 'not (binary(cucumber) + binary(tui_ui_pbt))' 2>&1 \
             | tee /tmp/holon-analyze-coverage.log
     fi
+    # Threshold / examples-exclude / missing-coverage policy live in
+    # .cargo-crap.toml and are picked up automatically from the repo root.
+    # Human report — every function over threshold, for visibility.
     cargo crap --lcov lcov.info 2>&1 | tee /tmp/holon-analyze-crap.log
+    # Regression gate — fail ONLY when a function's CRAP score rose vs the
+    # recorded baseline. New code can't make the pre-existing hotspots worse;
+    # the backlog (Phase 5) is paid down incrementally, not blocked. We compare
+    # via tools/crap_check_regression.py rather than `cargo crap --fail-regression`
+    # because the latter pairs functions by name only and mispairs the many
+    # duplicate-named functions in this repo (see the script's docstring).
+    # Regenerate the baseline with `just crap-baseline` after intentional changes.
+    if [ -f crap-baseline.json ]; then
+        cargo crap --lcov lcov.info --format json --output /tmp/holon-crap-current.json
+        python3 tools/crap_check_regression.py \
+            --baseline crap-baseline.json --current /tmp/holon-crap-current.json \
+            2>&1 | tee -a /tmp/holon-analyze-crap.log
+    else
+        echo "No crap-baseline.json — skipping regression gate. Run 'just crap-baseline'." \
+            | tee -a /tmp/holon-analyze-crap.log
+    fi
+
+# Record the current CRAP scores as the regression baseline (crap-baseline.json).
+# Run after intentionally accepting new complexity, or to lower the bar as the
+# Phase 5 backlog is paid down. Requires a fresh lcov.info (run analyze-crap first).
+crap-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f lcov.info ]; then
+        echo "lcov.info missing — run 'just analyze-crap' first to generate coverage."
+        exit 1
+    fi
+    cargo crap --lcov lcov.info --format json --output crap-baseline.json
+    echo "Wrote crap-baseline.json"
 
 # Dependency audit (vulnerabilities, licenses, bans).
 analyze-deny:

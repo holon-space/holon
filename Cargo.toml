@@ -108,7 +108,6 @@ iroh = { version = "0.96.0", default-features = false }
 # === Testing ===
 proptest = "1.6"
 proptest-state-machine = "0.7.0"
-cucumber = "0.22"
 serial_test = "3.2"
 tempfile = "3.23"
 

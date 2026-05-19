@@ -9,15 +9,14 @@
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::capabilities::{
     CapRegion, RefBlockTreeMut, RefEditorMirror, RefEditorMirrorMut, RefFocus, RefLifecycle,
-    commit_active_editor_if_changed,
+    SutEditorMirrorWrite, commit_active_editor_if_changed,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
@@ -92,14 +91,16 @@ where
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl E2ETransitionFactory for DeleteBackward {
+impl TransitionFactory<ReferenceState> for DeleteBackward {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         delete_backward_weighted_generator(state)
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for DeleteBackward {
+impl TransitionRef<ReferenceState> for DeleteBackward {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         delete_backward_preconditions(state)
     }
@@ -107,12 +108,17 @@ impl E2ETransitionImpl for DeleteBackward {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         delete_backward_apply_to_ref(self.count, state);
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutEditorMirrorWrite> TransitionImpl<ReferenceState, S> for DeleteBackward {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_delete_backward(self.count).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for DeleteBackward {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE,

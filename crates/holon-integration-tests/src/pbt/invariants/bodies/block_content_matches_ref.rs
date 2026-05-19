@@ -41,7 +41,7 @@ where
             // synthetic id. Skip — the slice's role is content equality on
             // stable ids; the wider PBT's synthetic-id-mapping does the
             // cross-side reconciliation for these.
-            if id.contains("::split-") || id.contains("::bulk-") {
+            if id.as_str().contains("::split-") || id.as_str().contains("::bulk-") {
                 continue;
             }
             let ref_content = match ref_.block_content(&id) {

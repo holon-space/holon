@@ -5,10 +5,11 @@
 //! - `LoroDocumentStore` for managing CRDT documents
 //! - `LoroBlocksDataSource` for populating `QueryableCache`
 //! - `LoroBlockOperations` for direct Loro CRDT access (not registered as
-//!   `OperationProvider` — the command bus writes through SQL)
-//! - `LoroSyncController` — the bidirectional bridge between the Loro doc
-//!   and the abstract command/event bus. Subscribes to EventBus for
-//!   inbound events and to `doc.subscribe_root` for outbound changes.
+//!   `OperationProvider`)
+//! - `LoroSyncController` — the outbound Loro → SQL projector. Subscribes to
+//!   `doc.subscribe_root` and projects each Loro change into `block_raw`. Loro
+//!   is the authority (seeded from the bundled Org assets via intents); there is
+//!   no SQL→Loro direction.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,12 +18,10 @@ use fluxdi::{Injector, Module, Provider, Shared};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use crate::api::{CoreOperations, LoroBackend};
 use crate::core::SqlOperationProvider;
 use crate::core::datasource::OperationProvider;
 use crate::core::queryable_cache::QueryableCache;
 use crate::storage::BLOCK_WRITE_TABLE;
-use crate::storage::DbHandle;
 use crate::storage::schema_module::SchemaModule;
 use crate::storage::schema_modules::BlockSchemaModule;
 use crate::sync::event_bus::EventBus;
@@ -30,8 +29,7 @@ use crate::sync::{
     LoroBlockOperations, LoroBlocksDataSource, LoroDocumentStore, LoroSyncController,
     LoroSyncControllerHandle, TursoEventBus,
 };
-use holon_api::block::{Block, BlockContent};
-use holon_api::{ContentType, EntityUri, Value};
+use holon_api::block::Block;
 
 /// Configuration for standalone Loro CRDT support
 #[derive(Clone, Debug)]
@@ -111,6 +109,57 @@ impl Module for LoroModule {
         // root factory to defer execution until DI resolution. The handle
         // owns the Loro subscription and the background task; keeping this
         // value in DI keeps both alive.
+        // The downstream Loro→SQL projection (consolidator → SQL sink convergent
+        // feed) as a SHARED, standalone DI service. Built independently of the
+        // controller's run-loop task so org's initial scan can drive it (via
+        // `DownstreamProjection::flush`) WITHOUT resolving the controller handle
+        // — that handle's factory runs `seed` + `controller.start()`, which is
+        // gated post-scan. The controller resolves the SAME instance, so the
+        // run loop and org's flush advance one `last_synced` watermark and
+        // serialize on the projection's lock. `last_synced` loads from the
+        // sidecar (last session's frontier); Loro's persisted snapshot is the
+        // startup source of truth, so the diff is bounded to this session's
+        // changes.
+        injector.provide::<crate::sync::loro_sync_controller::LoroProjection>(
+            Provider::root_async(|resolver| async move {
+                let config = resolver.resolve::<LoroConfig>();
+                let doc_store = resolver.resolve::<LoroDocumentStore>();
+                let event_bus = resolver.resolve::<TursoEventBus>();
+                let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
+                let db_handle_provider = resolver.resolve::<dyn crate::di::DbHandleProvider>();
+                let db_handle = db_handle_provider.handle();
+                let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
+                    db_handle.clone(),
+                    BLOCK_WRITE_TABLE.to_string(),
+                    "block".to_string(),
+                    "block".to_string(),
+                    event_bus_arc,
+                    BlockSchemaModule.edge_fields(),
+                ));
+                let command_bus: Arc<dyn OperationProvider> = sql_ops;
+                let sink_reader: Arc<dyn crate::sync::SinkReader> =
+                    Arc::new(crate::sync::TursoSinkReader::new(db_handle));
+                let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
+                Shared::new(
+                    crate::sync::loro_sync_controller::LoroProjection::from_storage(
+                        doc_store_arc,
+                        command_bus,
+                        sink_reader,
+                        &config.storage_dir,
+                    ),
+                )
+            }),
+        );
+
+        injector.provide::<dyn holon_core::DownstreamProjection>(Provider::root_async(
+            |resolver| async move {
+                let projection = resolver
+                    .resolve_async::<crate::sync::loro_sync_controller::LoroProjection>()
+                    .await;
+                projection as Arc<dyn holon_core::DownstreamProjection>
+            },
+        ));
+
         tracing::info!(
             "[LoroModule] STAGE 1: registering LoroSyncControllerHandle provider (pre-provide call)"
         );
@@ -119,81 +168,58 @@ impl Module for LoroModule {
                 "[LoroModule] STAGE 2: LoroSyncControllerHandle factory body started (inside async closure)"
             );
             info!("[LoroModule] LoroSyncControllerHandle factory: entering");
-            let config = resolver.resolve::<LoroConfig>();
             let doc_store = resolver.resolve::<LoroDocumentStore>();
-            let event_bus = resolver.resolve::<TursoEventBus>();
-             tracing::info!("[LoroModule] STAGE 3: upstream deps resolved");
+            tracing::info!("[LoroModule] STAGE 3: upstream deps resolved");
             info!("[LoroModule] LoroSyncControllerHandle factory: upstream deps resolved");
-            let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
-             tracing::info!("[LoroModule] STAGE 3a: event_bus_arc built");
 
             // The Loro controller writes to the persistent block store
             // through an `OperationProvider`. We construct a dedicated
             // `SqlOperationProvider` instance for it — equivalent to the
             // one OrgMode uses, but independent so the two directions
             // can run in parallel without coupling.
-             tracing::info!("[LoroModule] STAGE 3b: resolving DbHandleProvider");
-            let db_handle_provider = resolver.resolve::<dyn crate::di::DbHandleProvider>();
-             tracing::info!("[LoroModule] STAGE 3c: DbHandleProvider resolved");
-            let db_handle = db_handle_provider.handle();
-             tracing::info!("[LoroModule] STAGE 3d: db_handle obtained");
-            // Writes go to the underlying base table `block_raw`; `block` is
-            // a matview and Turso rejects DML against it. The entity name
-            // and short_name remain the logical "block" so dispatcher routing
-            // and event aggregate types stay unchanged.
-            let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
-                db_handle.clone(),
-                BLOCK_WRITE_TABLE.to_string(),
-                "block".to_string(),
-                "block".to_string(),
-                event_bus_arc.clone(),
-                BlockSchemaModule.edge_fields(),
-            ));
-            let command_bus: Arc<dyn OperationProvider> = sql_ops as Arc<dyn OperationProvider>;
-             tracing::info!("[LoroModule] STAGE 3e: sql_ops built");
+            // The downstream Loro→SQL projection is a shared standalone service
+            // (registered above). Resolve the SAME instance org's scan flushes,
+            // so the controller's run loop and org's flush advance one
+            // `last_synced` watermark and serialize on the projection's lock.
+            let projection = resolver
+                .resolve_async::<crate::sync::loro_sync_controller::LoroProjection>()
+                .await;
+             tracing::info!("[LoroModule] STAGE 3e: shared projection resolved");
 
             let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
-             tracing::info!("[LoroModule] STAGE 3f: doc_store_arc built; about to call seed");
+            tracing::info!("[LoroModule] STAGE 3f: doc_store_arc built");
 
-            // Seed Loro from the persistent block store BEFORE starting
-            // the controller. Some blocks enter SQL via raw writes that
-            // bypass the `OperationProvider` entirely (notably
-            // `seed_default_layout`, which has a legitimate bootstrap
-            // reason to do so). Without this step those blocks would
-            // never reach Loro — the controller's inbound branch only
-            // sees EventBus events, and these blocks produce none.
-            //
-            // Seeding here runs inside the DI factory (before the
-            // controller starts), so the controller sees Loro already
-            // in sync with the persistent store and its initial
-            // watermark → current-frontiers reconcile is a no-op.
-            info!("[LoroModule] LoroSyncControllerHandle factory: calling seed_loro_from_persistent_store");
-            if let Err(e) = seed_loro_from_persistent_store(&doc_store_arc, &db_handle).await {
-                error!("[LoroModule] seed_loro_from_persistent_store failed: {}", e);
-            }
-            info!("[LoroModule] LoroSyncControllerHandle factory: seed call returned");
+            // Loro is NOT seeded from the persistent (Turso) store. The bundled
+            // Org assets are the seed source: they reach Loro directly via
+            // intents (`BlockOrdering::create_in_tree`) — `Journals.org` through
+            // the file watcher's `on_file_changed`, the `index.org` layout +
+            // `__default__` page through `FrontendSession::seed_default_layout`.
+            // SQL (`block_raw`) is a pure projection of Loro. There is no
+            // SQL→Loro direction (the Turso-seed + runtime mirror are removed).
 
-            // Pre-seed the sidecar with the current frontiers so the
-            // controller doesn't diff seeded blocks against an empty
-            // watermark (which would re-publish them as redundant creates).
-            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            // Advance the shared projection watermark to the current frontiers so
+            // the controller's first reconcile starts from the loaded doc state.
             {
-                let store = doc_store_arc.read().await;
-                let collab = store
-                    .get_global_doc()
-                    .await
-                    .expect("[LoroModule] get_global_doc for sidecar pre-seed");
-                let frontiers = collab.doc().oplog_frontiers();
-                let sidecar_path = config
-                    .storage_dir
-                    .join(super::loro_sync_controller::SIDECAR_FILENAME);
-                if let Some(parent) = sidecar_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .expect("[LoroModule] create sidecar parent dir");
-                }
-                std::fs::write(&sidecar_path, frontiers.encode())
-                    .expect("[LoroModule] write sidecar pre-seed");
+                let frontiers = {
+                    let store = doc_store_arc.read().await;
+                    let collab = store
+                        .get_global_doc()
+                        .await
+                        .expect("[LoroModule] get_global_doc for watermark advance");
+                    collab.doc().oplog_frontiers()
+                };
+                *projection.last_synced().lock().unwrap() = frontiers;
             }
+
+            // Arm the projection's DELETE pass now that the seed has mirrored
+            // every persistent-store block (including the raw-inserted seed
+            // layout) into Loro. Until this point the org initial scan may have
+            // flushed the projection with Loro not yet holding the seed layout;
+            // an unarmed projection withholds deletes so those SQL-only seed
+            // rows (journals / root-layout / sidebar) are not spuriously
+            // deleted before the seed reconciles them. See
+            // `LoroProjection::arm`.
+            projection.arm();
 
             // Rehydrate any previously-persisted shared subtrees —
             // walk mount nodes in the global doc, load each
@@ -225,18 +251,43 @@ impl Module for LoroModule {
                 }
             }
 
-            let controller = LoroSyncController::new(
-                doc_store_arc,
-                command_bus,
-                event_bus_arc,
-                config.storage_dir.clone(),
-            );
+            let controller = LoroSyncController::new(doc_store_arc, projection);
 
-            match controller.start().await {
-                Ok(handle) => {
-                    handle.disable_inbound_runtime();
-                    Shared::new(handle)
-                }
+            // Phase 4: build the shared block feed and hand it to the
+            // controller, which spawns the block mirror. The feed yields typed
+            // `Block`s — the SQL row→`Block` translation lives HERE, in the
+            // wiring layer, so the controller stays storage-agnostic. The
+            // mirror reflects every block (incl. org-ingested / seeded) into
+            // Loro via the initial snapshot + CDC, independent of `event_acks`.
+            let matview_manager = resolver.resolve::<crate::sync::MatviewManager>();
+            let block_live = {
+                use crate::sync::live_data::LiveData;
+                let watch = matview_manager
+                    .watch("SELECT * FROM block")
+                    .await
+                    .expect("[LoroModule] watch block matview for block mirror");
+                let live = LiveData::new(
+                    watch.initial_rows,
+                    |row: &crate::storage::types::StorageEntity| {
+                        row.get("id")
+                            .and_then(|v| v.as_string())
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| anyhow::anyhow!("block matview row missing id"))
+                    },
+                    // The row→`Block` codec is the storage/domain boundary's
+                    // job: `TryFrom<HashMap<String, Value>> for Block` in
+                    // holon-api (the same path `CacheBlockReader` uses). The
+                    // feed only delegates — no row-shape logic lives here.
+                    |row: &crate::storage::types::StorageEntity| {
+                        holon_api::block::Block::try_from(row.clone())
+                    },
+                );
+                live.subscribe("block", watch.stream);
+                live
+            };
+
+            match controller.start(block_live).await {
+                Ok(handle) => Shared::new(handle),
                 Err(e) => {
                     error!("[LoroModule] Failed to start LoroSyncController: {}", e);
                     // Startup failure: return a handle to a controller
@@ -358,344 +409,4 @@ fn register_subtree_share(injector: &Injector) {
             (*backend).clone() as Arc<dyn OperationProvider>
         },
     ));
-}
-
-/// One-shot seed that copies every block currently in the persistent block
-/// store into Loro. Used at startup to ensure Loro mirrors the bootstrap
-/// state written by paths that bypass the `OperationProvider` (e.g.
-/// `seed_default_layout`).
-///
-/// Idempotent: `create_block` with an existing stable ID is skipped, so
-/// repeated invocations (e.g. across restarts) are safe.
-pub async fn seed_loro_from_persistent_store(
-    doc_store: &Arc<RwLock<LoroDocumentStore>>,
-    db_handle: &DbHandle,
-) -> anyhow::Result<()> {
-    tracing::info!("[LoroModule] SEED-STAGE 1: function entry");
-    info!("[LoroModule] seed: querying block table");
-    tracing::info!("[LoroModule] SEED-STAGE 2: about to query block table");
-    // Phantom-Loro-exists fix (devlog 2026-05-11-phantom-loro-root-cause-found.md):
-    // skip rows whose `block.created` event has NOT been processed by the `loro`
-    // consumer yet. Those blocks will arrive via the regular CDC inbound path
-    // and `apply_create` will create them with correct typed positional intent.
-    // Without this filter, `apply_seed_row` creates them in HashMap-iteration
-    // order, the CDC events then find them already in Loro and bypass to
-    // `apply_update_with_backend` — scrambling tree children order.
-    //
-    // Blocks that bypass `OperationProvider` (notably `seed_default_layout`'s
-    // layout panel + sidebar entities written via raw INSERTs) produce no
-    // events, so the LEFT JOIN keeps them and the seed creates them as
-    // intended.
-    // Order by (parent_id, sort_key) so siblings reach Loro in the same
-    // relative order they have in SQL. `apply_seed_row` calls
-    // `create_block` without an `after_id`, which auto-appends to the
-    // parent's children — sibling N+1's Loro fi is therefore always
-    // greater than sibling N's. After the seed loop we project Loro's
-    // assigned fis back to SQL `sort_key` (see writeback below) so the
-    // two encodings agree on absolute strings going forward. Without
-    // this ordering, Loro's auto-assigned fis would reflect HashMap /
-    // created_at order rather than the org-parser's intended sequence,
-    // and SplitBlock-time `mov_after` would slot the new fi between
-    // Loro siblings whose order disagrees with SQL — surfacing as the
-    // seed=42 SplitBlock ordering panic (devlog handoff 2026-05-14).
-    let rows = db_handle
-        .query(
-            &format!(
-                "SELECT b.id, b.parent_id, b.content, b.content_type, b.source_language, \
-                        b.properties \
-                 FROM {table} b \
-                 LEFT JOIN events e ON e.aggregate_id = b.id \
-                                   AND e.aggregate_type = 'block' \
-                                   AND e.event_type = 'block.created' \
-                                   AND NOT EXISTS ( \
-                                       SELECT 1 FROM event_acks a \
-                                       WHERE a.event_id = e.id AND a.consumer = 'loro' \
-                                   ) \
-                 WHERE e.id IS NULL \
-                 ORDER BY b.parent_id ASC, b.sort_key ASC, b.id ASC",
-                table = crate::storage::BLOCK_READ_TABLE,
-            ),
-            std::collections::HashMap::new(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("query block table: {}", e))?;
-
-    tracing::info!(
-        "[LoroModule] SEED-STAGE 3: query returned {} rows (filtered to events the loro consumer has already processed or pre-event raw inserts)",
-        rows.len()
-    );
-    info!(
-        "[LoroModule] seed: got {} rows from block table",
-        rows.len()
-    );
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let store = doc_store.read().await;
-    let collab = store
-        .get_global_doc()
-        .await
-        .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
-    let backend = LoroBackend::from_document(collab);
-
-    let mut applied_ids: Vec<String> = Vec::new();
-    // Two-pass seed so children whose parent appears later in the result
-    // set still get placed correctly.
-    let mut pending: Vec<&std::collections::HashMap<String, Value>> = rows.iter().collect();
-    for _pass in 0..2 {
-        let mut next: Vec<&std::collections::HashMap<String, Value>> = Vec::new();
-        for row in pending.drain(..) {
-            match apply_seed_row(&backend, row).await {
-                Ok(Some(id)) => applied_ids.push(id),
-                Ok(None) => {}
-                Err(_) => next.push(row),
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        pending = next;
-    }
-
-    store
-        .save_all()
-        .await
-        .map_err(|e| anyhow::anyhow!("save_all after seed: {}", e))?;
-
-    // Project Loro's auto-assigned fis back to SQL `sort_key`. The seed
-    // ordered rows by SQL sort_key, so Loro's per-parent fi sequence
-    // agrees with SQL's order — but the absolute strings differ (org
-    // parser uses `gen_n_keys`, Loro uses its own format). After this
-    // writeback, every block's SQL `sort_key` equals its Loro
-    // `tree.fractional_index(node)`. From here on the Loro→SQL
-    // projector (`LoroSyncController::on_loro_changed`) is the only
-    // writer of `sort_key`, and the two encodings stay in sync. Without
-    // this, SplitBlock-time `mov_after` produces a Loro fi between
-    // siblings whose SQL sort_keys came from a different generator,
-    // and the resulting SQL ordering disagrees with the reference
-    // (devlog 2026-05-14 SplitBlock handoff).
-    if !applied_ids.is_empty() {
-        let mut written = 0usize;
-        for id in &applied_ids {
-            let block = match backend.get_block(id).await {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(
-                        "[LoroModule] sort_key writeback: get_block({}) failed: {}",
-                        id,
-                        e
-                    );
-                    continue;
-                }
-            };
-            let sql = format!(
-                "UPDATE {table} SET sort_key = ? WHERE id = ?",
-                table = BLOCK_WRITE_TABLE,
-            );
-            let params = vec![
-                turso::Value::Text(block.sort_key.clone()),
-                turso::Value::Text(id.clone()),
-            ];
-            db_handle
-                .execute(&sql, params)
-                .await
-                .map_err(|e| anyhow::anyhow!("sort_key writeback for {}: {}", id, e))?;
-            written += 1;
-        }
-        info!(
-            "[LoroModule] sort_key writeback: projected Loro fi to SQL for {} blocks",
-            written
-        );
-    }
-
-    info!(
-        "[LoroModule] Seeded Loro with {} blocks from persistent store",
-        applied_ids.len()
-    );
-    Ok(())
-}
-
-/// Returns `Some(stable_id)` for blocks newly created in Loro, `None`
-/// for blocks already present (idempotent). The caller uses the
-/// returned ids to drive the post-seed sort_key writeback.
-async fn apply_seed_row(
-    backend: &LoroBackend,
-    row: &std::collections::HashMap<String, Value>,
-) -> anyhow::Result<Option<String>> {
-    let id = row
-        .get("id")
-        .and_then(|v| v.as_string())
-        .ok_or_else(|| anyhow::anyhow!("row missing 'id'"))?
-        .to_string();
-
-    // Skip blocks already in Loro.
-    if backend.resolve_to_tree_id(&id).await.is_some() {
-        return Ok(None);
-    }
-
-    let parent_id_raw = row
-        .get("parent_id")
-        .and_then(|v| v.as_string())
-        .unwrap_or("sentinel:no_parent")
-        .to_string();
-
-    // Resolve parent: look up in Loro by stable ID. If not present, and
-    // the parent isn't the sentinel/no-parent, create a placeholder
-    // root so the child has a home.
-    let parent_uri = if backend.resolve_to_tree_id(&parent_id_raw).await.is_some() {
-        EntityUri::from_raw(&parent_id_raw)
-    } else {
-        let parent_entity = EntityUri::from_raw(&parent_id_raw);
-        if parent_entity.is_no_parent() || parent_entity.is_sentinel() {
-            parent_entity
-        } else {
-            let placeholder_uri = backend
-                .create_placeholder_root(parent_entity.id())
-                .await
-                .map_err(|e| anyhow::anyhow!("create placeholder: {}", e))?;
-            EntityUri::from_raw(&placeholder_uri)
-        }
-    };
-
-    let content_str = row
-        .get("content")
-        .and_then(|v| v.as_string())
-        .unwrap_or("")
-        .to_string();
-    let content_type_str = row
-        .get("content_type")
-        .and_then(|v| v.as_string())
-        .unwrap_or("text");
-    let content = if content_type_str == "source" {
-        let lang = row
-            .get("source_language")
-            .and_then(|v| v.as_string())
-            .unwrap_or("text");
-        BlockContent::source(lang, content_str)
-    } else {
-        BlockContent::text(content_str)
-    };
-
-    let block_id_uri = EntityUri::from_raw(&id);
-    let created = backend
-        .create_block(parent_uri, content, Some(block_id_uri))
-        .await
-        .map_err(|e| anyhow::anyhow!("create_block for {}: {}", id, e))?;
-
-    // Hydrate tags onto the freshly-created block. The literal `"Page"` tag
-    // marks the block as a page (formerly the `name`-bearing variant). The
-    // `tags` column is `#[jsonb]` and CDC seeds deliver it as Value::Array
-    // when Turso parses the column, or Value::Json/Value::String when the
-    // raw TEXT is passed through. Any other shape is a programming error.
-    let tags = parse_seed_row_tags(row)?;
-    if !tags.is_empty() {
-        backend
-            .set_block_tags(created.id.as_str(), &tags)
-            .await
-            .map_err(|e| anyhow::anyhow!("set_block_tags: {}", e))?;
-    }
-
-    // Properties: stored as JSON in the `properties` jsonb column. Same
-    // shape variance as `tags`: parse the JSON list explicitly instead of
-    // assuming Value::String.
-    if let Some(map) = parse_seed_row_properties(row)?
-        && !map.is_empty()
-    {
-        let props: std::collections::HashMap<String, Value> = map
-            .into_iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    serde_json::Value::String(s) => Value::String(s),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            Value::Integer(i)
-                        } else {
-                            Value::Float(n.as_f64().unwrap_or(0.0))
-                        }
-                    }
-                    serde_json::Value::Bool(b) => Value::Boolean(b),
-                    serde_json::Value::Null => Value::Null,
-                    _ => Value::String(v.to_string()),
-                };
-                (k, val)
-            })
-            .collect();
-        backend
-            .update_block_properties(created.id.as_str(), &props)
-            .await
-            .map_err(|e| anyhow::anyhow!("update_block_properties: {}", e))?;
-    }
-
-    // Unused-import shim (ContentType is re-exported for parity with other seeders).
-    let _ = ContentType::Text;
-    Ok(Some(id))
-}
-
-/// Parse the `tags` field of a CDC seed row into a typed `Vec<String>`.
-/// Accepts `Value::Array<String>`, `Value::Json` / `Value::String` containing a
-/// JSON list, or `Value::Null`/absent (treated as empty). Any other shape —
-/// non-string array elements, malformed JSON, unexpected variant — fails
-/// loudly so a malformed peer payload can't silently drop tag data.
-fn parse_seed_row_tags(
-    row: &std::collections::HashMap<String, Value>,
-) -> anyhow::Result<Vec<String>> {
-    match row.get("tags") {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .map(|elem| match elem {
-                Value::String(s) => Ok(s.clone()),
-                other => Err(anyhow::anyhow!(
-                    "[apply_seed_row] tag entry is not a string: {:?}",
-                    other
-                )),
-            })
-            .collect(),
-        Some(Value::Json(s)) | Some(Value::String(s)) => serde_json::from_str::<Vec<String>>(s)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "[apply_seed_row] tags string is not a JSON list: {} (raw: {:?})",
-                    e,
-                    s
-                )
-            }),
-        Some(other) => Err(anyhow::anyhow!(
-            "[apply_seed_row] tags has unexpected shape: {:?}",
-            other
-        )),
-    }
-}
-
-/// Parse the `properties` field of a CDC seed row into a JSON object.
-/// Returns `Ok(None)` if the column is absent / Null. Fails loudly on
-/// unexpected shapes so a malformed peer payload can't silently drop
-/// properties.
-fn parse_seed_row_properties(
-    row: &std::collections::HashMap<String, Value>,
-) -> anyhow::Result<Option<std::collections::HashMap<String, serde_json::Value>>> {
-    let raw = match row.get("properties") {
-        None | Some(Value::Null) => return Ok(None),
-        Some(v) => v,
-    };
-    let parsed: std::collections::HashMap<String, serde_json::Value> = match raw {
-        Value::Json(s) | Value::String(s) => serde_json::from_str(s).map_err(|e| {
-            anyhow::anyhow!(
-                "[apply_seed_row] properties string is not a JSON object: {} (raw: {:?})",
-                e,
-                s
-            )
-        })?,
-        Value::Object(m) => m
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone().into()))
-            .collect(),
-        other => {
-            return Err(anyhow::anyhow!(
-                "[apply_seed_row] properties has unexpected shape: {:?}",
-                other
-            ));
-        }
-    };
-    Ok(Some(parsed))
 }

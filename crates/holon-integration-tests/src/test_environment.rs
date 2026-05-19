@@ -702,37 +702,6 @@ impl TestEnvironment {
             .unwrap_or(0)
     }
 
-    /// Whether the `LoroSyncController` inbound runtime gate is currently
-    /// open (events are reflected SQL→Loro). Returns `true` when Loro is
-    /// disabled — the gate's "off" state only matters when there's a
-    /// controller to gate.
-    pub fn loro_sync_inbound_runtime_enabled(&self) -> bool {
-        self.loro_sync_handle
-            .as_ref()
-            .map(|h| h.inbound_runtime_enabled())
-            .unwrap_or(true)
-    }
-
-    /// Number of non-Loro-origin block events the inbound runtime path has
-    /// dropped (because the gate is disabled). Stays 0 while the gate is open.
-    /// Returns 0 when Loro is disabled.
-    pub fn loro_sync_drop_count(&self) -> usize {
-        self.loro_sync_handle
-            .as_ref()
-            .map(|h| h.inbound_runtime_drop_count())
-            .unwrap_or(0)
-    }
-
-    /// Number of non-Loro-origin block events the inbound runtime path has
-    /// applied to Loro (legitimate reflections that passed the gate, e.g.
-    /// `EventOrigin::Org`). Returns 0 when Loro is disabled.
-    pub fn loro_sync_applied_count(&self) -> usize {
-        self.loro_sync_handle
-            .as_ref()
-            .map(|h| h.inbound_runtime_applied_count())
-            .unwrap_or(0)
-    }
-
     /// Wait until every named EventBus consumer has caught up to the
     /// current published watermark, or until `timeout` elapses.
     ///
@@ -1596,7 +1565,8 @@ impl TestEnvironment {
                    b.content_type, b.source_language, b.source_name, \
                    b.properties, b.marks, b.collapsed, b.completed, \
                    b.block_type, b.created_at, b.updated_at, \
-                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags \
+                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
+                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
                    FROM block_raw b";
         let rows = self.query_sql(sql).await?;
         let all_blocks: Vec<Block> = rows
@@ -1746,10 +1716,13 @@ impl TestEnvironment {
     /// Create a text block.
     pub async fn create_block(&self, id: &str, parent_id: &str, content: &str) -> Result<()> {
         let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String(id.to_string()));
+        params.insert(
+            "id".to_string(),
+            Value::String(EntityUri::from_raw(id).to_string()),
+        );
         params.insert(
             "parent_id".to_string(),
-            Value::String(parent_id.to_string()),
+            Value::String(EntityUri::from_raw(parent_id).to_string()),
         );
         params.insert("content".to_string(), Value::String(content.to_string()));
         params.insert("content_type".to_string(), ContentType::Text.into());
@@ -1766,10 +1739,13 @@ impl TestEnvironment {
         content: &str,
     ) -> Result<()> {
         let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String(id.to_string()));
+        params.insert(
+            "id".to_string(),
+            Value::String(EntityUri::from_raw(id).to_string()),
+        );
         params.insert(
             "parent_id".to_string(),
-            Value::String(parent_id.to_string()),
+            Value::String(EntityUri::from_raw(parent_id).to_string()),
         );
         params.insert("content".to_string(), Value::String(content.to_string()));
         params.insert("content_type".to_string(), ContentType::Source.into());
@@ -1781,7 +1757,10 @@ impl TestEnvironment {
     /// Update a block's content.
     pub async fn update_block_content(&self, id: &str, new_content: &str) -> Result<()> {
         let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String(id.to_string()));
+        params.insert(
+            "id".to_string(),
+            Value::String(EntityUri::from_raw(id).to_string()),
+        );
         params.insert("field".to_string(), Value::String("content".to_string()));
         params.insert("value".to_string(), Value::String(new_content.to_string()));
 
@@ -1793,7 +1772,10 @@ impl TestEnvironment {
     /// Delete a block.
     pub async fn delete_block(&self, id: &str) -> Result<()> {
         let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String(id.to_string()));
+        params.insert(
+            "id".to_string(),
+            Value::String(EntityUri::from_raw(id).to_string()),
+        );
 
         self.test_ctx().execute_op("block", "delete", params).await
     }
@@ -1806,7 +1788,13 @@ impl TestEnvironment {
     pub async fn wait_for_block(&self, block_id: &str, timeout: std::time::Duration) -> bool {
         use crate::wait_until;
 
-        let sql = format!("SELECT id FROM block_raw WHERE id = '{}'", block_id);
+        // Callers address blocks by the bare id written in org files
+        // (e.g. "block-1"); `block_raw` stores the schemed form
+        // ("block:block-1"). Normalize at this boundary — idempotent for
+        // already-schemed input (per ORG_SYNTAX: schemes live everywhere
+        // outside org files).
+        let schemed = EntityUri::from_raw(block_id).to_string();
+        let sql = format!("SELECT id FROM block_raw WHERE id = '{}'", schemed);
         let poll_interval = std::time::Duration::from_millis(50);
 
         wait_until(
@@ -1839,7 +1827,7 @@ impl TestEnvironment {
     /// per-event ceiling surfaces a wedged stream as a timeout.
     pub async fn wait_for_blocks_synced(
         &mut self,
-        expected_ids: &HashSet<String>,
+        expected_ids: &HashSet<EntityUri>,
         timeout: std::time::Duration,
     ) -> Vec<HashMap<String, Value>> {
         use tokio::time::{Duration, timeout as tokio_timeout};
@@ -1849,7 +1837,9 @@ impl TestEnvironment {
 
         if let (Some(stream), Some(acc)) = (&mut self.all_blocks_stream, &mut self.all_blocks) {
             loop {
-                let subset_ok = expected_ids.iter().all(|id| acc.state().contains_key(id));
+                let subset_ok = expected_ids
+                    .iter()
+                    .all(|id| acc.state().contains_key(id.as_str()));
                 let length_ok = match seed_count {
                     Some(seeds) => acc.state().len() == expected_ids.len() + seeds,
                     None => true,
@@ -1899,7 +1889,7 @@ impl TestEnvironment {
     /// length match. Call this once after StartApp's seeding settles.
     pub async fn prime_seed_count(
         &mut self,
-        expected_ids: &HashSet<String>,
+        expected_ids: &HashSet<EntityUri>,
         timeout: std::time::Duration,
     ) {
         use tokio::time::{Duration, timeout as tokio_timeout};
@@ -1907,7 +1897,10 @@ impl TestEnvironment {
         let start = std::time::Instant::now();
 
         if let (Some(stream), Some(acc)) = (&mut self.all_blocks_stream, &mut self.all_blocks) {
-            while !expected_ids.iter().all(|id| acc.state().contains_key(id)) {
+            while !expected_ids
+                .iter()
+                .all(|id| acc.state().contains_key(id.as_str()))
+            {
                 if start.elapsed() >= timeout {
                     break;
                 }
@@ -1928,7 +1921,7 @@ impl TestEnvironment {
 
     /// Simulate app restart by touching all org files to trigger re-parsing.
     /// This tests that re-parsing doesn't create orphan blocks.
-    pub async fn simulate_restart(&mut self, expected_ids: &HashSet<String>) -> Result<()> {
+    pub async fn simulate_restart(&mut self, expected_ids: &HashSet<EntityUri>) -> Result<()> {
         use std::time::Duration;
 
         for (doc_uri, file_path) in &self.documents {

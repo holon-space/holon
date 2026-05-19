@@ -14,10 +14,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::pbt::reference_state::OpenPinEntry;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -31,7 +31,8 @@ pub struct NavigateFocus {
     pub block_id: EntityUri,
 }
 
-impl E2ETransitionFactory for NavigateFocus {
+impl TransitionFactory<ReferenceState> for NavigateFocus {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Restricted to Main: in production the only UI that triggers
         // `navigation.focus` is the LeftSidebar selectable's bound
@@ -84,8 +85,9 @@ impl E2ETransitionFactory for NavigateFocus {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for NavigateFocus {
+impl TransitionRef<ReferenceState> for NavigateFocus {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started, Reason::AppNotStarted),
@@ -169,12 +171,17 @@ impl E2ETransitionImpl for NavigateFocus {
         // content invariants should verify, not pre-bake.
         state.active_editor = None;
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for NavigateFocus {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_navigate_focus(self.region, &self.block_id).await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for NavigateFocus {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS,

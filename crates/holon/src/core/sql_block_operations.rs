@@ -14,18 +14,18 @@
 //!
 //! This provider runs the trait default implementations from
 //! `BlockOperations`, which decompose into a sequence of `set_field` calls.
-//! Each call is forwarded to `SqlOperationProvider::execute_operation`,
-//! preserving the "SQL is source of truth" model: each `set_field` lands
-//! in SQL, emits a CDC event, and reaches Loro through
-//! `LoroSyncController::on_inbound_event`. Reads come from
-//! `QueryableCache<Block>` — same backing store as the rest of the system.
+//! In Loro mode block writes route through the `BlockCellRegistry` to Loro (the
+//! authority) and the outbound projector emits the SQL row; in SqlOnly mode they
+//! land in SQL directly via `SqlOperationProvider::execute_operation`. There is
+//! no SQL→Loro reflection. Reads come from `QueryableCache<Block>` — same
+//! backing store as the rest of the system.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use holon_api::block::Block;
-use holon_api::{EntityName, Value};
+use holon_api::{EntityName, Tags, Value};
 
 use crate::core::datasource::{
     BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
@@ -36,6 +36,7 @@ use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_operation_provider::SqlOperationProvider;
 use crate::storage::types::StorageEntity;
 use crate::sync::block_cell_registry::BlockCellRegistry;
+use crate::sync::event_bus::EventOrigin;
 use holon_api::EntityUri;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::cell_registry::EntityCellRegistry;
@@ -210,6 +211,137 @@ impl BlockOrdering for SqlBlockOperations {
         Ok(())
     }
 
+    /// Loro mode → `create_entity` (LoroBackend::create_block, synchronous).
+    /// SqlOnly mode → `false`, so the caller keeps its SQL create path.
+    async fn create_in_tree(
+        &self,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+        new_id: &EntityUri,
+        content: holon_api::BlockContent,
+        properties: &HashMap<String, Value>,
+        tags: &Tags,
+        requires: &[String],
+    ) -> Result<bool> {
+        self.cell_registry
+            .create_entity(
+                parent_id, after_id, new_id, content, properties, tags, requires,
+            )
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
+
+    /// Apply a block update intent — the single org→block mutation seam (no
+    /// command bus behind it).
+    ///
+    /// Currently SQL-first (delegates to the SQL operation provider, which
+    /// partitions edge fields and lifts `POSITION_AFTER_BLOCK_ID_PARAM`). Picks
+    /// `create`/`update` by the row's prior presence so the emitted CDC kind
+    /// matches.
+    ///
+    /// KNOWN GAP: now that the SQL→Loro mirror is gone, a SQL-first update never
+    /// reaches Loro, so the Loro→SQL projection can revert an org content-edit to
+    /// Loro's stale value on a later reconcile. The fix is to route this path
+    /// Loro-first (like `create_in_tree`), but doing so deterministically
+    /// regresses sibling ordering via the org place loop (the
+    /// `inv-live-children` `ref-doc-3` divergence) — convergence and ordering are
+    /// coupled through the place loop in a not-yet-understood way. Routing updates
+    /// Loro-first belongs with the single-owner-order rewrite (tasks #10/#11).
+    async fn update_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(str::to_string)
+            .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                "update_in_tree: missing 'id' param".into()
+            })?;
+        let op = if self.cache.get_by_id(&id).await?.is_some() {
+            "update"
+        } else {
+            "create"
+        };
+        let entity = EntityName::new(Block::entity_name());
+        self.sql_ops
+            .execute_operation_with_origin(&entity, op, params, EventOrigin::Org)
+            .await?;
+        Ok(())
+    }
+
+    /// Apply a block delete intent.
+    ///
+    /// Loro mode: delete from the Loro tree (the authority) via the cell
+    /// registry; the outbound projector emits the SQL DELETE. This mirrors
+    /// `create_in_tree` (creates go to Loro, the projector writes SQL). Deleting
+    /// only from SQL would race the armed projection, which re-creates the
+    /// still-present Loro node back into SQL — the block resurrects (observed as
+    /// `inv-backend-blocks-match-ref` spurious `bulk-*` rows).
+    ///
+    /// SqlOnly mode: the registry returns `false`; delete straight from SQL via
+    /// the operation provider, preserving the `ROUTING_DOC_URI_KEY` hint so
+    /// `prepare_delete` skips the recursive document walk.
+    async fn delete_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+        let id = params.get("id").and_then(|v| v.as_string()).ok_or_else(
+            || -> Box<dyn std::error::Error + Send + Sync> {
+                "delete_in_tree: missing 'id' param".into()
+            },
+        )?;
+        let uri = EntityUri::from_raw(id);
+        if self
+            .cell_registry
+            .delete_entity(&uri)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
+        {
+            // Loro-backed: the outbound projector writes the SQL DELETE.
+            return Ok(());
+        }
+        let entity = EntityName::new(Block::entity_name());
+        self.sql_ops
+            .execute_operation_with_origin(&entity, "delete", params, EventOrigin::Org)
+            .await?;
+        Ok(())
+    }
+
+    fn is_loro_backed(&self) -> bool {
+        self.cell_registry.is_loro_backed()
+    }
+
+    /// Loro mode → read each block's live fractional index from the Loro tree
+    /// and write it to SQL `sort_key` via the standard `set_field` path,
+    /// mirroring the boot-time seed writeback
+    /// (`loro_module::seed_loro_from_persistent_store`). This closes the
+    /// projection-totality gap: a block created but never repositioned emits no
+    /// Loro mov delta, so the outbound projector never writes its fi and it
+    /// keeps the default `"A0"`. The write goes through
+    /// `SqlOperationProvider::set_field` (→ `prepare_update`) rather than a raw
+    /// `UPDATE block_raw`, so the `properties` column is read-merged and
+    /// re-canonicalised (`properties_to_canonical_json`) — a bare single-column
+    /// raw update desyncs the matview's `properties` projection
+    /// (the `props_check` invariant's "Value::Object serialization bug").
+    /// SqlOnly mode → no-op (SQL owns `sort_key`; `live_sort_key` returns
+    /// `None`).
+    async fn project_sort_keys(&self, ids: &[&str]) -> Result<()> {
+        let entity = EntityName::new(Block::entity_name());
+        for id in ids {
+            let fi = match self.cell_registry.live_sort_key(id).await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("project_sort_keys: live_sort_key({id}): {e:#}").into()
+                },
+            )? {
+                Some(fi) => fi,
+                None => return Ok(()), // SqlOnly — SQL already owns sort_key
+            };
+            let mut params: StorageEntity = HashMap::new();
+            params.insert("id".to_string(), Value::String(id.to_string()));
+            params.insert("field".to_string(), Value::String("sort_key".to_string()));
+            params.insert("value".to_string(), Value::String(fi));
+            self.sql_ops
+                .execute_operation(&entity, "set_field", params)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Returns the SQL `block.sort_key` value to persist for a new block
     /// placed under `parent_id` after `after_id`. Computed unconditionally
     /// via `gen_key_between` against the neighbor sort_keys in the cache —
@@ -368,6 +500,19 @@ impl BlockOrdering for SqlBlockOperations {
     }
 
     async fn children(&self, parent_id: &str) -> Result<Vec<String>> {
+        // Loro mode: the Loro tree is the order authority. Read it directly so
+        // the org-scan place loop sees `create_in_tree` blocks immediately —
+        // the outbound projector that fills the SQL cache is not running during
+        // the initial scan, so a cache read returns `[]` for freshly-created
+        // blocks and the poll times out. Steady-state, the cache is just a
+        // projection of this same tree, so the answer is identical.
+        if let Some(kids) = self.cell_registry.live_children(parent_id).await.map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("children({parent_id}): {e:#}").into()
+            },
+        )? {
+            return Ok(kids);
+        }
         let blocks = self.cache.get_all().await?;
         let mut kids: Vec<&Block> = blocks
             .iter()

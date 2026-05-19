@@ -1,7 +1,6 @@
 # RULES
-- Whenever there's a bug in Flutter, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_pbt.rs can reproduce it.
+- Whenever there's a bug in the UI, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_pbt.rs can reproduce it.
 - If the E2E test doesn't reproduce the issue think about how prod and E2E test can be made more similar, so that the E2E test can reproduce it.
-- Don't add new PBTs for Flutter bugs, only use the existing PBT in general_e2e_pbt.rs
 - **NEVER** swallow errors!! Use `Result` and enrich the error message with information.
 - **ALWAYS** `tee` before filtering output
 
@@ -47,6 +46,10 @@ See ARCHITECTURE.md
 
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.
+
+# Debugging
+Prefer using the `debugger-mcp` skill over adding debug logging.
+Compile code with the `debugger` cargo profile so you can inspect variables.
 
 <!-- ast-outline:begin v=1.0.1 -->
 ## Prefer `ast-outline` over full reads

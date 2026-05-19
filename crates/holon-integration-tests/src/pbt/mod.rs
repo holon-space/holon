@@ -3,6 +3,7 @@
 //! Extracted from `tests/general_e2e_pbt.rs` so the state machine can be
 //! reused by other test harnesses (e.g. Flutter FFI PBT).
 
+pub mod fixtures;
 pub mod generators;
 pub mod invariants;
 pub mod layout_bridge;

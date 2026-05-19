@@ -11,10 +11,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::E2ETransitionImpl;
 use crate::LoroCorruptionType;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
+use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -28,7 +28,8 @@ pub struct CreateStaleLoro {
     pub corruption_type: LoroCorruptionType,
 }
 
-impl E2ETransitionFactory for CreateStaleLoro {
+impl TransitionFactory<ReferenceState> for CreateStaleLoro {
+    type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let early_checks: Vec<Validated<(), Reason>> = vec![
             check(!state.app_started, Reason::AppAlreadyStarted),
@@ -79,8 +80,9 @@ impl E2ETransitionFactory for CreateStaleLoro {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl E2ETransitionImpl for CreateStaleLoro {
+impl TransitionRef<ReferenceState> for CreateStaleLoro {
+    type Reason = Reason;
+
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(!state.app_started, Reason::AppAlreadyStarted),
@@ -101,13 +103,18 @@ impl E2ETransitionImpl for CreateStaleLoro {
         // corresponding org file should still exist after startup. The system
         // should detect the corrupted .loro file and recover from the .org file.
     }
+}
 
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut dyn SutHandle) {
+#[allow(async_fn_in_trait)]
+impl<S: SutHandle> TransitionImpl<ReferenceState, S> for CreateStaleLoro {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.apply_create_stale_loro(&self.org_filename, self.corruption_type)
             .await;
     }
+}
 
-    #[cfg(feature = "otel-testing")]
+#[cfg(feature = "otel-testing")]
+impl crate::pbt::transition_budgets::SqlBudget for CreateStaleLoro {
     fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
         ExpectedSql {
             reads: 0,
