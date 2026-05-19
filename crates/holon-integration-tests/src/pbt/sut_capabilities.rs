@@ -364,6 +364,46 @@ impl<V: VariantMarker> SutViewModel for E2ESut<V> {
         let vm = engine.snapshot(&root_uri);
         vm.widget_name() == Some("error")
     }
+
+    /// Snapshot the headless `ReactiveEngine`'s rendered ViewModel and
+    /// count Error widgets. Mirrors the inline `inv-viewmodel-no-error-widgets`
+    /// path in `sut_check_invariants.rs` so the migrated body can drop the
+    /// inline equivalent. Returns `None` when the engine isn't installed,
+    /// the root id isn't set yet, the render expression is still loading /
+    /// placeholder, or shadow interpretation panics.
+    async fn headless_error_node_count(&self) -> Option<usize> {
+        use std::sync::Arc;
+        let engine = self.reactive_engine.borrow().clone()?;
+        let root_id = self.reactive_root_id.borrow().clone()?;
+        let results = engine.ensure_watching(&root_id);
+        if results.is_loading() {
+            return None;
+        }
+        let (render_expr, data_rows) = results.snapshot();
+        if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading" || name == "spacer")
+        {
+            return None;
+        }
+        // `HeadlessBuilderServices` needs the backend `BackendEngine`, not
+        // the reactive one — the inline path at the old `sut.rs:5009-5017`
+        // uses `self.engine()` (TestContext accessor) for the same reason.
+        let backend = Arc::clone(self.engine());
+        let _ = engine; // hold ref until snapshot completes
+        let re = render_expr.clone();
+        let dr = data_rows.clone();
+        let tree = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let services = holon_frontend::reactive::HeadlessBuilderServices::new(backend);
+                holon_frontend::interpret_pure(&re, &dr, &services).snapshot()
+            }))
+        })
+        .await
+        .ok()?
+        .ok()?;
+        Some(holon_layout_testing::display_assertions::count_error_nodes(
+            &tree,
+        ))
+    }
 }
 
 // ─── SutRenderer ──────────────────────────────────────────────────────
@@ -676,19 +716,17 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
 
 #[allow(async_fn_in_trait)]
 impl<V: VariantMarker> SutOrgRender for E2ESut<V> {
-    /// Render all tracked documents to org-mode text, returning
-    /// `(path_string, org_contents)` pairs.
-    /// Delegates to `TestContext::snapshot_org_render_pairs` — the same
-    /// path used by `inv-org-render-fixed-point` (sut.rs:4395–4412).
-    async fn render_documents_to_org(&self) -> Vec<(String, String)> {
+    /// Delegates straight to `TestContext::snapshot_org_render_pairs`
+    /// (the same path the migrated `InvOrgRenderFixedPoint` body uses).
+    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
         let pairs = self
             .ctx
             .snapshot_org_render_pairs()
             .await
-            .expect("SutOrgRender::render_documents_to_org: snapshot_org_render_pairs failed");
+            .expect("SutOrgRender::snapshot_org_render_pairs: TestContext call failed");
         pairs
             .into_iter()
-            .map(|(path, (_disk, rendered))| (path.to_string_lossy().to_string(), rendered))
+            .map(|(path, (disk, rendered))| (path.to_string_lossy().to_string(), disk, rendered))
             .collect()
     }
 }

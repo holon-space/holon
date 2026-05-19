@@ -88,6 +88,10 @@ impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
     async fn frontend_root_is_error(&self) -> bool {
         self.inner.frontend_root_is_error().await
     }
+
+    async fn headless_error_node_count(&self) -> Option<usize> {
+        self.inner.headless_error_node_count().await
+    }
 }
 
 // ─── SutCdc (read-only subset only) ───────────────────────────────────

@@ -1,20 +1,21 @@
-//! Phase 7 — `inv-org-render-fixed-point`.
+//! `inv-org-render-fixed-point`.
 //!
-//! Body derived from `sut.rs:4380–4412`.
-//! Re-renders every tracked org file from SQL and asserts the output equals
-//! what's on disk — guards against the echo-suppression loop spin described
-//! in the inline comment.
+//! Body derived from `sut.rs:4288–4305` (the inline version this replaces).
+//! Re-renders every tracked org file from the current SQL state and asserts
+//! the output equals the bytes already on disk — guards against the
+//! echo-suppression loop spin where `render(SQL) != disk` would force
+//! `re_render_all_tracked` to write a different file on the next tick,
+//! firing FSEvent, reprocessing via `on_file_changed`, and looping.
 //!
-//! 3-subsystem invariant: BlockTree + Renderer + Loro. Uses `SutOrgRender`
-//! because `render_documents_to_org` returns both the rendered string and the
-//! on-disk string via `snapshot_org_render_pairs`. The capability method
-//! returns only the rendered text; the disk text is in the SUT's file system.
+//! Catches the May-2026 shared-tree mount loop where a property-drawer key
+//! round-trip differed between ingestion and render. The `inv-blocks-match-ref`
+//! family does NOT cover this — the parser is forgiving of property
+//! ordering / sibling reordering driven by `sort_key` drift, and never
+//! sees disagreement at all when the bug only manifests in a file shape
+//! the reference model never generates (e.g. `:share-role: mount`).
 //!
-//! The current `SutOrgRender::render_documents_to_org` implementation returns
-//! only the rendered text (stripping the disk side). The body needs both sides.
-//! This is blocked on the capability stub — it returns `Skipped` until
-//! `SutOrgRender` is extended with a `snapshot_pairs` method that returns
-//! `(disk, rendered)` per file.
+//! Capability: `SutOrgRender::snapshot_org_render_pairs` returns
+//! `(path, disk, rendered)` triples.
 
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
@@ -38,17 +39,18 @@ where
         RunMode::Strict
     }
 
-    async fn check(&self, _: &R, _: &S) -> InvariantResult {
-        // Blocked on Phase 7 plumbing: SutOrgRender::render_documents_to_org
-        // currently returns only the rendered text, not the (disk, rendered)
-        // pair needed for the fixed-point comparison. The inline assertion
-        // in check_invariants_async uses snapshot_org_render_pairs which
-        // returns both sides. Extend the capability with a snapshot_pairs
-        // method and wire then.
-        InvariantResult::Skipped(
-            "blocked on Phase 7 plumbing: SutOrgRender needs snapshot_pairs() \
-             returning (disk, rendered) per file"
-                .to_string(),
-        )
+    async fn check(&self, _: &R, sut: &S) -> InvariantResult {
+        for (path, disk, rendered) in sut.snapshot_org_render_pairs().await {
+            if disk != rendered {
+                return InvariantResult::Fail(format!(
+                    "[inv-org-render-fixed-point] {path} would be rewritten by the \
+                     next re_render_all_tracked → echo-suppression loop risk.\n\
+                     --- disk ({} bytes) ---\n{disk}\n--- rendered from SQL ({} bytes) ---\n{rendered}",
+                    disk.len(),
+                    rendered.len(),
+                ));
+            }
+        }
+        InvariantResult::Ok
     }
 }

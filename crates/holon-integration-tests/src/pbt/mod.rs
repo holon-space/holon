@@ -18,6 +18,11 @@ pub mod reference_state;
 pub mod state_machine;
 pub mod sut;
 pub mod sut_capabilities;
+mod sut_check_invariants;
+mod sut_handle;
+mod sut_keybindings;
+mod sut_macros;
+mod sut_row_parsing;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
 pub mod transition_dispatch;

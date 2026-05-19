@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6ce87e2227076f7c017ab368314f190c4e45e65990cc4162ac49acf50a2cbc6c # shrinks to tops = [GenBlock { id: "n88", content: "a", tags: [], properties: [], todo: None, children: [] }]

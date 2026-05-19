@@ -1,14 +1,12 @@
 //! Reference model for the PBT state machine.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::{Arg, RenderExpr};
 use holon_api::{ContentType, EntityName, Region, Value};
-
-use holon::testing::e2e_test_helpers::ChangeType;
 
 use super::query::WatchSpec;
 use super::types::TestVariant;
@@ -328,9 +326,6 @@ pub struct ReferenceState {
     /// `BTreeMap` for deterministic iteration (see `BlockState::blocks`).
     pub documents: BTreeMap<EntityUri, String>,
 
-    /// Expected CDC events not yet observed
-    pub pending_cdc_events: VecDeque<ExpectedCDCEvent>,
-
     /// Active query watches (query_id -> watch spec with TestQuery)
     pub active_watches: HashMap<String, WatchSpec>,
 
@@ -491,14 +486,6 @@ pub struct PeerRefState {
     pub baseline_contents: HashMap<String, String>,
 }
 
-/// Expected CDC event
-#[derive(Debug, Clone)]
-pub struct ExpectedCDCEvent {
-    pub query_id: String,
-    pub change_type: ChangeType,
-    pub entity_id: EntityUri,
-}
-
 /// Cursor position within a focused block. Tracks line and column to predict
 /// whether arrow keys cause cross-block navigation or intra-block movement.
 #[derive(Debug, Clone, Copy)]
@@ -614,7 +601,6 @@ impl ReferenceState {
                 next_id: 0,
             },
             documents: BTreeMap::new(),
-            pending_cdc_events: VecDeque::new(),
             active_watches: HashMap::new(),
             next_doc_id: 0,
             current_view: "all".to_string(),
@@ -737,13 +723,6 @@ impl ReferenceState {
     /// Get the focused entity in a region (set by ClickBlock).
     pub fn focused_entity(&self, region: Region) -> Option<&EntityUri> {
         self.focused_entity_id.get(&region)
-    }
-
-    /// Get the content of the currently focused block (for cursor boundary prediction).
-    pub fn focused_block_content(&self, region: Region) -> Option<&str> {
-        let entity_id = self.focused_entity_id.get(&region)?;
-        let block = self.block_state.blocks.get(entity_id)?;
-        Some(&block.content)
     }
 
     pub fn can_go_forward(&self, region: Region) -> bool {
@@ -1462,37 +1441,6 @@ impl ReferenceState {
 
     pub fn has_blocks_profile(&self) -> bool {
         self.active_profiles.contains_key("block")
-    }
-
-    pub fn blocks_profile_yaml_index(&self) -> Option<usize> {
-        self.active_profiles.get("block").map(|(_, idx)| *idx)
-    }
-
-    /// Predict the expected RowProfile.name for a block, given the active profile YAML.
-    /// Uses Block ground truth from `self.block_state.blocks` instead of query row data.
-    pub fn expected_profile_name(&self, block_id: &EntityUri) -> Option<String> {
-        let yaml_idx = self.blocks_profile_yaml_index()?;
-        if yaml_idx == 0 {
-            return Some("default".into());
-        }
-
-        let block = self.block_state.blocks.get(block_id)?;
-        let tep = &TEST_PROFILES[yaml_idx - 1];
-
-        let has_field = match tep.field_name {
-            // Direct Block fields (not in properties map)
-            "content" => !block.content.is_empty(),
-            // Properties stored in the properties JSON map
-            _ => block
-                .properties
-                .get(tep.field_name)
-                .is_some_and(|v| !matches!(v, Value::Null)),
-        };
-        Some(if has_field {
-            tep.profile_name.to_string()
-        } else {
-            "default".into()
-        })
     }
 
     /// Rebuild profile tracking from current blocks state.

@@ -496,6 +496,15 @@ pub trait SutViewModel {
 
     /// True if the frontend root ViewModel is the Error variant.
     async fn frontend_root_is_error(&self) -> bool;
+
+    /// Count Error widget nodes in the headless `ReactiveEngine`'s rendered
+    /// ViewModel tree. Returns `None` when the headless engine is not
+    /// installed or the tree isn't ready to inspect yet (loading / placeholder
+    /// / shadow-interpretation panicked). Returns `Some(n)` otherwise.
+    ///
+    /// `Some(0)` means "the rendered tree has no Error widgets"; the
+    /// `inv-viewmodel-no-error-widgets` body asserts on that.
+    async fn headless_error_node_count(&self) -> Option<usize>;
 }
 
 /// Frontend-agnostic widget-tree IR. The minimum surface renderer-required
@@ -655,9 +664,14 @@ pub trait SutDriver {
 
 #[allow(async_fn_in_trait)]
 pub trait SutOrgRender {
-    /// Render the current document set to org-mode text. Used by the
-    /// fixed-point invariant: `parse(render(parse(text))) == parse(text)`.
-    async fn render_documents_to_org(&self) -> Vec<(String, String)>;
+    /// Snapshot every tracked org file as `(path, disk_text, rendered_text)`
+    /// where `disk_text` is the bytes currently on disk and `rendered_text`
+    /// is what the renderer would emit from the current SQL state.
+    ///
+    /// Used by `inv-org-render-fixed-point` to assert `disk == rendered`
+    /// — required so the echo-suppression loop in `re_render_all_tracked`
+    /// doesn't spin on a permanent disagreement.
+    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)>;
 }
 
 // ─── Phase 6g — QueryCompile cluster ─────────────────────────────────

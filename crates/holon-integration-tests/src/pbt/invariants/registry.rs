@@ -584,19 +584,23 @@ mod tests {
     /// the wide registry. The compile-time archlint upgrade lives in
     /// Phase 10.3; this runtime check catches the regression early.
     ///
-    /// `storage_consistency_pbt` runs:
-    ///   - `InvLoroNoErrors` → id `inv-loro-no-errors`
-    ///   - `InvBlockTagsReferencesExist` → id `inv-block-tags-references-exist`
-    /// Both must appear in the wide registry.
+    /// Slices currently consume:
+    ///   - `storage_consistency_pbt`: `inv-loro-no-errors`,
+    ///     `inv-block-tags-references-exist`
+    ///   - `cdc_delivery_pbt`: `inv-loro-no-errors`,
+    ///     `inv-block-tags-references-exist`
+    ///
+    /// Each id MUST also appear in the wide registry.
     #[test]
     fn storage_slice_invariants_are_subset_of_wide_registry() {
         let reg = register_default();
         let registry_ids: BTreeSet<&str> = reg.all().iter().map(|i| i.id.0).collect();
         let storage_slice_ids: &[&str] = &["inv-loro-no-errors", "inv-block-tags-references-exist"];
-        for id in storage_slice_ids {
+        let cdc_slice_ids: &[&str] = &["inv-loro-no-errors", "inv-block-tags-references-exist"];
+        for id in storage_slice_ids.iter().chain(cdc_slice_ids.iter()) {
             assert!(
                 registry_ids.contains(id),
-                "H11 violation: storage_consistency_pbt uses '{id}' but it is not registered in the wide registry"
+                "H11 violation: a non-wide slice uses '{id}' but it is not registered in the wide registry"
             );
         }
     }
