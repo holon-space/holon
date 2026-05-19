@@ -66,9 +66,7 @@ impl EnrichedRow {
     fn flatten_properties(mut data: HashMap<String, Value>) -> HashMap<String, Value> {
         if let Some(Value::Object(props)) = data.get("properties") {
             for (key, value) in props.clone() {
-                if !data.contains_key(&key) {
-                    data.insert(key, value);
-                }
+                data.entry(key).or_insert(value);
             }
         }
         data

@@ -18,6 +18,7 @@ fn random_bytes(size: usize) -> Vec<u8> {
     buf
 }
 
+#[allow(dead_code)] // benchmark fields read via Debug print, not direct accessors
 struct BenchResult {
     label: &'static str,
     raw_bytes: usize,

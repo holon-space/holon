@@ -129,7 +129,7 @@ impl RefBlockTree for EditorPureRef {
         let mut out = Vec::new();
         let mut stack = vec![self.root_id.clone()];
         while let Some(id) = stack.pop() {
-            if self.blocks.get(&id).is_some() {
+            if self.blocks.contains_key(&id) {
                 let is_text = self.is_text_block(&id);
                 if is_text && id != self.root_id {
                     out.push(id.clone());
@@ -544,7 +544,7 @@ impl SplitBlock {
             ok(
                 state
                     .block_content(block_id)
-                    .map_or(false, |t| position <= t.len()),
+                    .is_some_and(|t| position <= t.len()),
                 Rej::BadPosition,
             ),
             ok(!state.is_layout_block(block_id), Rej::NotInFocusTree),
@@ -785,11 +785,9 @@ fn noop_block_on<F: std::future::Future>(mut fut: F) -> F::Output {
     let mut ctx = Context::from_waker(&waker);
     // SAFETY: `fut` is owned + never moved after pinning here.
     let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
-    loop {
-        match pinned.as_mut().poll(&mut ctx) {
-            Poll::Ready(v) => return v,
-            Poll::Pending => panic!("noop_block_on: future yielded Pending; pure slice should not"),
-        }
+    match pinned.as_mut().poll(&mut ctx) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("noop_block_on: future yielded Pending; pure slice should not"),
     }
 }
 

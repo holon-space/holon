@@ -50,7 +50,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         }
     }
 
-    // Fallback: render the static content snapshot.
+    // Fallback: render the static content snapshot. // ALLOW(fallback): describes default-branch path, not error swallowing
     let content = slot.content.lock_ref();
     super::render(&content, ctx)
 }

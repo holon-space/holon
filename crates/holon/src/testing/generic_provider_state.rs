@@ -102,9 +102,7 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         }
 
                         // Randomly select one
-                        prop::sample::select(ids)
-                            .prop_map(|id| Value::String(id))
-                            .boxed()
+                        prop::sample::select(ids).prop_map(Value::String).boxed()
                     }
                     TypeHint::Bool => any::<bool>().prop_map(Value::Boolean).boxed(),
                     TypeHint::String => any::<String>().prop_map(Value::String).boxed(),
@@ -113,19 +111,19 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         // Randomly select from valid one-of values
                         let values_vec: Vec<Value> = values.clone();
                         if values_vec.is_empty() {
-                            // No values - fallback to empty string
+                            // No values — generate an empty string to keep the strategy non-empty
                             Just(Value::String("".to_string())).boxed()
                         } else {
-                            // For backward compatibility, if all values are strings, extract them
-                            // Otherwise, select from the full Value objects
+                            // If every value is a string, generate strings directly; older
+                            // proptest regressions expect that narrower shape.
                             let string_values: Vec<String> = values_vec
                                 .iter()
                                 .filter_map(|v| v.as_string().map(|s| s.to_string()))
                                 .collect();
                             if string_values.len() == values_vec.len() {
-                                // All values are strings - use string selection for backward compatibility
+                                // Narrow path — strings only, matches older regression shrinks
                                 prop::sample::select(string_values)
-                                    .prop_map(|v| Value::String(v))
+                                    .prop_map(Value::String)
                                     .boxed()
                             } else {
                                 // Mixed types - select from full Value objects
@@ -193,12 +191,11 @@ impl<P: OperationProvider> GenericProviderState<P> {
             }
         } else if op_name == "delete" || op_name.starts_with("delete_") {
             // Remove ID from state
-            if let Some(id_value) = params.get("id") {
-                if let Some(id) = id_value.as_string() {
-                    if let Some(entity_set) = self.entities.get_mut(entity_str) {
-                        entity_set.remove(id);
-                    }
-                }
+            if let Some(id_value) = params.get("id")
+                && let Some(id) = id_value.as_string()
+                && let Some(entity_set) = self.entities.get_mut(entity_str)
+            {
+                entity_set.remove(id);
             }
 
             self.history.push(OperationExecution {

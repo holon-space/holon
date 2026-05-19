@@ -3,8 +3,8 @@ use super::prelude::*;
 pub fn render(
     width: &f32,
     height: &f32,
-    _color: &Option<String>,
-    _ctx: &DioxusRenderContext,
+    _: &Option<String>,
+    _: &DioxusRenderContext,
 ) -> Element {
     let w = *width;
     let h = *height;

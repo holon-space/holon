@@ -245,11 +245,8 @@ fn sync_update_size() {
     // Now make a small edit
     let children = tree_a.children(root).unwrap();
     let meta = tree_a.get_meta(children[50]).unwrap();
-    match meta.get("content_raw") {
-        Some(ValueOrContainer::Container(Container::Text(t))) => {
-            t.insert(0, "EDITED: ").unwrap();
-        }
-        _ => {}
+    if let Some(ValueOrContainer::Container(Container::Text(t))) = meta.get("content_raw") {
+        t.insert(0, "EDITED: ").unwrap();
     }
     doc_a.commit();
 

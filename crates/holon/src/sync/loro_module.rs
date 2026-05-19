@@ -216,7 +216,7 @@ impl Module for LoroModule {
                     .expect("[LoroModule] get_global_doc for share rehydration");
                 let doc_arc = collab.doc();
                 let doc = &*doc_arc;
-                match rehydrate_shared_trees(&backend, &doc).await {
+                match rehydrate_shared_trees(&backend, doc).await {
                     Ok(n) if n > 0 => info!("[LoroModule] rehydrated {n} shared subtree(s)"),
                     Ok(_) => {}
                     Err(e) => {
@@ -599,32 +599,32 @@ async fn apply_seed_row(
     // Properties: stored as JSON in the `properties` jsonb column. Same
     // shape variance as `tags`: parse the JSON list explicitly instead of
     // assuming Value::String.
-    if let Some(map) = parse_seed_row_properties(row)? {
-        if !map.is_empty() {
-            let props: std::collections::HashMap<String, Value> = map
-                .into_iter()
-                .map(|(k, v)| {
-                    let val = match v {
-                        serde_json::Value::String(s) => Value::String(s),
-                        serde_json::Value::Number(n) => {
-                            if let Some(i) = n.as_i64() {
-                                Value::Integer(i)
-                            } else {
-                                Value::Float(n.as_f64().unwrap_or(0.0))
-                            }
+    if let Some(map) = parse_seed_row_properties(row)?
+        && !map.is_empty()
+    {
+        let props: std::collections::HashMap<String, Value> = map
+            .into_iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    serde_json::Value::String(s) => Value::String(s),
+                    serde_json::Value::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            Value::Integer(i)
+                        } else {
+                            Value::Float(n.as_f64().unwrap_or(0.0))
                         }
-                        serde_json::Value::Bool(b) => Value::Boolean(b),
-                        serde_json::Value::Null => Value::Null,
-                        _ => Value::String(v.to_string()),
-                    };
-                    (k, val)
-                })
-                .collect();
-            backend
-                .update_block_properties(created.id.as_str(), &props)
-                .await
-                .map_err(|e| anyhow::anyhow!("update_block_properties: {}", e))?;
-        }
+                    }
+                    serde_json::Value::Bool(b) => Value::Boolean(b),
+                    serde_json::Value::Null => Value::Null,
+                    _ => Value::String(v.to_string()),
+                };
+                (k, val)
+            })
+            .collect();
+        backend
+            .update_block_properties(created.id.as_str(), &props)
+            .await
+            .map_err(|e| anyhow::anyhow!("update_block_properties: {}", e))?;
     }
 
     // Unused-import shim (ContentType is re-exported for parity with other seeders).

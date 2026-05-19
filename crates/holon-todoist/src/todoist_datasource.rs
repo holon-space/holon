@@ -366,22 +366,25 @@ where
         table,
         id_column,
     );
-    ops.extend(
-        __operations_crud_operations::crud_operations(entity_name, short_name, table, id_column)
-            .into_iter(),
-    );
-    ops.extend(
-        __operations_block_operations::block_operations(entity_name, short_name, table, id_column)
-            .into_iter(),
-    );
+    ops.extend(__operations_crud_operations::crud_operations(
+        entity_name,
+        short_name,
+        table,
+        id_column,
+    ));
+    ops.extend(__operations_block_operations::block_operations(
+        entity_name,
+        short_name,
+        table,
+        id_column,
+    ));
     ops.extend(
         __operations_todoist_move_operations::todoist_move_operations(
             entity_name,
             short_name,
             table,
             id_column,
-        )
-        .into_iter(),
+        ),
     );
     ops
 }
@@ -417,10 +420,12 @@ where
 
     // Block operations (move_block, indent, outdent) — no MCP equivalent
     use holon::core::datasource::__operations_block_operations;
-    ops.extend(
-        __operations_block_operations::block_operations(entity_name, short_name, table, id_column)
-            .into_iter(),
-    );
+    ops.extend(__operations_block_operations::block_operations(
+        entity_name,
+        short_name,
+        table,
+        id_column,
+    ));
 
     // Todoist-specific move operations — no MCP equivalent
     ops.extend(
@@ -429,8 +434,7 @@ where
             short_name,
             table,
             id_column,
-        )
-        .into_iter(),
+        ),
     );
 
     ops
@@ -569,7 +573,7 @@ impl ChangeNotifications<TodoistProject> for TodoistProjectDataSource {
     }
 }
 
-// Keep DataSource implementation for backward compatibility during migration
+// ALLOW(compatibility): bridge impl kept until the Todoist datasource migration lands
 #[async_trait]
 impl holon::core::datasource::DataSource<TodoistProject> for TodoistProjectDataSource {
     async fn get_all(&self) -> Result<Vec<TodoistProject>> {
@@ -589,7 +593,7 @@ impl holon::core::datasource::DataSource<TodoistProject> for TodoistProjectDataS
                 serde_json::from_value::<TodoistProjectApiResponse>(p.clone())
                     .ok() // ALLOW(ok): TODO — should propagate, not silently drop
                     .filter(|api: &TodoistProjectApiResponse| !api.is_deleted.unwrap_or(false))
-                    .map(|api| TodoistProject::from(api))
+                    .map(TodoistProject::from)
             })
             .collect();
 
@@ -780,7 +784,7 @@ impl TodoistProjectDataSource {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
-            .ok_or_else(|| "move_block requires 'id' parameter")?;
+            .ok_or("move_block requires 'id' parameter")?;
 
         // parent_id can be null (move to root) or a project ID
         let new_parent_id = params.get("parent_id").and_then(|v| v.as_string());
@@ -802,7 +806,7 @@ impl TodoistProjectDataSource {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
-            .ok_or_else(|| "archive requires 'id' parameter")?;
+            .ok_or("archive requires 'id' parameter")?;
 
         debug!("[TodoistProjectDataSource] Archiving project {}", id);
 
@@ -818,7 +822,7 @@ impl TodoistProjectDataSource {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
-            .ok_or_else(|| "unarchive requires 'id' parameter")?;
+            .ok_or("unarchive requires 'id' parameter")?;
 
         debug!("[TodoistProjectDataSource] Unarchiving project {}", id);
 

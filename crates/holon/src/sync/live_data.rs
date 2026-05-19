@@ -37,10 +37,13 @@ fn extract_rowid(data: &StorageEntity) -> Option<String> {
 ///
 /// Both `id_fn` and `parse_fn` return `Result` — if they fail, it's a programming
 /// error (wrong table, schema mismatch) and should be loud, not silently swallowed.
+type IdFn = Box<dyn Fn(&StorageEntity) -> Result<String> + Send + Sync>;
+type ParseFn<T> = Box<dyn Fn(&StorageEntity) -> Result<T> + Send + Sync>;
+
 pub struct LiveData<T: Clone + Send + Sync + 'static> {
     items: MutableBTreeMap<String, T>,
-    id_fn: Box<dyn Fn(&StorageEntity) -> Result<String> + Send + Sync>,
-    parse_fn: Box<dyn Fn(&StorageEntity) -> Result<T> + Send + Sync>,
+    id_fn: IdFn,
+    parse_fn: ParseFn<T>,
     /// Highest `BatchMetadata.seq` this mirror has applied via `subscribe`'s
     /// CDC stream. Tests use this with `cdc_emitted_watermark()` to wait for
     /// the mirror to catch up — see `wait_for_seq`. `0` until the first
@@ -251,8 +254,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         crate::util::spawn_actor(async move {
             use tokio_stream::StreamExt;
             use tracing::Instrument;
-            let span =
-                tracing::info_span!("live_data.subscribe_actor", source = source_name);
+            let span = tracing::info_span!("live_data.subscribe_actor", source = source_name);
             let _enter = span.enter();
             let mut batches_seen: u64 = 0;
             loop {

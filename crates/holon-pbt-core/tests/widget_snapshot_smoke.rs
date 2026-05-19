@@ -202,15 +202,10 @@ where
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     use std::pin::pin;
-    use std::sync::Arc;
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(Noop));
-    let mut ctx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
     let mut fut = pin!(f);
     loop {
         if let std::task::Poll::Ready(v) = fut.as_mut().poll(&mut ctx) {

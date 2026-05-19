@@ -414,8 +414,8 @@ mod tests {
         for i in 0..10 {
             let op = Operation::new(
                 "test",
-                &format!("op{}", i),
-                &format!("Op {}", i),
+                format!("op{}", i),
+                format!("Op {}", i),
                 HashMap::new(),
             );
             store
@@ -497,14 +497,14 @@ mod tests {
         for i in 0..3 {
             let op = Operation::new(
                 "test",
-                &format!("op{}", i),
-                &format!("Op {}", i),
+                format!("op{}", i),
+                format!("Op {}", i),
                 HashMap::new(),
             );
             let inverse = Operation::new(
                 "test",
-                &format!("op{}_inv", i),
-                &format!("Undo Op {}", i),
+                format!("op{}_inv", i),
+                format!("Undo Op {}", i),
                 HashMap::new(),
             );
             let id = store
@@ -548,8 +548,8 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let op = Operation::new(
                     "test",
-                    &format!("op{}", i),
-                    &format!("Op {}", i),
+                    format!("op{}", i),
+                    format!("Op {}", i),
                     HashMap::new(),
                 );
                 store_clone

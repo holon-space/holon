@@ -12,7 +12,7 @@ fn c(hex: u32) -> Hsla {
 }
 
 impl gpui::Render for CollapsibleView {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let chevron = if self.collapsed { "▸" } else { "▾" };
 
         let header_row = div()
@@ -85,8 +85,8 @@ impl gpui::Render for CollapsibleView {
 }
 
 pub fn render(node: &holon_frontend::reactive_view_model::ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
-    let header_text = node.prop_str("header").unwrap_or_else(|| "".to_string());
-    let icon_text = node.prop_str("icon").unwrap_or_else(|| "".to_string());
+    let header_text = node.prop_str("header").unwrap_or_default();
+    let icon_text = node.prop_str("icon").unwrap_or_default();
     let children = &node.children;
 
     let detail_text: String = children.iter().filter_map(|child| {

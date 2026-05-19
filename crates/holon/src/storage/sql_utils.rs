@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_float() {
-        assert_eq!(value_to_sql_literal(&Value::Float(3.14)), "3.14");
+        assert_eq!(value_to_sql_literal(&Value::Float(2.5)), "2.5");
     }
 
     #[test]

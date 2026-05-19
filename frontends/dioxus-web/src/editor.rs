@@ -208,7 +208,7 @@ pub mod cursor {
     /// Look up an editable element by its `data-entity-id` attribute.
     pub fn find_element(entity_id: &str) -> Option<Element> {
         let selector = format!("[data-entity-id=\"{entity_id}\"]");
-        window()?.document()?.query_selector(&selector).ok()?
+        window()?.document()?.query_selector(&selector).ok()? // ALLOW(ok): DOM selector miss → None
     }
 
     /// True if `el` is the document's `activeElement`.
@@ -302,7 +302,7 @@ pub mod cursor {
         let active = doc.active_element()?;
         let entity_id = active.get_attribute("data-entity-id")?;
 
-        let sel = win.get_selection().ok()??;
+        let sel = win.get_selection().ok()??; // ALLOW(ok): Selection API JsValue error → None
         let anchor_node = sel.anchor_node()?;
         let focus_node = sel.focus_node()?;
 

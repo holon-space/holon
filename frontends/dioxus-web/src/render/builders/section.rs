@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn render(title: &String, children: &LazyChildren, _ctx: &DioxusRenderContext) -> Element {
+pub fn render(title: &String, children: &LazyChildren, _: &DioxusRenderContext) -> Element {
     let title = title.clone();
     rsx! {
         div {

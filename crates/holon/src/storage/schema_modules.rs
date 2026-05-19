@@ -318,7 +318,7 @@ impl SchemaModule for NavigationSchemaModule {
                         &stmt[..stmt.len().min(60)]
                     );
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         }
 

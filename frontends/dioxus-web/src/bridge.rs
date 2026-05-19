@@ -64,7 +64,7 @@ impl WorkerBridge {
         let onmessage: Closure<dyn Fn(MessageEvent)> =
             Closure::wrap(Box::new(move |e: MessageEvent| {
                 let data = e.data();
-                let kind = Reflect::get(&data, &"kind".into())
+                let kind = Reflect::get(&data, &"kind".into()) // ALLOW(ok): JS reflection — absent property is normal
                     .ok()
                     .and_then(|v| v.as_string());
 
@@ -76,11 +76,11 @@ impl WorkerBridge {
                 }
 
                 if kind.as_deref() == Some("snapshot") {
-                    let handle = Reflect::get(&data, &"handle".into())
+                    let handle = Reflect::get(&data, &"handle".into()) // ALLOW(ok): JS reflection — absent property is normal
                         .ok()
                         .and_then(|v| v.as_f64())
                         .map(|v| v as u32);
-                    let json = Reflect::get(&data, &"snapshotJson".into())
+                    let json = Reflect::get(&data, &"snapshotJson".into()) // ALLOW(ok): JS reflection — absent property is normal
                         .ok()
                         .and_then(|v| v.as_string());
                     if let (Some(h), Some(j)) = (handle, json) {
@@ -94,23 +94,23 @@ impl WorkerBridge {
                     return;
                 }
 
-                let id = Reflect::get(&data, &"id".into())
+                let id = Reflect::get(&data, &"id".into()) // ALLOW(ok): JS reflection — absent property is normal
                     .ok()
                     .and_then(|v| v.as_f64())
                     .map(|v| v as u32);
                 if let Some(id) = id {
                     if let Some(tx) = pending_c.borrow_mut().remove(&id) {
-                        let ok = Reflect::get(&data, &"ok".into())
+                        let ok = Reflect::get(&data, &"ok".into()) // ALLOW(ok): JS reflection — absent property is normal
                             .ok()
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
                         let _ = if ok {
-                            let val = Reflect::get(&data, &"value".into())
+                            let val = Reflect::get(&data, &"value".into()) // ALLOW(ok): JS reflection — absent property is normal
                                 .ok()
                                 .unwrap_or(JsValue::UNDEFINED);
                             tx.send(Ok(val))
                         } else {
-                            let err = Reflect::get(&data, &"error".into())
+                            let err = Reflect::get(&data, &"error".into()) // ALLOW(ok): JS reflection — absent property is normal
                                 .ok()
                                 .and_then(|v| v.as_string())
                                 .unwrap_or_else(|| "unknown error".into());

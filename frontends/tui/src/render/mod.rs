@@ -506,11 +506,7 @@ fn render_edit_buffer(
 
     // Walk graphemes once to record (byte_offset, char_count) so we can map
     // the byte cursor to a grapheme column and back.
-    let graphemes: Vec<(usize, &str)> = edit
-        .buffer
-        .grapheme_indices(true)
-        .map(|(b, g)| (b, g))
-        .collect();
+    let graphemes: Vec<(usize, &str)> = edit.buffer.grapheme_indices(true).collect();
     let total_cols = graphemes.len();
     let cursor_col = graphemes
         .iter()
@@ -893,7 +889,7 @@ fn render_column(
     // here, and they typically consume 0 rows. Skipping the gap for them
     // avoids introducing visual breaks before invisible items and matches
     // the original "0-consumed children take 0 rows" contract.
-    let children: Vec<Arc<ReactiveViewModel>> = node.children.iter().cloned().collect();
+    let children: Vec<Arc<ReactiveViewModel>> = node.children.to_vec();
     for child in &children {
         let consumed =
             render_view_model(child.as_ref(), ctx, ops, current_row, start_col, max_width);

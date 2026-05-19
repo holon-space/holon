@@ -284,10 +284,10 @@ impl SharedSnapshotStore {
         {
             let entry = entry?;
             let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if let Some(id) = name.strip_suffix(".loro") {
-                    ids.push(id.to_string());
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && let Some(id) = name.strip_suffix(".loro")
+            {
+                ids.push(id.to_string());
             }
         }
         Ok(ids)
@@ -340,7 +340,7 @@ mod tests {
         store.save("x", &doc).unwrap();
         let tmps: Vec<_> = std::fs::read_dir(dir.path().join("shares"))
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(|e| e.ok()) // ALLOW(filter_map_ok) ALLOW(ok): test fixture — readdir entry failure isn't part of the property under test
             .filter(|e| {
                 e.path()
                     .file_name()
@@ -371,7 +371,7 @@ mod tests {
         // A quarantine file exists.
         let quarantined: Vec<_> = std::fs::read_dir(dir.path().join("shares"))
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(|e| e.ok()) // ALLOW(filter_map_ok) ALLOW(ok): test fixture — readdir entry failure isn't part of the property under test
             .filter(|e| {
                 e.path()
                     .file_name()

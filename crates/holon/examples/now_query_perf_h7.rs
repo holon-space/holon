@@ -293,7 +293,7 @@ async fn populate(conn: &turso::Connection, scenario: Scenario) -> Result<()> {
         )
         .await?;
         tx_size += 1;
-        if tx_size % 5_000 == 0 {
+        if tx_size.is_multiple_of(5_000) {
             conn.execute("COMMIT", ()).await?;
             conn.execute("BEGIN", ()).await?;
         }
@@ -340,7 +340,7 @@ async fn populate_edges(
                         )
                         .await;
                     tx_size += 1;
-                    if tx_size % 5_000 == 0 {
+                    if tx_size.is_multiple_of(5_000) {
                         conn.execute("COMMIT", ()).await?;
                         conn.execute("BEGIN", ()).await?;
                     }
@@ -369,7 +369,7 @@ async fn populate_edges(
                         )
                         .await;
                     tx_size += 1;
-                    if tx_size % 5_000 == 0 {
+                    if tx_size.is_multiple_of(5_000) {
                         conn.execute("COMMIT", ()).await?;
                         conn.execute("BEGIN", ()).await?;
                     }
@@ -394,7 +394,7 @@ async fn populate_edges(
                     )
                     .await;
                 tx_size += 1;
-                if tx_size % 5_000 == 0 {
+                if tx_size.is_multiple_of(5_000) {
                     conn.execute("COMMIT", ()).await?;
                     conn.execute("BEGIN", ()).await?;
                 }
@@ -421,7 +421,7 @@ async fn populate_edges(
                         )
                         .await;
                     tx_size += 1;
-                    if tx_size % 5_000 == 0 {
+                    if tx_size.is_multiple_of(5_000) {
                         conn.execute("COMMIT", ()).await?;
                         conn.execute("BEGIN", ()).await?;
                     }
@@ -446,7 +446,7 @@ async fn populate_edges(
                     )
                     .await;
                 tx_size += 1;
-                if tx_size % 5_000 == 0 {
+                if tx_size.is_multiple_of(5_000) {
                     conn.execute("COMMIT", ()).await?;
                     conn.execute("BEGIN", ()).await?;
                 }

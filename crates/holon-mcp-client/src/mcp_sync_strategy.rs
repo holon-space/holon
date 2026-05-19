@@ -181,8 +181,8 @@ impl SyncStrategy for ResourceSync {
     async fn fetch_records(
         &self,
         peer: &Peer<RoleClient>,
-        _token_store: &dyn SyncTokenStore,
-        _token_key: &str,
+        _: &dyn SyncTokenStore,
+        _: &str,
     ) -> anyhow::Result<FetchResult> {
         let span = info_span!("resource_fetch", uri = %self.uri);
         async {
@@ -244,11 +244,11 @@ pub fn expand_uri_template(
     for (key, value) in params {
         result = result.replace(&format!("{{{key}}}"), value);
     }
-    if let Some(start) = result.find('{') {
-        if let Some(end) = result[start..].find('}') {
-            let unresolved = &result[start + 1..start + end];
-            anyhow::bail!("Unresolved URI template parameter '{{{unresolved}}}' in '{template}'");
-        }
+    if let Some(start) = result.find('{')
+        && let Some(end) = result[start..].find('}')
+    {
+        let unresolved = &result[start + 1..start + end];
+        anyhow::bail!("Unresolved URI template parameter '{{{unresolved}}}' in '{template}'");
     }
     Ok(result)
 }
@@ -274,7 +274,8 @@ pub fn match_uri_template(template: &str, uri: &str) -> Option<HashMap<String, S
             // Find the next literal segment to know where the param value ends
             let value_end = if template_pos < template_bytes.len() {
                 // Find the next literal character(s) in the URI
-                let next_literal_end = if template_bytes[template_pos] == b'{' {
+
+                if template_bytes[template_pos] == b'{' {
                     // Next segment is also a param — shouldn't happen in practice,
                     // but take a single path segment as the value
                     uri[uri_pos..]
@@ -290,8 +291,7 @@ pub fn match_uri_template(template: &str, uri: &str) -> Option<HashMap<String, S
                     let literal = &template[template_pos..next_brace];
                     // Find this literal in the remaining URI
                     uri[uri_pos..].find(literal).map(|i| uri_pos + i)?
-                };
-                next_literal_end
+                }
             } else {
                 // Param is at the end of the template — consume rest of URI
                 uri_bytes.len()

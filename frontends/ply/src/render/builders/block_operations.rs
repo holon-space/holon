@@ -7,7 +7,7 @@ use holon_frontend::operations::OperationIntent;
 
 const BLOCK_FIELDS: &[&str] = &["parent_id", "sort_key", "depth", "content"];
 
-pub fn build(_args: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
+pub fn build(_: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
     let ops = find_ops_affecting(BLOCK_FIELDS, &ctx.operations);
     if ops.is_empty() {
         return empty_widget();

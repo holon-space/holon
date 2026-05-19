@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn build(args: &ResolvedArgs, _ctx: &RenderContext) -> PlyWidget {
+pub fn build(args: &ResolvedArgs, _: &RenderContext) -> PlyWidget {
     let language = args.get_string("language").unwrap_or("text").to_string();
     let source = args
         .get_string("source")

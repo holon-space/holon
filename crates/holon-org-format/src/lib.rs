@@ -8,8 +8,8 @@
 //! No disk I/O, no file watching, no DI wiring. Depends only on `holon-api`
 //! types and pure format libraries (`orgize`, `sha2`, `hex`, `chrono`, `uuid`).
 //!
-//! The disk I/O and sync layer lives in `holon-orgmode`, which re-exports
-//! everything from this crate for backward compatibility.
+//! The disk I/O and sync layer lives in `holon-orgmode`, which re-exports // ALLOW(compatibility): see holon-orgmode crate header
+//! everything from this crate so older import paths keep resolving.
 
 pub mod block_diff;
 pub mod inline_marks;

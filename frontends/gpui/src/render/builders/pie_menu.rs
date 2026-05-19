@@ -9,7 +9,7 @@ const RADIUS: f32 = 52.0;
 const ITEM_SIZE: f32 = 36.0;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
-    let fields = node.prop_str("fields").unwrap_or_else(|| "".to_string());
+    let fields = node.prop_str("fields").unwrap_or_default();
     let child = node.children.first().expect("pie_menu requires a child");
 
     let child_el = super::render(child, ctx);

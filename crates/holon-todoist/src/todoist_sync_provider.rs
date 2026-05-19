@@ -76,8 +76,8 @@ impl SyncableProvider for TodoistSyncProvider {
     /// 4. Emits changes on separate typed streams
     /// 5. Saves new token to token store
     /// 6. Returns the new stream position
-    #[tracing::instrument(name = "provider.todoist.sync", skip(self, _position))]
-    async fn sync(&self, _position: StreamPosition) -> Result<StreamPosition> {
+    #[tracing::instrument(name = "provider.todoist.sync", skip(self))]
+    async fn sync(&self, _: StreamPosition) -> Result<StreamPosition> {
         use tracing::info;
 
         // Note: Using #[instrument] instead of manual span creation ensures
@@ -149,10 +149,17 @@ impl SyncableProvider for TodoistSyncProvider {
             Span::current().record("sync.project_updated", project_updated);
             Span::current().record("sync.project_deleted", project_deleted);
 
-            // Determine new position from sync token
+            // Determine new position from sync token. The Todoist Sync v9 API
+            // contract guarantees `sync_token` is always present on a 200
+            // response; missing it is a protocol-level bug we should surface
+            // rather than silently re-syncing from the beginning next time.
             let new_position = match response.sync_token {
                 Some(token) => StreamPosition::Version(token.as_bytes().to_vec()),
-                None => StreamPosition::Beginning, // Fallback - shouldn't happen
+                None => {
+                    return Err(
+                        "todoist sync response missing sync_token — protocol violation".into(),
+                    );
+                }
             };
 
             // Create sync token update to be saved atomically with data
@@ -252,7 +259,7 @@ impl OperationProvider for TodoistSyncProvider {
         &self,
         entity_name: &EntityName,
         op_name: &str,
-        _params: StorageEntity,
+        _: StorageEntity,
     ) -> Result<OperationResult> {
         // Validate this is the sync operation for this provider
         let expected_entity_name = format!("{}.sync", self.provider_name());

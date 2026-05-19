@@ -203,7 +203,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .and_then(|v| v.as_string())
                 .unwrap_or("panel");
             let rendered = super::render(item, ctx);
-            let id = hashed_id(&scroll_id.to_string());
+            let id = hashed_id(scroll_id);
             let pad_x = ctx.style().content_padding_x;
             let pad_y = ctx.style().content_padding_y;
             match item.layout_hint {

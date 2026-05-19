@@ -62,7 +62,7 @@ impl CommandStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(CommandStatus::Pending),
             "executed" => Some(CommandStatus::Executed),
@@ -92,7 +92,7 @@ impl SyncStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "local" => Some(SyncStatus::Local),
             "pending_sync" => Some(SyncStatus::PendingSync),

@@ -141,10 +141,10 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
         if let Some(text) = state.block_content(&id) {
             let content_len = text.len();
             for position in 0..=content_len {
-                if split_block_preconditions(&id, position, state).is_good() {
-                    if let Ok(uri) = EntityUri::parse(&id) {
-                        candidates.push((uri, position));
-                    }
+                if split_block_preconditions(&id, position, state).is_good()
+                    && let Ok(uri) = EntityUri::parse(&id)
+                {
+                    candidates.push((uri, position));
                 }
             }
         }

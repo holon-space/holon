@@ -391,14 +391,15 @@ pub async fn populate_initial_id_map<R1: CoreOperations, R2: CoreOperations>(
     // We match top-level blocks (those with document URI parents) with the same content
     for ref_block in &ref_blocks {
         let ref_is_root = ref_block.parent_id.is_no_parent() || ref_block.parent_id.is_sentinel();
-        if ref_is_root && !id_map.contains_key(ref_block.id.as_str()) {
-            if let Some(sut_block) = sut_blocks.iter().find(|b| {
+        if ref_is_root
+            && !id_map.contains_key(ref_block.id.as_str())
+            && let Some(sut_block) = sut_blocks.iter().find(|b| {
                 (b.parent_id.is_no_parent() || b.parent_id.is_sentinel())
                     && b.content == ref_block.content
                     && !id_map.values().any(|v| v == b.id.as_str())
-            }) {
-                id_map.insert(ref_block.id.to_string(), sut_block.id.to_string());
-            }
+            })
+        {
+            id_map.insert(ref_block.id.to_string(), sut_block.id.to_string());
         }
     }
 

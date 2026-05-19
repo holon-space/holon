@@ -252,8 +252,7 @@ mod tests {
             Ok(self
                 .sorted_children(parent_id)
                 .into_iter()
-                .filter(|b| b.sort_key < block.sort_key)
-                .last()
+                .rfind(|b| b.sort_key < block.sort_key)
                 .map(|b| b.id))
         }
 

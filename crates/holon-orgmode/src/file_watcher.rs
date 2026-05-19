@@ -216,6 +216,7 @@ impl OrgFileWatcher {
     /// Consume the watcher and return both the watcher and receiver.
     ///
     /// The caller MUST keep the watcher alive for file watching to work.
+    #[allow(clippy::type_complexity)] // 3-tuple of (watcher, channel, hash map) is the public ownership surface
     pub fn into_parts(
         self,
     ) -> (

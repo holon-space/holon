@@ -276,7 +276,7 @@ impl EditorView {
                     }
                     let prev_synced = last_synced.clone();
                     let mut applied = false;
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         let Some(view) = this.upgrade() else {
                             return;
                         };
@@ -341,7 +341,7 @@ impl EditorView {
                     if this.upgrade().is_none() {
                         break;
                     }
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         let Some(view) = this.upgrade() else {
                             return;
                         };
@@ -390,7 +390,7 @@ impl EditorView {
                     if this.upgrade().is_none() {
                         break;
                     }
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         let Some(view) = this.upgrade() else {
                             return;
                         };
@@ -1030,7 +1030,7 @@ fn execute_action<T: 'static>(
                 use futures_signals::signal::SignalExt;
                 signal
                     .for_each(|_items| {
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             cx.notify(editor_entity_id);
                         });
                         async {}

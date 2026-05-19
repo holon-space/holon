@@ -96,7 +96,7 @@ pub fn collapse_state(node: &ReactiveViewModel, _ctx: &GpuiRenderContext) -> Opt
         return Some((depth, false));
     }
 
-    let expanded = node.expanded.as_ref().map_or(true, |m| m.get());
+    let expanded = node.expanded.as_ref().is_none_or(|m| m.get());
     Some((depth, !expanded))
 }
 
@@ -134,7 +134,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     // tree_item built outside `wrap_tree_item`).
     let expanded_handle = node.expanded.clone();
     let collapsed = if has_children && show_chevron {
-        !expanded_handle.as_ref().map_or(true, |m| m.get())
+        !expanded_handle.as_ref().is_none_or(|m| m.get())
     } else {
         false
     };

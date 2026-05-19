@@ -1,5 +1,5 @@
 use super::prelude::*;
 
-pub fn render(_fields: &String, child: &Box<ViewModel>, _ctx: &DioxusRenderContext) -> Element {
+pub fn render(_: &String, child: &Box<ViewModel>, _: &DioxusRenderContext) -> Element {
     rsx! { RenderNode { node: (**child).clone() } }
 }

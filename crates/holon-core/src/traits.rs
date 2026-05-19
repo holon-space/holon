@@ -509,15 +509,17 @@ async fn write_content_via_cells(
     Ok(true)
 }
 
-/// Authoritative block create through the cell registry. Routes
-/// `split_block`'s new-block create into Loro (tree.create + LoroText init
-/// + positional move). The outbound projector then emits the SQL INSERT
-/// tagged `EventOrigin::Loro`, which the inbound gate `EchoSuppress`es —
-/// the SQL-direct `BlockOperations::create` path tags events
-/// `EventOrigin::Other("sql")`, which the post-3.3-flip gate drops as an
-/// unmigrated chord-op write. Returns `Ok(false)` when no cell route is
-/// available (synthetic stores, SqlOnly mode); caller falls back to
-/// `BlockOperations::create`.
+/// Authoritative block create through the cell registry.
+///
+/// Routes `split_block`'s new-block create into Loro (tree.create +
+/// LoroText init + positional move). The outbound projector then emits
+/// the SQL INSERT tagged `EventOrigin::Loro`, which the inbound gate
+/// `EchoSuppress`es. The SQL-direct `BlockOperations::create` path tags
+/// events `EventOrigin::Other("sql")`, which the post-3.3-flip gate
+/// drops as an unmigrated chord-op write.
+///
+/// Returns `Ok(false)` when no cell route is available (synthetic
+/// stores, SqlOnly mode); caller invokes `BlockOperations::create`. // ALLOW(fallback): doc describes default path
 async fn create_block_via_cells(
     registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
     parent_id: &EntityUri,

@@ -499,7 +499,7 @@ impl OperationProvider for NavigationProvider {
         let region: Region = params
             .get("region")
             .cloned()
-            .ok_or_else(|| "Missing required parameter 'region'")?
+            .ok_or("Missing required parameter 'region'")?
             .try_into()
             .map_err(|e: Box<dyn std::error::Error + Send + Sync>| e.to_string())?;
 

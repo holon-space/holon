@@ -42,9 +42,9 @@ impl E2ETestContext {
             let engine = create_test_engine()
                 .await
                 .context("Failed to create test engine")?;
-            return Ok(Self {
+            Ok(Self {
                 service: HolonService::new(engine),
-            });
+            })
         }
         #[cfg(not(any(test, feature = "test-helpers")))]
         {
@@ -78,9 +78,10 @@ impl E2ETestContext {
 
     /// Stub for non-test builds - always returns an error
     #[cfg(not(any(test, feature = "test-helpers")))]
+    // ALLOW(unused_param): stub signature mirrors the test-only impl
     pub async fn with_providers<F>(_setup_fn: F) -> Result<Self>
     where
-        F: FnOnce(()) -> (),
+        F: FnOnce(()),
     {
         Err(anyhow::anyhow!(
             "E2ETestContext::with_providers() is only available in test builds"
@@ -154,10 +155,10 @@ impl E2ETestContext {
 
         loop {
             // Check if we've reached max events
-            if let Some(max) = max_events {
-                if events.len() >= max {
-                    break;
-                }
+            if let Some(max) = max_events
+                && events.len() >= max
+            {
+                break;
             }
 
             // Check if timeout has passed
@@ -287,8 +288,8 @@ pub fn assert_change_type(
         .map(|id| format!(" with entity_id='{}'", id))
         .unwrap_or_default();
     Err(anyhow::anyhow!(
-        "Expected {} change{} not found in {} batches. Found changes: {:?}",
-        format!("{:?}", expected_type),
+        "Expected {:?} change{} not found in {} batches. Found changes: {:?}",
+        expected_type,
         entity_msg,
         batches.len(),
         found_changes

@@ -338,7 +338,7 @@ fn main() {
                 })),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| AppView::new(cx)),
+            |_, cx| cx.new(AppView::new),
         )
         .expect("Failed to open window");
     });

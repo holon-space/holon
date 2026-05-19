@@ -17,8 +17,8 @@ fn semantic_color(ctx: &GpuiRenderContext, name: &str) -> Hsla {
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let field = node.prop_str("field").unwrap_or_else(|| "task_state".to_string());
-    let current = node.prop_str("current").unwrap_or_else(|| "".to_string());
-    let states = node.prop_str("states").unwrap_or_else(|| "".to_string());
+    let current = node.prop_str("current").unwrap_or_default();
+    let states = node.prop_str("states").unwrap_or_default();
 
     let (_label, semantic) = state_display(&current);
     let color = semantic_color(ctx, semantic);

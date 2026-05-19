@@ -160,24 +160,18 @@ impl holon::core::datasource::OperationRegistry for TodoistTask {
             };
             __operations_crud_operations::crud_operations(entity_name, short_name, table, id_column)
                 .into_iter()
-                .chain(
-                    __operations_block_operations::block_operations(
-                        entity_name,
-                        short_name,
-                        table,
-                        id_column,
-                    )
-                    .into_iter(),
-                )
-                .chain(
-                    __operations_task_operations::task_operations(
-                        entity_name,
-                        short_name,
-                        table,
-                        id_column,
-                    )
-                    .into_iter(),
-                )
+                .chain(__operations_block_operations::block_operations(
+                    entity_name,
+                    short_name,
+                    table,
+                    id_column,
+                ))
+                .chain(__operations_task_operations::task_operations(
+                    entity_name,
+                    short_name,
+                    table,
+                    id_column,
+                ))
                 .collect()
         }
         #[cfg(target_arch = "wasm32")]

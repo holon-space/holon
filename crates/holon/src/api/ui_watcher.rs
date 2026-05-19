@@ -231,7 +231,7 @@ async fn render_and_forward(
     variant: &Option<String>,
     generation: u64,
 ) {
-    match engine.blocks().render_entity(&block_id, variant).await {
+    match engine.blocks().render_entity(block_id, variant).await {
         Ok((render_expr, data_stream)) => {
             tracing::info!(
                 "[UiWatcher] render_entity('{}') OK: gen={}, render={:?}",
@@ -286,7 +286,7 @@ async fn forward_data_stream(
         let metadata = batch_with_metadata.metadata.clone();
         let enriched = enrich_batch(batch_with_metadata.inner.items, &profile_resolver);
         // Convert Change<EnrichedRow> → Change<DataRow> at the UiEvent boundary.
-        // UiEvent::Data uses MapChange (= Change<DataRow>) for FFI compatibility.
+        // UiEvent::Data uses MapChange (= Change<DataRow>) — the FFI boundary requires this shape.
         let map_changes: Vec<holon_api::MapChange> = enriched
             .into_iter()
             .map(|c| c.map(EnrichedRow::into_inner))

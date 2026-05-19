@@ -507,9 +507,9 @@ struct DemoApp {
 impl DemoApp {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            panel_a: cx.new(|cx| PanelA::new(cx)),
-            panel_b: cx.new(|cx| PanelB::new(cx)),
-            panel_c: cx.new(|cx| PanelC::new(cx)),
+            panel_a: cx.new(PanelA::new),
+            panel_b: cx.new(PanelB::new),
+            panel_c: cx.new(PanelC::new),
         }
     }
 }
@@ -563,7 +563,7 @@ fn main() {
                 })),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| DemoApp::new(cx)),
+            |_, cx| cx.new(DemoApp::new),
         )
         .expect("Failed to open window");
     });

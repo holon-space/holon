@@ -52,7 +52,7 @@ impl ClientHandler for NotifyingClientHandler {
     fn on_resource_updated(
         &self,
         params: ResourceUpdatedNotificationParam,
-        _context: NotificationContext<RoleClient>,
+        _: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + Send + '_ {
         debug!("[NotifyingClientHandler] Resource updated: {}", params.uri);
         let _ = self.sender.send(params.uri);

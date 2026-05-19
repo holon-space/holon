@@ -13,8 +13,8 @@ fn c(hex: u32) -> Hsla {
 }
 
 pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let sender = node.prop_str("sender").unwrap_or_else(|| "".to_string());
-    let time = node.prop_str("time").unwrap_or_else(|| "".to_string());
+    let sender = node.prop_str("sender").unwrap_or_default();
+    let time = node.prop_str("time").unwrap_or_default();
     let children = &node.children;
     let child_elements = render_children(children, ctx);
 

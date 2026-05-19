@@ -17,10 +17,28 @@ fn icons_dir() -> &'static PathBuf {
         if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
             return PathBuf::from(manifest).join("assets/icons");
         }
-        std::env::current_exe()
-            .ok() // ALLOW(ok): non-critical, has fallback
-            .and_then(|p| p.parent().map(|d| d.join("assets/icons")))
-            .unwrap_or_else(|| PathBuf::from("assets/icons"))
+        match std::env::current_exe() {
+            Ok(p) => p
+                .parent()
+                .map(|d| d.join("assets/icons"))
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        target: "holon.icons",
+                        "current_exe has no parent directory; falling back to ./assets/icons \
+                         — icons may render as unicode glyphs"
+                    );
+                    PathBuf::from("assets/icons")
+                }),
+            Err(e) => {
+                tracing::warn!(
+                    target: "holon.icons",
+                    error = %e,
+                    "std::env::current_exe() failed; falling back to ./assets/icons \
+                     — icons may render as unicode glyphs"
+                );
+                PathBuf::from("assets/icons")
+            }
+        }
     })
 }
 
@@ -66,7 +84,7 @@ fn icon_svg_name(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Unicode fallback for icons without an SVG file.
+/// Unicode fallback for icons without an SVG file. // ALLOW(fallback): describes default-branch path, not error swallowing
 fn icon_char(name: &str) -> &'static str {
     match name {
         "orgmode" => "\u{25C9}",
@@ -128,7 +146,7 @@ pub(crate) fn render_icon(name: &str, size: f32, ctx: &GpuiRenderContext) -> Div
         }
     }
 
-    // Unicode fallback
+    // Unicode fallback // ALLOW(fallback): describes default-branch path, not error swallowing
     let color = tc(ctx, |t| t.muted_foreground);
     div()
         .flex_shrink_0()

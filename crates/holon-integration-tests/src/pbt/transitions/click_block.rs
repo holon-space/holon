@@ -159,7 +159,6 @@ impl E2ETransitionImpl for ClickBlock {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use crate::pbt::reference_state::NavigationHistory;
         use crate::pbt::reference_state::OpenPinEntry;
         // The default LeftSidebar wraps each doc in a `selectable` whose
         // bound action is `navigation.focus(region: "main", block_id: col("id"))`.
@@ -172,10 +171,7 @@ impl E2ETransitionImpl for ClickBlock {
         // entities the default sidebar PRQL does NOT render (so prod
         // has no selectable bound), fall through to editor focus.
         if state.predicts_navigation_focus(&self.block_id, self.region) {
-            let history = state
-                .navigation_history
-                .entry(Region::Main)
-                .or_insert_with(NavigationHistory::new);
+            let history = state.navigation_history.entry(Region::Main).or_default();
             history.entries.truncate(history.cursor + 1);
             history.entries.push(Some(self.block_id.clone()));
             history.cursor = history.entries.len() - 1;

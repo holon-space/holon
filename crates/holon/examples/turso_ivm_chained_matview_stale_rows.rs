@@ -296,8 +296,7 @@ async fn main() -> anyhow::Result<()> {
 
             let raw_count = count_query(
                 &conn,
-                &format!(
-                    "SELECT count(*) as cnt FROM (
+                "SELECT count(*) as cnt FROM (
                     SELECT cf.region, cf.block_id, i.id AS root_id
                     FROM current_focus AS cf
                     JOIN items AS i ON i.parent_id = cf.block_id
@@ -305,8 +304,7 @@ async fn main() -> anyhow::Result<()> {
                     SELECT cf.region, cf.block_id, i.id AS root_id
                     FROM current_focus AS cf
                     JOIN items AS i ON i.id = cf.block_id
-                ) WHERE region = 'main'"
-                ),
+                ) WHERE region = 'main'",
             )
             .await?;
             println!("  Raw SQL re-evaluation: {raw_count} rows (no stale)");

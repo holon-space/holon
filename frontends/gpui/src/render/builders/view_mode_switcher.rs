@@ -32,7 +32,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let slot = node.slot.as_ref().expect("view_mode_switcher requires a slot");
 
     // active_mode and mode_templates are stored in props
-    let active_mode_prop = node.prop_str("active_mode").unwrap_or_else(|| "".to_string());
+    let active_mode_prop = node.prop_str("active_mode").unwrap_or_default();
     let render_ctx = node.render_ctx.as_ref();
 
     // Shadow builder stores mode templates as individual `tmpl_mode_*` props,

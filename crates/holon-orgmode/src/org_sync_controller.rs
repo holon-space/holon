@@ -714,6 +714,8 @@ impl OrgSyncController {
                 } else {
                     new_block.parent_id.as_str().to_string()
                 };
+                #[allow(clippy::map_entry)]
+                // async fetch between check + insert, entry API doesn't fit
                 if !live_children.contains_key(&parent_key) {
                     let kids = self
                         .ordering
@@ -1013,8 +1015,8 @@ impl OrgSyncController {
         let mut ingested = 0;
         let keys: Vec<(CanonicalPath, PathBuf)> = self
             .last_projection
-            .iter()
-            .map(|(k, _)| (k.clone(), (**k).to_path_buf()))
+            .keys()
+            .map(|k| (k.clone(), (**k).to_path_buf()))
             .collect();
 
         for (canonical, path) in keys {

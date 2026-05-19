@@ -111,11 +111,9 @@ pub fn inject_entity_name(stmts: &mut [Statement]) {
                 }
             }
             // Skip recursive CTE bodies — UNION ALL branches must have matching column counts
-            if !is_recursive {
-                if let Some(with) = &mut query.with {
-                    for cte in &mut with.cte_tables {
-                        inject_into_query(&mut cte.query, &cte_names);
-                    }
+            if !is_recursive && let Some(with) = &mut query.with {
+                for cte in &mut with.cte_tables {
+                    inject_into_query(&mut cte.query, &cte_names);
                 }
             }
             inject_into_set_expr(&mut query.body, &cte_names);
@@ -241,10 +239,10 @@ fn get_dominant_qualifier_table(select: &Select, cte_names: &HashSet<String>) ->
 
 /// Extract the table qualifier from a compound identifier (e.g., `_v4."id"` → `_v4`).
 fn extract_qualifier(expr: &Expr) -> Option<String> {
-    if let Expr::CompoundIdentifier(parts) = expr {
-        if parts.len() == 2 {
-            return Some(parts[0].value.clone());
-        }
+    if let Expr::CompoundIdentifier(parts) = expr
+        && parts.len() == 2
+    {
+        return Some(parts[0].value.clone());
     }
     None
 }
@@ -279,12 +277,11 @@ fn check_table_factor_for_alias(
         alias: Some(table_alias),
         ..
     } = factor
+        && table_alias.name.value == alias
     {
-        if table_alias.name.value == alias {
-            let table_name = normalize_table_name(&name.to_string());
-            if !cte_names.contains(&table_name.to_lowercase()) {
-                return Some(table_name);
-            }
+        let table_name = normalize_table_name(&name.to_string());
+        if !cte_names.contains(&table_name.to_lowercase()) {
+            return Some(table_name);
         }
     }
     None
@@ -299,10 +296,10 @@ fn get_change_origin_table_and_alias(
 ) -> (Option<String>, Option<String>) {
     // Try dominant qualifier: if all qualified columns reference the same alias,
     // use that alias's real table name.
-    if let Some(dominant_alias) = get_dominant_qualifier(select) {
-        if let Some(real_name) = resolve_alias_to_table(select, &dominant_alias, cte_names) {
-            return (Some(real_name), Some(dominant_alias));
-        }
+    if let Some(dominant_alias) = get_dominant_qualifier(select)
+        && let Some(real_name) = resolve_alias_to_table(select, &dominant_alias, cte_names)
+    {
+        return (Some(real_name), Some(dominant_alias));
     }
     // Fall back to primary FROM table
     let real_name = select
@@ -406,7 +403,7 @@ fn normalize_table_name(name: &str) -> String {
         .trim_matches('[')
         .trim_matches(']')
         .split('.')
-        .last()
+        .next_back()
         .unwrap_or(name)
         .to_string()
 }
@@ -765,11 +762,9 @@ fn inject_change_origin(stmts: &mut [Statement]) {
                 }
             }
             // Skip recursive CTE bodies — UNION ALL branches must have matching column counts
-            if !is_recursive {
-                if let Some(with) = &mut query.with {
-                    for cte in &mut with.cte_tables {
-                        inject_change_origin_into_query(&mut cte.query, &cte_names);
-                    }
+            if !is_recursive && let Some(with) = &mut query.with {
+                for cte in &mut with.cte_tables {
+                    inject_change_origin_into_query(&mut cte.query, &cte_names);
                 }
             }
             inject_change_origin_into_set_expr(&mut query.body, &cte_names);
@@ -804,10 +799,10 @@ fn inject_change_origin_into_set_expr(set_expr: &mut SetExpr, cte_names: &HashSe
             // same table — if a dominant qualifier points to a JOINed table,
             // use that table's alias, not the first FROM alias.
             let (real_name, table_ref) = get_change_origin_table_and_alias(select, cte_names);
-            if let Some(ref name) = real_name {
-                if !has_change_origin_column(name) {
-                    return;
-                }
+            if let Some(ref name) = real_name
+                && !has_change_origin_column(name)
+            {
+                return;
             }
             if let Some(table_ref) = table_ref {
                 select.projection.push(SelectItem::ExprWithAlias {
@@ -844,15 +839,14 @@ fn has_change_origin_alias(projection: &[SelectItem]) -> bool {
 // =============================================================================
 
 /// For UNION queries, wrap each branch in a CTE with `SELECT json_object(*) AS data`.
-fn inject_json_aggregation(stmts: &mut Vec<Statement>) {
-    let len = stmts.len();
-    for i in 0..len {
-        if let Statement::Query(query) = &mut stmts[i] {
+fn inject_json_aggregation(stmts: &mut [Statement]) {
+    for stmt in stmts.iter_mut() {
+        if let Statement::Query(query) = stmt {
             if !matches!(query.body.as_ref(), SetExpr::SetOperation { .. }) {
                 continue;
             }
             // Collect branches and operators from the UNION tree
-            let mut branches: Vec<Box<SetExpr>> = Vec::new();
+            let mut branches: Vec<SetExpr> = Vec::new();
             let mut operators: Vec<SetOperator> = Vec::new();
             collect_union_branches(&query.body, &mut branches, &mut operators);
 
@@ -872,7 +866,7 @@ fn inject_json_aggregation(stmts: &mut Vec<Statement>) {
                     &format!("_branch_{}", idx),
                     Query {
                         with: None,
-                        body: branch.clone(),
+                        body: Box::new(branch.clone()),
                         order_by: None,
                         limit_clause: None,
                         fetch: None,
@@ -901,7 +895,7 @@ fn inject_json_aggregation(stmts: &mut Vec<Statement>) {
                 recursive: false,
                 cte_tables: all_ctes,
             });
-            query.body = Box::new(new_body);
+            *query.body = new_body;
         }
     }
 }
@@ -909,7 +903,7 @@ fn inject_json_aggregation(stmts: &mut Vec<Statement>) {
 /// Recursively collect all leaf branches and operators from a nested SetOperation tree.
 fn collect_union_branches(
     body: &SetExpr,
-    branches: &mut Vec<Box<SetExpr>>,
+    branches: &mut Vec<SetExpr>,
     operators: &mut Vec<SetOperator>,
 ) {
     match body {
@@ -921,10 +915,10 @@ fn collect_union_branches(
             if matches!(right.as_ref(), SetExpr::SetOperation { .. }) {
                 collect_union_branches(right, branches, operators);
             } else {
-                branches.push(right.clone());
+                branches.push((**right).clone());
             }
         }
-        _ => branches.push(Box::new(body.clone())),
+        _ => branches.push(body.clone()),
     }
 }
 

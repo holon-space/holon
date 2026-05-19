@@ -104,7 +104,7 @@ fn extract_param_name(pat: &Pat) -> String {
         Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
         Pat::Wild(_) => "_".to_string(),
         _ => {
-            // Fallback: try to stringify the pattern
+            // Fallback: try to stringify the pattern // ALLOW(fallback): describes default-branch path, not error swallowing
             quote! { #pat }.to_string()
         }
     }
@@ -163,7 +163,7 @@ fn infer_type_string(type_str: &str) -> String {
 /// Pass-through attribute for #[affects(...)] - allows Rust to accept the attribute
 /// The actual parsing is done by extract_affected_fields() in the operations_trait macro.
 #[proc_macro_attribute]
-pub fn affects(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn affects(_: TokenStream, item: TokenStream) -> TokenStream {
     // Pass through unchanged - this just allows Rust to accept the attribute
     item
 }
@@ -186,7 +186,7 @@ pub fn affects(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// async fn set_completion(&self, id: &str, completed: bool) -> Result<()>
 /// ```
 #[proc_macro_attribute]
-pub fn triggered_by(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn triggered_by(_: TokenStream, item: TokenStream) -> TokenStream {
     // Pass through unchanged - this just allows Rust to accept the attribute
     item
 }
@@ -203,7 +203,7 @@ pub fn triggered_by(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// async fn set_state(&self, id: &str, task_state: String) -> Result<OperationResult>
 /// ```
 #[proc_macro_attribute]
-pub fn enum_from(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn enum_from(_: TokenStream, item: TokenStream) -> TokenStream {
     // Pass through unchanged - this just allows Rust to accept the attribute
     item
 }
@@ -228,7 +228,7 @@ pub fn enum_from(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// let op = DELETE_BLOCK_OP();
 /// ```
 #[proc_macro_attribute]
-pub fn operation(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn operation(_: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
 
     // Detect crate path (same logic as Entity macro)
@@ -312,7 +312,7 @@ pub fn operation(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This allows the attribute to be recognized by Rust's parser
 /// The actual processing is done by the operations_trait macro
 #[proc_macro_attribute]
-pub fn require(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn require(_: TokenStream, item: TokenStream) -> TokenStream {
     // Just return the item unchanged - the operations_trait macro will process the require attributes
     // This is a no-op macro that just passes through the item
     // We clone the token stream to ensure proper span preservation for rust-analyzer

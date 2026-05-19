@@ -221,7 +221,7 @@ mod tests {
             // Sync under write lock (same as StubSut)
             {
                 let doc = &*primary;
-                crate::sync::multi_peer::sync_docs_direct(&doc, &peer);
+                crate::sync::multi_peer::sync_docs_direct(doc, &peer);
             }
 
             assert!(
@@ -240,7 +240,7 @@ mod tests {
 
             {
                 let doc = &*primary;
-                crate::sync::multi_peer::sync_docs_direct(&doc, &peer2);
+                crate::sync::multi_peer::sync_docs_direct(doc, &peer2);
             }
 
             assert!(

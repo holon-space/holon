@@ -159,7 +159,7 @@ impl Lifecycle for MemoryBackend {
         })
     }
 
-    async fn open_existing(_doc_id: String) -> Result<Self, ApiError> {
+    async fn open_existing(_: String) -> Result<Self, ApiError> {
         Err(ApiError::InvalidOperation {
             message: "MemoryBackend does not support persistence".to_string(),
         })
@@ -235,11 +235,11 @@ impl CoreOperations for MemoryBackend {
         // Start traversal from root nodes
         for parent_key in state.children_by_parent.keys() {
             let uri = EntityUri::from_raw(parent_key);
-            if uri.is_no_parent() || uri.is_sentinel() {
-                if let Some(children) = state.children_by_parent.get(parent_key) {
-                    for child_id in children {
-                        traverse(child_id, 1, &state, &traversal, &mut result);
-                    }
+            if (uri.is_no_parent() || uri.is_sentinel())
+                && let Some(children) = state.children_by_parent.get(parent_key)
+            {
+                for child_id in children {
+                    traverse(child_id, 1, &state, &traversal, &mut result);
                 }
             }
         }

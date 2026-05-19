@@ -1136,19 +1136,19 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .iter()
             .filter_map(|row| row.get("id")?.as_string().map(|s| s.to_string()))
             .find(|id| !pre_known.contains(id));
-        if self.frontend_geometry.is_some() {
-            if let Some(new_id) = new_block_real_id.as_deref() {
-                // Best-effort barrier: try to absorb the
-                // editor_cursor → window.focus(new) → InputEvent::Focus →
-                // set_focus(new) propagation chain before the next step. If
-                // it doesn't converge in 2s, fall through and let the
-                // downstream inv-focus-matches-ref polling catch real
-                // regressions — the new EditorView may not have mounted
-                // yet (a real, separate fragility worth surfacing there).
-                let _ = self
-                    .wait_for_focus_to_match(new_id, Duration::from_secs(2))
-                    .await;
-            }
+        if self.frontend_geometry.is_some()
+            && let Some(new_id) = new_block_real_id.as_deref()
+        {
+            // Best-effort barrier: try to absorb the
+            // editor_cursor → window.focus(new) → InputEvent::Focus →
+            // set_focus(new) propagation chain before the next step. If
+            // it doesn't converge in 2s, fall through and let the
+            // downstream inv-focus-matches-ref polling catch real
+            // regressions — the new EditorView may not have mounted
+            // yet (a real, separate fragility worth surfacing there).
+            let _ = self
+                .wait_for_focus_to_match(new_id, Duration::from_secs(2))
+                .await;
         }
     }
 
@@ -1276,7 +1276,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
                 _ => None,
             })
             .collect();
-        let has_enter = regulars.iter().any(|k| *k == "enter");
+        let has_enter = regulars.contains(&"enter");
         let mod_refs: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
         for key in regulars {
             driver
@@ -1421,7 +1421,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         let primary_doc = global_doc.doc();
         let primary = &*primary_doc;
         let peer = &self.peers[peer_idx];
-        holon::sync::multi_peer::sync_docs_direct(&primary, &peer.doc);
+        holon::sync::multi_peer::sync_docs_direct(primary, &peer.doc);
         drop(store);
         // Give the controller's spawned task time to process the
         // peer import via subscribe_root → on_loro_changed → SQL.

@@ -194,7 +194,7 @@ fn parse_render_dsl_with_engine(source: &str, engine: &RhaiEngine) -> Result<Ren
         .map_err(|e| anyhow::anyhow!("Failed to parse render DSL '{}': {e}", trimmed))?;
 
     dynamic_to_render_expr(&result)
-        .with_context(|| format!("Failed to convert Rhai result to RenderExpr: {:?}", &result))
+        .with_context(|| format!("Failed to convert Rhai result to RenderExpr: {:?}", result))
 }
 
 fn default_table() -> RenderExpr {
@@ -508,28 +508,28 @@ fn map_to_function_call(map: &RhaiMap) -> Result<RenderExpr> {
     let mut args = Vec::new();
 
     // Named args
-    if let Some(named_dyn) = map.get("_named") {
-        if named_dyn.is_map() {
-            let named = named_dyn.clone().cast::<RhaiMap>();
-            for (k, v) in &named {
-                args.push(Arg {
-                    name: Some(k.to_string()),
-                    value: dynamic_to_render_expr(v)?,
-                });
-            }
+    if let Some(named_dyn) = map.get("_named")
+        && named_dyn.is_map()
+    {
+        let named = named_dyn.clone().cast::<RhaiMap>();
+        for (k, v) in &named {
+            args.push(Arg {
+                name: Some(k.to_string()),
+                value: dynamic_to_render_expr(v)?,
+            });
         }
     }
 
     // Positional args
-    if let Some(pos_dyn) = map.get("_positional") {
-        if pos_dyn.is_array() {
-            let positional = pos_dyn.clone().cast::<Vec<Dynamic>>();
-            for v in &positional {
-                args.push(Arg {
-                    name: None,
-                    value: dynamic_to_render_expr(v)?,
-                });
-            }
+    if let Some(pos_dyn) = map.get("_positional")
+        && pos_dyn.is_array()
+    {
+        let positional = pos_dyn.clone().cast::<Vec<Dynamic>>();
+        for v in &positional {
+            args.push(Arg {
+                name: None,
+                value: dynamic_to_render_expr(v)?,
+            });
         }
     }
 

@@ -122,7 +122,7 @@ impl CacheEventSubscriber {
     /// downstream notifications.
     #[tracing::instrument(skip_all, name = "cache.flush_block_batch", fields(batch_size = changes.len()))]
     async fn flush_block_batch(
-        _cache: &Arc<QueryableCache<Block>>,
+        _: &Arc<QueryableCache<Block>>,
         event_bus: &Arc<dyn EventBus>,
         changes: &mut Vec<Change<Block>>,
         event_ids: &mut Vec<String>,
@@ -360,13 +360,13 @@ impl EventSubscriber for CacheEventSubscriber {
             })?;
 
         // Mark event as processed if EventBus reference is available
-        if let Some(ref event_bus) = self.event_bus {
-            if let Err(e) = event_bus.mark_processed(&event.id, Consumer::CACHE).await {
-                tracing::warn!(
-                    "[CacheEventSubscriber] Failed to mark event as processed: {}",
-                    e
-                );
-            }
+        if let Some(ref event_bus) = self.event_bus
+            && let Err(e) = event_bus.mark_processed(&event.id, Consumer::CACHE).await
+        {
+            tracing::warn!(
+                "[CacheEventSubscriber] Failed to mark event as processed: {}",
+                e
+            );
         }
 
         Ok(())

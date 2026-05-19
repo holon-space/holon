@@ -1,5 +1,5 @@
 use super::prelude::*;
 
-pub fn render(_operations: &String, _ctx: &DioxusRenderContext) -> Element {
+pub fn render(_: &String, _: &DioxusRenderContext) -> Element {
     rsx! {}
 }

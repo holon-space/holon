@@ -1,3 +1,4 @@
+#![allow(dead_code, clippy::await_holding_lock, clippy::type_complexity)] // standalone repro
 //! FU-13 follow-up: do CDC events on a chained matview leak rows that the
 //! inner matview's WHERE filter excluded?
 //!
@@ -110,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         for change in &event.changes {
-            let raw = format!("{:?}", change);
+            let _raw = format!("{:?}", change);
             let (change_type, bin_len) = match &change.change {
                 turso::DatabaseChangeType::Insert { bin_record } => ("Insert", bin_record.len()),
                 turso::DatabaseChangeType::Update { bin_record } => ("Update", bin_record.len()),

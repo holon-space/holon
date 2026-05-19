@@ -109,7 +109,7 @@ impl Render for RenderEntityView {
             .entity()
             .get("id")
             .and_then(|v| v.as_string())
-            .map(|s| EntityUri::from_raw(s));
+            .map(EntityUri::from_raw);
 
         let Some(ref id) = block_id else {
             return child_el;

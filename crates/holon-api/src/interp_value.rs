@@ -92,7 +92,7 @@ pub trait ReactiveRowProvider: Send + Sync {
     /// also no `.set()`, just no upstream to fire.
     fn row_mutable(
         &self,
-        _id: &str,
+        _: &str,
     ) -> Option<futures_signals::signal::ReadOnlyMutable<Arc<DataRow>>> {
         None
     }

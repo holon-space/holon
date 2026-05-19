@@ -15,7 +15,7 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 /// parent-scoped and won't deduplicate across the cycle. The cycle check
 /// fires before the cache lookup so the cycle case never enters the cache.
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
-    let block_id_str = node.prop_str("block_id").unwrap_or_else(|| "".to_string());
+    let block_id_str = node.prop_str("block_id").unwrap_or_default();
     let block_id = EntityUri::parse(&block_id_str)
         .unwrap_or_else(|_| EntityUri::block(&block_id_str));
 

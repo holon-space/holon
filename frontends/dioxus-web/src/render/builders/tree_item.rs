@@ -2,9 +2,9 @@ use super::prelude::*;
 
 pub fn render(
     depth: &usize,
-    _has_children: &bool,
+    _: &bool,
     children: &LazyChildren,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     let pad = depth * 16;
     rsx! {

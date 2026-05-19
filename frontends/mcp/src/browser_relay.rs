@@ -233,8 +233,8 @@ impl ServerHandler for BrowserRelayServer {
 
     fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
-        _context: RequestContext<RoleServer>,
+        _: Option<PaginatedRequestParam>,
+        _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         let tools =
             (HolonMcpServer::tool_router_ui() + HolonMcpServer::tool_router_backend()).list_all();
@@ -244,7 +244,7 @@ impl ServerHandler for BrowserRelayServer {
     fn call_tool(
         &self,
         request: CallToolRequestParam,
-        _context: RequestContext<RoleServer>,
+        _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         let relay = self.relay.clone();
         async move { relay.forward(request).await }

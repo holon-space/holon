@@ -87,7 +87,7 @@ impl AttrArgs {
 ///
 /// Returns None if the tokens cannot be parsed as key-value pairs.
 fn parse_meta_list_args(meta_list: &syn::MetaList) -> Option<AttrArgs> {
-    syn::parse2::<AttrArgs>(meta_list.tokens.clone()).ok() // ALLOW(ok): fallback parse attempt
+    syn::parse2::<AttrArgs>(meta_list.tokens.clone()).ok() // ALLOW(ok): optional attribute shape
 }
 
 // ============================================================================
@@ -105,19 +105,17 @@ pub struct EntityAttribute {
 /// Extract entity attribute from #[entity(name = "...", ...)]
 pub fn extract_entity_attribute(attrs: &[syn::Attribute]) -> EntityAttribute {
     for attr in attrs {
-        if attr.path().is_ident("entity") {
-            if let syn::Meta::List(meta_list) = &attr.meta {
-                if let Some(args) = parse_meta_list_args(meta_list) {
-                    if let Some(name) = args.get_str("name") {
-                        return EntityAttribute {
-                            name,
-                            short_name: args.get_str("short_name"),
-                            api_crate: args.get_str("api_crate"),
-                            graph_label: args.get_str("graph_label"),
-                        };
-                    }
-                }
-            }
+        if attr.path().is_ident("entity")
+            && let syn::Meta::List(meta_list) = &attr.meta
+            && let Some(args) = parse_meta_list_args(meta_list)
+            && let Some(name) = args.get_str("name")
+        {
+            return EntityAttribute {
+                name,
+                short_name: args.get_str("short_name"),
+                api_crate: args.get_str("api_crate"),
+                graph_label: args.get_str("graph_label"),
+            };
         }
     }
     panic!("Entity derive macro requires #[entity(name = \"...\")]");
@@ -132,28 +130,25 @@ pub struct ReferenceAttribute {
 /// Extract reference attribute from a field's attributes.
 pub fn extract_reference_attribute(attrs: &[syn::Attribute]) -> Option<ReferenceAttribute> {
     for attr in attrs {
-        if attr.path().is_ident("reference") {
-            if let syn::Meta::List(meta_list) = &attr.meta {
-                let tokens_str = meta_list.tokens.to_string();
-                // Try parsing as key-value pairs first: `Entity, edge = "..."`
-                // The first token is the entity name (an ident), followed by optional kv pairs
-                let mut iter = tokens_str.splitn(2, ',');
-                let entity_name = iter.next().unwrap().trim().to_string();
-                let edge_name = if let Some(rest) = iter.next() {
-                    // Try to parse remaining as key-value
-                    if let Ok(args) = syn::parse_str::<AttrArgs>(rest.trim()) {
-                        args.get_str("edge")
-                    } else {
-                        None
-                    }
+        if attr.path().is_ident("reference")
+            && let syn::Meta::List(meta_list) = &attr.meta
+        {
+            let tokens_str = meta_list.tokens.to_string();
+            let mut iter = tokens_str.splitn(2, ',');
+            let entity_name = iter.next().unwrap().trim().to_string();
+            let edge_name = if let Some(rest) = iter.next() {
+                if let Ok(args) = syn::parse_str::<AttrArgs>(rest.trim()) {
+                    args.get_str("edge")
                 } else {
                     None
-                };
-                return Some(ReferenceAttribute {
-                    entity_name,
-                    edge_name,
-                });
-            }
+                }
+            } else {
+                None
+            };
+            return Some(ReferenceAttribute {
+                entity_name,
+                edge_name,
+            });
         }
     }
     None
@@ -175,20 +170,18 @@ pub fn extract_param_mappings(attrs: &[syn::Attribute]) -> Vec<ParsedParamMappin
                 && attr.path().segments[0].ident == "holon_macros"
                 && attr.path().segments[1].ident == "triggered_by");
 
-        if is_triggered_by_attr {
-            if let syn::Meta::List(meta_list) = &attr.meta {
-                if let Some(args) = parse_meta_list_args(meta_list) {
-                    if let Some(availability_of) = args.get_str("availability_of") {
-                        let providing = args
-                            .get_list("providing")
-                            .unwrap_or_else(|| vec![availability_of.clone()]);
-                        mappings.push(ParsedParamMapping {
-                            availability_of,
-                            providing,
-                        });
-                    }
-                }
-            }
+        if is_triggered_by_attr
+            && let syn::Meta::List(meta_list) = &attr.meta
+            && let Some(args) = parse_meta_list_args(meta_list)
+            && let Some(availability_of) = args.get_str("availability_of")
+        {
+            let providing = args
+                .get_list("providing")
+                .unwrap_or_else(|| vec![availability_of.clone()]);
+            mappings.push(ParsedParamMapping {
+                availability_of,
+                providing,
+            });
         }
     }
 
@@ -209,19 +202,16 @@ pub fn extract_enum_from(attrs: &[syn::Attribute]) -> Option<ParsedEnumFrom> {
                 && attr.path().segments[0].ident == "holon_macros"
                 && attr.path().segments[1].ident == "enum_from");
 
-        if is_enum_from_attr {
-            if let syn::Meta::List(meta_list) = &attr.meta {
-                if let Some(args) = parse_meta_list_args(meta_list) {
-                    if let (Some(method_name), Some(param_name)) =
-                        (args.get_str("method"), args.get_str("param"))
-                    {
-                        return Some(ParsedEnumFrom {
-                            method_name,
-                            param_name,
-                        });
-                    }
-                }
-            }
+        if is_enum_from_attr
+            && let syn::Meta::List(meta_list) = &attr.meta
+            && let Some(args) = parse_meta_list_args(meta_list)
+            && let (Some(method_name), Some(param_name)) =
+                (args.get_str("method"), args.get_str("param"))
+        {
+            return Some(ParsedEnumFrom {
+                method_name,
+                param_name,
+            });
         }
     }
     None
@@ -236,15 +226,12 @@ pub fn extract_affected_fields(attrs: &[syn::Attribute]) -> Vec<String> {
                 && attr.path().segments[0].ident == "holon_macros"
                 && attr.path().segments[1].ident == "affects");
 
-        if is_affects_attr {
-            if let syn::Meta::List(meta_list) = &attr.meta {
-                // Parse as comma-separated string literals
-                if let Ok(items) = meta_list.parse_args_with(
-                    syn::punctuated::Punctuated::<LitStr, Token![,]>::parse_terminated,
-                ) {
-                    return items.iter().map(|lit| lit.value()).collect();
-                }
-            }
+        if is_affects_attr
+            && let syn::Meta::List(meta_list) = &attr.meta
+            && let Ok(items) = meta_list
+                .parse_args_with(syn::punctuated::Punctuated::<LitStr, Token![,]>::parse_terminated)
+        {
+            return items.iter().map(|lit| lit.value()).collect();
         }
 
         // Also check for #[operation(affects = [...])]
@@ -253,14 +240,12 @@ pub fn extract_affected_fields(attrs: &[syn::Attribute]) -> Vec<String> {
                 && attr.path().segments[0].ident == "holon_macros"
                 && attr.path().segments[1].ident == "operation");
 
-        if is_operation_attr {
-            if let syn::Meta::List(meta_list) = &attr.meta {
-                if let Some(args) = parse_meta_list_args(meta_list) {
-                    if let Some(fields) = args.get_list("affects") {
-                        return fields;
-                    }
-                }
-            }
+        if is_operation_attr
+            && let syn::Meta::List(meta_list) = &attr.meta
+            && let Some(args) = parse_meta_list_args(meta_list)
+            && let Some(fields) = args.get_list("affects")
+        {
+            return fields;
         }
     }
     Vec::new()

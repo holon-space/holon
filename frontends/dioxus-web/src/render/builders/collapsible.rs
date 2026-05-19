@@ -4,7 +4,7 @@ pub fn render(
     header: &String,
     icon: &String,
     children: &LazyChildren,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     let header = header.clone();
     let icon = icon.clone();

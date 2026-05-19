@@ -233,11 +233,11 @@ fn parse_action_dsl(source: &str) -> Result<ParsedAction> {
 
     let entity = map
         .get("_action_entity")
-        .and_then(|v| v.clone().into_string().ok())
+        .and_then(|v| v.clone().into_string().ok()) // ALLOW(ok): Rhai value type mismatch → None
         .ok_or_else(|| anyhow::anyhow!("Action DSL result missing _action_entity"))?;
     let operation = map
         .get("_action_op")
-        .and_then(|v| v.clone().into_string().ok())
+        .and_then(|v| v.clone().into_string().ok()) // ALLOW(ok): Rhai value type mismatch → None
         .ok_or_else(|| anyhow::anyhow!("Action DSL result missing _action_op"))?;
 
     let params_map = map

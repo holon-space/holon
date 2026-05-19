@@ -535,7 +535,7 @@ impl ReactiveShell {
         self.props_watchers.clear();
         let items = self.items.clone();
         for item in &items {
-            self.watch_item_signals(&item, cx);
+            self.watch_item_signals(item, cx);
         }
     }
 

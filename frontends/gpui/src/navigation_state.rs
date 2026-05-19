@@ -13,6 +13,12 @@ pub struct NavigationState {
     navigation_debug: Arc<StdRwLock<NavigationDebugState>>,
 }
 
+impl Default for NavigationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NavigationState {
     pub fn new() -> Self {
         Self {

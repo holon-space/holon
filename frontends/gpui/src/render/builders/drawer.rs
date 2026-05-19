@@ -47,7 +47,7 @@ pub(super) fn drawer_toggle_widget(
 }
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
-    let block_id = node.prop_str("block_id").unwrap_or_else(|| "".to_string());
+    let block_id = node.prop_str("block_id").unwrap_or_default();
     let mode = DrawerMode::from_str(&node.prop_str("mode").unwrap_or_else(|| "shrink".to_string()));
     let width = node.prop_f64("width").unwrap_or(300.0) as f32;
     let child = node.children.first().expect("drawer requires a child");

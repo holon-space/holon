@@ -237,11 +237,11 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
     }
     // Sort opens at same position: longer marks (later end) open first → outer.
     for v in opens_at.values_mut() {
-        v.sort_by(|a, b| b.end.cmp(&a.end));
+        v.sort_by_key(|m| std::cmp::Reverse(m.end));
     }
     // Sort closes at same position: most-recently-opened (later start) closes first.
     for v in closes_at.values_mut() {
-        v.sort_by(|a, b| b.start.cmp(&a.start));
+        v.sort_by_key(|m| std::cmp::Reverse(m.start));
     }
 
     let mut out = String::with_capacity(text.len() + marks.len() * 4);

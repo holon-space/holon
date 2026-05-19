@@ -93,6 +93,12 @@ pub struct LocalEntityScope {
     pub(crate) parent_cache: Option<EntityCache>,
 }
 
+impl Default for LocalEntityScope {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocalEntityScope {
     pub fn new() -> Self {
         Self {

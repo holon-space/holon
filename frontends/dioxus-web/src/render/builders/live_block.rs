@@ -4,7 +4,7 @@ use crate::render::EntityContext;
 pub fn render(
     block_id: &String,
     content: &Box<ViewModel>,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     let block_id = block_id.clone();
     let content = (**content).clone();
@@ -18,7 +18,7 @@ pub fn render(
 /// Each LiveBlockNode owns its own `engineWatchView` subscription for the
 /// target block and renders whatever ViewModel snapshots arrive. The
 /// `content` prop from the parent snapshot is only used as an
-/// initial/fallback render before the cell's own subscription delivers.
+/// initial/fallback render before the cell's own subscription delivers. // ALLOW(fallback): describes default-branch path, not error swallowing
 #[component]
 fn LiveBlockNode(block_id: String, content: ViewModel) -> Element {
     use_context_provider(|| EntityContext(block_id.clone()));

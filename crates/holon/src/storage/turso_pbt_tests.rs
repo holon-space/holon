@@ -333,9 +333,6 @@ impl StorageTest {
         }
     }
 
-    /// Create a new StorageTest with file-based backend (Unix-like systems only)
-    #[cfg(target_family = "unix")]
-
     /// Execute a batch of operations concurrently with panic detection.
     /// Uses a barrier to maximize the chance of concurrent execution.
     /// Returns the number of panics detected.
@@ -354,7 +351,7 @@ impl StorageTest {
             // Single operation - no concurrency needed
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tokio::task::block_in_place(|| {
-                    handle.block_on(apply_to_turso_inner(&self.backend, &operations[0], handle))
+                    handle.block_on(apply_to_turso_inner(&self.backend, &operations[0], handle)) // ALLOW(block_on): sync proptest harness bridges to tokio
                 })
             }));
 
@@ -409,7 +406,7 @@ impl StorageTest {
 
         // Execute all futures concurrently using join_all
         // This works with single-threaded runtime unlike spawned tasks with barriers
-        tokio::task::block_in_place(|| handle.block_on(futures::future::join_all(futures)));
+        tokio::task::block_in_place(|| handle.block_on(futures::future::join_all(futures))); // ALLOW(block_on): sync proptest harness bridges to tokio
 
         panic_count.load(Ordering::SeqCst)
     }
@@ -427,7 +424,7 @@ impl StorageTest {
     pub async fn execute_transaction_batch(
         &self,
         operations: Vec<StorageTransition>,
-        _handle: &tokio::runtime::Handle,
+        _: &tokio::runtime::Handle,
     ) -> Result<(), String> {
         if operations.is_empty() {
             return Ok(());
@@ -622,32 +619,31 @@ fn apply_to_reference(
             // Track view change notifications for views monitoring this entity
             // ONLY if the view stream has been created (callback registered)
             for (view_name, (view_entity, _count)) in &state.materialized_views {
-                if view_entity == entity {
-                    if let Some(changes_vec) = state.view_stream_changes.get(view_name) {
-                        // Assign ROWID for this view (each view has its own ROWID space)
-                        let rowid = *state.next_view_rowid.entry(view_name.clone()).or_insert(1);
-                        state.next_view_rowid.insert(view_name.clone(), rowid + 1);
-                        state
-                            .view_rowids
-                            .entry(view_name.clone())
-                            .or_default()
-                            .insert(id.clone(), rowid);
+                if view_entity == entity
+                    && let Some(changes_vec) = state.view_stream_changes.get(view_name)
+                {
+                    // Assign ROWID for this view (each view has its own ROWID space)
+                    let rowid = *state.next_view_rowid.entry(view_name.clone()).or_insert(1);
+                    state.next_view_rowid.insert(view_name.clone(), rowid + 1);
+                    state
+                        .view_rowids
+                        .entry(view_name.clone())
+                        .or_default()
+                        .insert(id.clone(), rowid);
 
-                        let mut data_with_rowid = data.clone();
-                        data_with_rowid
-                            .insert("_rowid".to_string(), Value::String(rowid.to_string()));
-                        let change = RowChange {
-                            relation_name: view_name.clone(),
-                            change: ChangeData::Created {
-                                data: data_with_rowid,
-                                origin: ChangeOrigin::Remote {
-                                    operation_id: None,
-                                    trace_id: None,
-                                },
+                    let mut data_with_rowid = data.clone();
+                    data_with_rowid.insert("_rowid".to_string(), Value::String(rowid.to_string()));
+                    let change = RowChange {
+                        relation_name: view_name.clone(),
+                        change: ChangeData::Created {
+                            data: data_with_rowid,
+                            origin: ChangeOrigin::Remote {
+                                operation_id: None,
+                                trace_id: None,
                             },
-                        };
-                        changes_vec.lock().unwrap().push(change);
-                    }
+                        },
+                    };
+                    changes_vec.lock().unwrap().push(change);
                 }
             }
             None
@@ -655,9 +651,7 @@ fn apply_to_reference(
         StorageTransition::Update { entity, id, value } => {
             let entities = state.entities.get_mut(entity).unwrap();
             // In concurrent batches, the entity may have been deleted by another operation
-            let Some(data) = entities.get_mut(id) else {
-                return None;
-            };
+            let data = entities.get_mut(id)?;
             data.insert("value".to_string(), Value::String(value.clone()));
 
             // Track CDC event if enabled
@@ -670,34 +664,34 @@ fn apply_to_reference(
             // Track view change notifications for views monitoring this entity
             // ONLY if the view stream has been created (callback registered)
             for (view_name, (view_entity, _count)) in &state.materialized_views {
-                if view_entity == entity {
-                    if let Some(changes_vec) = state.view_stream_changes.get(view_name) {
-                        let updated_data = entities.get(id).unwrap().clone();
-                        // Look up the ROWID for this entity in this view
-                        // In concurrent batches, the ROWID may not exist if entity was inserted after view creation
-                        let Some(rowid) = state
-                            .view_rowids
-                            .get(view_name)
-                            .and_then(|rowids| rowids.get(id))
-                        else {
-                            continue;
-                        };
-                        let mut updated_data_with_rowid = updated_data.clone();
-                        updated_data_with_rowid
-                            .insert("_rowid".to_string(), Value::String(rowid.to_string()));
-                        let change = RowChange {
-                            relation_name: view_name.clone(),
-                            change: ChangeData::Updated {
-                                id: rowid.to_string(),
-                                data: updated_data_with_rowid,
-                                origin: ChangeOrigin::Remote {
-                                    operation_id: None,
-                                    trace_id: None,
-                                },
+                if view_entity == entity
+                    && let Some(changes_vec) = state.view_stream_changes.get(view_name)
+                {
+                    let updated_data = entities.get(id).unwrap().clone();
+                    // Look up the ROWID for this entity in this view
+                    // In concurrent batches, the ROWID may not exist if entity was inserted after view creation
+                    let Some(rowid) = state
+                        .view_rowids
+                        .get(view_name)
+                        .and_then(|rowids| rowids.get(id))
+                    else {
+                        continue;
+                    };
+                    let mut updated_data_with_rowid = updated_data.clone();
+                    updated_data_with_rowid
+                        .insert("_rowid".to_string(), Value::String(rowid.to_string()));
+                    let change = RowChange {
+                        relation_name: view_name.clone(),
+                        change: ChangeData::Updated {
+                            id: rowid.to_string(),
+                            data: updated_data_with_rowid,
+                            origin: ChangeOrigin::Remote {
+                                operation_id: None,
+                                trace_id: None,
                             },
-                        };
-                        changes_vec.lock().unwrap().push(change);
-                    }
+                        },
+                    };
+                    changes_vec.lock().unwrap().push(change);
                 }
             }
             None
@@ -705,9 +699,7 @@ fn apply_to_reference(
         StorageTransition::Delete { entity, id } => {
             // In concurrent batches, the entity may have already been deleted
             let entities = state.entities.get_mut(entity).unwrap();
-            if entities.remove(id).is_none() {
-                return None; // Already deleted by concurrent operation
-            }
+            entities.remove(id)?;
             state.versions.get_mut(entity).unwrap().remove(id);
             state
                 .deleted_ids
@@ -731,35 +723,35 @@ fn apply_to_reference(
             // Track view change notifications for views monitoring this entity
             // ONLY if the view stream has been created (callback registered)
             for (view_name, (view_entity, _count)) in &state.materialized_views {
-                if view_entity == entity {
-                    if let Some(changes_vec) = state.view_stream_changes.get(view_name) {
-                        // Get ROWID for this entity in this view before removing
-                        // In concurrent batches, the ROWID may not exist if entity was never in view
-                        let Some(rowid) = state
-                            .view_rowids
-                            .get(view_name)
-                            .and_then(|rowids| rowids.get(id))
-                            .copied()
-                        else {
-                            continue;
-                        };
+                if view_entity == entity
+                    && let Some(changes_vec) = state.view_stream_changes.get(view_name)
+                {
+                    // Get ROWID for this entity in this view before removing
+                    // In concurrent batches, the ROWID may not exist if entity was never in view
+                    let Some(rowid) = state
+                        .view_rowids
+                        .get(view_name)
+                        .and_then(|rowids| rowids.get(id))
+                        .copied()
+                    else {
+                        continue;
+                    };
 
-                        let change = RowChange {
-                            relation_name: view_name.clone(),
-                            change: ChangeData::Deleted {
-                                id: rowid.to_string(),
-                                origin: ChangeOrigin::Remote {
-                                    operation_id: None,
-                                    trace_id: None,
-                                },
+                    let change = RowChange {
+                        relation_name: view_name.clone(),
+                        change: ChangeData::Deleted {
+                            id: rowid.to_string(),
+                            origin: ChangeOrigin::Remote {
+                                operation_id: None,
+                                trace_id: None,
                             },
-                        };
-                        changes_vec.lock().unwrap().push(change);
+                        },
+                    };
+                    changes_vec.lock().unwrap().push(change);
 
-                        // Remove ROWID mapping (ROWID might be reused in real Turso - to be tested)
-                        if let Some(rowids) = state.view_rowids.get_mut(view_name) {
-                            rowids.remove(id);
-                        }
+                    // Remove ROWID mapping (ROWID might be reused in real Turso - to be tested)
+                    if let Some(rowids) = state.view_rowids.get_mut(view_name) {
+                        rowids.remove(id);
                     }
                 }
             }
@@ -803,41 +795,41 @@ fn apply_to_reference(
                 .insert(id.clone(), Some(version.clone()));
 
             // Update _version in the entity data
-            if let Some(entities) = state.entities.get_mut(entity) {
-                if let Some(data) = entities.get_mut(id) {
-                    data.insert("_version".to_string(), Value::String(version.clone()));
+            if let Some(entities) = state.entities.get_mut(entity)
+                && let Some(data) = entities.get_mut(id)
+            {
+                data.insert("_version".to_string(), Value::String(version.clone()));
 
-                    // Track view change notifications for views monitoring this entity
-                    for (view_name, (view_entity, _count)) in &state.materialized_views {
-                        if view_entity == entity {
-                            if let Some(changes_vec) = state.view_stream_changes.get(view_name) {
-                                // Look up the ROWID for this entity in this view
-                                // In concurrent batches, the ROWID may not exist
-                                let Some(rowid) = state
-                                    .view_rowids
-                                    .get(view_name)
-                                    .and_then(|rowids| rowids.get(id))
-                                else {
-                                    continue;
-                                };
+                // Track view change notifications for views monitoring this entity
+                for (view_name, (view_entity, _count)) in &state.materialized_views {
+                    if view_entity == entity
+                        && let Some(changes_vec) = state.view_stream_changes.get(view_name)
+                    {
+                        // Look up the ROWID for this entity in this view
+                        // In concurrent batches, the ROWID may not exist
+                        let Some(rowid) = state
+                            .view_rowids
+                            .get(view_name)
+                            .and_then(|rowids| rowids.get(id))
+                        else {
+                            continue;
+                        };
 
-                                let mut data_with_rowid = data.clone();
-                                data_with_rowid
-                                    .insert("_rowid".to_string(), Value::String(rowid.to_string()));
-                                let change = RowChange {
-                                    relation_name: view_name.clone(),
-                                    change: ChangeData::Updated {
-                                        id: rowid.to_string(),
-                                        data: data_with_rowid,
-                                        origin: ChangeOrigin::Remote {
-                                            operation_id: None,
-                                            trace_id: None,
-                                        },
-                                    },
-                                };
-                                changes_vec.lock().unwrap().push(change);
-                            }
-                        }
+                        let mut data_with_rowid = data.clone();
+                        data_with_rowid
+                            .insert("_rowid".to_string(), Value::String(rowid.to_string()));
+                        let change = RowChange {
+                            relation_name: view_name.clone(),
+                            change: ChangeData::Updated {
+                                id: rowid.to_string(),
+                                data: data_with_rowid,
+                                origin: ChangeOrigin::Remote {
+                                    operation_id: None,
+                                    trace_id: None,
+                                },
+                            },
+                        };
+                        changes_vec.lock().unwrap().push(change);
                     }
                 }
             }
@@ -881,16 +873,16 @@ fn apply_to_reference(
 
             // Assign ROWIDs to any entities that were inserted after CreateMaterializedView
             // but before CreateViewStream
-            if let Some((entity, _)) = state.materialized_views.get(view_name) {
-                if let Some(entities) = state.entities.get(entity) {
-                    let existing_rowids = state.view_rowids.entry(view_name.clone()).or_default();
-                    let next_rowid = state.next_view_rowid.entry(view_name.clone()).or_insert(1);
+            if let Some((entity, _)) = state.materialized_views.get(view_name)
+                && let Some(entities) = state.entities.get(entity)
+            {
+                let existing_rowids = state.view_rowids.entry(view_name.clone()).or_default();
+                let next_rowid = state.next_view_rowid.entry(view_name.clone()).or_insert(1);
 
-                    for entity_id in entities.keys() {
-                        if !existing_rowids.contains_key(entity_id) {
-                            existing_rowids.insert(entity_id.clone(), *next_rowid);
-                            *next_rowid += 1;
-                        }
+                for entity_id in entities.keys() {
+                    if !existing_rowids.contains_key(entity_id) {
+                        existing_rowids.insert(entity_id.clone(), *next_rowid);
+                        *next_rowid += 1;
                     }
                 }
             }
@@ -911,7 +903,7 @@ fn apply_to_reference(
 async fn apply_to_turso_inner(
     backend: &TursoBackend,
     transition: &StorageTransition,
-    _handle: &tokio::runtime::Handle,
+    _: &tokio::runtime::Handle,
 ) -> Result<Option<Vec<StorageEntity>>, String> {
     match transition {
         StorageTransition::CreateEntity { name } => {
@@ -1351,10 +1343,7 @@ fn verify_states_match(
 }
 
 /// Generate a random filter strategy
-fn generate_filter(
-    _entity_names: Vec<String>,
-    existing_values: Vec<String>,
-) -> BoxedStrategy<Filter> {
+fn generate_filter(_: Vec<String>, existing_values: Vec<String>) -> BoxedStrategy<Filter> {
     let leaf = prop_oneof![
         (
             Just("id".to_string()),
@@ -1391,9 +1380,8 @@ fn generate_filter(
         3,  // Items per collection
         |inner| {
             prop_oneof![
-                prop::collection::vec(inner.clone(), 1..=2)
-                    .prop_map(|filters| Filter::And(filters)),
-                prop::collection::vec(inner, 1..=2).prop_map(|filters| Filter::Or(filters)),
+                prop::collection::vec(inner.clone(), 1..=2).prop_map(Filter::And),
+                prop::collection::vec(inner, 1..=2).prop_map(Filter::Or),
             ]
         },
     )
@@ -1613,37 +1601,37 @@ fn generate_transition_batch(state: &ReferenceState) -> BoxedStrategy<Transition
                 30u32,
                 base_op_strategy
                     .clone()
-                    .prop_map(|op| TransitionBatch::single(op))
+                    .prop_map(TransitionBatch::single)
                     .boxed(),
             ),
             (
                 10u32,
                 prop::collection::vec(base_op_strategy.clone(), 2..=2)
-                    .prop_map(|ops| TransitionBatch::concurrent(ops))
+                    .prop_map(TransitionBatch::concurrent)
                     .boxed(),
             ),
             (
                 10u32,
                 prop::collection::vec(base_op_strategy.clone(), 3..=3)
-                    .prop_map(|ops| TransitionBatch::concurrent(ops))
+                    .prop_map(TransitionBatch::concurrent)
                     .boxed(),
             ),
             (
                 20u32,
                 prop::collection::vec(base_op_strategy.clone(), 2..=3)
-                    .prop_map(|ops| TransitionBatch::transaction(ops))
+                    .prop_map(TransitionBatch::transaction)
                     .boxed(),
             ),
             (
                 20u32,
                 prop::collection::vec(base_op_strategy.clone(), 3..=4)
-                    .prop_map(|ops| TransitionBatch::transaction(ops))
+                    .prop_map(TransitionBatch::transaction)
                     .boxed(),
             ),
             (
                 10u32,
                 prop::collection::vec(base_op_strategy, 4..=5)
-                    .prop_map(|ops| TransitionBatch::transaction(ops))
+                    .prop_map(TransitionBatch::transaction)
                     .boxed(),
             ),
         ])
@@ -1655,25 +1643,25 @@ fn generate_transition_batch(state: &ReferenceState) -> BoxedStrategy<Transition
                 40u32,
                 base_op_strategy
                     .clone()
-                    .prop_map(|op| TransitionBatch::single(op))
+                    .prop_map(TransitionBatch::single)
                     .boxed(),
             ),
             (
                 30u32,
                 prop::collection::vec(base_op_strategy.clone(), 2..=2)
-                    .prop_map(|ops| TransitionBatch::concurrent(ops))
+                    .prop_map(TransitionBatch::concurrent)
                     .boxed(),
             ),
             (
                 20u32,
                 prop::collection::vec(base_op_strategy.clone(), 3..=3)
-                    .prop_map(|ops| TransitionBatch::concurrent(ops))
+                    .prop_map(TransitionBatch::concurrent)
                     .boxed(),
             ),
             (
                 10u32,
                 prop::collection::vec(base_op_strategy, 4..=4)
-                    .prop_map(|ops| TransitionBatch::concurrent(ops))
+                    .prop_map(TransitionBatch::concurrent)
                     .boxed(),
             ),
         ])
@@ -1684,19 +1672,19 @@ fn generate_transition_batch(state: &ReferenceState) -> BoxedStrategy<Transition
                 80u32,
                 base_op_strategy
                     .clone()
-                    .prop_map(|op| TransitionBatch::single(op))
+                    .prop_map(TransitionBatch::single)
                     .boxed(),
             ),
             (
                 15u32,
                 prop::collection::vec(base_op_strategy.clone(), 2..=2)
-                    .prop_map(|ops| TransitionBatch::concurrent(ops))
+                    .prop_map(TransitionBatch::concurrent)
                     .boxed(),
             ),
             (
                 5u32,
                 prop::collection::vec(base_op_strategy, 3..=3)
-                    .prop_map(|ops| TransitionBatch::concurrent(ops))
+                    .prop_map(TransitionBatch::concurrent)
                     .boxed(),
             ),
         ])
@@ -1966,10 +1954,12 @@ impl StateMachineTest for StorageTest {
                 ref_state
                     .view_stream_changes
                     .get(view_name)
-                    .expect(&format!(
-                        "View '{}' exists in SUT but not in reference state",
-                        view_name
-                    ));
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "View '{}' exists in SUT but not in reference state",
+                            view_name
+                        )
+                    });
             let expected_len = expected_changes_arc.lock().unwrap().len();
 
             // Wait for stream to catch up (bounded wait up to 50ms)

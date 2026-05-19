@@ -85,10 +85,10 @@ impl<'a> BlockDomain<'a> {
             .execute_query(BLOCK_PATH_LOOKUP_SQL.to_string(), params, None)
             .await?;
 
-        if let Some(row) = rows.first() {
-            if let Some(Value::String(path)) = row.get("path") {
-                return Ok(path.clone());
-            }
+        if let Some(row) = rows.first()
+            && let Some(Value::String(path)) = row.get("path")
+        {
+            return Ok(path.clone());
         }
 
         // ALLOW(fallback): pre-existing comment-only — block_id used as path when block_with_path lookup races
@@ -231,19 +231,16 @@ impl<'a> BlockDomain<'a> {
         if let RenderExpr::FunctionCall { name, mut args } = result_expr {
             if name == "view_mode_switcher" {
                 for arg in args.iter_mut() {
-                    if arg.name.as_deref() == Some("modes") {
-                        if let RenderExpr::Literal {
+                    if arg.name.as_deref() == Some("modes")
+                        && let RenderExpr::Literal {
                             value: Value::String(modes_json),
                         } = &mut arg.value
-                        {
-                            if let Ok(mut modes) =
-                                serde_json::from_str::<Vec<serde_json::Value>>(modes_json)
-                            {
-                                modes.push(serde_json::json!({"name": "source", "icon": "code"}));
-                                if let Ok(updated) = serde_json::to_string(&modes) {
-                                    *modes_json = updated;
-                                }
-                            }
+                        && let Ok(mut modes) =
+                            serde_json::from_str::<Vec<serde_json::Value>>(modes_json)
+                    {
+                        modes.push(serde_json::json!({"name": "source", "icon": "code"}));
+                        if let Ok(updated) = serde_json::to_string(&modes) {
+                            *modes_json = updated;
                         }
                     }
                 }
@@ -469,6 +466,24 @@ pub(crate) fn view_mode_switcher_from_variants(
     }
 }
 
+impl<'a> BlockDomain<'a> {
+    /// Rank all active task blocks using WSJF (Weighted Shortest Job First).
+    pub async fn rank_tasks(&self) -> Result<crate::petri::RankResult> {
+        let rows = self
+            .engine
+            .execute_query(TASK_BLOCKS_FOR_PETRI_SQL.to_string(), HashMap::new(), None)
+            .await?;
+
+        let blocks: Vec<holon_api::block::Block> = rows
+            .into_iter()
+            .map(holon_api::Block::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("rank_tasks: failed to parse block rows")?;
+
+        Ok(crate::petri::rank_tasks(&blocks))
+    }
+}
+
 #[cfg(test)]
 mod view_mode_switcher_from_variants_tests {
     use super::*;
@@ -493,13 +508,12 @@ mod view_mode_switcher_from_variants_tests {
             panic!("expected FunctionCall");
         };
         for a in args {
-            if a.name.as_deref() == Some("modes") {
-                if let RenderExpr::Literal {
+            if a.name.as_deref() == Some("modes")
+                && let RenderExpr::Literal {
                     value: Value::String(s),
                 } = &a.value
-                {
-                    return s.clone();
-                }
+            {
+                return s.clone();
             }
         }
         panic!("missing `modes` arg");
@@ -510,13 +524,12 @@ mod view_mode_switcher_from_variants_tests {
             return None;
         };
         for a in args {
-            if a.name.as_deref() == Some(name) {
-                if let RenderExpr::Literal {
+            if a.name.as_deref() == Some(name)
+                && let RenderExpr::Literal {
                     value: Value::String(s),
                 } = &a.value
-                {
-                    return Some(s.clone());
-                }
+            {
+                return Some(s.clone());
             }
         }
         None
@@ -609,23 +622,5 @@ mod view_mode_switcher_from_variants_tests {
             "no Always variant → no default_mode arg; frontend falls back \
              to modes[0] (existing behavior, no regression for this shape)"
         );
-    }
-}
-
-impl<'a> BlockDomain<'a> {
-    /// Rank all active task blocks using WSJF (Weighted Shortest Job First).
-    pub async fn rank_tasks(&self) -> Result<crate::petri::RankResult> {
-        let rows = self
-            .engine
-            .execute_query(TASK_BLOCKS_FOR_PETRI_SQL.to_string(), HashMap::new(), None)
-            .await?;
-
-        let blocks: Vec<holon_api::block::Block> = rows
-            .into_iter()
-            .map(holon_api::Block::try_from)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("rank_tasks: failed to parse block rows")?;
-
-        Ok(crate::petri::rank_tasks(&blocks))
     }
 }

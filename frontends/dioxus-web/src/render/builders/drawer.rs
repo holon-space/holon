@@ -1,9 +1,9 @@
 use super::prelude::*;
 
 pub fn render(
-    _block_id: &String,
+    _: &String,
     child: &Box<ViewModel>,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     rsx! { RenderNode { node: (**child).clone() } }
 }

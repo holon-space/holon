@@ -194,7 +194,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .get("parent_id")
             .and_then(|v| v.as_string())
             .map(|s| s.to_string())
-            .ok_or_else(|| "parent_id is required for block creation")?;
+            .ok_or("parent_id is required for block creation")?;
 
         // All blocks live in the single global tree
         let doc_id = String::new();
@@ -548,46 +548,36 @@ impl OperationProvider for LoroBlockOperations {
         );
 
         // Add operations from other trait sources
-        ops.extend(
-            __operations_crud_operations::crud_operations(
-                entity_name,
-                short_name,
-                entity_name,
-                id_column,
-            )
-            .into_iter(),
-        );
-        ops.extend(
-            __operations_block_operations::block_operations(
-                entity_name,
-                short_name,
-                entity_name,
-                id_column,
-            )
-            .into_iter(),
-        );
-        ops.extend(
-            __operations_mark_operations::mark_operations(
-                entity_name,
-                short_name,
-                entity_name,
-                id_column,
-            )
-            .into_iter(),
-        );
-        ops.extend(
-            __operations_text_operations::text_operations(
-                entity_name,
-                short_name,
-                entity_name,
-                id_column,
-            )
-            .into_iter(),
-        );
-        ops.extend(
-            __operations_has_cache::has_cache(entity_name, short_name, entity_name, id_column)
-                .into_iter(),
-        );
+        ops.extend(__operations_crud_operations::crud_operations(
+            entity_name,
+            short_name,
+            entity_name,
+            id_column,
+        ));
+        ops.extend(__operations_block_operations::block_operations(
+            entity_name,
+            short_name,
+            entity_name,
+            id_column,
+        ));
+        ops.extend(__operations_mark_operations::mark_operations(
+            entity_name,
+            short_name,
+            entity_name,
+            id_column,
+        ));
+        ops.extend(__operations_text_operations::text_operations(
+            entity_name,
+            short_name,
+            entity_name,
+            id_column,
+        ));
+        ops.extend(__operations_has_cache::has_cache(
+            entity_name,
+            short_name,
+            entity_name,
+            id_column,
+        ));
 
         ops
     }

@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn build(_args: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
+pub fn build(_: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
     let block_uri = match ctx.row().get("id").and_then(|v| v.as_string()) {
         Some(id) => holon_api::EntityUri::parse(id)
             .expect("live_block row id is not a valid EntityUri"),

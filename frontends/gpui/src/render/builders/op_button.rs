@@ -9,7 +9,7 @@ use holon_api::Value;
 /// routes id-only ops to direct dispatch and multi-param ops to the
 /// popup param-collection flow.
 ///
-/// Sighted-user fallback label sits underneath the icon because GPUI
+/// Sighted-user fallback label sits underneath the icon because GPUI // ALLOW(fallback): describes default-branch path, not error swallowing
 /// has no accessibility surface yet (see V2 in the mobile-bar plan —
 /// `Android TalkBack` / `iOS VoiceOver` need upstream GPUI work).
 ///
@@ -21,9 +21,9 @@ pub fn render(
     node: &holon_frontend::ReactiveViewModel,
     ctx: &GpuiRenderContext,
 ) -> AnyElement {
-    let op_name = node.prop_str("op_name").unwrap_or_else(|| "".to_string());
-    let target_id = node.prop_str("target_id").unwrap_or_else(|| "".to_string());
-    let display_name = node.prop_str("display_name").unwrap_or_else(|| "".to_string());
+    let op_name = node.prop_str("op_name").unwrap_or_default();
+    let target_id = node.prop_str("target_id").unwrap_or_default();
+    let display_name = node.prop_str("display_name").unwrap_or_default();
     let icon_char = op_icon_char(&op_name);
     let icon_label = if icon_char.is_empty() {
         fallback_short_label(&display_name)

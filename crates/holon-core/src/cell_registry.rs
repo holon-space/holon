@@ -148,8 +148,11 @@ impl<T: 'static + Send + Sync + Clone> AnyCellSlot for CellSlot<T> {
 /// Reusable Weak-keyed cell cache. Registries embed one of these and
 /// supply a per-`(field, T)` constructor; the cache handles upgrade,
 /// eviction, and same-id pruning.
+type CellCacheKey = (EntityUri, String, TypeId);
+type CellCacheMap = HashMap<CellCacheKey, Box<dyn AnyCellSlot>>;
+
 pub struct CellCache {
-    inner: Mutex<HashMap<(EntityUri, String, TypeId), Box<dyn AnyCellSlot>>>,
+    inner: Mutex<CellCacheMap>,
 }
 
 impl Default for CellCache {
@@ -228,7 +231,7 @@ mod tests {
 
     fn dummy_text_backing() -> Arc<dyn CellBacking<String>> {
         Arc::new(LwwTextCellBacking::new(
-            Arc::new(|| String::new()),
+            Arc::new(String::new),
             Arc::new(|_| -> BoxFuture<'static, Result<()>> { Box::pin(async { Ok(()) }) }),
             Arc::new(|| -> BoxStream<'static, String> { Box::pin(futures::stream::empty()) }),
         ))

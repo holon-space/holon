@@ -45,7 +45,7 @@ impl E2ETransitionFactory for DragDropBlock {
             .filter(|b| {
                 b.content_type == ContentType::Text
                     && !b.is_page()
-                    && &b.id != &source
+                    && b.id != source
                     && !state.layout_blocks.contains(&b.id)
                     && state.is_descendant_of_any(&b.id, &focus_roots)
             })
@@ -129,7 +129,7 @@ impl E2ETransitionImpl for DragDropBlock {
                 .block_state
                 .blocks
                 .get(&self.source)
-                .is_some_and(|b| &b.parent_id != &self.target),
+                .is_some_and(|b| b.parent_id != self.target),
             Reason::NoOpParentMove,
         ));
 

@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn build(_args: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
+pub fn build(_: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
     let content_type = ctx
         .row()
         .get("content_type")

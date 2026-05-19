@@ -181,6 +181,7 @@ enum Directive {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)] // Row* prefix mirrors the assertion DSL used in trace files
 enum AssertKind {
     RowExists { table: String, id: String },
     RowAbsent { table: String, id: String },
@@ -287,7 +288,7 @@ fn inline_positional_params(sql: &str, params_str: &str) -> String {
                 "NULL".to_string()
             };
             values.push((value, abs_start));
-            pos = pos + full_match.end();
+            pos += full_match.end();
         } else {
             break;
         }
@@ -365,15 +366,15 @@ fn extract_from_log(args: &ExtractArgs) -> anyhow::Result<ExtractedTrace> {
     let mut lines: Vec<String> = Vec::new();
     for (line_num, raw_line) in content.lines().enumerate() {
         let clean = ansi_re.replace_all(raw_line, "").to_string();
-        if let Some(stop) = args.stop_at {
-            if line_num + 1 >= stop {
-                break;
-            }
+        if let Some(stop) = args.stop_at
+            && line_num + 1 >= stop
+        {
+            break;
         }
-        if let Some(ref pat) = stop_pattern {
-            if pat.is_match(&clean) {
-                break;
-            }
+        if let Some(ref pat) = stop_pattern
+            && pat.is_match(&clean)
+        {
+            break;
         }
         lines.push(clean);
     }
@@ -597,10 +598,10 @@ fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
             if let Some((tag, sql)) = current_sql.take() {
                 directives.push(Directive::Sql { tag, sql });
             }
-            if let Some(ms_str) = rest.strip_suffix("ms") {
-                if let Ok(ms) = ms_str.parse::<u64>() {
-                    directives.push(Directive::Wait(ms));
-                }
+            if let Some(ms_str) = rest.strip_suffix("ms")
+                && let Ok(ms) = ms_str.parse::<u64>()
+            {
+                directives.push(Directive::Wait(ms));
             }
             continue;
         }
@@ -666,10 +667,10 @@ fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
         }
     }
 
-    if let Some((tag, sql)) = current_sql.take() {
-        if !sql.trim().is_empty() {
-            directives.push(Directive::Sql { tag, sql });
-        }
+    if let Some((tag, sql)) = current_sql.take()
+        && !sql.trim().is_empty()
+    {
+        directives.push(Directive::Sql { tag, sql });
     }
 
     Ok(directives)
@@ -1160,7 +1161,7 @@ async fn cmd_replay_via_actor(args: &ReplayArgs, replay_file: &str) -> anyhow::R
             Directive::Sql { tag, sql } => {
                 stmt_idx += 1;
                 if tag == "actor_tx_begin" {
-                    if stmt_idx % 500 == 0 || stmt_idx < 5 {
+                    if stmt_idx.is_multiple_of(500) || stmt_idx < 5 {
                         println!(
                             "[{stmt_idx}/{sql_count}] BEGIN  (CDC: {})",
                             cdc_count.load(Ordering::Relaxed)
@@ -1404,19 +1405,19 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     let mut tracker_prev: Vec<Option<Vec<bool>>> = vec![None; trackers.len()];
 
     for directive in &directives {
-        if let Some(max) = args.max_secs {
-            if replay_start.elapsed().as_secs() >= max {
-                hit_max_secs = true;
-                println!("\n!!! max-secs ({max}) reached at stmt {stmt_idx}; bailing out");
-                break;
-            }
+        if let Some(max) = args.max_secs
+            && replay_start.elapsed().as_secs() >= max
+        {
+            hit_max_secs = true;
+            println!("\n!!! max-secs ({max}) reached at stmt {stmt_idx}; bailing out");
+            break;
         }
-        if let Some(max) = args.max_stmts {
-            if stmt_idx >= max {
-                hit_max_stmts = true;
-                println!("\n!!! max-stmts ({max}) reached; bailing out");
-                break;
-            }
+        if let Some(max) = args.max_stmts
+            && stmt_idx >= max
+        {
+            hit_max_stmts = true;
+            println!("\n!!! max-stmts ({max}) reached; bailing out");
+            break;
         }
         match directive {
             Directive::SetChangeCallback => {
@@ -1428,7 +1429,7 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
                 let cdc_count_clone = cdc_count.clone();
                 conn.set_change_callback(move |event: &RelationChangeEvent| {
                     let prev = cdc_count_clone.fetch_add(1, Ordering::SeqCst);
-                    if (prev + 1) % 100 == 0 {
+                    if (prev + 1).is_multiple_of(100) {
                         println!(
                             "  [CDC] event #{}: {} changes to {}",
                             prev + 1,
@@ -1722,7 +1723,7 @@ fn crashes_with_subprocess(
         std::thread::spawn(move || {
             use std::io::BufRead;
             let buf = std::io::BufReader::new(reader);
-            for line in buf.lines().flatten() {
+            for line in buf.lines().map_while(Result::ok) {
                 if line.contains(&needle) {
                     let _ = tx.send(true);
                     return;
@@ -1812,23 +1813,23 @@ fn detect_crash_pattern(directives: &[Directive]) -> String {
     // and use the table name as the pattern so the minimizer locks onto the
     // matview that drifted.
     for line in combined.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("INCONSISTENCY in ") {
-            if let Some(name) = rest.split(':').next() {
-                let pattern = format!("INCONSISTENCY in {name}");
-                println!("  Detected crash pattern: {pattern}");
-                return pattern;
-            }
+        if let Some(rest) = line.trim_start().strip_prefix("INCONSISTENCY in ")
+            && let Some(name) = rest.split(':').next()
+        {
+            let pattern = format!("INCONSISTENCY in {name}");
+            println!("  Detected crash pattern: {pattern}");
+            return pattern;
         }
     }
 
     for (i, line) in combined.lines().enumerate() {
-        if line.contains("panicked at") {
-            if let Some(next_line) = combined.lines().nth(i + 1) {
-                let pattern = next_line.trim().to_string();
-                if !pattern.is_empty() {
-                    println!("  Detected crash pattern: {pattern}");
-                    return pattern;
-                }
+        if line.contains("panicked at")
+            && let Some(next_line) = combined.lines().nth(i + 1)
+        {
+            let pattern = next_line.trim().to_string();
+            if !pattern.is_empty() {
+                println!("  Detected crash pattern: {pattern}");
+                return pattern;
             }
         }
     }
@@ -2035,16 +2036,16 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
                             }
                         }
                     }
-                    if upper.starts_with("SELECT ") {
-                        if let Some(from_pos) = upper.find(" FROM ") {
-                            let rest = sql.trim()[from_pos + 6..].trim_start();
-                            let name = rest
-                                .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
-                                .next()
-                                .filter(|s| !s.is_empty());
-                            if let Some(n) = name {
-                                return Some(n.to_string());
-                            }
+                    if upper.starts_with("SELECT ")
+                        && let Some(from_pos) = upper.find(" FROM ")
+                    {
+                        let rest = sql.trim()[from_pos + 6..].trim_start();
+                        let name = rest
+                            .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
+                            .next()
+                            .filter(|s| !s.is_empty());
+                        if let Some(n) = name {
+                            return Some(n.to_string());
                         }
                     }
                     None
@@ -2056,7 +2057,7 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
         }
 
         let mut groups: Vec<(String, Vec<usize>)> = table_groups.into_iter().collect();
-        groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        groups.sort_by_key(|g| std::cmp::Reverse(g.1.len()));
 
         println!("  Found {} table groups", groups.len());
         for (table, indices) in &groups {

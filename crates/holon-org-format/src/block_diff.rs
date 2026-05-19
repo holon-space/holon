@@ -75,6 +75,7 @@ pub fn compute_text_ops(old: &str, new: &str) -> Vec<TextOp> {
 
 /// Represents a change to apply to a Loro document.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // Created variant carries a full Block; boxing would ripple through every consumer
 pub enum BlockDiff {
     /// A new block was created
     Created {
@@ -137,7 +138,7 @@ pub fn diff_blocks(
     let mut diffs = Vec::new();
 
     // Find deleted blocks (in old but not in new)
-    for (id, _) in old_blocks {
+    for id in old_blocks.keys() {
         if !new_blocks.contains_key(id) {
             diffs.push(BlockDiff::Deleted {
                 id: EntityUri::from_raw(id),

@@ -435,7 +435,7 @@ proptest! {
         let explicit_ids: std::collections::HashSet<String> = complete_doc
             .root_headlines
             .iter()
-            .flat_map(|h| collect_explicit_ids(h))
+            .flat_map(collect_explicit_ids)
             .collect();
         for explicit_id in &explicit_ids {
             let found = parse_result
@@ -984,13 +984,11 @@ fn apply_text_mutation(org_text: &str, mutation: &TextMutation) -> Option<String
                 .find(|kw| {
                     after_stars.starts_with(*kw) && after_stars[kw.len()..].starts_with(' ')
                 });
-            match removed {
-                Some(kw) => {
-                    let stars = "*".repeat(section.level);
-                    let rest = after_stars[kw.len()..].trim_start();
-                    lines[section.start_line] = format!("{} {}", stars, rest);
-                }
-                None => return None,
+            {
+                let kw = removed?;
+                let stars = "*".repeat(section.level);
+                let rest = after_stars[kw.len()..].trim_start();
+                lines[section.start_line] = format!("{} {}", stars, rest);
             }
         }
         TextMutation::AddTag { section_idx, tag } => {
@@ -1052,11 +1050,7 @@ fn replace_headline_title(line: &str, new_title: &str) -> String {
     }
 
     // Check for tags at end — preserve them
-    let tags_suffix = if let Some(tag_start) = find_tags_suffix(rest) {
-        tag_start
-    } else {
-        ""
-    };
+    let tags_suffix = find_tags_suffix(rest).unwrap_or_default();
 
     let stars = "*".repeat(level);
     let prefix = prefix_parts.join(" ");

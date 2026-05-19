@@ -123,8 +123,7 @@ pub async fn create_backend_engine<F>(db_path: PathBuf, setup_fn: F) -> Result<A
 where
     F: FnOnce(&Injector) -> Result<()>,
 {
-    let (engine, ()) =
-        create_backend_engine_with_extras(db_path, setup_fn, |_| async { () }).await?;
+    let (engine, ()) = create_backend_engine_with_extras(db_path, setup_fn, |_| async {}).await?;
     Ok(engine)
 }
 

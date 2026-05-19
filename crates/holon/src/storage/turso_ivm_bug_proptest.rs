@@ -539,7 +539,7 @@ async fn apply_to_turso(
         }
         IvmBugTransition::YieldToTasks => {
             // No-op since we're now using synchronous operations
-            // Keep this transition for state machine compatibility
+            // Keep the variant so existing proptest regression files still deserialize. // ALLOW(compatibility): proptest regression replay
         }
     }
 
@@ -728,14 +728,13 @@ fn generate_transitions(state: &IvmBugReferenceState) -> BoxedStrategy<IvmBugTra
         strategies.push((25, Just(IvmBugTransition::YieldToTasks).boxed()));
     }
 
-    if strategies.is_empty() {
-        // Fallback: insert a root block
-        return Just(IvmBugTransition::InsertRootBlock {
-            id: "fallback".to_string(),
-            content: "fallback content".to_string(),
-        })
-        .boxed();
-    }
+    // Once schema is set up the phase-4 `InsertRootBlock` strategy is pushed
+    // unconditionally, so the weighted union is never empty here. If it is,
+    // the state machine has a bug we want to surface, not paper over.
+    assert!(
+        !strategies.is_empty(),
+        "generate_transitions: no strategies enabled — state={state:?}"
+    );
 
     prop::strategy::Union::new_weighted(strategies).boxed()
 }

@@ -766,12 +766,11 @@ fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<Tre
         if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
             continue;
         }
-        if let Ok(meta) = tree.get_meta(node.id) {
-            if let Some(ValueOrContainer::Value(v)) = meta.get(STABLE_ID) {
-                if v.as_string().map(|s| s.as_str()) == Some(needle) {
-                    return Some(node.id);
-                }
-            }
+        if let Ok(meta) = tree.get_meta(node.id)
+            && let Some(ValueOrContainer::Value(v)) = meta.get(STABLE_ID)
+            && v.as_string().map(|s| s.as_str()) == Some(needle)
+        {
+            return Some(node.id);
         }
     }
     None
@@ -788,13 +787,13 @@ fn find_mount_by_shared_tree_id(doc: &LoroDoc, shared_tree_id: &str) -> Option<(
         if !shared_tree::is_mount_node(&tree, node.id) {
             continue;
         }
-        if let Some(info) = shared_tree::read_mount_info(&tree, node.id) {
-            if info.shared_tree_id == shared_tree_id {
-                let stable_id = read_stable_id(&tree, node.id)
-                    .map(|s| block_uri_from_bare(&s))
-                    .unwrap_or_default();
-                return Some((node.id, stable_id));
-            }
+        if let Some(info) = shared_tree::read_mount_info(&tree, node.id)
+            && info.shared_tree_id == shared_tree_id
+        {
+            let stable_id = read_stable_id(&tree, node.id)
+                .map(|s| block_uri_from_bare(&s))
+                .unwrap_or_default();
+            return Some((node.id, stable_id));
         }
     }
     None
@@ -851,24 +850,19 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
 
-            let tid = find_tree_id_by_stable_id(&doc, &id_uri)
+            let tid = find_tree_id_by_stable_id(doc, &id_uri)
                 .ok_or_else(|| err(format!("block {id} not found in Loro tree")))?;
             if shared_tree::is_mount_node(&doc.get_tree(crate::api::loro_backend::TREE_NAME), tid) {
                 return Err(err(format!(
                     "block {id} is already a mount node; sharing a mount is not supported"
                 )));
             }
-            let parent = parent_as_option(&doc, tid);
+            let parent = parent_as_option(doc, tid);
 
             // --- Phase A: fork + extract (source unchanged) ---
-            let extracted = shared_tree::extract_for_share(
-                &doc,
-                tid,
-                parent,
-                shared_tree_id.clone(),
-                retention,
-            )
-            .map_err(|e| err(format!("extract_for_share failed: {e:#}")))?;
+            let extracted =
+                shared_tree::extract_for_share(doc, tid, parent, shared_tree_id.clone(), retention)
+                    .map_err(|e| err(format!("extract_for_share failed: {e:#}")))?;
 
             // Stable peer id BEFORE save so the persisted snapshot
             // already carries the right identity.
@@ -896,9 +890,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
             // --- Phase B: prune source + create mount node ---
             let shared_root = extracted.shared_root;
-            let mount_tid = shared_tree::commit_share_prune(&doc, &extracted)
+            let mount_tid = shared_tree::commit_share_prune(doc, &extracted)
                 .map_err(|e| err(format!("commit_share_prune failed: {e:#}")))?;
-            set_stable_id(&doc, mount_tid, &mount_stable_id)
+            set_stable_id(doc, mount_tid, &mount_stable_id)
                 .map_err(|e| err(format!("set mount stable_id: {e:#}")))?;
             doc.commit();
 
@@ -1063,12 +1057,11 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
 
-            if let Some((_tid, existing_uri)) = find_mount_by_shared_tree_id(&doc, &shared_tree_id)
-            {
+            if let Some((_tid, existing_uri)) = find_mount_by_shared_tree_id(doc, &shared_tree_id) {
                 existing_uri
             } else {
                 let new_id = format!("block:{}", Uuid::new_v4());
-                let parent_tid = find_tree_id_by_stable_id(&doc, &parent_uri)
+                let parent_tid = find_tree_id_by_stable_id(doc, &parent_uri)
                     .ok_or_else(|| err(format!("parent block {parent_id} not found")))?;
 
                 let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
@@ -1079,7 +1072,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     shared_root,
                 )
                 .map_err(|e| err(format!("create mount node: {e:#}")))?;
-                set_stable_id(&doc, mount, &new_id)
+                set_stable_id(doc, mount, &new_id)
                     .map_err(|e| err(format!("set mount stable_id: {e:#}")))?;
                 doc.commit();
                 new_id
@@ -1487,7 +1480,7 @@ struct MountRehydrationRecord {
 /// not assume presence or absence of a `block:` scheme prefix (see
 /// [`block_uri_from_bare`] for the normalization).
 fn read_stable_id(tree: &loro::LoroTree, tid: TreeID) -> Option<String> {
-    let meta = tree.get_meta(tid).ok()?;
+    let meta = tree.get_meta(tid).ok()?; // ALLOW(ok): Option chain — missing meta means no stable id
     let v = meta.get(STABLE_ID)?;
     match v {
         ValueOrContainer::Value(val) => val.as_string().map(|s| s.to_string()),
@@ -1625,7 +1618,7 @@ mod tests {
         let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
         let parent_tid = parent_stable_id.map(|pid| {
             let parent_uri = EntityUri::block(pid);
-            find_tree_id_by_stable_id(&doc, &parent_uri)
+            find_tree_id_by_stable_id(doc, &parent_uri)
                 .unwrap_or_else(|| panic!("parent {pid} not found"))
         });
         let node = tree.create(parent_tid).unwrap();
@@ -1644,9 +1637,9 @@ mod tests {
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let uri = EntityUri::block(stable_id);
-        let tid = find_tree_id_by_stable_id(&doc, &uri)?;
+        let tid = find_tree_id_by_stable_id(doc, &uri)?;
         let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
-        let meta = tree.get_meta(tid).ok()?;
+        let meta = tree.get_meta(tid).ok()?; // ALLOW(ok): Option chain — missing meta means no stable id
         match meta.get("content_raw") {
             Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
                 Some(t.to_string())
@@ -1709,8 +1702,9 @@ mod tests {
             .get_nodes(false)
             .iter()
             .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
+            // ALLOW(filter_map_ok): test assertion — non-text nodes are intentionally skipped
             .filter_map(|n| {
-                let meta = b_tree.get_meta(n.id).ok()?;
+                let meta = b_tree.get_meta(n.id).ok()?; // ALLOW(ok): same as above
                 match meta.get("content_raw") {
                     Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
                         Some(t.to_string())
@@ -1977,7 +1971,7 @@ mod tests {
         let collab = backend_a.test_global_doc().await;
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
-        let n = rehydrate_shared_trees(&backend_a, &doc).await.unwrap();
+        let n = rehydrate_shared_trees(&backend_a, doc).await.unwrap();
         assert_eq!(n, 1, "A should rehydrate exactly 1 share");
 
         // Let the rehydrate kick-sync dial B so B records A's fresh
@@ -2074,12 +2068,10 @@ mod tests {
         // Wait up to 1s for the degraded signal — debounce is 150ms
         // so the save attempt should fire within ~200ms.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-        let ev = loop {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(ev)) => break ev,
-                Ok(Err(_)) => panic!("bus closed unexpectedly"),
-                Err(_) => panic!("no ShareDegraded event within 1s"),
-            }
+        let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(ev)) => ev,
+            Ok(Err(_)) => panic!("bus closed unexpectedly"),
+            Err(_) => panic!("no ShareDegraded event within 1s"),
         };
         assert_eq!(ev.shared_tree_id, "readonly");
         assert!(matches!(

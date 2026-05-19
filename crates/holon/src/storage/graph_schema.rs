@@ -26,6 +26,12 @@ pub struct GraphSchemaRegistry {
     edge_fields: Vec<EdgeFieldDescriptor>,
 }
 
+impl Default for GraphSchemaRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GraphSchemaRegistry {
     pub fn new() -> Self {
         Self {

@@ -105,33 +105,24 @@ impl holon::core::datasource::OperationRegistry for Directory {
             };
             __operations_crud_operations::crud_operations(entity_name, short_name, table, id_column)
                 .into_iter()
-                .chain(
-                    __operations_block_operations::block_operations(
-                        entity_name,
-                        short_name,
-                        table,
-                        id_column,
-                    )
-                    .into_iter(),
-                )
-                .chain(
-                    __operations_rename_operations::rename_operations(
-                        entity_name,
-                        short_name,
-                        table,
-                        id_column,
-                    )
-                    .into_iter(),
-                )
-                .chain(
-                    __operations_move_operations::move_operations(
-                        entity_name,
-                        short_name,
-                        table,
-                        id_column,
-                    )
-                    .into_iter(),
-                )
+                .chain(__operations_block_operations::block_operations(
+                    entity_name,
+                    short_name,
+                    table,
+                    id_column,
+                ))
+                .chain(__operations_rename_operations::rename_operations(
+                    entity_name,
+                    short_name,
+                    table,
+                    id_column,
+                ))
+                .chain(__operations_move_operations::move_operations(
+                    entity_name,
+                    short_name,
+                    table,
+                    id_column,
+                ))
                 .collect()
         }
         #[cfg(target_arch = "wasm32")]
@@ -188,7 +179,7 @@ impl<P: DirectoryChangeProvider> AsDirectoryChangeProvider for Arc<P> {
 impl<P: DirectoryChangeProvider> ChangeNotifications<Directory> for DirectoryDataSource<P> {
     async fn watch_changes_since(
         &self,
-        _position: StreamPosition,
+        _: StreamPosition,
     ) -> Pin<Box<dyn Stream<Item = std::result::Result<Vec<Change<Directory>>, ApiError>> + Send>>
     {
         let rx = DirectoryChangeProvider::subscribe_directories(&*self.provider);
@@ -221,23 +212,23 @@ impl<P: DirectoryChangeProvider> DataSource<Directory> for DirectoryDataSource<P
         Ok(vec![])
     }
 
-    async fn get_by_id(&self, _id: &str) -> Result<Option<Directory>> {
+    async fn get_by_id(&self, _: &str) -> Result<Option<Directory>> {
         Ok(None)
     }
 }
 
 #[async_trait]
 impl<P: DirectoryChangeProvider> CrudOperations<Directory> for DirectoryDataSource<P> {
-    async fn set_field(&self, _id: &str, _field: &str, _value: Value) -> Result<OperationResult> {
+    async fn set_field(&self, _: &str, _: &str, _: Value) -> Result<OperationResult> {
         // Directory modifications not supported yet
         Err("Directory field updates not implemented".into())
     }
 
-    async fn create(&self, _fields: HashMap<String, Value>) -> Result<(String, OperationResult)> {
+    async fn create(&self, _: HashMap<String, Value>) -> Result<(String, OperationResult)> {
         Err("Directory creation not implemented".into())
     }
 
-    async fn delete(&self, _id: &str) -> Result<OperationResult> {
+    async fn delete(&self, _: &str) -> Result<OperationResult> {
         Err("Directory deletion not implemented".into())
     }
 }

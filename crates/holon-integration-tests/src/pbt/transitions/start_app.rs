@@ -252,12 +252,9 @@ impl E2ETransitionImpl for StartApp {
         // that here so the reference state's `current_focus` and
         // `expected_focus_root_ids(Main)` line up with what the SUT
         // actually has post-StartApp.
-        use crate::pbt::reference_state::{NavigationHistory, OpenPinEntry};
+        use crate::pbt::reference_state::OpenPinEntry;
         let journals_uri = EntityUri::block("journals");
-        let history = state
-            .navigation_history
-            .entry(Region::Main)
-            .or_insert_with(NavigationHistory::new);
+        let history = state.navigation_history.entry(Region::Main).or_default();
         history.entries.truncate(history.cursor + 1);
         history.entries.push(Some(journals_uri.clone()));
         history.cursor = history.entries.len() - 1;

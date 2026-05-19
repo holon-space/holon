@@ -3,9 +3,9 @@ use super::prelude::*;
 pub fn render(
     content: &String,
     bold: &bool,
-    _size: &f32,
+    _: &f32,
     color: &Option<String>,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     let color_css = color
         .as_ref()

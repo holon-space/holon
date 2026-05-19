@@ -2,7 +2,7 @@ use super::prelude::*;
 use holon_frontend::ReactiveViewModel;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let label = node.prop_str("label").unwrap_or_else(|| "".to_string());
+    let label = node.prop_str("label").unwrap_or_default();
     div()
         .px(px(8.0))
         .py(px(2.0))

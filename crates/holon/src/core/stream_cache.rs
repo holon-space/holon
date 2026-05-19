@@ -47,6 +47,7 @@ where
 /// - DataSource (reads from cache)
 /// - CrudOperations (CrudOperations) (delegates writes)
 /// - ChangeNotifications (forwards changes from datasource, updates cache)
+///
 /// Stream ingestion updates the cache asynchronously as changes arrive from providers.
 pub struct QueryableCache<T> {
     datasource: Arc<dyn ChangeNotifyingDataSource<T>>,
@@ -204,10 +205,8 @@ where
     {
         // Convert item to StorageEntity
         let json_value = serde_json::to_value(item).map_err(|e| {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )) as Box<dyn std::error::Error + Send + Sync>
+            Box::new(std::io::Error::other(e.to_string()))
+                as Box<dyn std::error::Error + Send + Sync>
         })?;
 
         let mut entity = StorageEntity::new();
@@ -256,10 +255,8 @@ where
         let db_guard = db.write().await;
         let schema = holon_api::TypeDefinition::from_table_name(table);
         db_guard.update(&schema, &id, entity).await.map_err(|e| {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )) as Box<dyn std::error::Error + Send + Sync>
+            Box::new(std::io::Error::other(e.to_string()))
+                as Box<dyn std::error::Error + Send + Sync>
         })?;
 
         Ok(())
@@ -374,26 +371,20 @@ where
             .query(&self.table, crate::storage::Filter::And(vec![]))
             .await
             .map_err(|e| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )) as Box<dyn std::error::Error + Send + Sync>
+                Box::new(std::io::Error::other(e.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
             })?;
 
         let mut results = Vec::new();
         for entity in entities {
             // Convert StorageEntity to JSON and then to T
             let json_value = serde_json::to_value(&entity).map_err(|e| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )) as Box<dyn std::error::Error + Send + Sync>
+                Box::new(std::io::Error::other(e.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
             })?;
             let item: T = serde_json::from_value(json_value).map_err(|e| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )) as Box<dyn std::error::Error + Send + Sync>
+                Box::new(std::io::Error::other(e.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
             })?;
             results.push(item);
         }
@@ -403,24 +394,18 @@ where
     async fn get_by_id(&self, id: &str) -> Result<Option<T>> {
         let db_guard = self.db.read().await;
         match db_guard.get(&self.table, id).await.map_err(|e| {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )) as Box<dyn std::error::Error + Send + Sync>
+            Box::new(std::io::Error::other(e.to_string()))
+                as Box<dyn std::error::Error + Send + Sync>
         })? {
             Some(entity) => {
                 // Convert StorageEntity to JSON and then to T
                 let json_value = serde_json::to_value(&entity).map_err(|e| {
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )) as Box<dyn std::error::Error + Send + Sync>
+                    Box::new(std::io::Error::other(e.to_string()))
+                        as Box<dyn std::error::Error + Send + Sync>
                 })?;
                 let item: T = serde_json::from_value(json_value).map_err(|e| {
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )) as Box<dyn std::error::Error + Send + Sync>
+                    Box::new(std::io::Error::other(e.to_string()))
+                        as Box<dyn std::error::Error + Send + Sync>
                 })?;
                 Ok(Some(item))
             }

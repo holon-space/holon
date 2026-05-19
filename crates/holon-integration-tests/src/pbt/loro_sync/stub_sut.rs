@@ -120,7 +120,7 @@ impl StubSut {
             .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
-        sync_docs_direct(&doc, ref_doc);
+        sync_docs_direct(doc, ref_doc);
         Ok(())
     }
 }
@@ -170,7 +170,7 @@ impl LoroSyncSut for StubSut {
                         .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
                     let doc_arc = collab.doc();
                     let doc = &*doc_arc;
-                    sync_docs_direct(&doc, &state.peers[*peer_idx].doc);
+                    sync_docs_direct(doc, &state.peers[*peer_idx].doc);
                     // The controller is down, so no subscribe_root fires.
                 }
                 {
@@ -249,7 +249,7 @@ impl LoroSyncSut for StubSut {
         };
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
-        let blocks = holon::api::snapshot_blocks_from_doc(&doc);
+        let blocks = holon::api::snapshot_blocks_from_doc(doc);
         blocks
             .into_iter()
             .map(|(id, block)| {

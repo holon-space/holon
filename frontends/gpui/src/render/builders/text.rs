@@ -8,7 +8,7 @@ use holon_frontend::ReactiveViewModel;
 use std::ops::Range;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
-    let content = node.prop_str("content").unwrap_or_else(|| "".to_string());
+    let content = node.prop_str("content").unwrap_or_default();
     let bold = node.prop_bool("bold").unwrap_or(false);
     let size = node.prop_f64("size").unwrap_or(14.0) as f32;
     let color = node.prop_str("color").map(|s| s.to_string());

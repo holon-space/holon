@@ -1,7 +1,7 @@
 use super::prelude::*;
 use holon_api::Value;
 
-pub fn build(_args: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
+pub fn build(_: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
     let result_value = ctx
         .row()
         .get("result")

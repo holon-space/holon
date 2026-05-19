@@ -442,7 +442,7 @@ impl LoroSyncController {
         let doc_arc = self.raw_doc().await?;
         let after: HashMap<String, Block> = {
             let doc = &*doc_arc;
-            snapshot_blocks_from_doc(&doc)
+            snapshot_blocks_from_doc(doc)
         };
 
         // Fork at the watermark to read the "before" state. fork_at returns
@@ -688,17 +688,17 @@ pub(crate) fn diff_snapshots_to_ops(
     // guard at the end of `prepare_update` (`AND (col1 IS NOT val1 OR
     // …)`) still keeps no-op UPDATEs from firing spurious CDC.
     for (id, new_block) in after {
-        if let Some(old_block) = before.get(id) {
-            if blocks_differ(old_block, new_block) {
-                let params = block_diff_params(old_block, new_block);
-                tracing::trace!(
-                    "[LORO_DIFF_TRACE] UPDATE id={} content_before={:?} content_after={:?}",
-                    id,
-                    old_block.content,
-                    new_block.content
-                );
-                ops.push(("update".to_string(), params));
-            }
+        if let Some(old_block) = before.get(id)
+            && blocks_differ(old_block, new_block)
+        {
+            let params = block_diff_params(old_block, new_block);
+            tracing::trace!(
+                "[LORO_DIFF_TRACE] UPDATE id={} content_before={:?} content_after={:?}",
+                id,
+                old_block.content,
+                new_block.content
+            );
+            ops.push(("update".to_string(), params));
         }
     }
 
@@ -741,10 +741,10 @@ fn topological_sort_creates<'a>(
         }
         visited.insert(id);
         let parent_id = block.parent_id.as_str();
-        if create_ids.contains(parent_id) {
-            if let Some(parent) = all.get(parent_id) {
-                visit(parent, all, create_ids, visited, result);
-            }
+        if create_ids.contains(parent_id)
+            && let Some(parent) = all.get(parent_id)
+        {
+            visit(parent, all, create_ids, visited, result);
         }
         result.push(block);
     }
@@ -870,18 +870,18 @@ fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
         let arr: Vec<Value> = new.tags.iter().map(|t| Value::String(t.clone())).collect();
         params.insert("tags".to_string(), Value::Array(arr));
     }
-    if old.source_language != new.source_language {
-        if let Some(ref lang) = new.source_language {
-            params.insert(
-                "source_language".to_string(),
-                Value::String(lang.to_string()),
-            );
-        }
+    if old.source_language != new.source_language
+        && let Some(ref lang) = new.source_language
+    {
+        params.insert(
+            "source_language".to_string(),
+            Value::String(lang.to_string()),
+        );
     }
-    if old.source_name != new.source_name {
-        if let Some(ref name) = new.source_name {
-            params.insert("source_name".to_string(), Value::String(name.clone()));
-        }
+    if old.source_name != new.source_name
+        && let Some(ref name) = new.source_name
+    {
+        params.insert("source_name".to_string(), Value::String(name.clone()));
     }
     if old.sort_key != new.sort_key {
         params.insert("sort_key".to_string(), Value::String(new.sort_key.clone()));
@@ -1319,13 +1319,13 @@ async fn apply_properties_from_json(
         _ => None,
     };
 
-    if let Some(props) = props {
-        if !props.is_empty() {
-            backend
-                .update_block_properties(tree_id_str, &props)
-                .await
-                .map_err(|e| anyhow::anyhow!("update_properties failed: {}", e))?;
-        }
+    if let Some(props) = props
+        && !props.is_empty()
+    {
+        backend
+            .update_block_properties(tree_id_str, &props)
+            .await
+            .map_err(|e| anyhow::anyhow!("update_properties failed: {}", e))?;
     }
     Ok(())
 }

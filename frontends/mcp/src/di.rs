@@ -48,14 +48,9 @@ pub fn register_debug_services(injector: &Injector) {
 /// `diff_loro_sql`) — the standalone MCP, frontends, and PBT tests can
 /// all add this module instead of duplicating the resolve-and-populate
 /// boilerplate. `register_debug_services` must be called first.
+#[derive(Default)]
 pub struct DebugServicesPopulatorModule {
     pub orgmode_root: Option<std::path::PathBuf>,
-}
-
-impl Default for DebugServicesPopulatorModule {
-    fn default() -> Self {
-        Self { orgmode_root: None }
-    }
 }
 
 impl Module for DebugServicesPopulatorModule {

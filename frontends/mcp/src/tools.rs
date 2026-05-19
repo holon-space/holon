@@ -171,154 +171,6 @@ fn format_display_tree(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn json_to_holon_string() {
-        let v = json_to_holon_value(serde_json::json!("hello"));
-        assert_eq!(v, Value::String("hello".into()));
-    }
-
-    #[test]
-    fn json_to_holon_integer() {
-        let v = json_to_holon_value(serde_json::json!(42));
-        assert_eq!(v, Value::Integer(42));
-    }
-
-    #[test]
-    fn json_to_holon_float() {
-        let v = json_to_holon_value(serde_json::json!(3.14));
-        assert_eq!(v, Value::Float(3.14));
-    }
-
-    #[test]
-    fn json_to_holon_bool() {
-        let v = json_to_holon_value(serde_json::json!(true));
-        assert_eq!(v, Value::Boolean(true));
-    }
-
-    #[test]
-    fn json_to_holon_null() {
-        let v = json_to_holon_value(serde_json::json!(null));
-        assert_eq!(v, Value::Null);
-    }
-
-    #[test]
-    fn json_to_holon_array() {
-        let v = json_to_holon_value(serde_json::json!([1, "two"]));
-        match v {
-            Value::Array(arr) => {
-                assert_eq!(arr.len(), 2);
-                assert_eq!(arr[0], Value::Integer(1));
-                assert_eq!(arr[1], Value::String("two".into()));
-            }
-            _ => panic!("expected Array"),
-        }
-    }
-
-    #[test]
-    fn json_to_holon_object() {
-        let v = json_to_holon_value(serde_json::json!({"key": "value"}));
-        match v {
-            Value::Object(map) => {
-                assert_eq!(map.get("key").unwrap(), &Value::String("value".into()));
-            }
-            _ => panic!("expected Object"),
-        }
-    }
-
-    #[test]
-    fn holon_to_json_string() {
-        let v = holon_to_json_value(&Value::String("hello".into()));
-        assert_eq!(v, serde_json::json!("hello"));
-    }
-
-    #[test]
-    fn holon_to_json_integer() {
-        let v = holon_to_json_value(&Value::Integer(42));
-        assert_eq!(v, serde_json::json!(42));
-    }
-
-    #[test]
-    fn holon_to_json_float() {
-        let v = holon_to_json_value(&Value::Float(3.14));
-        assert_eq!(v, serde_json::json!(3.14));
-    }
-
-    #[test]
-    fn holon_to_json_bool() {
-        let v = holon_to_json_value(&Value::Boolean(false));
-        assert_eq!(v, serde_json::json!(false));
-    }
-
-    #[test]
-    fn holon_to_json_null() {
-        let v = holon_to_json_value(&Value::Null);
-        assert_eq!(v, serde_json::Value::Null);
-    }
-
-    #[test]
-    fn holon_to_json_datetime() {
-        let v = holon_to_json_value(&Value::DateTime("2024-01-01T00:00:00Z".into()));
-        assert_eq!(v, serde_json::json!("2024-01-01T00:00:00Z"));
-    }
-
-    #[test]
-    fn holon_to_json_valid_json_string_is_parsed() {
-        let v = holon_to_json_value(&Value::Json(r#"{"nested": true}"#.into()));
-        assert_eq!(v, serde_json::json!({"nested": true}));
-    }
-
-    #[test]
-    fn holon_to_json_invalid_json_falls_back_to_string() {
-        let v = holon_to_json_value(&Value::Json("not json".into()));
-        assert_eq!(v, serde_json::json!("not json"));
-    }
-
-    #[test]
-    fn holon_to_json_array() {
-        let v = holon_to_json_value(&Value::Array(vec![
-            Value::Integer(1),
-            Value::String("two".into()),
-        ]));
-        assert_eq!(v, serde_json::json!([1, "two"]));
-    }
-
-    #[test]
-    fn holon_to_json_object() {
-        let mut map = HashMap::new();
-        map.insert("k".into(), Value::Boolean(true));
-        let v = holon_to_json_value(&Value::Object(map));
-        assert_eq!(v, serde_json::json!({"k": true}));
-    }
-
-    #[test]
-    fn roundtrip_json_to_holon_to_json() {
-        let original = serde_json::json!({
-            "name": "test",
-            "count": 42,
-            "active": true,
-            "tags": ["a", "b"],
-            "meta": null
-        });
-        let holon = json_to_holon_value(original.clone());
-        let back = holon_to_json_value(&holon);
-        assert_eq!(original, back);
-    }
-
-    #[test]
-    fn json_map_to_storage_entity_converts_all_fields() {
-        let mut map = HashMap::new();
-        map.insert("id".into(), serde_json::json!("block-1"));
-        map.insert("priority".into(), serde_json::json!(3));
-        let entity = json_map_to_storage_entity(map);
-        assert_eq!(entity.get("id").unwrap(), &Value::String("block-1".into()));
-        assert_eq!(entity.get("priority").unwrap(), &Value::Integer(3));
-    }
-}
-
 #[tool_router(router = tool_router_backend, vis = "pub(crate)")]
 impl HolonMcpServer {
     #[tool(description = "Create a table with specified schema")]
@@ -417,7 +269,7 @@ impl HolonMcpServer {
             let module =
                 holon::storage::dynamic_schema_module::DynamicSchemaModule::new(type_def.clone());
             let db_handle = self.engine().db_handle();
-            module.ensure_schema(&db_handle).await.map_err(|e| {
+            module.ensure_schema(db_handle).await.map_err(|e| {
                 rmcp::ErrorData::internal_error(
                     format!("Failed to create table for '{}': {e}", name),
                     None,
@@ -770,7 +622,7 @@ impl HolonMcpServer {
                                 // Convert fields vec to a map
                                 let mut map = HashMap::new();
                                 for (field_name, _old_val, new_val) in fields {
-                                    map.insert(field_name.clone(), holon_to_json_value(&new_val));
+                                    map.insert(field_name.clone(), holon_to_json_value(new_val));
                                 }
                                 Some(map)
                             }
@@ -2515,5 +2367,153 @@ impl HolonMcpServer {
             ),
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_to_holon_string() {
+        let v = json_to_holon_value(serde_json::json!("hello"));
+        assert_eq!(v, Value::String("hello".into()));
+    }
+
+    #[test]
+    fn json_to_holon_integer() {
+        let v = json_to_holon_value(serde_json::json!(42));
+        assert_eq!(v, Value::Integer(42));
+    }
+
+    #[test]
+    fn json_to_holon_float() {
+        let v = json_to_holon_value(serde_json::json!(2.5));
+        assert_eq!(v, Value::Float(2.5));
+    }
+
+    #[test]
+    fn json_to_holon_bool() {
+        let v = json_to_holon_value(serde_json::json!(true));
+        assert_eq!(v, Value::Boolean(true));
+    }
+
+    #[test]
+    fn json_to_holon_null() {
+        let v = json_to_holon_value(serde_json::json!(null));
+        assert_eq!(v, Value::Null);
+    }
+
+    #[test]
+    fn json_to_holon_array() {
+        let v = json_to_holon_value(serde_json::json!([1, "two"]));
+        match v {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], Value::Integer(1));
+                assert_eq!(arr[1], Value::String("two".into()));
+            }
+            _ => panic!("expected Array"),
+        }
+    }
+
+    #[test]
+    fn json_to_holon_object() {
+        let v = json_to_holon_value(serde_json::json!({"key": "value"}));
+        match v {
+            Value::Object(map) => {
+                assert_eq!(map.get("key").unwrap(), &Value::String("value".into()));
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn holon_to_json_string() {
+        let v = holon_to_json_value(&Value::String("hello".into()));
+        assert_eq!(v, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn holon_to_json_integer() {
+        let v = holon_to_json_value(&Value::Integer(42));
+        assert_eq!(v, serde_json::json!(42));
+    }
+
+    #[test]
+    fn holon_to_json_float() {
+        let v = holon_to_json_value(&Value::Float(2.5));
+        assert_eq!(v, serde_json::json!(2.5));
+    }
+
+    #[test]
+    fn holon_to_json_bool() {
+        let v = holon_to_json_value(&Value::Boolean(false));
+        assert_eq!(v, serde_json::json!(false));
+    }
+
+    #[test]
+    fn holon_to_json_null() {
+        let v = holon_to_json_value(&Value::Null);
+        assert_eq!(v, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn holon_to_json_datetime() {
+        let v = holon_to_json_value(&Value::DateTime("2024-01-01T00:00:00Z".into()));
+        assert_eq!(v, serde_json::json!("2024-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn holon_to_json_valid_json_string_is_parsed() {
+        let v = holon_to_json_value(&Value::Json(r#"{"nested": true}"#.into()));
+        assert_eq!(v, serde_json::json!({"nested": true}));
+    }
+
+    #[test]
+    fn holon_to_json_invalid_json_falls_back_to_string() {
+        let v = holon_to_json_value(&Value::Json("not json".into()));
+        assert_eq!(v, serde_json::json!("not json"));
+    }
+
+    #[test]
+    fn holon_to_json_array() {
+        let v = holon_to_json_value(&Value::Array(vec![
+            Value::Integer(1),
+            Value::String("two".into()),
+        ]));
+        assert_eq!(v, serde_json::json!([1, "two"]));
+    }
+
+    #[test]
+    fn holon_to_json_object() {
+        let mut map = HashMap::new();
+        map.insert("k".into(), Value::Boolean(true));
+        let v = holon_to_json_value(&Value::Object(map));
+        assert_eq!(v, serde_json::json!({"k": true}));
+    }
+
+    #[test]
+    fn roundtrip_json_to_holon_to_json() {
+        let original = serde_json::json!({
+            "name": "test",
+            "count": 42,
+            "active": true,
+            "tags": ["a", "b"],
+            "meta": null
+        });
+        let holon = json_to_holon_value(original.clone());
+        let back = holon_to_json_value(&holon);
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn json_map_to_storage_entity_converts_all_fields() {
+        let mut map = HashMap::new();
+        map.insert("id".into(), serde_json::json!("block-1"));
+        map.insert("priority".into(), serde_json::json!(3));
+        let entity = json_map_to_storage_entity(map);
+        assert_eq!(entity.get("id").unwrap(), &Value::String("block-1".into()));
+        assert_eq!(entity.get("priority").unwrap(), &Value::Integer(3));
     }
 }

@@ -411,11 +411,9 @@ impl<V: VariantMarker> E2ESut<V> {
                     .map(|s| s == target_id)
                     .unwrap_or(false);
                 drop(props);
-                if matches {
-                    if let Some(gate) = node.expanded.as_ref() {
-                        gate.set(value);
-                        return true;
-                    }
+                if matches && let Some(gate) = node.expanded.as_ref() {
+                    gate.set(value);
+                    return true;
                 }
             }
             for child in &node.children {
@@ -429,12 +427,11 @@ impl<V: VariantMarker> E2ESut<V> {
                     return true;
                 }
             }
-            if let Some(lazy) = node.lazy_slot.as_ref() {
-                if let Some(materialised) = lazy.cache.get_cloned() {
-                    if find_and_flip(&materialised, target_id, value) {
-                        return true;
-                    }
-                }
+            if let Some(lazy) = node.lazy_slot.as_ref()
+                && let Some(materialised) = lazy.cache.get_cloned()
+                && find_and_flip(&materialised, target_id, value)
+            {
+                return true;
             }
             false
         }
@@ -597,13 +594,13 @@ impl<V: VariantMarker> E2ESut<V> {
             }
             if !scrolled && tokio::time::Instant::now() >= scroll_deadline {
                 scrolled = true;
-                if let Some(driver) = self.driver.as_ref() {
-                    if let Err(e) = driver.scroll_to_entity(entity_id).await {
-                        tracing::debug!(
-                            "wait_for_entity_bounds: scroll_to_entity({entity_id:?}) \
+                if let Some(driver) = self.driver.as_ref()
+                    && let Err(e) = driver.scroll_to_entity(entity_id).await
+                {
+                    tracing::debug!(
+                        "wait_for_entity_bounds: scroll_to_entity({entity_id:?}) \
                              returned Err — continuing to poll: {e:#}"
-                        );
-                    }
+                    );
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -837,10 +834,10 @@ impl<V: VariantMarker> E2ESut<V> {
                 if info.widget_type != "rendered_text" && info.widget_type != "editable_text" {
                     continue;
                 }
-                if let Some(eid) = info.entity_id.as_deref() {
-                    if expected_child_ids.contains(eid) {
-                        seen.insert(eid.to_string());
-                    }
+                if let Some(eid) = info.entity_id.as_deref()
+                    && expected_child_ids.contains(eid)
+                {
+                    seen.insert(eid.to_string());
                 }
             }
             if seen.len() >= expected_child_ids.len() {

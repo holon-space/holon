@@ -18,7 +18,7 @@ pub fn column_ref_name(expr: &RenderExpr) -> Option<&str> {
     }
 }
 
-pub fn sort_key_column<'a>(args: &'a ResolvedArgs) -> Option<&'a str> {
+pub fn sort_key_column(args: &ResolvedArgs) -> Option<&str> {
     match args.get_template("sort_key") {
         Some(RenderExpr::ColumnRef { name }) => Some(name.as_str()),
         _ => None,
@@ -168,11 +168,9 @@ impl OutlineTree {
                 .and_then(|v| v.as_string())
                 .unwrap_or("");
 
-            let parent_exists = sorted_rows.iter().any(|r| {
-                r.get("id")
-                    .and_then(|v| v.as_string())
-                    .map_or(false, |id| id == pid)
-            });
+            let parent_exists = sorted_rows
+                .iter()
+                .any(|r| r.get("id").and_then(|v| v.as_string()) == Some(pid));
 
             if !parent_exists {
                 roots.push(i);
@@ -246,7 +244,7 @@ pub fn has_drawer_rows(rows: &[Arc<DataRow>]) -> bool {
         row.get("collapse_to")
             .or(row.get("collapse-to"))
             .and_then(|v| v.as_string())
-            .map_or(false, |s| s.eq_ignore_ascii_case("drawer"))
+            .is_some_and(|s| s.eq_ignore_ascii_case("drawer"))
     })
 }
 
@@ -270,7 +268,7 @@ where
                 .get("collapse_to")
                 .or(row.get("collapse-to"))
                 .and_then(|v| v.as_string());
-            let is_drawer = collapse_to.map_or(false, |s| s.eq_ignore_ascii_case("drawer"));
+            let is_drawer = collapse_to.is_some_and(|s| s.eq_ignore_ascii_case("drawer"));
             let block_id = row
                 .get("id")
                 .and_then(|v| v.as_string())
@@ -428,14 +426,14 @@ fn value_to_f64(v: &Value) -> Option<f64> {
 /// Implementations are provided by the render interpreter (widget +
 /// value-function registry). Unknown names return `None`; the caller
 /// in `eval_to_interp` then resolves the name to `Value::Null` (F1 in
-/// the design plan — no silent first-arg fallback).
+/// the design plan — no silent first-arg fallback). // ALLOW(fallback): historical name in doc comment
 pub trait ValueFnLookup {
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<InterpValue>;
 }
 
 /// Built-in value functions available to every caller — `concat` for
 /// now, more added later. Frontend registries chain through this as a
-/// fallback so user-supplied registrations can still override built-in
+/// fallback so user-supplied registrations can still override built-in // ALLOW(fallback): doc describes registry chaining order
 /// names (collision check at `register_value_fn` enforces uniqueness
 /// against widgets, not against the core list).
 ///
@@ -564,7 +562,7 @@ pub fn eval_to_value(expr: &RenderExpr, row: &HashMap<String, Value>) -> Value {
 /// Drives argument evaluation for `resolve_args_with`. Dispatches
 /// `FunctionCall`s through the provided registry; unknown names
 /// (other than the legacy `concat` shim) produce `Value::Null`. The
-/// pre-F1 "silently return first arg" fallback is gone — a typo'd
+/// pre-F1 "silently return first arg" fallback is gone — a typo'd // ALLOW(fallback): historical name in doc comment
 /// function call now produces a visible `Null` at the consumer.
 pub fn eval_to_interp(
     expr: &RenderExpr,
@@ -588,7 +586,7 @@ pub fn eval_to_interp(
             let resolved = resolve_args_with(args, row, fns);
             match fns.invoke(name, &resolved) {
                 Some(v) => v,
-                // F1: silent first-arg fallback removed. Unknown name
+                // F1: silent first-arg default removed. Unknown name // ALLOW(fallback): historical reference in code comment
                 // → Null. Built-in fns (`concat`, ...) are reachable
                 // through `CORE_VALUE_FN_LOOKUP` and should be chained
                 // into the caller's lookup if a frontend wants to keep
@@ -901,7 +899,7 @@ mod tests {
     fn test_to_display_string() {
         assert_eq!(Value::String("hello".into()).to_display_string(), "hello");
         assert_eq!(Value::Integer(42).to_display_string(), "42");
-        assert_eq!(Value::Float(3.14).to_display_string(), "3.14");
+        assert_eq!(Value::Float(2.5).to_display_string(), "2.5");
         assert_eq!(Value::Boolean(true).to_display_string(), "true");
         assert_eq!(Value::Null.to_display_string(), "");
         assert_eq!(

@@ -226,7 +226,7 @@ impl MatviewManager {
                             Ok(batch) => {
                                 let view_name = &batch.metadata.relation_name;
                                 let sub_count = subscribers.get(view_name).map(|s| s.len()).unwrap_or(0);
-                                if batch.inner.items.len() > 0 {
+                                if !batch.inner.items.is_empty() {
                                     if sub_count > 0 {
                                         tracing::info!(
                                             "[Demux] view='{}' items={} subscribers={}",

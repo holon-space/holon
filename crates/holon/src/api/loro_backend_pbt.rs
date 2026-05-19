@@ -25,9 +25,12 @@ mod stateful_tests {
 
     type WatcherId = usize;
 
+    type WatcherChangeStream =
+        Pin<Box<dyn futures::Stream<Item = Result<Vec<Change<Block>>, ApiError>> + Send>>;
+
     /// Stream wrapper for a watcher subscription
     struct WatcherStream {
-        stream: Pin<Box<dyn futures::Stream<Item = Result<Vec<Change<Block>>, ApiError>> + Send>>,
+        stream: WatcherChangeStream,
     }
 
     impl std::fmt::Debug for WatcherStream {
@@ -38,6 +41,7 @@ mod stateful_tests {
 
     /// Pure metadata for a watcher (cloneable)
     #[derive(Debug, Clone)]
+    #[allow(dead_code)] // fields kept for diagnostic logging in failing PBT runs
     struct WatcherDescriptor {
         watcher_id: WatcherId,
         base_version_idx: usize,
@@ -891,7 +895,7 @@ mod custom_properties_round_trip {
         let collab = backend.collab_for_test();
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
-        let snapshot = snapshot_blocks_from_doc(&doc);
+        let snapshot = snapshot_blocks_from_doc(doc);
 
         let snap_block = snapshot
             .get(block.id.as_str())
@@ -947,7 +951,7 @@ mod custom_properties_round_trip {
             let fork = doc.fork_at(&watermark).expect("fork_at must succeed");
             (
                 snapshot_blocks_from_doc(&fork),
-                snapshot_blocks_from_doc(&doc),
+                snapshot_blocks_from_doc(doc),
             )
         };
 
@@ -970,7 +974,7 @@ mod custom_properties_round_trip {
 
         // Before should NOT have effort — watermark was taken first.
         assert!(
-            before_block.properties_map().get("effort").is_none(),
+            !before_block.properties_map().contains_key("effort"),
             "before-snapshot unexpectedly has effort — fork_at didn't rewind. Before props: {:?}",
             before_block.properties_map()
         );

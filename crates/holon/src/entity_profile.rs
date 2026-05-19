@@ -40,7 +40,7 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "available_height_px",
     "available_width_physical_px",
     "available_height_physical_px",
-    // Global viewport fallback: emitted by UiState::context_for when no
+    // Global viewport default: emitted by UiState::context_for when no // ALLOW(fallback): comment describes default-context emission
     // refinement has reached this block.
     "viewport_width_px",
     "viewport_height_px",
@@ -401,7 +401,7 @@ pub fn profile_variants_to_stored(
             profile,
         });
     }
-    variants.sort_by(|a, b| b.priority.cmp(&a.priority));
+    variants.sort_by_key(|v| std::cmp::Reverse(v.priority));
     Ok(variants)
 }
 
@@ -534,6 +534,7 @@ impl EntityProfile {
     /// whose data conditions match, each carrying its `ui_condition` predicate
     /// for frontend-side selection. The default profile is appended as last
     /// candidate with `Predicate::Always`.
+    #[allow(clippy::type_complexity)] // returns (matched variants, evaluated field values) tuple
     pub fn resolve_candidates(
         &self,
         row: &HashMap<String, holon_api::Value>,
@@ -564,7 +565,6 @@ impl EntityProfile {
     /// Returns all collection variants (each carries a `ui_condition` for
     /// frontend-side view-mode switching). The collection default is appended
     /// with `Predicate::Always`.
-
     fn resolve_from_scope(
         &self,
         engine: &RhaiEngine,
@@ -605,12 +605,12 @@ impl EntityProfile {
 
             // Flatten `properties` object so inner fields (task_state, priority, etc.)
             // are available as top-level scope variables for profile conditions.
-            if key == "properties" {
-                if let holon_api::Value::Object(props) = value {
-                    for (prop_key, prop_value) in props {
-                        if !row.contains_key(prop_key) {
-                            scope.push(prop_key.clone(), value_to_dynamic(prop_value));
-                        }
+            if key == "properties"
+                && let holon_api::Value::Object(props) = value
+            {
+                for (prop_key, prop_value) in props {
+                    if !row.contains_key(prop_key) {
+                        scope.push(prop_key.clone(), value_to_dynamic(prop_value));
                     }
                 }
             }
@@ -716,13 +716,12 @@ fn storage_entity_to_rhai_map(entity: &StorageEntity) -> rhai::Dynamic {
                 for (pk, pv) in props {
                     map.insert(pk.clone().into(), value_to_dynamic(pv));
                 }
-            } else if let holon_api::Value::String(json_str) = v {
-                if let Ok(parsed) =
+            } else if let holon_api::Value::String(json_str) = v
+                && let Ok(parsed) =
                     serde_json::from_str::<HashMap<String, holon_api::Value>>(json_str)
-                {
-                    for (pk, pv) in &parsed {
-                        map.insert(pk.clone().into(), value_to_dynamic(pv));
-                    }
+            {
+                for (pk, pv) in &parsed {
+                    map.insert(pk.clone().into(), value_to_dynamic(pv));
                 }
             }
         }
@@ -760,6 +759,7 @@ pub trait ProfileResolving: Send + Sync {
     }
 
     /// Get virtual child config for an entity type, if declared in its profile.
+    // ALLOW(unused_param): trait shape; default impl ignores name
     fn virtual_child_config(&self, _entity_name: &str) -> Option<VirtualChildConfig> {
         None
     }
@@ -808,6 +808,7 @@ impl ProfileCache {
 /// `resolve()` reads the cache via `watch::Receiver<Arc<ProfileCache>>` —
 /// just an Arc clone, no RwLock contention on the hot path.
 pub struct ProfileResolver {
+    #[allow(dead_code)] // keeps the LiveData stream alive while the resolver exists
     source: Arc<crate::sync::LiveData<EntityProfile>>,
     cache_signal: futures_signals::signal::Mutable<Arc<ProfileCache>>,
     /// Entity operations from the OperationDispatcher, keyed by entity name.
@@ -923,7 +924,7 @@ impl ProfileResolver {
         row: &HashMap<String, holon_api::Value>,
     ) -> Arc<RowProfile> {
         let ops = row_id(row)
-            .map(|id| self.operations_for(&id.scheme()))
+            .map(|id| self.operations_for(id.scheme()))
             .unwrap_or_default();
         Arc::new(RowProfile {
             name: stored.name.clone(),
@@ -940,7 +941,7 @@ impl ProfileResolver {
     ) -> ProfileCache {
         let mut profiles = HashMap::new();
 
-        // Seed with type-defined profiles (fallback layer)
+        // Seed with type-defined profiles (baseline layer) // ALLOW(fallback): describes profile layering, not error swallowing
         for profile in type_profiles {
             let name = profile.entity_name.clone();
             profiles.insert(name, profile.clone());
@@ -974,7 +975,7 @@ impl ProfileResolver {
         existing.variants.extend(incoming.variants.iter().cloned());
         existing
             .variants
-            .sort_by(|a, b| b.priority.cmp(&a.priority));
+            .sort_by_key(|v| std::cmp::Reverse(v.priority));
 
         // Computed fields: incoming overrides existing by name
         for (name, expr) in &incoming.computed_fields {
@@ -1111,7 +1112,7 @@ impl ProfileResolving for ProfileResolver {
         let (candidates, computed) = entity_profile.resolve_candidates(row, &engine);
 
         let ops = row_id(row)
-            .map(|id| self.operations_for(&id.scheme()))
+            .map(|id| self.operations_for(id.scheme()))
             .unwrap_or_default();
 
         let render_variants: Vec<RenderVariant> = candidates

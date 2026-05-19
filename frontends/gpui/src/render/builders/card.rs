@@ -41,7 +41,7 @@ pub fn render(
     node: &holon_frontend::ReactiveViewModel,
     ctx: &GpuiRenderContext,
 ) -> Div {
-    let accent = node.prop_str("accent").unwrap_or_else(|| "".to_string());
+    let accent = node.prop_str("accent").unwrap_or_default();
     let children = &node.children;
     let s = ctx.style();
     let border_radius = s.card_border_radius;

@@ -77,14 +77,12 @@ mod adapter {
     /// a protocol bug on the other side).
     async fn drain_until_eof(stream: &mut iroh::endpoint::RecvStream) -> Result<()> {
         let mut buf = [0u8; 64];
-        loop {
-            match stream.read(&mut buf).await {
-                Ok(None) => return Ok(()),
-                Ok(Some(n)) => {
-                    anyhow::bail!("unexpected {n} trailing byte(s) after protocol completed");
-                }
-                Err(e) => return Err(anyhow::anyhow!("drain read failed: {e}")),
+        match stream.read(&mut buf).await {
+            Ok(None) => Ok(()),
+            Ok(Some(n)) => {
+                anyhow::bail!("unexpected {n} trailing byte(s) after protocol completed")
             }
+            Err(e) => Err(anyhow::anyhow!("drain read failed: {e}")),
         }
     }
 
@@ -475,6 +473,12 @@ mod adapter {
     /// Implements SharedTreeStore so LoroBackend can traverse mount nodes.
     pub struct SharedTreeSyncManager {
         trees: Arc<RwLock<HashMap<String, Arc<LoroDoc>>>>,
+    }
+
+    impl Default for SharedTreeSyncManager {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl SharedTreeSyncManager {

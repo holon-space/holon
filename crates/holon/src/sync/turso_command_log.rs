@@ -100,11 +100,11 @@ impl TursoCommandLog {
             })
             .transpose()?;
 
-        let status = CommandStatus::from_str(&status_str).ok_or_else(|| {
+        let status = CommandStatus::parse_str(&status_str).ok_or_else(|| {
             StorageError::DatabaseError(format!("Invalid status: {}", status_str))
         })?;
 
-        let sync_status = SyncStatus::from_str(&sync_status_str).ok_or_else(|| {
+        let sync_status = SyncStatus::parse_str(&sync_status_str).ok_or_else(|| {
             StorageError::DatabaseError(format!("Invalid sync_status: {}", sync_status_str))
         })?;
 
@@ -242,10 +242,10 @@ impl CommandLog for TursoCommandLog {
             .transpose()?;
 
         let inverse_value = inverse_json
-            .map(|json| turso::Value::Text(json))
+            .map(turso::Value::Text)
             .unwrap_or(turso::Value::Null);
         let target_system_value = target_system
-            .map(|sys| turso::Value::Text(sys))
+            .map(turso::Value::Text)
             .unwrap_or(turso::Value::Null);
 
         let params: Vec<turso::Value> = vec![

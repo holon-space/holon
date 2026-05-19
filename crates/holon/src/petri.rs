@@ -541,14 +541,14 @@ pub fn parse_content_prefixes(raw: &str) -> (String, bool, Executor, bool) {
         content = content[1..].trim_start().to_string();
     }
 
-    if content.starts_with("@[[") {
-        if let Some(bracket_end) = content.find("]]") {
-            let person = content[3..bracket_end].to_string();
-            let after_bracket = &content[bracket_end + 2..];
-            if after_bracket.starts_with(':') {
-                executor = Executor::Delegated { person };
-                content = after_bracket[1..].trim_start().to_string();
-            }
+    if content.starts_with("@[[")
+        && let Some(bracket_end) = content.find("]]")
+    {
+        let person = content[3..bracket_end].to_string();
+        let after_bracket = &content[bracket_end + 2..];
+        if let Some(rest) = after_bracket.strip_prefix(':') {
+            executor = Executor::Delegated { person };
+            content = rest.trim_start().to_string();
         }
     }
 
@@ -795,12 +795,11 @@ fn resolve_sequential_deps(tasks: &mut [TaskInfo]) {
         sorted.sort_by_key(|&idx| tasks[idx].position);
         let mut prev_sibling_id: Option<String> = None;
         for &idx in &sorted {
-            if tasks[idx].has_sequential_dep {
-                if let Some(ref prev_id) = prev_sibling_id {
-                    if !tasks[idx].depends_on.contains(prev_id) {
-                        tasks[idx].depends_on.push(prev_id.clone());
-                    }
-                }
+            if tasks[idx].has_sequential_dep
+                && let Some(ref prev_id) = prev_sibling_id
+                && !tasks[idx].depends_on.contains(prev_id)
+            {
+                tasks[idx].depends_on.push(prev_id.clone());
             }
             prev_sibling_id = Some(tasks[idx].block_id.clone());
         }
@@ -881,19 +880,19 @@ fn build_delegate_tokens(active: &[&TaskInfo]) -> Vec<TaskToken> {
     let mut seen = HashSet::new();
     let mut tokens = Vec::new();
     for task in active {
-        if let Executor::Delegated { ref person } = task.executor {
-            if seen.insert(person.clone()) {
-                tokens.push(TaskToken {
-                    id: format!("person_{person}"),
-                    token_type: "person".to_string(),
-                    attributes: {
-                        let mut a = BTreeMap::new();
-                        a.insert("status".to_string(), Value::String("active".to_string()));
-                        a.insert("name".to_string(), Value::String(person.clone()));
-                        a
-                    },
-                });
-            }
+        if let Executor::Delegated { ref person } = task.executor
+            && seen.insert(person.clone())
+        {
+            tokens.push(TaskToken {
+                id: format!("person_{person}"),
+                token_type: "person".to_string(),
+                attributes: {
+                    let mut a = BTreeMap::new();
+                    a.insert("status".to_string(), Value::String("active".to_string()));
+                    a.insert("name".to_string(), Value::String(person.clone()));
+                    a
+                },
+            });
         }
     }
     tokens
@@ -983,7 +982,7 @@ fn build_task_transitions(
         } else {
             "document"
         };
-        let bind_name = link.replace('/', "_").replace(' ', "_");
+        let bind_name = link.replace(['/', ' '], "_");
         inputs.push(InputArc {
             bind: bind_name.clone(),
             token_type: entity_type.to_string(),

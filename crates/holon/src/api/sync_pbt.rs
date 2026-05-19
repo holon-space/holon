@@ -45,20 +45,20 @@ mod tests {
         type Reference = DirectGroupState;
 
         fn init_test(
-            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            _: &<Self::Reference as ReferenceStateMachine>::State,
         ) -> Self::SystemUnderTest {
         }
 
         fn apply(
             state: Self::SystemUnderTest,
-            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
-            _transition: <Self::Reference as ReferenceStateMachine>::Transition,
+            _: &<Self::Reference as ReferenceStateMachine>::State,
+            _: <Self::Reference as ReferenceStateMachine>::Transition,
         ) -> Self::SystemUnderTest {
             state
         }
 
         fn check_invariants(
-            _state: &Self::SystemUnderTest,
+            _: &Self::SystemUnderTest,
             ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) {
             check_invariants(ref_state);
@@ -113,20 +113,20 @@ mod tests {
         type Reference = IrohGroupState;
 
         fn init_test(
-            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            _: &<Self::Reference as ReferenceStateMachine>::State,
         ) -> Self::SystemUnderTest {
         }
 
         fn apply(
             state: Self::SystemUnderTest,
-            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
-            _transition: <Self::Reference as ReferenceStateMachine>::Transition,
+            _: &<Self::Reference as ReferenceStateMachine>::State,
+            _: <Self::Reference as ReferenceStateMachine>::Transition,
         ) -> Self::SystemUnderTest {
             state
         }
 
         fn check_invariants(
-            _state: &Self::SystemUnderTest,
+            _: &Self::SystemUnderTest,
             ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) {
             check_invariants(ref_state);
@@ -332,7 +332,7 @@ mod tests {
             let collab = be.test_global_doc().await;
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
-            let _ = rehydrate_shared_trees(&be, &doc).await.unwrap();
+            let _ = rehydrate_shared_trees(&be, doc).await.unwrap();
             be
         }
 
@@ -350,7 +350,7 @@ mod tests {
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let tree = doc.get_tree(TREE_NAME);
-            let parent_tid = parent.map(|pid| find(&doc, pid).unwrap());
+            let parent_tid = parent.map(|pid| find(doc, pid).unwrap());
             let node = tree.create(parent_tid).unwrap();
             let meta = tree.get_meta(node).unwrap();
             meta.insert("id", loro::LoroValue::from(stable_id)).unwrap();
@@ -367,12 +367,11 @@ mod tests {
                 if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
                     continue;
                 }
-                if let Ok(meta) = tree.get_meta(node.id) {
-                    if let Some(loro::ValueOrContainer::Value(v)) = meta.get("id") {
-                        if v.as_string().map(|s| s.as_str()) == Some(stable_id) {
-                            return Some(node.id);
-                        }
-                    }
+                if let Ok(meta) = tree.get_meta(node.id)
+                    && let Some(loro::ValueOrContainer::Value(v)) = meta.get("id")
+                    && v.as_string().map(|s| s.as_str()) == Some(stable_id)
+                {
+                    return Some(node.id);
                 }
             }
             None
@@ -487,12 +486,11 @@ mod tests {
                 if matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
                     continue;
                 }
-                if let Ok(meta) = tree.get_meta(n.id) {
-                    if let Some(loro::ValueOrContainer::Value(v)) = meta.get("shared_tree_id") {
-                        if v.as_string().map(|s| s.as_str()) == Some(shared_tree_id) {
-                            return true;
-                        }
-                    }
+                if let Ok(meta) = tree.get_meta(n.id)
+                    && let Some(loro::ValueOrContainer::Value(v)) = meta.get("shared_tree_id")
+                    && v.as_string().map(|s| s.as_str()) == Some(shared_tree_id)
+                {
+                    return true;
                 }
             }
             false
@@ -503,11 +501,8 @@ mod tests {
         /// degraded signals fired.
         fn drain_bus(rx: &mut broadcast::Receiver<ShareDegraded>) -> Vec<ShareDegraded> {
             let mut out = Vec::new();
-            loop {
-                match rx.try_recv() {
-                    Ok(ev) => out.push(ev),
-                    Err(_) => break,
-                }
+            while let Ok(ev) = rx.try_recv() {
+                out.push(ev);
             }
             out
         }
@@ -534,16 +529,18 @@ mod tests {
                 if name.ends_with(".loro.tmp") {
                     tmps.push(path.clone());
                 }
-                if name.ends_with(".loro") && !name.contains(".corrupt-") {
-                    if entry.metadata().unwrap().len() == 0 {
-                        zero_byte.push(path);
-                    }
+                if name.ends_with(".loro")
+                    && !name.contains(".corrupt-")
+                    && entry.metadata().unwrap().len() == 0
+                {
+                    zero_byte.push(path);
                 }
             }
             (zero_byte, tmps)
         }
 
         /// Check post-action invariants that apply every step.
+        #[allow(clippy::too_many_arguments)] // exercises both peers' full state across an action
         async fn check_invariants(
             a: &LoroShareBackend,
             b: &LoroShareBackend,
@@ -893,28 +890,28 @@ mod tests {
                         b = backend_at(dir_b.path(), old_bus).await;
                     }
                     Action::MarkOnA(kind) => {
-                        if ref_a.share_usable {
-                            if let Some(suffix) = ref_a.alive_suffixes.last().cloned() {
-                                let d = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
-                                if mark_suffix_on_root(&d, &suffix, kind) {
-                                    ref_a.expected_marks.push(ExpectedMark {
-                                        suffix,
-                                        key: kind.loro_key(),
-                                    });
-                                }
+                        if ref_a.share_usable
+                            && let Some(suffix) = ref_a.alive_suffixes.last().cloned()
+                        {
+                            let d = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
+                            if mark_suffix_on_root(&d, &suffix, kind) {
+                                ref_a.expected_marks.push(ExpectedMark {
+                                    suffix,
+                                    key: kind.loro_key(),
+                                });
                             }
                         }
                     }
                     Action::MarkOnB(kind) => {
-                        if ref_b.share_usable {
-                            if let Some(suffix) = ref_b.alive_suffixes.last().cloned() {
-                                let d = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
-                                if mark_suffix_on_root(&d, &suffix, kind) {
-                                    ref_b.expected_marks.push(ExpectedMark {
-                                        suffix,
-                                        key: kind.loro_key(),
-                                    });
-                                }
+                        if ref_b.share_usable
+                            && let Some(suffix) = ref_b.alive_suffixes.last().cloned()
+                        {
+                            let d = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
+                            if mark_suffix_on_root(&d, &suffix, kind) {
+                                ref_b.expected_marks.push(ExpectedMark {
+                                    suffix,
+                                    key: kind.loro_key(),
+                                });
                             }
                         }
                     }

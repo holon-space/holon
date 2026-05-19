@@ -22,7 +22,7 @@ pub use super::DioxusRenderContext;
 //
 // `render_node(node, ctx) -> Element` is produced by walking the directory
 // for `*.rs` files other than `mod` / `prelude` and emitting one match arm
-// per file. Variants not covered by a file hit the fallback (empty element
+// per file. Variants not covered by a file hit the fallback (empty element // ALLOW(fallback): describes default-branch path, not error swallowing
 // with a `tracing::warn!`).
 holon_macros::builder_registry!(
     "src/render/builders",
@@ -41,9 +41,9 @@ pub fn RenderNode(node: ViewModel) -> Element {
     render_node(&node, &DioxusRenderContext)
 }
 
-/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant
+/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant // ALLOW(fallback): describes default-branch path, not error swallowing
 /// has no matching builder file. `Empty` / `Loading` / `DropZone` fall
 /// through here by design — they render as nothing.
-pub fn render_unsupported(_name: &str, _ctx: &DioxusRenderContext) -> Element {
+pub fn render_unsupported(_: &str, _: &DioxusRenderContext) -> Element {
     rsx! {}
 }

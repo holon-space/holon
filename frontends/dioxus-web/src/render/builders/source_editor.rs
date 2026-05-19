@@ -3,7 +3,7 @@ use super::prelude::*;
 pub fn render(
     language: &String,
     content: &String,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     let lang = language.clone();
     let content = content.clone();

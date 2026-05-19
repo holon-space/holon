@@ -60,15 +60,15 @@ impl E2ETransitionFactory for FocusEditableText {
         let candidates: Vec<EntityUri> = state
             .block_state
             .blocks
-            .iter()
-            .map(|(id, _)| id.clone())
-            .filter(|uri| {
+            .keys()
+            .filter(|&uri| {
                 FocusEditableText {
                     block_id: uri.clone(),
                 }
                 .preconditions(state)
                 .is_good()
             })
+            .cloned()
             .collect();
 
         check(!candidates.is_empty(), Reason::NoFocusableBlocks).map(|_| {

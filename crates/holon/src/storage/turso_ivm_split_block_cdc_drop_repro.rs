@@ -182,7 +182,7 @@ async fn split_block_emits_both_insert_and_update_events() {
     //   1. Created/Inserted: child_1_split (new sibling)
     //   2. Updated:           child_1     (truncated content)
     let view_events: Vec<&ChangeData> = count_for_view(&events, "descendants_view").collect();
-    let saw_insert_new = view_events.iter().any(|c| matches!(c, ChangeData::Created { data, .. } if data.get("id").and_then(|v| v.as_string()).as_deref() == Some("child_1_split")));
+    let saw_insert_new = view_events.iter().any(|c| matches!(c, ChangeData::Created { data, .. } if data.get("id").and_then(|v| v.as_string()) == Some("child_1_split")));
     let saw_update_orig = view_events.iter().any(|c| match c {
         ChangeData::Updated { id, .. } => id == "child_1",
         // After coalesce, a same-batch DELETE+INSERT for child_1 with new
@@ -289,7 +289,7 @@ async fn split_block_update_then_insert() {
     let saw_update = view_events
         .iter()
         .any(|c| matches!(c, ChangeData::Updated { id, .. } if id == "child_1"));
-    let saw_insert = view_events.iter().any(|c| matches!(c, ChangeData::Created { data, .. } if data.get("id").and_then(|v| v.as_string()).as_deref() == Some("child_1_split")));
+    let saw_insert = view_events.iter().any(|c| matches!(c, ChangeData::Created { data, .. } if data.get("id").and_then(|v| v.as_string()) == Some("child_1_split")));
     eprintln!("[update_then_insert] saw_update_orig={saw_update} saw_insert_new={saw_insert}");
 }
 
@@ -474,7 +474,7 @@ async fn recursive_matview_delete_then_insert_workaround() {
     let saw_any_for_child_1 = view_events.iter().any(|c| match c {
         ChangeData::Updated { id, .. } => id == "child_1",
         ChangeData::Created { data, .. } => {
-            data.get("id").and_then(|v| v.as_string()).as_deref() == Some("child_1")
+            data.get("id").and_then(|v| v.as_string()) == Some("child_1")
         }
         ChangeData::Deleted { id, .. } => id == "child_1",
         _ => false,
@@ -533,6 +533,6 @@ async fn split_block_nonrecursive_matview() {
     let saw_update = view_events
         .iter()
         .any(|c| matches!(c, ChangeData::Updated { id, .. } if id == "child_1"));
-    let saw_insert = view_events.iter().any(|c| matches!(c, ChangeData::Created { data, .. } if data.get("id").and_then(|v| v.as_string()).as_deref() == Some("child_1_split")));
+    let saw_insert = view_events.iter().any(|c| matches!(c, ChangeData::Created { data, .. } if data.get("id").and_then(|v| v.as_string()) == Some("child_1_split")));
     eprintln!("[nonrecursive] saw_update_orig={saw_update} saw_insert_new={saw_insert}");
 }

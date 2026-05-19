@@ -105,7 +105,7 @@ clippy:
 
 # Run all workspace tests (not PBTs — those are slow)
 test:
-    cargo test --workspace 2>&1 | tee /tmp/holon-test.log
+    cargo nextest run --workspace 2>&1 | tee /tmp/holon-test.log
 
 # --- Code Quality -----------------------------------------------------------
 
@@ -160,7 +160,19 @@ analyze-crap:
     set -euo pipefail
     if [ ! -f lcov.info ] || [ $(find lcov.info -mmin -60 2>/dev/null | wc -l) -eq 0 ]; then
         echo "Generating fresh lcov.info via cargo-llvm-cov..."
-        cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 \
+        # Coverage runs the whole test suite. Use nextest so .config/nextest.toml
+        # enforces per-test timeouts (2 min default, 10 min for E2E PBTs).
+        # cucumber-rs uses its own CLI; nextest can't enumerate it.
+        # --no-fail-fast so individual failing tests don't abort coverage.
+        # cucumber-rs uses its own CLI; nextest can't enumerate it.
+        # --ignore-run-fail: llvm-cov writes lcov.info even if nextest exits non-zero.
+        # (Mutually exclusive with --no-fail-fast in cargo-llvm-cov.)
+        # Excluded:
+        #   cucumber          — uses its own CLI, nextest can't enumerate it
+        #   tui_ui_pbt        — process::exit on PBT failure aborts coverage write
+        cargo llvm-cov nextest --workspace --lcov --output-path lcov.info \
+            --ignore-run-fail \
+            -E 'not (binary(cucumber) + binary(tui_ui_pbt))' 2>&1 \
             | tee /tmp/holon-analyze-coverage.log
     fi
     cargo crap --lcov lcov.info 2>&1 | tee /tmp/holon-analyze-crap.log
@@ -173,9 +185,12 @@ analyze-deny:
 analyze-machete:
     cargo machete 2>&1 | tee /tmp/holon-analyze-machete.log
 
-# Lint with clippy at the workspace level, warnings as errors.
+# Lint with clippy at the workspace level.
+# Report-only: clippy findings are surfaced but don't fail the recipe. Phase 6
+# of the code-quality plan re-tightens this gate (`-D warnings`) once the
+# workspace backlog has been paid down incrementally.
 analyze-clippy:
-    cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
+    cargo clippy --workspace --all-targets 2>&1 \
         | tee /tmp/holon-analyze-clippy.log
 
 # Copy-paste / duplication detection via polydup.
@@ -184,7 +199,7 @@ analyze-duplication:
 
 # Architecture lints (cycles, banned imports, etc.).
 analyze-arch:
-    cargo run -p archlint -- --all 2>&1 | tee /tmp/holon-analyze-arch.log
+    ./archlint/archlint --all 2>&1 | tee /tmp/holon-analyze-arch.log
 
 # Run every analyzer. Continues on failure; reports a summary at the end.
 analyze:

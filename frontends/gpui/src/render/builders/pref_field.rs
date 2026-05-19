@@ -23,8 +23,8 @@ fn dispatch_set_preference(
 }
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let key = node.prop_str("key").unwrap_or_else(|| "".to_string());
-    let pref_type = node.prop_str("pref_type").unwrap_or_else(|| "".to_string());
+    let key = node.prop_str("key").unwrap_or_default();
+    let pref_type = node.prop_str("pref_type").unwrap_or_default();
     let value = node.props.lock_ref().get("value").cloned().unwrap_or(Value::Null);
     let requires_restart = node.prop_bool("requires_restart").unwrap_or(false);
     let locked = node.prop_bool("locked").unwrap_or(false);

@@ -45,7 +45,7 @@ impl MarkdownRenderer {
         out
     }
 
-    pub fn render_blocks(blocks: &[Block], _file_path: &Path, file_id: &EntityUri) -> String {
+    pub fn render_blocks(blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
         let mut out = String::new();
         let block_map: HashMap<&str, &Block> = blocks.iter().map(|b| (b.id.as_str(), b)).collect();
 

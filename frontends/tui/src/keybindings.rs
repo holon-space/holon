@@ -238,10 +238,8 @@ mod tests {
     #[test]
     fn existing_leader_chords_present() {
         let b = global();
-        for (chord, expected) in [
-            ('x', "cycle_task_state"),
-            // arrows are SpecialKey, not Char, so they'd fail this loop
-        ] {
+        {
+            let (chord, expected) = ('x', "cycle_task_state");
             let km = KeyMatch {
                 key: KeyKind::Char(chord),
                 modifiers: Modifiers {

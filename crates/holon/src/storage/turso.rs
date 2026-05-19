@@ -36,20 +36,15 @@ use holon_api::{
 /// Note: DDL is allowed in ALL phases because MatViews are created dynamically
 /// when users navigate to blocks with PRQL queries. The actor's value is
 /// SERIALIZATION, not phase-based blocking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DatabasePhase {
     /// Startup phase - schema initialization in progress
+    #[default]
     SchemaInit,
     /// Normal operation - all DDL complete, application running
     Ready,
     /// Shutting down - rejecting new commands
     ShuttingDown,
-}
-
-impl Default for DatabasePhase {
-    fn default() -> Self {
-        Self::SchemaInit
-    }
 }
 
 /// Priority levels for different operation types.
@@ -583,7 +578,7 @@ fn extract_change_origin_from_data(data: &StorageEntity) -> ChangeOrigin {
             Value::String(json) => ChangeOrigin::from_json(json),
             _ => None,
         })
-        .unwrap_or_else(|| ChangeOrigin::Remote {
+        .unwrap_or(ChangeOrigin::Remote {
             operation_id: None,
             trace_id: None,
         })
@@ -1242,11 +1237,11 @@ impl TursoBackend {
 
         // Flatten 'data' JSON column: remove it and promote its fields to top-level
         // (used for heterogeneous UNION queries).
-        if let Some(data_value) = entity.remove("data") {
-            if let Some(obj) = Self::parse_json_object(data_value) {
-                for (key, value) in obj {
-                    entity.entry(key).or_insert(value);
-                }
+        if let Some(data_value) = entity.remove("data")
+            && let Some(obj) = Self::parse_json_object(data_value)
+        {
+            for (key, value) in obj {
+                entity.entry(key).or_insert(value);
             }
         }
 
@@ -1333,7 +1328,7 @@ impl TursoBackend {
         let mut raw_changes = Vec::new();
         let mut batch_trace_context: Option<BatchTraceContext> = None;
 
-        for (_change_idx, change) in event.changes.iter().enumerate() {
+        for change in event.changes.iter() {
             let change_data = match &change.change {
                 DatabaseChangeType::Insert { .. } => {
                     if let Some(values) = change.parse_record() {
@@ -1553,11 +1548,11 @@ impl TursoBackend {
 
             DbCommand::ExecuteDdl { sql, response } => {
                 let result = Self::handle_ddl(conn, &sql).await;
-                if result.is_ok() {
-                    if let Ok(stmts) = parse_sql(&sql) {
-                        let provides = extract_created_tables(&stmts);
-                        Self::mark_resources_available(available_resources, &provides);
-                    }
+                if result.is_ok()
+                    && let Ok(stmts) = parse_sql(&sql)
+                {
+                    let provides = extract_created_tables(&stmts);
+                    Self::mark_resources_available(available_resources, &provides);
                 }
                 let _ = response.send(result);
             }
@@ -1710,11 +1705,11 @@ impl TursoBackend {
             }
 
             // Flatten 'data' JSON column if present
-            if let Some(data_value) = entity.remove("data") {
-                if let Some(obj) = flatten_data_column(data_value) {
-                    for (key, value) in obj {
-                        entity.entry(key).or_insert(value);
-                    }
+            if let Some(data_value) = entity.remove("data")
+                && let Some(obj) = flatten_data_column(data_value)
+            {
+                for (key, value) in obj {
+                    entity.entry(key).or_insert(value);
                 }
             }
 
@@ -1760,11 +1755,11 @@ impl TursoBackend {
             }
 
             // Flatten 'data' JSON column if present
-            if let Some(data_value) = entity.remove("data") {
-                if let Some(obj) = flatten_data_column(data_value) {
-                    for (key, value) in obj {
-                        entity.entry(key).or_insert(value);
-                    }
+            if let Some(data_value) = entity.remove("data")
+                && let Some(obj) = flatten_data_column(data_value)
+            {
+                for (key, value) in obj {
+                    entity.entry(key).or_insert(value);
                 }
             }
 
@@ -1911,6 +1906,7 @@ impl TursoBackend {
     }
 
     /// Handle DDL with dependency tracking
+    #[allow(clippy::too_many_arguments)] // internal helper threading DDL pipeline state — params are all distinct
     async fn handle_ddl_with_deps_internal(
         conn: &turso::Connection,
         next_op_id: &AtomicU64,
@@ -1989,7 +1985,7 @@ impl TursoBackend {
         *pending_ddl = still_pending;
 
         // Sort by priority (highest first)
-        ready.sort_by(|a, b| b.priority.cmp(&a.priority));
+        ready.sort_by_key(|op| std::cmp::Reverse(op.priority));
 
         // Execute ready operations
         for op in ready {
@@ -2071,7 +2067,7 @@ impl StorageBackend for TursoBackend {
             placeholders.join(", ")
         );
 
-        let params: Vec<turso::Value> = data.values().map(|v| value_to_turso_param(v)).collect();
+        let params: Vec<turso::Value> = data.values().map(value_to_turso_param).collect();
 
         self.handle().execute(&insert_sql, params).await?;
         Ok(())
@@ -2248,8 +2244,8 @@ mod tests {
             Value::Integer(42)
         );
         assert_eq!(
-            turso_value_to_value(turso_core::Value::from_f64(3.14)),
-            Value::Float(3.14)
+            turso_value_to_value(turso_core::Value::from_f64(2.5)),
+            Value::Float(2.5)
         );
 
         // Plain string

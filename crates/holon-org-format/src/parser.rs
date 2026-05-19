@@ -269,6 +269,7 @@ fn parse_keywords_from_config(config: &str) -> (Vec<String>, Vec<String>) {
 }
 
 /// Recursively process headlines and their children
+#[allow(clippy::only_used_in_recursion)] // file_id threaded for future log/diagnostic plumbing
 fn process_headlines(
     headlines: impl Iterator<Item = Headline>,
     parent_id: &str,
@@ -295,7 +296,7 @@ fn process_headlines(
         // Extract TODO keyword first, parsed into TaskState with category
         let task_state = headline
             .todo_keyword()
-            .map(|t| TaskState::from_keyword_with_done_list(&t.to_string(), &done_keywords));
+            .map(|t| TaskState::from_keyword_with_done_list(t.as_ref(), done_keywords));
 
         // Extract title using title_raw() and remove TODO keyword if present
         let mut title = headline.title_raw().trim().to_string();
@@ -315,8 +316,9 @@ fn process_headlines(
         });
 
         // Extract tags
-        let tags =
-            holon_api::Tags::from_iter(headline.tags().map(|t| t.to_string()).collect::<Vec<_>>());
+        let tags = holon_api::Tags::from_tag_iter(
+            headline.tags().map(|t| t.to_string()).collect::<Vec<_>>(),
+        );
 
         // Extract section content with source blocks
         let section = extract_section_content(&headline);
@@ -807,16 +809,11 @@ fn unescape_source_lines(content: &str) -> String {
         if i > 0 {
             out.push('\n');
         }
-        let unescaped = line.strip_prefix(',').and_then(|rest| {
-            if rest.starts_with('*')
+        let unescaped = line.strip_prefix(',').filter(|&rest| {
+            rest.starts_with('*')
                 || rest.starts_with("#+")
                 || rest.starts_with(",*")
                 || rest.starts_with(",#+")
-            {
-                Some(rest)
-            } else {
-                None
-            }
         });
         out.push_str(unescaped.unwrap_or(line));
     }

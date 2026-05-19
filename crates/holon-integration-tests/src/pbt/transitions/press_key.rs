@@ -188,10 +188,12 @@ impl E2ETransitionImpl for PressKey {
         // on `active_editor.in_memory_content` so `inv-displayed-text`'s
         // expected (= in_memory_content while editor is active) tracks
         // what's actually on screen.
-        else if matches!(single, Some(Key::Backspace)) && !has_modifier && cursor_byte > 0 {
-            if let Some(editor) = state.active_editor.as_mut() {
-                editor.delete_backward(1);
-            }
+        else if matches!(single, Some(Key::Backspace))
+            && !has_modifier
+            && cursor_byte > 0
+            && let Some(editor) = state.active_editor.as_mut()
+        {
+            editor.delete_backward(1);
         }
         // Other chords (Tab, etc.): no structural change modeled in v1.
         // Pending edits remain in InputState.

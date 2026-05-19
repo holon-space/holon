@@ -31,7 +31,7 @@ fn item_entity_id(ix: usize) -> String {
 }
 
 fn row_height(ix: usize) -> f32 {
-    if ix % 2 == 0 {
+    if ix.is_multiple_of(2) {
         SHORT_H
     } else {
         TALL_H

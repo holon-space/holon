@@ -49,12 +49,10 @@ impl WatermarkState {
         if let Ok(rows) = db_handle
             .query("SELECT MAX(created_at) AS ts FROM events", HashMap::new())
             .await
+            && let Some(row) = rows.into_iter().next()
+            && let Some(Value::Integer(ts)) = row.get("ts")
         {
-            if let Some(row) = rows.into_iter().next() {
-                if let Some(Value::Integer(ts)) = row.get("ts") {
-                    *state.global.lock_mut() = *ts;
-                }
-            }
+            *state.global.lock_mut() = *ts;
         }
 
         // Bootstrap per-consumer: max acked_at per consumer from the ack table.
@@ -118,10 +116,10 @@ impl WatermarkState {
         use crate::storage::turso::ChangeData;
         match change {
             ChangeData::Created { data, .. } | ChangeData::Updated { data, .. } => {
-                if let Some(Value::Integer(ts)) = data.get("ts") {
-                    if *ts > 0 {
-                        self.bump_global(*ts);
-                    }
+                if let Some(Value::Integer(ts)) = data.get("ts")
+                    && *ts > 0
+                {
+                    self.bump_global(*ts);
                 }
             }
             ChangeData::Deleted { .. } | ChangeData::FieldsChanged { .. } => {}
@@ -160,10 +158,10 @@ impl WatermarkState {
                     Some(Value::String(s)) => s.clone(),
                     _ => return,
                 };
-                if let Some(Value::Integer(ts)) = data.get("ts") {
-                    if *ts > 0 {
-                        self.bump_consumer(&consumer, *ts);
-                    }
+                if let Some(Value::Integer(ts)) = data.get("ts")
+                    && *ts > 0
+                {
+                    self.bump_consumer(&consumer, *ts);
                 }
             }
             ChangeData::Deleted { .. } | ChangeData::FieldsChanged { .. } => {}
@@ -246,13 +244,12 @@ impl TursoEventBus {
         let mut data = row.clone();
         // Normalize payload: CDC delivers it as Value::String (JSON text),
         // but direct SQL queries deserialize it into Value::Object/Array.
-        if let Some(val) = data.get("payload") {
-            if !matches!(val, holon_api::Value::String(_)) {
-                let json_str = serde_json::to_string(&val).map_err(|e| {
-                    StorageError::SerializationError(format!("serialize payload: {e}"))
-                })?;
-                data.insert("payload".to_string(), holon_api::Value::String(json_str));
-            }
+        if let Some(val) = data.get("payload")
+            && !matches!(val, holon_api::Value::String(_))
+        {
+            let json_str = serde_json::to_string(&val)
+                .map_err(|e| StorageError::SerializationError(format!("serialize payload: {e}")))?;
+            data.insert("payload".to_string(), holon_api::Value::String(json_str));
         }
         Self::parse_row_change_to_event(&crate::storage::turso::ChangeData::Created {
             data,
@@ -409,8 +406,8 @@ impl TursoEventBus {
                     _ => None,
                 });
 
-                let origin = EventOrigin::from_str(&origin_str);
-                let status = EventStatus::from_str(&status_str).unwrap_or_else(|| {
+                let origin = EventOrigin::parse_str(&origin_str);
+                let status = EventStatus::parse_str(&status_str).unwrap_or_else(|| {
                     panic!("stored event status must be valid, got: '{}'", status_str)
                 });
 
@@ -453,39 +450,32 @@ impl TursoEventBus {
     /// Check if an event matches the filter criteria
     fn event_matches_filter(event: &Event, filter: &EventFilter) -> bool {
         // Filter by origin
-        if !filter.origins.is_empty() {
-            if !filter
+        if !filter.origins.is_empty()
+            && !filter
                 .origins
                 .iter()
                 .any(|o| o.as_str() == event.origin.as_str())
-            {
-                return false;
-            }
+        {
+            return false;
         }
 
         // Filter by status
-        if !filter.statuses.is_empty() {
-            if !filter.statuses.iter().any(|s| *s == event.status) {
-                return false;
-            }
+        if !filter.statuses.is_empty() && !filter.statuses.contains(&event.status) {
+            return false;
         }
 
         // Filter by aggregate type
-        if !filter.aggregate_types.is_empty() {
-            if !filter
-                .aggregate_types
-                .iter()
-                .any(|t| *t == event.aggregate_type)
-            {
-                return false;
-            }
+        if !filter.aggregate_types.is_empty()
+            && !filter.aggregate_types.contains(&event.aggregate_type)
+        {
+            return false;
         }
 
         // Filter by timestamp
-        if let Some(after_timestamp) = filter.after_timestamp {
-            if event.created_at <= after_timestamp {
-                return false;
-            }
+        if let Some(after_timestamp) = filter.after_timestamp
+            && event.created_at <= after_timestamp
+        {
+            return false;
         }
 
         true
@@ -888,8 +878,7 @@ impl EventBus for TursoEventBus {
         // Single multi-VALUES INSERT — one statement, one matview re-eval,
         // instead of N round-trips through the DB actor.
         let now = chrono::Utc::now().timestamp_millis();
-        let placeholders = std::iter::repeat("(?, ?, ?)")
-            .take(event_ids.len())
+        let placeholders = std::iter::repeat_n("(?, ?, ?)", event_ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -921,7 +910,7 @@ impl EventBus for TursoEventBus {
     ) -> Result<()> {
         // Use execute_via_actor which routes through the database actor
         let rejection_reason_value = rejection_reason
-            .map(|r| turso::Value::Text(r))
+            .map(turso::Value::Text)
             .unwrap_or(turso::Value::Null);
 
         let sql = include_str!("../../sql/events/update_status.sql");

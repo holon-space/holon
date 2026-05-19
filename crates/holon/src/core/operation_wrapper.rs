@@ -94,15 +94,15 @@ where
 
         // 2. Sync to external systems (if sync provider is available)
         // Extract FieldDeltas from the operation result and pass to sync_changes
-        if let Some(ref sync_provider) = self.sync_provider {
-            if let Err(e) = sync_provider.sync_changes(&result.changes).await {
-                tracing::warn!(
-                    "[OperationWrapper] Post-operation sync failed for {}.{}: {}",
-                    entity_name,
-                    op_name,
-                    e
-                );
-            }
+        if let Some(ref sync_provider) = self.sync_provider
+            && let Err(e) = sync_provider.sync_changes(&result.changes).await
+        {
+            tracing::warn!(
+                "[OperationWrapper] Post-operation sync failed for {}.{}: {}",
+                entity_name,
+                op_name,
+                e
+            );
         }
 
         // 3. Return operation result (contains both changes and undo action)
@@ -136,9 +136,9 @@ mod tests {
 
         async fn execute_operation(
             &self,
-            _entity_name: &EntityName,
-            _op_name: &str,
-            _params: StorageEntity,
+            _: &EntityName,
+            _: &str,
+            _: StorageEntity,
         ) -> Result<OperationResult> {
             Ok(OperationResult::irreversible(Vec::new()))
         }
@@ -156,12 +156,12 @@ mod tests {
 
         async fn sync(
             &self,
-            _position: crate::core::datasource::StreamPosition,
+            _: crate::core::datasource::StreamPosition,
         ) -> Result<crate::core::datasource::StreamPosition> {
             Ok(crate::core::datasource::StreamPosition::Beginning)
         }
 
-        async fn sync_changes(&self, _changes: &[FieldDelta]) -> Result<()> {
+        async fn sync_changes(&self, _: &[FieldDelta]) -> Result<()> {
             Ok(())
         }
     }

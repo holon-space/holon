@@ -205,7 +205,6 @@ async fn exercise_entity(
     let fdw_rows = tokio::task::spawn_blocking({
         let fdw = std::sync::Arc::new(fdw);
         let conn = conn.clone();
-        let limit = limit;
         move || -> Result<Vec<Vec<Value>>> {
             let mut cursor = fdw
                 .open_cursor(conn)
@@ -219,10 +218,10 @@ async fn exercise_entity(
                     .map(|i| cursor.column(i).expect("column"))
                     .collect();
                 out.push(row);
-                if let Some(l) = limit {
-                    if out.len() >= l {
-                        break;
-                    }
+                if let Some(l) = limit
+                    && out.len() >= l
+                {
+                    break;
                 }
                 has = cursor.next().map_err(|e| anyhow::anyhow!("next: {e}"))?;
             }

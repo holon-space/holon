@@ -157,7 +157,7 @@ fn format_properties_drawer(properties_json: &str) -> String {
     // Sort by key for deterministic output — serde_json::Map uses IndexMap
     // (preserve_order feature enabled by transitive dependency).
     let mut sorted_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
-    sorted_props.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted_props.sort_by_key(|(a, _)| *a);
     for (key, value) in sorted_props {
         let value_str = match value {
             serde_json::Value::String(s) => s.clone(),
@@ -286,7 +286,7 @@ impl OrgDocumentExt for Block {
         let value = self.get_property(org_props::TODO_KEYWORDS)?;
         let json_str = value.as_string()?;
         // Try new JSON array format first, fall back to legacy "ACTIVE1,ACTIVE2|DONE1,DONE2"
-        if let Ok(states) = serde_json::from_str::<Vec<TaskState>>(&json_str) {
+        if let Ok(states) = serde_json::from_str::<Vec<TaskState>>(json_str) {
             return Some(states);
         }
         // Legacy format: "TODO,DOING|DONE,CANCELLED"
@@ -546,7 +546,7 @@ impl OrgBlockExt for Block {
 
     fn task_state(&self) -> Option<TaskState> {
         self.get_property(org_props::TASK_STATE)
-            .and_then(|v| v.as_string().map(|s| TaskState::from_keyword(&s)))
+            .and_then(|v| v.as_string().map(TaskState::from_keyword))
     }
 
     fn set_task_state(&mut self, state: Option<TaskState>) {
@@ -592,7 +592,7 @@ impl OrgBlockExt for Block {
     fn scheduled(&self) -> Option<Timestamp> {
         self.get_property(org_props::SCHEDULED)
             // ALLOW(ok): boundary parse from org property
-            .and_then(|v| v.as_string().and_then(|s| Timestamp::parse(&s).ok()))
+            .and_then(|v| v.as_string().and_then(|s| Timestamp::parse(s).ok()))
     }
 
     fn set_scheduled(&mut self, scheduled: Option<Timestamp>) {
@@ -611,7 +611,7 @@ impl OrgBlockExt for Block {
     fn deadline(&self) -> Option<Timestamp> {
         self.get_property(org_props::DEADLINE)
             // ALLOW(ok): boundary parse from org property
-            .and_then(|v| v.as_string().and_then(|s| Timestamp::parse(&s).ok()))
+            .and_then(|v| v.as_string().and_then(|s| Timestamp::parse(s).ok()))
     }
 
     fn set_deadline(&mut self, deadline: Option<Timestamp>) {
@@ -954,12 +954,12 @@ pub fn parse_header_args_from_str(params: &str) -> HashMap<String, String> {
     let mut current_value = String::new();
 
     for token in params.split_whitespace() {
-        if token.starts_with(':') {
+        if let Some(rest) = token.strip_prefix(':') {
             if let Some(key) = current_key.take() {
                 args.insert(key, current_value.trim().to_string());
                 current_value.clear();
             }
-            current_key = Some(token[1..].to_string());
+            current_key = Some(rest.to_string());
         } else if current_key.is_some() {
             if !current_value.is_empty() {
                 current_value.push(' ');

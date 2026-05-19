@@ -2,7 +2,7 @@ use super::prelude::*;
 use holon_frontend::ReactiveViewModel;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let message = node.prop_str("message").unwrap_or_else(|| "".to_string());
+    let message = node.prop_str("message").unwrap_or_default();
     div()
         .p_2()
         .rounded(px(4.0))

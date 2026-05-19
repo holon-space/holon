@@ -32,12 +32,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         // This is a simplified approach - we assume the first generic param is the entity type
                         let mut new_pred = pred_type.clone();
                         // Replace T with E in the type path
-                        if let syn::Type::Path(type_path) = &mut new_pred.bounded_ty {
-                            if let Some(segment) = type_path.path.segments.first_mut() {
-                                if segment.ident == "T" {
-                                    segment.ident = syn::Ident::new("E", segment.ident.span());
-                                }
-                            }
+                        if let syn::Type::Path(type_path) = &mut new_pred.bounded_ty
+                            && let Some(segment) = type_path.path.segments.first_mut()
+                            && segment.ident == "T"
+                        {
+                            segment.ident = syn::Ident::new("E", segment.ident.span());
                         }
                         Some(quote! { #new_pred })
                     } else {
@@ -367,7 +366,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                             }
                         }
                     } else {
-                        // Fallback: try to convert via Value::from
+                        // ALLOW(fallback): default branch comment — try Value::from
                         if is_required {
                             quote! {
                                 (#param_name_lit.to_string(), holon_api::Value::from(#param_name_ident))
@@ -437,7 +436,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     let param_name_ident = match &*pat_type.pat {
                         Pat::Ident(pat_ident) => pat_ident.ident.clone(),
                         _ => {
-                            // Fallback: try to extract from string
+                            // ALLOW(fallback): default branch comment — best-effort name extraction
                             let name_str = extract_param_name(&pat_type.pat);
                             syn::Ident::new(&name_str, proc_macro2::Span::call_site())
                         }
@@ -921,12 +920,12 @@ fn parse_provider_name_str(attr_str: &str) -> Option<String> {
     }
 
     // Look for provider_name = "value" pattern
-    if let Some(start) = attr_str.find("provider_name") {
-        if let Some(equals) = attr_str[start..].find('=') {
-            let value_start = attr_str[start + equals + 1..].find('"')? + start + equals + 1;
-            let value_end = attr_str[value_start + 1..].find('"')? + value_start + 1;
-            return Some(attr_str[value_start + 1..value_end].to_string());
-        }
+    if let Some(start) = attr_str.find("provider_name")
+        && let Some(equals) = attr_str[start..].find('=')
+    {
+        let value_start = attr_str[start + equals + 1..].find('"')? + start + equals + 1;
+        let value_end = attr_str[value_start + 1..].find('"')? + value_start + 1;
+        return Some(attr_str[value_start + 1..value_end].to_string());
     }
     None
 }
@@ -1013,10 +1012,8 @@ fn extract_require_precondition(attrs: &[syn::Attribute]) -> Option<proc_macro2:
                 && attr.path().segments[0].ident == "holon_macros"
                 && attr.path().segments[1].ident == "require");
 
-        if is_require {
-            if let Meta::List(meta_list) = &attr.meta {
-                preconditions.push(meta_list.tokens.clone());
-            }
+        if is_require && let Meta::List(meta_list) = &attr.meta {
+            preconditions.push(meta_list.tokens.clone());
         }
     }
 
@@ -1047,7 +1044,7 @@ fn extract_enum_from(attrs: &[syn::Attribute]) -> Option<ParsedEnumFrom> {
 fn generate_precondition_closure(
     method: &syn::TraitItemFn,
     precondition_tokens: &proc_macro2::TokenStream,
-    _crate_path: &proc_macro2::TokenStream,
+    _crate_path: &proc_macro2::TokenStream, // ALLOW(unused_param): kept for symmetry with sibling generators
 ) -> proc_macro2::TokenStream {
     let mut param_declarations = Vec::new();
 
@@ -1209,17 +1206,14 @@ pub fn infer_type(ty: &Type) -> (String, bool) {
     }
 
     // Handle Option<T> via AST path matching
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                        let (inner_type, _) = infer_type(inner_ty);
-                        return (inner_type, false);
-                    }
-                }
-            }
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+    {
+        let (inner_type, _) = infer_type(inner_ty);
+        return (inner_type, false);
     }
 
     let type_name = extract_type_name(ty);
@@ -1274,16 +1268,16 @@ fn parse_param_type_hint(
     let mut not_entity = false;
 
     for attr in attrs {
-        if attr.path().is_ident("entity_ref") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens = &meta_list.tokens;
-                let token_str = quote! { #tokens }.to_string();
-                if let Some(stripped) = token_str
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                {
-                    entity_ref_override = Some(stripped.to_string());
-                }
+        if attr.path().is_ident("entity_ref")
+            && let Meta::List(meta_list) = &attr.meta
+        {
+            let tokens = &meta_list.tokens;
+            let token_str = quote! { #tokens }.to_string();
+            if let Some(stripped) = token_str
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+            {
+                entity_ref_override = Some(stripped.to_string());
             }
         }
 

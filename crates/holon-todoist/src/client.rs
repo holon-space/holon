@@ -138,16 +138,7 @@ impl TodoistClient {
                 "Failed to {} for {}: timeout - request took too long (check network or increase timeout)",
                 operation, url
             )
-        } else if {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                e.is_connect()
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                false // is_connect not available on WASM
-            }
-        } {
+        } else if e.is_connect() {
             format!(
                 "Failed to {} for {}: connection error - check network connectivity, DNS resolution, and firewall settings. Error: {}",
                 operation, url, e
@@ -348,10 +339,9 @@ impl TodoistClient {
             impl opentelemetry::propagation::Injector for HeaderInjector {
                 fn set(&mut self, key: &str, value: String) {
                     if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                        && let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value)
                     {
-                        if let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value) {
-                            self.headers.insert(header_name, header_value);
-                        }
+                        self.headers.insert(header_name, header_value);
                     }
                 }
             }
@@ -479,29 +469,29 @@ impl TodoistClient {
         );
 
         // Check for error response first
-        if let Ok(error_resp) = serde_json::from_str::<serde_json::Value>(&response_text) {
-            if error_resp.get("error").is_some() {
-                let error = format!(
-                    "Todoist API error: {} - {}",
-                    error_resp
-                        .get("error_tag")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("UNKNOWN"),
-                    error_resp
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown error")
-                );
-                error!("[TodoistClient] {}", error);
-                return Err(error.into());
-            }
+        if let Ok(error_resp) = serde_json::from_str::<serde_json::Value>(&response_text)
+            && error_resp.get("error").is_some()
+        {
+            let error = format!(
+                "Todoist API error: {} - {}",
+                error_resp
+                    .get("error_tag")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("UNKNOWN"),
+                error_resp
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown error")
+            );
+            error!("[TodoistClient] {}", error);
+            return Err(error.into());
         }
 
         let response: SyncResponse = serde_json::from_str(&response_text).map_err(|e| {
             let error = format!(
                 "Failed to parse SyncResponse: {} - Response (first 500): {}",
                 e,
-                &response_text.chars().take(500).collect::<String>()
+                response_text.chars().take(500).collect::<String>()
             );
             error!("[TodoistClient] {}", error);
             error
@@ -516,7 +506,9 @@ impl TodoistClient {
         Ok(response)
     }
 
-    /// Get all tasks (backward compatibility - performs full sync)
+    /// Get all tasks via a full sync. // ALLOW(compatibility): convenience wrapper kept for older callers
+    ///
+    /// Equivalent to `sync_items(None)`. Newer code paths prefer cursor-based incremental sync.
     pub async fn get_all_tasks(&self) -> Result<Vec<TodoistTaskApiResponse>> {
         let response = self.sync_items(None).await?;
         Ok(response.items)

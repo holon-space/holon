@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use holon_engine::engine::Engine;
 use holon_engine::yaml::{History, YamlMarking, YamlNet};
 use holon_engine::{display, objective};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "holon-engine", about = "Petri net engine")]
@@ -27,7 +27,7 @@ enum Command {
     Objective,
 }
 
-fn load_all(dir: &PathBuf) -> Result<(YamlNet, YamlMarking, History), Box<dyn std::error::Error>> {
+fn load_all(dir: &Path) -> Result<(YamlNet, YamlMarking, History), Box<dyn std::error::Error>> {
     let net = YamlNet::load(&dir.join("net.yaml"))?;
     let mut marking = YamlMarking::load(&dir.join("state.yaml"))?;
     let history = History::load(&dir.join("history.yaml"))?;

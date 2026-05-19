@@ -70,7 +70,7 @@ pub fn parse_markdown_file(
     root: &Path,
 ) -> Result<ParseResult> {
     let file_id = generate_file_id(path, root);
-    // Use the file stem (no extension) as the page title fallback so the
+    // Use the file stem (no extension) as the page title default so the // ALLOW(fallback): default-value comment
     // markdown and org adapters agree on the name shape.
     let file_name = path
         .file_stem()
@@ -177,7 +177,7 @@ pub fn parse_markdown_file(
         // Strip code fences out of the body — they become source-block children.
         let (body_without_code, source_blocks) = extract_code_fences(&body_text);
 
-        let (task_state, heading_text) = strip_task_state_prefix(&heading_text);
+        let (task_state, heading_text) = strip_task_state_prefix(heading_text);
 
         let mut combined = heading_text.to_string();
         let body_clean = body_without_code.trim_end_matches('\n');
@@ -238,7 +238,7 @@ pub fn parse_markdown_file(
                 source_language: src
                     .language
                     .as_deref()
-                    .and_then(|l| l.parse::<SourceLanguage>().ok()),
+                    .and_then(|l| l.parse::<SourceLanguage>().ok()), // ALLOW(ok): unknown language → None is intentional
                 created_at: now,
                 updated_at: now,
                 ..Block::default()
@@ -272,8 +272,10 @@ fn parse_options() -> ParseOptions {
     opts
 }
 
-fn position_offset_or(node: &Node, fallback: usize) -> usize {
-    node.position().map(|p| p.start.offset).unwrap_or(fallback)
+fn position_offset_or(node: &Node, default_offset: usize) -> usize {
+    node.position()
+        .map(|p| p.start.offset)
+        .unwrap_or(default_offset)
 }
 
 fn source_slice(body: &[u8], start: usize, end: usize) -> &str {
@@ -360,7 +362,7 @@ fn is_block_id_byte(b: u8) -> bool {
 }
 
 fn trim_trailing_blank_lines(s: &str) -> &str {
-    s.trim_end_matches(|c: char| c == '\n' || c == '\r' || c == ' ' || c == '\t')
+    s.trim_end_matches(['\n', '\r', ' ', '\t'])
 }
 
 #[derive(Debug)]
@@ -465,7 +467,7 @@ fn apply_frontmatter_to_document(doc: &mut Block, fm: &Frontmatter) {
         doc.set_property("title", holon_api::Value::String(title.clone()));
     }
     if !fm.tags.is_empty() {
-        let tags = Tags::from_iter(fm.tags.clone());
+        let tags = Tags::from_tag_iter(fm.tags.clone());
         doc.set_property("tags", holon_api::Value::String(tags.to_csv()));
     }
     if !fm.extra.is_empty() {

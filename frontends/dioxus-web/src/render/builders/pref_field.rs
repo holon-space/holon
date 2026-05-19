@@ -4,13 +4,13 @@ use holon_api::Value;
 
 pub fn render(
     key: &String,
-    _pref_type: &String,
+    _: &String,
     value: &Value,
-    _requires_restart: &bool,
-    _locked: &bool,
-    _options: &Vec<Value>,
-    _children: &LazyChildren,
-    _ctx: &DioxusRenderContext,
+    _: &bool,
+    _: &bool,
+    _: &Vec<Value>,
+    _: &LazyChildren,
+    _: &DioxusRenderContext,
 ) -> Element {
     let key = key.clone();
     let val = value_to_display(value);

@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn build(_args: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
+pub fn build(_: &ResolvedArgs, ctx: &RenderContext) -> PlyWidget {
     if ctx.data_rows.is_empty() {
         return Box::new(|ui: &mut ply_engine::Ui<'_, ()>| {
             ui.text("[empty]", |t| {

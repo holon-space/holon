@@ -8,14 +8,13 @@ pub fn json_schema_to_type_hint(
     schema: &serde_json::Map<String, Value>,
     param_override: Option<&ParamOverride>,
 ) -> TypeHint {
-    if let Some(ovr) = param_override {
-        if let Some(hint) = &ovr.type_hint {
-            if let Some(entity) = hint.strip_prefix("entity_id:") {
-                return TypeHint::EntityId {
-                    entity_name: entity.into(),
-                };
-            }
-        }
+    if let Some(ovr) = param_override
+        && let Some(hint) = &ovr.type_hint
+        && let Some(entity) = hint.strip_prefix("entity_id:")
+    {
+        return TypeHint::EntityId {
+            entity_name: entity.into(),
+        };
     }
 
     if let Some(Value::Array(variants)) = schema.get("enum") {

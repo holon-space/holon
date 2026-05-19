@@ -116,7 +116,7 @@ impl ChangeOrigin {
     /// Priority:
     /// 1. Task-local CURRENT_TRACE_CONTEXT (most reliable for async propagation)
     /// 2. OpenTelemetry span context (via set_parent)
-    /// 3. Fallback to tracing span ID
+    /// 3. Last resort: derive from the tracing span ID // ALLOW(fallback): doc enumerates resolution order
     ///
     /// flutter_rust_bridge:ignore
     fn extract_trace_context_from_current_span() -> (Option<String>, Option<String>) {
@@ -153,7 +153,7 @@ impl ChangeOrigin {
             return (Some(operation_id), Some(trace_id));
         }
 
-        // Fallback: use tracing span ID if no OTel context available
+        // ALLOW(fallback): last-resort derive from tracing span ID when no OTel context present
         if let Some(id) = span.id() {
             let operation_id = format!("{:016x}", id.into_u64());
             let trace_id = format!("{:032x}", id.into_u64());
@@ -489,7 +489,7 @@ impl BatchTraceContext {
         ))
     }
 
-    /// Get operation ID (alias for span_id, for compatibility)
+    /// Alias for [`span_id`](Self::span_id). Some callers historically read this name.
     pub fn operation_id(&self) -> &str {
         &self.span_id
     }
@@ -505,7 +505,7 @@ impl BatchTraceContext {
     /// 1. Task-local CURRENT_TRACE_CONTEXT (set at FFI boundary)
     /// 2. OpenTelemetry Context::current()
     /// 3. Tracing span context (via set_parent)
-    /// 4. Fallback to tracing span ID
+    /// 4. Last resort: derive from the tracing span ID // ALLOW(fallback): doc enumerates resolution order
     ///
     /// flutter_rust_bridge:ignore
     pub fn from_current_span() -> Option<Self> {
@@ -538,7 +538,7 @@ impl BatchTraceContext {
                 return Some(Self::from_span_context(span_ctx));
             }
 
-            // Fallback: try to create from tracing span ID
+            // ALLOW(fallback): last-resort derive from tracing span ID
             if let Some(id) = span.id() {
                 return Some(Self {
                     trace_id: format!("{:032x}", id.into_u64()),

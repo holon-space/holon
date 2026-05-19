@@ -3,9 +3,9 @@ use super::prelude::*;
 pub fn render(
     language: &String,
     content: &String,
-    _name: &String,
-    _editable: &bool,
-    _ctx: &DioxusRenderContext,
+    _: &String,
+    _: &bool,
+    _: &DioxusRenderContext,
 ) -> Element {
     let lang = language.clone();
     let content = content.clone();

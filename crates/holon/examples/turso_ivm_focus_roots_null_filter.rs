@@ -1,3 +1,4 @@
+#![allow(dead_code, clippy::await_holding_lock)] // standalone repro — diagnostic helpers + harmless lock bridges
 //! FU-13 verification: does `WHERE block_id IS NOT NULL` work in the
 //! `focus_roots`-shaped matview?
 //!

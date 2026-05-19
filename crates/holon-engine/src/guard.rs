@@ -66,6 +66,12 @@ pub struct RhaiEvaluator {
     engine: Engine,
 }
 
+impl Default for RhaiEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RhaiEvaluator {
     pub fn new() -> Self {
         RhaiEvaluator {
@@ -182,9 +188,9 @@ impl RhaiEvaluator {
                 let token_val = token_val?;
                 let matches = match token_val {
                     Value::String(s) => s == spec,
-                    Value::Float(f) => spec.parse::<f64>().map_or(false, |v| (*f - v).abs() < 1e-9),
-                    Value::Int(i) => spec.parse::<i64>().map_or(false, |v| *i == v),
-                    Value::Bool(b) => spec.parse::<bool>().map_or(false, |v| *b == v),
+                    Value::Float(f) => spec.parse::<f64>().is_ok_and(|v| (*f - v).abs() < 1e-9),
+                    Value::Int(i) => spec.parse::<i64>() == Ok(*i),
+                    Value::Bool(b) => spec.parse::<bool>() == Ok(*b),
                     Value::Null => spec == "null",
                 };
                 if !matches {

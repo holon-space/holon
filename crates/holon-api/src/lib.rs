@@ -112,7 +112,7 @@ pub enum Number {
     Float(f64),
 }
 
-/// Value type for flutter_rust_bridge compatibility
+/// Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility): FRB constrains the variant shape
 ///
 /// This type is used in holon-prql-render and re-exported by holon
 /// to ensure type consistency across the codebase.
@@ -125,10 +125,10 @@ pub enum Value {
     Integer(i64),
     Float(f64),
     Boolean(bool),
-    // DateTime variant: stored as RFC3339 string for flutter_rust_bridge compatibility
+    // DateTime variant: stored as RFC3339 string for flutter_rust_bridge interop. // ALLOW(compatibility): FRB doesn't expose chrono::DateTime
     // Use as_datetime() to get the parsed chrono::DateTime
     DateTime(String),
-    // Json variant: stored as String for flutter_rust_bridge compatibility
+    // Json variant: stored as String for flutter_rust_bridge interop. // ALLOW(compatibility): FRB doesn't expose serde_json::Value
     // Use as_json_value() to get the parsed serde_json::Value
     Json(String),
     Array(Vec<Value>),
@@ -142,7 +142,7 @@ impl Value {
     /// flutter_rust_bridge:ignore
     pub fn as_json_value(&self) -> Option<serde_json::Value> {
         match self {
-            // ALLOW(ok): fallback to None for invalid JSON
+            // ALLOW(ok) ALLOW(fallback): malformed Json variant returns None (FRB-shaped string)
             Value::Json(s) => serde_json::from_str(s).ok(),
             _ => None,
         }

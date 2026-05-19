@@ -388,17 +388,16 @@ fn build_fdw_metadata(
         }
         // Source 2: dynamic URI template params (column name == param name, Eq-only)
         // Required only if there's no enumerate_from enumeration.
-        else if let Some(param_val) = vtable_config.uri_params.get(col_name) {
-            if param_val.is_dynamic() {
-                let has_enumeration = matches!(param_val, UriParamValue::Dynamic(_));
-                let mut kc =
-                    KeyColumn::new(col_name.clone(), col_idx as u32, vec![ConstraintOp::Eq]);
-                if !has_enumeration {
-                    kc = kc.required();
-                }
-                column_to_param.insert(col_idx as u32, col_name.clone());
-                key_columns.push(kc);
+        else if let Some(param_val) = vtable_config.uri_params.get(col_name)
+            && param_val.is_dynamic()
+        {
+            let has_enumeration = matches!(param_val, UriParamValue::Dynamic(_));
+            let mut kc = KeyColumn::new(col_name.clone(), col_idx as u32, vec![ConstraintOp::Eq]);
+            if !has_enumeration {
+                kc = kc.required();
             }
+            column_to_param.insert(col_idx as u32, col_name.clone());
+            key_columns.push(kc);
         }
     }
 
@@ -418,6 +417,7 @@ impl McpForeignDataWrapper {
     /// `cache_table` is the name of the local BTree table to write through to.
     /// `entity_prefix` is needed to resolve `enumerate_from` entity references
     /// to actual SQL table names (e.g. `"cc_"` + `"session"` → `"cc_session"`).
+    #[allow(clippy::too_many_arguments)] // constructor wires the vtable's full surface
     pub fn new(
         table_name: &str,
         columns: &[(String, String)],
@@ -654,10 +654,10 @@ impl McpCursor {
     ) -> HashMap<String, String> {
         let mut params = default_params.clone();
         for c in constraints {
-            if let Some(param_name) = self.column_to_param.get(&c.column_index) {
-                if let Value::Text(ref t) = c.value {
-                    params.insert(param_name.clone(), t.as_str().to_owned());
-                }
+            if let Some(param_name) = self.column_to_param.get(&c.column_index)
+                && let Value::Text(ref t) = c.value
+            {
+                params.insert(param_name.clone(), t.as_str().to_owned());
             }
         }
         params
@@ -820,10 +820,10 @@ impl McpCursor {
                             .and_then(|m| resolve_json_path(m, total_response_path))
                             .and_then(|v| v.as_u64());
                     }
-                    if let Some(t) = total {
-                        if (all.len() as u64) >= t {
-                            break;
-                        }
+                    if let Some(t) = total
+                        && (all.len() as u64) >= t
+                    {
+                        break;
                     }
                     page += 1;
                 }
@@ -1028,12 +1028,11 @@ impl ForeignCursor for McpCursor {
                             (Some(v), _) => json_value_to_turso_value(&v),
                         };
                         // Apply ID scheme prefix if this is the ID column
-                        if let Some((ref id_col, ref scheme)) = self.id_scheme {
-                            if col_name == id_col {
-                                if let Value::Text(ref t) = val {
-                                    return Value::build_text(format!("{scheme}:{}", t.as_str()));
-                                }
-                            }
+                        if let Some((ref id_col, ref scheme)) = self.id_scheme
+                            && col_name == id_col
+                            && let Value::Text(ref t) = val
+                        {
+                            return Value::build_text(format!("{scheme}:{}", t.as_str()));
                         }
                         val
                     })

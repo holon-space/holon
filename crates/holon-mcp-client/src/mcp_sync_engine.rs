@@ -66,6 +66,7 @@ pub struct McpSyncEngine {
 }
 
 impl McpSyncEngine {
+    #[allow(clippy::too_many_arguments)] // wires up the full sync pipeline; each arg is a distinct subsystem
     pub fn new(
         peer: Peer<RoleClient>,
         strategies: HashMap<String, Box<dyn SyncStrategy>>,
@@ -179,7 +180,7 @@ impl McpSyncEngine {
         let entity_type = self.sidecar.prefixed_name(entity_name);
         let scheme = entity_type.as_str();
 
-        if fetch_result.new_cursor.is_some() {
+        if let Some(new_cursor) = fetch_result.new_cursor.clone() {
             // Incremental sync — server already filtered to new/changed records
             let changes: Vec<Change<DynamicEntity>> = fetch_result
                 .records
@@ -194,7 +195,6 @@ impl McpSyncEngine {
                 cache.apply_batch(&changes, None).await?;
             }
 
-            let new_cursor = fetch_result.new_cursor.unwrap();
             self.token_store
                 .save_token(
                     &token_key,
@@ -472,6 +472,7 @@ impl McpSyncEngine {
 
 #[async_trait]
 impl MatviewHook for McpSyncEngine {
+    // ALLOW(unused_param): _fdw_sql required by trait shape — handler ignores it
     async fn on_fdw_primed(&self, cache_table: &str, _fdw_sql: &str) {
         // Find the vtable subscription for this cache table.
         // The FDW table name is "{cache_table}_fdw", so match by stripping the suffix.
@@ -528,6 +529,7 @@ impl SyncableProvider for McpSyncEngine {
         &self.provider_name
     }
 
+    // ALLOW(unused_param): _position required by trait shape — full sync ignores stream position
     async fn sync(&self, _position: StreamPosition) -> Result<StreamPosition> {
         let span = info_span!("mcp_full_sync", provider = %self.provider_name);
         async {

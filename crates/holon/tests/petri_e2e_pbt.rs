@@ -714,15 +714,15 @@ fn check_engine_invariants(ref_state: &PetriRefState, net: &TaskNet, marking: &T
         // Check sequential deps: find previous sibling
         if block.has_sequential_dep {
             let prev_sibling = find_previous_sibling(ref_state, block);
-            if let Some(prev_id) = prev_sibling {
-                if !completed_ids.contains(&prev_id) {
-                    assert!(
-                        !enabled_ids.contains(&block.id),
-                        "Task {} is enabled but sequential dep {} is incomplete",
-                        block.id,
-                        prev_id
-                    );
-                }
+            if let Some(prev_id) = prev_sibling
+                && !completed_ids.contains(&prev_id)
+            {
+                assert!(
+                    !enabled_ids.contains(&block.id),
+                    "Task {} is enabled but sequential dep {} is incomplete",
+                    block.id,
+                    prev_id
+                );
             }
         }
     }
@@ -914,19 +914,18 @@ fn check_dependency_arcs(ref_state: &PetriRefState, net: &TaskNet) {
         }
 
         // Check sequential dep
-        if block.has_sequential_dep {
-            if let Some(prev_id) = find_previous_sibling(ref_state, block) {
-                let has_seq_arc = transition.inputs().iter().any(|i| {
-                    i.token_type == "completion"
-                        && i.precond.get("source_task").map(|v| v.as_str())
-                            == Some(prev_id.as_str())
-                });
-                assert!(
-                    has_seq_arc,
-                    "Task {} should have sequential dep arc for previous sibling {}",
-                    block.id, prev_id
-                );
-            }
+        if block.has_sequential_dep
+            && let Some(prev_id) = find_previous_sibling(ref_state, block)
+        {
+            let has_seq_arc = transition.inputs().iter().any(|i| {
+                i.token_type == "completion"
+                    && i.precond.get("source_task").map(|v| v.as_str()) == Some(prev_id.as_str())
+            });
+            assert!(
+                has_seq_arc,
+                "Task {} should have sequential dep arc for previous sibling {}",
+                block.id, prev_id
+            );
         }
     }
 }
@@ -1098,42 +1097,42 @@ fn check_fire_invariants(
     );
 
     // b) If question task: knowledge token created
-    if let Some(block) = ref_state.blocks.get(&binding.transition_id) {
-        if block.is_question {
-            let knowledge_id = format!("knowledge_{}", binding.transition_id);
+    if let Some(block) = ref_state.blocks.get(&binding.transition_id)
+        && block.is_question
+    {
+        let knowledge_id = format!("knowledge_{}", binding.transition_id);
+        assert!(
+            post_marking.token(&knowledge_id).is_some(),
+            "Question task {} must create knowledge token after firing",
+            binding.transition_id
+        );
+    }
+
+    // c) Consumed tokens (consume: true arcs) are gone
+    for input in transition.inputs() {
+        if input.consume
+            && let Some(token_id) = binding.token_bindings.get(&input.bind)
+        {
             assert!(
-                post_marking.token(&knowledge_id).is_some(),
-                "Question task {} must create knowledge token after firing",
+                post_marking.token(token_id).is_none(),
+                "Consumed token {} should be removed after firing {}",
+                token_id,
                 binding.transition_id
             );
         }
     }
 
-    // c) Consumed tokens (consume: true arcs) are gone
-    for input in transition.inputs() {
-        if input.consume {
-            if let Some(token_id) = binding.token_bindings.get(&input.bind) {
-                assert!(
-                    post_marking.token(token_id).is_none(),
-                    "Consumed token {} should be removed after firing {}",
-                    token_id,
-                    binding.transition_id
-                );
-            }
-        }
-    }
-
     // d) Non-consumed tokens still exist
     for input in transition.inputs() {
-        if !input.consume {
-            if let Some(token_id) = binding.token_bindings.get(&input.bind) {
-                assert!(
-                    post_marking.token(token_id).is_some(),
-                    "Non-consumed token {} should still exist after firing {}",
-                    token_id,
-                    binding.transition_id
-                );
-            }
+        if !input.consume
+            && let Some(token_id) = binding.token_bindings.get(&input.bind)
+        {
+            assert!(
+                post_marking.token(token_id).is_some(),
+                "Non-consumed token {} should still exist after firing {}",
+                token_id,
+                binding.transition_id
+            );
         }
     }
 

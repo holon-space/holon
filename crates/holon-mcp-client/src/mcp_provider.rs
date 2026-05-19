@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -24,14 +25,12 @@ use crate::mcp_sidecar::{McpSidecar, UndoConfig};
 
 /// Type-erased entity field reader — reads entity fields as HashMap<String, Value>.
 /// Allows McpOperationProvider to capture old state without knowing concrete entity types.
-pub trait EntityFieldReader: Send + Sync {
-    fn get_fields(
-        &self,
-        id: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<HashMap<String, Value>>>> + Send + '_>>;
-}
+type FieldReadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<HashMap<String, Value>>>> + Send + 'a>>;
 
-use std::future::Future;
+pub trait EntityFieldReader: Send + Sync {
+    fn get_fields(&self, id: &str) -> FieldReadFuture<'_>;
+}
 
 use holon::core::queryable_cache::QueryableCache;
 use holon_api::entity::{IntoEntity, TryFromEntity};

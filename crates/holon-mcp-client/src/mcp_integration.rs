@@ -69,6 +69,7 @@ pub struct McpIntegrationConfig {
 /// Result of building an MCP integration.
 ///
 /// OAuth connections may require user consent before the connection is ready.
+#[allow(clippy::large_enum_variant)] // OAuthPending carries small flow-state; Connected wraps a full integration handle
 pub enum McpConnectionResult {
     /// Connection is ready to use.
     Connected(McpIntegration),
@@ -101,13 +102,13 @@ impl McpIntegration {
         let sidecar = self.sync_engine.sidecar();
         for (entity_name, entity_config) in &sidecar.entities {
             let table_name = sidecar.prefixed_name(entity_name).table_name();
-            if let Some(td) = entity_config.to_type_definition(&table_name) {
-                if let Err(e) = type_registry.register(td) {
-                    tracing::warn!(
-                        "[McpIntegration] Failed to register type '{}': {e}",
-                        table_name
-                    );
-                }
+            if let Some(td) = entity_config.to_type_definition(&table_name)
+                && let Err(e) = type_registry.register(td)
+            {
+                tracing::warn!(
+                    "[McpIntegration] Failed to register type '{}': {e}",
+                    table_name
+                );
             }
         }
     }

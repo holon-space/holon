@@ -4,8 +4,8 @@ use crate::render::EntityContext;
 
 pub fn render(
     content: &String,
-    _field: &String,
-    _ctx: &DioxusRenderContext,
+    _: &String,
+    _: &DioxusRenderContext,
 ) -> Element {
     let content = content.clone();
     rsx! { EditableTextNode { content } }

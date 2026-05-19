@@ -35,7 +35,7 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
     // Idempotent — skip if root block already present.
     let existing = db
         .query(
-            &format!("SELECT id FROM {BLOCK_READ_TABLE} WHERE id = '{ROOT_ID}'"),
+            &format!("SELECT id FROM {BLOCK_READ_TABLE} WHERE id = '{ROOT_ID}'"), // ALLOW(sql): idempotency check during seed
             Default::default(),
         )
         .await?;
@@ -182,7 +182,7 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         } else {
             format!(", '{source_language}'")
         };
-        let sql = format!(
+        let sql = format!( // ALLOW(sql): seed INSERT for the bundled default layout
             "INSERT OR IGNORE INTO {BLOCK_WRITE_TABLE} \
              (id, parent_id, content, content_type{lang_col}, sort_key, properties, created_at, updated_at) \
              VALUES ('{id}', '{parent_id}', '{content_escaped}', '{content_type}'{lang_val}, \

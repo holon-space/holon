@@ -178,7 +178,7 @@ impl EventStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "speculative" => Some(EventStatus::Speculative),
             "confirmed" => Some(EventStatus::Confirmed),
@@ -209,7 +209,7 @@ impl EventOrigin {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s {
             "loro" => EventOrigin::Loro,
             "org" => EventOrigin::Org,

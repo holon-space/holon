@@ -195,7 +195,7 @@ impl BackendEngine {
                 "[diag-cdc-leak] subscribe_sql: SQL → view"
             );
         }
-        let view_name = self.matview_manager.ensure_view(&sql).await?;
+        let view_name = self.matview_manager.ensure_view(sql).await?;
         Ok(self.matview_manager.subscribe_cdc(&view_name))
     }
 
@@ -294,7 +294,7 @@ impl BackendEngine {
         Ok(Self::gql_params_to_dollar(&sql))
     }
 
-    /// Convert GQL `:param` syntax to `$param` for compatibility with `inline_parameters`.
+    /// Convert GQL `:param` syntax to `$param` so `inline_parameters` can read it. // ALLOW(compatibility): doc describes parameter normalisation, not a shim
     fn gql_params_to_dollar(sql: &str) -> String {
         use std::fmt::Write;
         let mut result = String::with_capacity(sql.len());
@@ -303,12 +303,12 @@ impl BackendEngine {
             if c == ':' {
                 if chars
                     .peek()
-                    .map_or(false, |ch| ch.is_ascii_alphabetic() || *ch == '_')
+                    .is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == '_')
                 {
                     result.push('$');
                     while chars
                         .peek()
-                        .map_or(false, |ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
                     {
                         let _ = write!(result, "{}", chars.next().unwrap());
                     }
@@ -318,7 +318,7 @@ impl BackendEngine {
             } else if c == '\'' {
                 // Skip string literals — don't convert inside quoted strings
                 result.push(c);
-                while let Some(sc) = chars.next() {
+                for sc in chars.by_ref() {
                     result.push(sc);
                     if sc == '\'' {
                         break;
@@ -455,13 +455,7 @@ impl BackendEngine {
         // db_handle used directly
         let mut last_error = None;
         for attempt in 0..5 {
-            // On first attempt, use normal connection. On retries, use fresh connection
-            // to avoid stale prepared statement caches.
-            let result = if attempt == 0 {
-                self.db_handle.query(&sql, params.clone()).await
-            } else {
-                self.db_handle.query(&sql, params.clone()).await
-            };
+            let result = self.db_handle.query(&sql, params.clone()).await;
             match result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
@@ -744,12 +738,11 @@ impl BackendEngine {
             }
 
             // If operation succeeded and has an inverse, push to undo stack
-            if let Ok(result) = &operation_result {
-                if let UndoAction::Undo(inverse_op) = &result.undo {
+            if let Ok(result) = &operation_result
+                && let UndoAction::Undo(inverse_op) = &result.undo {
                     let mut undo_stack = self.undo_stack.write().await;
                     undo_stack.push(original_op, inverse_op.clone());
                 }
-            }
 
             operation_result.map(|r| r.response).map_err(|e| {
                 anyhow::anyhow!(
@@ -863,7 +856,6 @@ impl BackendEngine {
     /// # Ok(())
     /// # }
     /// ```
-
     pub async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
         self.dispatcher
             .operations()

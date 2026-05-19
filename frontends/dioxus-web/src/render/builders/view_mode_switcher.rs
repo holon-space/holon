@@ -2,10 +2,10 @@ use super::prelude::*;
 use holon_api::EntityUri;
 
 pub fn render(
-    _entity_uri: &EntityUri,
-    _modes: &String,
+    _: &EntityUri,
+    _: &String,
     child: &Box<ViewModel>,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     rsx! { RenderNode { node: (**child).clone() } }
 }

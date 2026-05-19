@@ -78,9 +78,9 @@ fn turso_ivm_index_points_to_nonexistent_row() {
                     "#+END_SRC\n",
                 ),
             )
-            .with_org_file("doc_a.org", &org_headings(5, "a"))
-            .with_org_file("doc_b.org", &org_headings(3, "b"))
-            .with_org_file("doc_c.org", &org_headings(3, "c"))
+            .with_org_file("doc_a.org", org_headings(5, "a"))
+            .with_org_file("doc_b.org", org_headings(3, "b"))
+            .with_org_file("doc_c.org", org_headings(3, "c"))
             .build(rt.clone())
             .await
             .expect("Failed to build environment");
@@ -148,7 +148,7 @@ fn turso_ivm_index_bug_stress() {
                     .with_todoist_fake()
                     .with_org_file(
                         "index.org",
-                        &format!(
+                        format!(
                             concat!(
                                 "* Query {round}\n",
                                 ":PROPERTIES:\n",
@@ -164,10 +164,10 @@ fn turso_ivm_index_bug_stress() {
                             round = round
                         ),
                     )
-                    .with_org_file("a.org", &org_headings(8, &format!("a{round}")))
-                    .with_org_file("b.org", &org_headings(6, &format!("b{round}")))
-                    .with_org_file("c.org", &org_headings(4, &format!("c{round}")))
-                    .with_org_file("d.org", &org_headings(4, &format!("d{round}")))
+                    .with_org_file("a.org", org_headings(8, &format!("a{round}")))
+                    .with_org_file("b.org", org_headings(6, &format!("b{round}")))
+                    .with_org_file("c.org", org_headings(4, &format!("c{round}")))
+                    .with_org_file("d.org", org_headings(4, &format!("d{round}")))
                     .build(rt.clone())
                     .await
                     .expect("build");

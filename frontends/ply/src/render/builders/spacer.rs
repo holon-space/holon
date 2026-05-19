@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn build(args: &ResolvedArgs, _ctx: &RenderContext) -> PlyWidget {
+pub fn build(args: &ResolvedArgs, _: &RenderContext) -> PlyWidget {
     let w = args
         .get_f64("width")
         .or(args.get_f64("w"))

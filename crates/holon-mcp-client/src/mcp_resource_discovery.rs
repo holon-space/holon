@@ -28,12 +28,12 @@ pub fn parse_resource_template_meta(template: &ResourceTemplate) -> Option<Resou
     let mapping = doc.as_mapping()?;
 
     let entity_name = mapping
-        .get(&serde_yaml::Value::String("entity".into()))?
+        .get(serde_yaml::Value::String("entity".into()))?
         .as_str()?
         .to_string();
 
     let primary_keys: Vec<String> = mapping
-        .get(&serde_yaml::Value::String("primary_keys".into()))?
+        .get(serde_yaml::Value::String("primary_keys".into()))?
         .as_sequence()?
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -43,14 +43,14 @@ pub fn parse_resource_template_meta(template: &ResourceTemplate) -> Option<Resou
         return None;
     }
 
-    let schema_value = mapping.get(&serde_yaml::Value::String("schema".into()))?;
+    let schema_value = mapping.get(serde_yaml::Value::String("schema".into()))?;
     let schema_map = schema_value.as_mapping()?;
 
     // Support both flat format (`id: string`) and JSON Schema format
     // (`type: object, properties: { id: { type: string } }`)
-    let field_map = if schema_map.contains_key(&serde_yaml::Value::String("properties".into())) {
+    let field_map = if schema_map.contains_key(serde_yaml::Value::String("properties".into())) {
         schema_map
-            .get(&serde_yaml::Value::String("properties".into()))?
+            .get(serde_yaml::Value::String("properties".into()))?
             .as_mapping()?
     } else {
         schema_map
@@ -64,10 +64,9 @@ pub fn parse_resource_template_meta(template: &ResourceTemplate) -> Option<Resou
             // JSON Schema format: value is a mapping like { type: "string" }
             let type_str = if let Some(s) = v.as_str() {
                 s
-            } else if let Some(m) = v.as_mapping() {
-                m.get(&serde_yaml::Value::String("type".into()))?.as_str()?
             } else {
-                return None;
+                let m = v.as_mapping()?;
+                m.get(serde_yaml::Value::String("type".into()))?.as_str()?
             };
             let sql_type = map_type_to_sql(type_str);
             let is_pk = primary_keys.contains(&name.to_string());

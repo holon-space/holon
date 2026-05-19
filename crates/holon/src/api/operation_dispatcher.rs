@@ -611,7 +611,7 @@ mod tests {
             &self,
             entity_name: &EntityName,
             op_name: &str,
-            _params: StorageEntity,
+            _: StorageEntity,
         ) -> Result<OperationResult> {
             if entity_name != self.entity_name.as_str() {
                 return Err(format!(

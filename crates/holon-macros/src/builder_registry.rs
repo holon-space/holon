@@ -311,10 +311,10 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if let Some(stem) = name.strip_suffix(".rs") {
-                if !skip_set.contains(stem) {
-                    return Some(stem.to_string());
-                }
+            if let Some(stem) = name.strip_suffix(".rs")
+                && !skip_set.contains(stem)
+            {
+                return Some(stem.to_string());
             }
             None
         })

@@ -12,7 +12,7 @@ pub fn render(
     node: &holon_frontend::ReactiveViewModel,
     ctx: &GpuiRenderContext,
 ) -> AnyElement {
-    let content = node.prop_str("content").unwrap_or_else(|| "".to_string());
+    let content = node.prop_str("content").unwrap_or_default();
     let field = node.prop_str("field").unwrap_or_else(|| "content".to_string());
 
     let Some(row_id) = node.row_id() else {

@@ -114,8 +114,7 @@ pub trait RefBlockTree {
     /// True if `id` is in the "no content update" set — render sources,
     /// query sources, profile blocks. Wide PBT consults
     /// `layout_blocks.render_source_ids` + `layout_blocks.query_source_ids`
-    /// + `profile_block_ids`. Pure slice has no such concept → returns
-    /// `false`.
+    /// + `profile_block_ids`. Pure slice has no such concept → returns `false`.
     fn is_no_content_update(&self, id: &CapBlockId) -> bool;
 
     /// True if `id` is a Page block (tagged `Page`). Mirrors

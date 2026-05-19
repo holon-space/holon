@@ -68,6 +68,30 @@ impl HeadlessEditorMirror {
             .insert(block_id.to_string(), byte);
     }
 
+    /// Read `block_raw.content` for `block_id` via the engine's SQL
+    /// surface. Returns `""` when the block isn't present yet (e.g. the
+    /// just-clicked block's create event hasn't projected) — caller's
+    /// subsequent keystrokes then no-op until the row materialises,
+    /// matching production GPUI's "editor mounts after CDC settles"
+    /// behaviour.
+    async fn sql_block_content(&self, engine: &Arc<ReactiveEngine>, block_id: &str) -> String {
+        let escaped = block_id.replace('\'', "''");
+        let sql = format!("SELECT content FROM block_raw WHERE id = '{escaped}'");
+        let rows = engine
+            .session()
+            .execute_query(sql, HashMap::new(), None)
+            .await
+            .unwrap_or_default();
+        rows.into_iter()
+            .next()
+            .and_then(|r| {
+                r.get("content")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    }
+
     /// Route a single keystroke through the same logical pipeline GPUI's
     /// `editor_view.rs` runs in capture phase: char keys mutate
     /// `MutableText` directly, Enter / Backspace-at-0 / Tab / Shift+Tab
@@ -134,7 +158,20 @@ impl HeadlessEditorMirror {
                  increase the consumer timeout or check why the loro consumer is stuck."
             );
         }
-        let current_text = mt.as_ref().map(|m| m.current()).unwrap_or_default();
+        // SqlOnly variant has no `MutableText` — read the block's
+        // SQL-projected `content` directly so the headless cursor walks the
+        // same byte string a production GPUI editor would after
+        // `set_value(content)`. Without this, `current_text` was `""`,
+        // `cursor_or_init` pinned the cursor at 0, every "right" keystroke
+        // no-op'd (`"".chars().next() == None`), and Enter fired
+        // `split_block(.., position=0)` — the SqlOnly SplitBlock content-
+        // routing divergence first surfaced by `split_block_content_pbt`
+        // (commit aa636444).
+        let current_text = if let Some(ref m) = mt {
+            m.current()
+        } else {
+            self.sql_block_content(engine, &block_id).await
+        };
         let cursor_byte = self.cursor_or_init(&block_id, &current_text);
 
         let has_shift = modifiers.iter().any(|m| *m == "shift");

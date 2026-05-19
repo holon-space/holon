@@ -3,7 +3,7 @@ use crate::geometry::TransparentTracker;
 use holon_frontend::{expand_toggle_id_for, reactive_view_model::ReactiveViewModel};
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let target_id = node.prop_str("target_id").unwrap_or_else(|| "".to_string());
+    let target_id = node.prop_str("target_id").unwrap_or_default();
     let expanded = node
         .expanded
         .as_ref()

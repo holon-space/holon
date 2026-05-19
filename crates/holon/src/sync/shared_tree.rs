@@ -32,6 +32,12 @@ pub struct InMemorySharedTreeStore {
     trees: std::collections::HashMap<String, Arc<LoroDoc>>,
 }
 
+impl Default for InMemorySharedTreeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemorySharedTreeStore {
     pub fn new() -> Self {
         Self {
@@ -400,11 +406,10 @@ pub fn is_mount_node(tree: &LoroTree, node: TreeID) -> bool {
 pub fn read_mount_info(tree: &LoroTree, node: TreeID) -> Option<MountInfo> {
     let meta = tree.get_meta(node).ok()?; // ALLOW(ok): node may be deleted
 
-    let kind = match meta.get(MOUNT_KIND) {
+    match meta.get(MOUNT_KIND) {
         Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_ref() == MOUNT_KIND_VALUE => {}
         _ => return None,
     };
-    let _ = kind;
 
     let shared_tree_id = match meta.get(MOUNT_SHARED_TREE_ID) {
         Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),

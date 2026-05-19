@@ -181,7 +181,7 @@ fn main() {
                     .timer(Duration::from_millis(200))
                     .await;
                 if quit_rx.try_recv().is_ok() {
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                     break;
                 }
             }

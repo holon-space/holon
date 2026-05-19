@@ -349,12 +349,11 @@ impl SqlOperationProvider {
     /// and MCP callers that don't pass the key fall through to the walk —
     /// correctness preserved.
     async fn resolve_doc_uri(&self, params: &StorageEntity, block_id: &str) -> Option<String> {
-        if let Some(v) = params.get(crate::sync::event_bus::ROUTING_DOC_URI_KEY) {
-            if let Some(s) = v.as_string() {
-                if !s.is_empty() {
-                    return Some(s.to_string());
-                }
-            }
+        if let Some(v) = params.get(crate::sync::event_bus::ROUTING_DOC_URI_KEY)
+            && let Some(s) = v.as_string()
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
         }
         self.find_document_uri(block_id).await
     }
@@ -462,10 +461,7 @@ impl SqlOperationProvider {
         // blocks preserve content verbatim. Look up `content_type` from the
         // params so `trimmed_content` can branch correctly. Defaults to
         // text when absent — the common case.
-        let is_source = params
-            .get("content_type")
-            .and_then(|v| v.as_string())
-            .map_or(false, |s| s == "source");
+        let is_source = params.get("content_type").and_then(|v| v.as_string()) == Some("source");
 
         for (key, value) in params.iter() {
             if key == "properties" {
@@ -521,28 +517,24 @@ impl SqlOperationProvider {
         }
 
         // Merge existing properties JSON into extra_props
-        if let Some(json_str) = existing_properties_json {
-            if let Ok(map) = serde_json::from_str::<
+        if let Some(json_str) = existing_properties_json
+            && let Ok(map) = serde_json::from_str::<
                 std::collections::HashMap<String, serde_json::Value>,
             >(&json_str)
-            {
-                for (k, v) in map {
-                    if !extra_props.contains_key(&k) {
-                        let value = match v {
-                            serde_json::Value::String(s) => Value::String(s),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    Value::Integer(i)
-                                } else {
-                                    Value::Float(n.as_f64().unwrap_or(0.0))
-                                }
-                            }
-                            serde_json::Value::Bool(b) => Value::Boolean(b),
-                            _ => Value::String(v.to_string()),
-                        };
-                        extra_props.insert(k, value);
+        {
+            for (k, v) in map {
+                extra_props.entry(k).or_insert_with(|| match v {
+                    serde_json::Value::String(s) => Value::String(s),
+                    serde_json::Value::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            Value::Integer(i)
+                        } else {
+                            Value::Float(n.as_f64().unwrap_or(0.0))
+                        }
                     }
-                }
+                    serde_json::Value::Bool(b) => Value::Boolean(b),
+                    _ => Value::String(v.to_string()),
+                });
             }
         }
 
@@ -587,10 +579,10 @@ impl SqlOperationProvider {
                 .map_err(|e| format!("Failed to execute SQL: {}", e))?;
         }
         for event in prepared.events {
-            if let Some(ref bus) = self.event_bus {
-                if let Err(e) = bus.publish(event, None).await {
-                    tracing::warn!("[SqlOperationProvider] Failed to publish event: {}", e);
-                }
+            if let Some(ref bus) = self.event_bus
+                && let Err(e) = bus.publish(event, None).await
+            {
+                tracing::warn!("[SqlOperationProvider] Failed to publish event: {}", e);
             }
         }
         Ok(())
@@ -702,7 +694,7 @@ impl SqlOperationProvider {
 
         let payload = self.build_event_payload(&params);
         let event = self
-            .make_event(EventKind::Created, &aggregate_id, payload)
+            .make_event(EventKind::Created, aggregate_id, payload)
             .with_position_after_block_id(position_after)
             .with_routing_doc_uri(routing_doc_uri);
 
@@ -892,7 +884,7 @@ impl SqlOperationProvider {
             ));
         }
         for (descriptor, targets) in &edge_field_params {
-            sql_statements.extend(Self::edge_field_replace_sql(&id, descriptor, targets));
+            sql_statements.extend(Self::edge_field_replace_sql(id, descriptor, targets));
         }
         Ok(Some(PreparedOp {
             sql_statements,
@@ -908,7 +900,7 @@ impl SqlOperationProvider {
             .and_then(|v| v.as_string())
             .ok_or_else(|| "Missing 'id' parameter".to_string())?;
 
-        let doc_uri = self.resolve_doc_uri(params, &id).await;
+        let doc_uri = self.resolve_doc_uri(params, id).await;
 
         let mut queue = vec![id.to_string()];
         let mut all_ids = Vec::new();
@@ -960,7 +952,7 @@ impl SqlOperationProvider {
             id.replace('\'', "''")
         ));
         events.push(
-            self.make_event(EventKind::Deleted, &id, HashMap::new())
+            self.make_event(EventKind::Deleted, id, HashMap::new())
                 .with_routing_doc_uri(doc_uri.clone()),
         );
 
@@ -983,10 +975,7 @@ impl SqlOperationProvider {
         let mut data_map = serde_json::Map::new();
         let mut props_map = serde_json::Map::new();
 
-        let is_source = params
-            .get("content_type")
-            .and_then(|v| v.as_string())
-            .map_or(false, |s| s == "source");
+        let is_source = params.get("content_type").and_then(|v| v.as_string()) == Some("source");
 
         for (key, value) in params.iter() {
             // Edge-typed fields live in junction tables, not in the row's
@@ -1230,7 +1219,7 @@ impl OperationProvider for SqlOperationProvider {
                                 .and_then(|v| v.as_string())
                                 .map(|s| s.to_string())
                         })
-                        .map_or(false, |s| s == "source");
+                        .is_some_and(|s| s == "source");
                     Self::trimmed_content(raw_value, is_source)
                 } else {
                     raw_value.clone()
@@ -1264,7 +1253,7 @@ impl OperationProvider for SqlOperationProvider {
                             )),
                         })
                         .collect::<std::result::Result<Vec<_>, _>>()?;
-                    for stmt in Self::edge_field_replace_sql(&id, descriptor, &targets) {
+                    for stmt in Self::edge_field_replace_sql(id, descriptor, &targets) {
                         self.db_handle
                             .execute(&stmt, vec![])
                             .await
@@ -1273,11 +1262,11 @@ impl OperationProvider for SqlOperationProvider {
                     return Ok(OperationResult::irreversible(Vec::new()));
                 }
 
-                let sql = if self.known_columns.contains(&*field) {
+                let sql = if self.known_columns.contains(field) {
                     format!(
                         "UPDATE {} SET {} = {} WHERE id = '{}'",
                         self.table_name,
-                        Self::quote_identifier(&field),
+                        Self::quote_identifier(field),
                         sql_value,
                         id.replace('\'', "''")
                     )
@@ -1336,10 +1325,10 @@ impl OperationProvider for SqlOperationProvider {
                 // Document-routing hint rides on the typed `Event::routing_doc_uri`
                 // field — lets the OrgMode event handler route this to
                 // `on_block_changed(doc_id)` instead of `re_render_all_tracked()`.
-                let routing_doc_uri = self.resolve_doc_uri(&params, &id).await;
+                let routing_doc_uri = self.resolve_doc_uri(&params, id).await;
                 self.publish_event(
                     EventKind::FieldsChanged,
-                    &id,
+                    id,
                     payload,
                     None,
                     routing_doc_uri,
@@ -1523,7 +1512,7 @@ impl OperationProvider for SqlOperationProvider {
 
                 let states: Vec<String> =
                     vec!["".into(), "TODO".into(), "DOING".into(), "DONE".into()];
-                let next = holon_api::render_eval::cycle_state(&current, &states);
+                let next = holon_api::render_eval::cycle_state(current, &states);
 
                 let mut set_params = StorageEntity::new();
                 set_params.insert("id".into(), Value::String(id));

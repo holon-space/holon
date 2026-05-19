@@ -2,7 +2,7 @@ use super::prelude::*;
 use holon_frontend::ReactiveViewModel;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let title = node.prop_str("title").unwrap_or_else(|| "".to_string());
+    let title = node.prop_str("title").unwrap_or_default();
     let children = &node.children;
     let mut container = div().size_full().flex_1().flex_col().gap(px(8.0));
 

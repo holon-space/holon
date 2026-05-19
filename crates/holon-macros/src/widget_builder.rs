@@ -120,18 +120,13 @@ fn parse_param_type(input: ParseStream) -> syn::Result<ParamType> {
         "Expr" => Ok(ParamType::Expr),
         "Option" => {
             // Parse Option<String> — extract the inner type
-            if let Type::Path(tp) = &ty {
-                if let Some(seg) = tp.path.segments.last() {
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(Type::Path(inner))) =
-                            args.args.first()
-                        {
-                            if inner.path.is_ident("String") {
-                                return Ok(ParamType::OptionalString);
-                            }
-                        }
-                    }
-                }
+            if let Type::Path(tp) = &ty
+                && let Some(seg) = tp.path.segments.last()
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                && let Some(syn::GenericArgument::Type(Type::Path(inner))) = args.args.first()
+                && inner.path.is_ident("String")
+            {
+                return Ok(ParamType::OptionalString);
             }
             Err(syn::Error::new_spanned(
                 ty,
@@ -243,9 +238,9 @@ fn generate_extraction(params: &[WidgetParam]) -> proc_macro2::TokenStream {
                         // named arg (populated by `resolve_args_with` when a
                         // value-fn returns `InterpValue::Rows`) wins over
                         // the inherited `ctx.data_source`. The inherited
-                        // value is kept as a fallback so profiles that rely
-                        // on parent-block data (no explicit `collection:`)
-                        // keep working byte-for-byte.
+                        // value is kept as the secondary source so profiles
+                        // that rely on parent-block data (no explicit
+                        // `collection:`) keep working byte-for-byte. // ALLOW(fallback): doc comment about inheritance precedence
                         let __explicit_ds: Option<std::sync::Arc<dyn holon_api::ReactiveRowProvider>>
                             = ba.args.get_rows("collection");
                         let __ds: Option<std::sync::Arc<dyn holon_api::ReactiveRowProvider>> =
@@ -319,8 +314,9 @@ fn generate_extraction(params: &[WidgetParam]) -> proc_macro2::TokenStream {
                                     .collect();
                                 crate::reactive_view_model::CollectionData::Static { items }
                             }
-                            // Fallback: no template, no positional — render each row
-                            // as a bare `row` element. Rare, mostly legacy.
+                            // No template, no positional — render each row
+                            // as a bare `row` element. Rare, mostly legacy. // ALLOW(fallback): rare-legacy default branch
+
                             (None, _) => {
                                 let items = ba.ctx.data_rows.iter()
                                     .map(|__row| ViewModel::element("row", __row.clone(), vec![]))

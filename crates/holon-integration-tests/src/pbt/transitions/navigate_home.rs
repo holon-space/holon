@@ -13,7 +13,6 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use super::E2ETransitionImpl;
-use crate::pbt::reference_state::NavigationHistory;
 use crate::pbt::reference_state::OpenPinEntry;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
@@ -60,10 +59,7 @@ impl E2ETransitionImpl for NavigateHome {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        let history = state
-            .navigation_history
-            .entry(self.region)
-            .or_insert_with(NavigationHistory::new);
+        let history = state.navigation_history.entry(self.region).or_default();
 
         history.entries.truncate(history.cursor + 1);
         history.entries.push(None);

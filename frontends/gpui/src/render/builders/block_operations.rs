@@ -5,7 +5,7 @@ use holon_frontend::{OperationIntent, ReactiveViewModel};
 const BLOCK_FIELDS: &[&str] = &["parent_id", "sort_key", "depth", "content"];
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let operations = node.prop_str("operations").unwrap_or_else(|| "".to_string());
+    let operations = node.prop_str("operations").unwrap_or_default();
 
     let ops = find_ops_affecting(BLOCK_FIELDS, &node.operations);
 

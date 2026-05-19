@@ -344,6 +344,12 @@ pub struct CdcAccumulator<V> {
     state: HashMap<String, V>,
 }
 
+impl<V> Default for CdcAccumulator<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<V> CdcAccumulator<V> {
     pub fn new() -> Self {
         Self {

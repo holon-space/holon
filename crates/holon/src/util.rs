@@ -63,7 +63,7 @@ pub fn strip_order_by(sql: &str) -> String {
     strip_unsupported_clauses(sql)
 }
 
-/// Strip ORDER BY, LIMIT, and OFFSET clauses from SQL for matview compatibility.
+/// Strip ORDER BY, LIMIT, and OFFSET clauses so the SQL can become a matview body.
 ///
 /// Uses word-boundary matching to avoid false positives on column names
 /// like `cursor_offset` which contain "OFFSET" as a substring.

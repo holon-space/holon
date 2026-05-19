@@ -1,11 +1,11 @@
 use super::prelude::*;
 
 pub fn render(
-    _field: &String,
+    _: &String,
     current: &String,
     label: &String,
-    _states: &String,
-    _ctx: &DioxusRenderContext,
+    _: &String,
+    _: &DioxusRenderContext,
 ) -> Element {
     let display = if label.is_empty() {
         current.clone()

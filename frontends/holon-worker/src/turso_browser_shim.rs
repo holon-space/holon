@@ -268,7 +268,7 @@ impl File for OpfsFile {
     fn sync(
         &self,
         c: turso_core::Completion,
-        _sync_type: turso_core::io::FileSyncType,
+        _: turso_core::io::FileSyncType,
     ) -> turso_core::Result<turso_core::Completion> {
         let web_worker = is_web_worker_safe();
         tracing::debug!("sync({}, is_web_worker={})", self.handle, web_worker);

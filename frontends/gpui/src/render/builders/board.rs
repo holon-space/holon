@@ -56,15 +56,30 @@ struct BoardCard {
     lines: Vec<CardLine>,
 }
 
+/// Parse a `#RRGGBB` (or `RRGGBB`) hex color into a packed `RGBA` u32.
+///
+/// Returns `None` only when the input is empty. Malformed non-empty input
+/// (wrong length, non-hex digits) is logged with a `warn!` so the typo
+/// surfaces in the log instead of silently rendering as the default colour.
 fn parse_hex(hex: &str) -> Option<u32> {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 || !hex.is_ascii() {
+    let trimmed = hex.trim_start_matches('#');
+    if trimmed.is_empty() {
         return None;
     }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as u32;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as u32;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as u32;
-    Some((r << 24) | (g << 16) | (b << 8) | 0xFF)
+    let parse = |slice: &str| -> Result<u32, std::num::ParseIntError> {
+        u8::from_str_radix(slice, 16).map(|b| b as u32)
+    };
+    if trimmed.len() < 6 || !trimmed.is_ascii() {
+        tracing::warn!(target: "holon.board", hex = %hex, "malformed hex colour — using default");
+        return None;
+    }
+    match (parse(&trimmed[0..2]), parse(&trimmed[2..4]), parse(&trimmed[4..6])) {
+        (Ok(r), Ok(g), Ok(b)) => Some((r << 24) | (g << 16) | (b << 8) | 0xFF),
+        _ => {
+            tracing::warn!(target: "holon.board", hex = %hex, "malformed hex colour — using default");
+            None
+        }
+    }
 }
 
 /// Tint `base` toward `accent` at ~15% blend. Mirrors `card.rs::tint_rgba` so
@@ -146,7 +161,7 @@ fn extract_card(lane_index: usize, card_index: usize, card_vm: &ReactiveViewMode
 /// - Streaming path: `ReactiveView::create_grouped_driver` rebuilds lane
 ///   VMs (each with `children = cards`) atomically per upstream event.
 fn extract_lane_cards(lane: &ReactiveViewModel) -> Vec<std::sync::Arc<ReactiveViewModel>> {
-    lane.children.iter().cloned().collect()
+    lane.children.to_vec()
 }
 
 /// Resolve the row's profile and its `set_field` op. Returns the
@@ -263,8 +278,8 @@ fn lane_state(
 
 fn render_card(
     item: &BoardCard,
-    _ix: usize,
-    _window: &gpui::Window,
+    _: usize,
+    _: &gpui::Window,
     cx: &gpui::App,
 ) -> gpui::AnyElement {
     let theme = cx.theme();
@@ -314,7 +329,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let lanes: Vec<std::sync::Arc<ReactiveViewModel>> = if let Some(ref view) = node.collection {
         view.items.lock_ref().iter().cloned().collect()
     } else {
-        node.children.iter().cloned().collect()
+        node.children.to_vec()
     };
     tracing::info!(
         "[BOARD_RENDER] enter lane_count={} lane_field={:?} streaming={}",

@@ -1114,7 +1114,7 @@ fn handle_edit_input(state: &mut TuiState, input_event: InputEvent) -> EventProp
         Key::SpecialKey(SpecialKey::End) => {
             edit_state.cursor = current.len();
         }
-        Key::Character(c) => {
+        Key::Character(c)
             // Filter out non-printable control characters (e.g. ESC arrives
             // as both SpecialKey::Esc and possibly a raw control char on
             // some terminals; let SpecialKey::Esc handle it). Also drop
@@ -1122,7 +1122,7 @@ fn handle_edit_input(state: &mut TuiState, input_event: InputEvent) -> EventProp
             // mode is `Alt+s` (split), handled above; anything else with
             // Alt would be either a future shortcut or a typo, never
             // intended literal text.
-            if !c.is_control() && !alt {
+            if !c.is_control() && !alt => {
                 let mut buf = [0u8; 4];
                 let s = c.encode_utf8(&mut buf);
                 if let Err(e) = edit_state.vm.apply_local(TextOp::Insert {
@@ -1133,7 +1133,6 @@ fn handle_edit_input(state: &mut TuiState, input_event: InputEvent) -> EventProp
                 }
                 edit_state.cursor += s.len();
             }
-        }
         _ => {}
     }
     EventPropagation::ConsumedRender

@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn render(children: &LazyChildren, _ctx: &DioxusRenderContext) -> Element {
+pub fn render(children: &LazyChildren, _: &DioxusRenderContext) -> Element {
     rsx! {
         div {
             style: "display: flex; flex-direction: column; gap: 1px;",

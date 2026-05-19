@@ -92,7 +92,7 @@ pub fn diagnose_displayed_text(
 /// widgets — comparing the engine's leaf content to the on-screen string is
 /// the same comparison `inv-displayed-text` does, just at the engine level.
 fn first_text_for_block(vm: &ViewModel, target_id: &str) -> Option<String> {
-    if vm.entity_id().map_or(false, |id| id == target_id) {
+    if vm.entity_id() == Some(target_id) {
         match &vm.kind {
             ViewKind::EditableText { content, .. } => return Some(content.clone()),
             ViewKind::Text { content, .. } => return Some(content.clone()),

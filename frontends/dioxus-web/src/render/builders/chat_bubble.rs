@@ -4,7 +4,7 @@ pub fn render(
     sender: &String,
     time: &String,
     children: &LazyChildren,
-    _ctx: &DioxusRenderContext,
+    _: &DioxusRenderContext,
 ) -> Element {
     let sender = sender.clone();
     let time = time.clone();

@@ -76,7 +76,7 @@ fn App() -> Element {
         let root_val = match bridge
             .call(
                 "engineExecuteQuery",
-                [format!("SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1").into()],
+                [format!("SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1").into()], // ALLOW(sql): startup readiness probe before BackendEngine is wired
             )
             .await
         {
@@ -234,7 +234,7 @@ fn App() -> Element {
 /// `trunk --watch` restarts without requiring a page reload).
 fn connect_mcp_relay(bridge: WorkerBridge) {
     let host = web_sys::window()
-        .and_then(|w| w.location().host().ok())
+        .and_then(|w| w.location().host().ok()) // ALLOW(ok): web-sys JsValue error has no Display; default below
         .unwrap_or_else(|| "localhost:8765".to_string());
     let url = format!("ws://{host}/mcp-hub?role=browser");
 
@@ -297,7 +297,7 @@ fn connect_mcp_relay(bridge: WorkerBridge) {
                     Ok(val) => {
                         // Worker parsed the result JSON; stringify back to text.
                         let text = js_sys::JSON::stringify(&val)
-                            .ok()
+                            .ok() // ALLOW(ok): JsValue error has no Display; None handled below
                             .and_then(|s| s.as_string())
                             .unwrap_or_else(|| "null".to_string());
                         let content = serde_json::to_string(
@@ -351,17 +351,17 @@ fn connect_mcp_relay(bridge: WorkerBridge) {
 /// work regardless of realm.
 fn extract_first_id(val: &JsValue) -> Option<String> {
     let len = Reflect::get(val, &"length".into())
-        .ok()?
+        .ok()? // ALLOW(ok): JS reflection — absent property is a normal None
         .as_f64()
         .unwrap_or(0.0) as u32;
     if len == 0 {
         return None;
     }
-    let item = Reflect::get(val, &JsValue::from_str("0")).ok()?;
+    let item = Reflect::get(val, &JsValue::from_str("0")).ok()?; // ALLOW(ok): same as above
     if item.is_undefined() || item.is_null() {
         return None;
     }
-    Reflect::get(&item, &"id".into()).ok()?.as_string()
+    Reflect::get(&item, &"id".into()).ok()?.as_string() // ALLOW(ok): same as above
 }
 
 fn now_ms() -> u64 {

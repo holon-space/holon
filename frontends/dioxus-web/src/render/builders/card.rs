@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn render(accent: &String, children: &LazyChildren, _ctx: &DioxusRenderContext) -> Element {
+pub fn render(accent: &String, children: &LazyChildren, _: &DioxusRenderContext) -> Element {
     let border = if accent.is_empty() {
         "border-left: 3px solid #444;".to_string()
     } else {

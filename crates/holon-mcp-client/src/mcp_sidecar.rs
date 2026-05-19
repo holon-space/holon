@@ -49,14 +49,14 @@ pub struct EntityConfig {
 }
 
 impl EntityConfig {
-    /// Resolve short_name with fallback to entity key name.
+    /// Resolve short_name with fallback to entity key name. // ALLOW(fallback): describes default-branch path, not error swallowing
     pub fn short_name_or(&self, entity_name: &str) -> String {
         self.short_name
             .clone()
             .unwrap_or_else(|| entity_name.to_string())
     }
 
-    /// Resolve id_column with fallback to "id".
+    /// Resolve id_column with fallback to "id". // ALLOW(fallback): describes default-branch path, not error swallowing
     pub fn id_column_or_default(&self) -> String {
         self.id_column.clone().unwrap_or_else(|| "id".to_string())
     }
@@ -232,7 +232,7 @@ impl EntityConfig {
 
 /// Convert a snake_case or kebab-case name to PascalCase.
 fn pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-')
+    s.split(['_', '-'])
         .filter(|part| !part.is_empty())
         .map(|part| {
             let mut chars = part.chars();

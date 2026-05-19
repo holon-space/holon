@@ -1,7 +1,7 @@
 use super::prelude::*;
 use holon_frontend::ReactiveViewModel;
 
-pub fn render(node: &ReactiveViewModel, _ctx: &GpuiRenderContext) -> Div {
+pub fn render(node: &ReactiveViewModel, _: &GpuiRenderContext) -> Div {
     let data = node.entity();
     let mut row_div = div()
         .flex()

@@ -256,7 +256,7 @@ fn scalar_count(s: &str) -> usize {
 }
 
 impl Focusable for RichTextEditor {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
     }
 }
@@ -269,18 +269,18 @@ impl EntityInputHandler for RichTextEditor {
     fn text_for_range(
         &mut self,
         range: Range<usize>,
-        _adjusted_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<String> {
         self.text.get(range).map(|s| s.to_string())
     }
 
     fn selected_text_range(
         &mut self,
-        _ignore_disabled: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         let bytes = self.selection_byte_range();
         Some(UTF16Selection {
@@ -289,22 +289,18 @@ impl EntityInputHandler for RichTextEditor {
         })
     }
 
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
         None
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
 
     fn replace_text_in_range(
         &mut self,
         range: Option<Range<usize>>,
         new_text: &str,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) {
         // gpui hands us a UTF-8 byte range. If `None`, the IME wants us to
         // replace the current selection. Translate to Unicode-scalar offsets
@@ -331,36 +327,36 @@ impl EntityInputHandler for RichTextEditor {
 
     fn replace_and_mark_text_in_range(
         &mut self,
-        _range: Option<Range<usize>>,
-        _new_text: &str,
-        _new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _: Option<Range<usize>>,
+        _: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) {
     }
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
+        _: Range<usize>,
         element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         Some(element_bounds)
     }
 
     fn character_index_for_point(
         &mut self,
-        _point: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Option<usize> {
         Some(self.selection.head)
     }
 }
 
 impl Render for RichTextEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         gpui::div()
             .key_context("RichTextEditor")
@@ -401,8 +397,8 @@ impl Element for EditorPaint {
 
     fn request_layout(
         &mut self,
-        _id: Option<&gpui::GlobalElementId>,
-        _inspect_id: Option<&gpui::InspectorElementId>,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
         cx: &mut gpui::App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
@@ -419,10 +415,10 @@ impl Element for EditorPaint {
 
     fn prepaint(
         &mut self,
-        _id: Option<&gpui::GlobalElementId>,
-        _inspect_id: Option<&gpui::InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut gpui::App,
     ) -> Self::PrepaintState {
@@ -442,10 +438,10 @@ impl Element for EditorPaint {
 
     fn paint(
         &mut self,
-        _id: Option<&gpui::GlobalElementId>,
-        _inspect_id: Option<&gpui::InspectorElementId>,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        _: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut gpui::App,

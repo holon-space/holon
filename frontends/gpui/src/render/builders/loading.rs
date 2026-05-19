@@ -1,7 +1,7 @@
 use super::prelude::*;
 use holon_frontend::ReactiveViewModel;
 
-pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+pub fn render(_: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     div()
         .p_2()
         .text_color(tc(ctx, |t| t.muted_foreground))

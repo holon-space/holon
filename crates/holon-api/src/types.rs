@@ -677,7 +677,7 @@ impl Tags {
     }
 
     /// Build from an iterator of individual tag strings (e.g. from orgize).
-    pub fn from_iter(iter: impl IntoIterator<Item = String>) -> Self {
+    pub fn from_tag_iter(iter: impl IntoIterator<Item = String>) -> Self {
         let tags: Vec<String> = iter
             .into_iter()
             .map(|t| t.trim().to_string())

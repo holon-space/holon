@@ -1,7 +1,7 @@
 use super::prelude::*;
 use holon_frontend::ReactiveViewModel;
 
-pub fn render(node: &ReactiveViewModel, _ctx: &GpuiRenderContext) -> Div {
+pub fn render(node: &ReactiveViewModel, _: &GpuiRenderContext) -> Div {
     let width = node.prop_f64("width").unwrap_or(0.0) as f32;
     let height = node.prop_f64("height").unwrap_or(0.0) as f32;
     let color = node.prop_str("color").map(|s| s.to_string());

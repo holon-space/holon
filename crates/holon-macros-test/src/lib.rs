@@ -1,5 +1,6 @@
 // Test crate for holon-macros
 // This allows us to test the macro expansion since proc macros can't be used in their own crate
+#![allow(clippy::manual_range_contains)] // expanded operations_trait macro emits `>=`/`<=` checks
 
 use async_trait::async_trait;
 use holon::core::datasource::{Result, UndoAction};
@@ -13,16 +14,18 @@ where
     T: Send + Sync + 'static,
 {
     /// Delete an item by ID
-    #[require(id.len() > 0)]
+    #[require(!id.is_empty())]
     async fn delete(&self, id: &str) -> Result<UndoAction>;
 
     /// Set a boolean flag
-    #[require(value == true || value == false)]
+    #[require(value || !value)]
+    // ALLOW(unused_param): test fixture — id is part of the trait shape
     async fn set_flag(&self, _id: &str, value: bool) -> Result<UndoAction>;
 
     /// Set priority with range check
     #[require(priority >= 1)]
     #[require(priority <= 5)]
+    // ALLOW(unused_param): test fixture — id is part of the trait shape
     async fn set_priority(&self, _id: &str, priority: i64) -> Result<UndoAction>;
 
     /// Method without precondition
@@ -94,18 +97,13 @@ mod tests {
             result_valid.is_ok(),
             "Precondition should pass for valid input"
         );
-        assert_eq!(
-            result_valid.unwrap(),
-            true,
-            "Precondition should return true"
-        );
+        assert!(result_valid.unwrap(), "Precondition should return true");
 
         // Test invalid precondition
         let result_invalid = precondition(&params_invalid);
         assert!(result_invalid.is_ok(), "Precondition should not error");
-        assert_eq!(
-            result_invalid.unwrap(),
-            false,
+        assert!(
+            !result_invalid.unwrap(),
             "Precondition should return false for empty string"
         );
     }
@@ -131,9 +129,8 @@ mod tests {
             result.is_ok(),
             "Precondition should pass for valid priority"
         );
-        assert_eq!(
+        assert!(
             result.unwrap(),
-            true,
             "Precondition should return true for priority 3"
         );
 
@@ -147,9 +144,8 @@ mod tests {
 
         let result_low = precondition(&params_low);
         assert!(result_low.is_ok(), "Precondition should not error");
-        assert_eq!(
-            result_low.unwrap(),
-            false,
+        assert!(
+            !result_low.unwrap(),
             "Precondition should return false for priority 0"
         );
 
@@ -163,9 +159,8 @@ mod tests {
 
         let result_high = precondition(&params_high);
         assert!(result_high.is_ok(), "Precondition should not error");
-        assert_eq!(
-            result_high.unwrap(),
-            false,
+        assert!(
+            !result_high.unwrap(),
             "Precondition should return false for priority 6"
         );
     }
@@ -188,11 +183,7 @@ mod tests {
 
         let result_true = precondition(&params_true);
         assert!(result_true.is_ok(), "Precondition should pass for true");
-        assert_eq!(
-            result_true.unwrap(),
-            true,
-            "Precondition should return true"
-        );
+        assert!(result_true.unwrap(), "Precondition should return true");
 
         // Test with false value
         let mut params_false: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
@@ -204,9 +195,8 @@ mod tests {
 
         let result_false = precondition(&params_false);
         assert!(result_false.is_ok(), "Precondition should pass for false");
-        assert_eq!(
+        assert!(
             result_false.unwrap(),
-            true,
             "Precondition should return true for false (it's a valid bool)"
         );
     }
@@ -253,9 +243,8 @@ mod tests {
             result_min.is_ok(),
             "Precondition should pass for priority 1 (lower bound)"
         );
-        assert_eq!(
+        assert!(
             result_min.unwrap(),
-            true,
             "Precondition should return true for priority 1"
         );
 
@@ -271,9 +260,8 @@ mod tests {
             result_max.is_ok(),
             "Precondition should pass for priority 5 (upper bound)"
         );
-        assert_eq!(
+        assert!(
             result_max.unwrap(),
-            true,
             "Precondition should return true for priority 5"
         );
     }

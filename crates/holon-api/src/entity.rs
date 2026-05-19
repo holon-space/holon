@@ -103,21 +103,16 @@ impl Default for DynamicEntity {
 /// | `Computed`   | No   | No       | Yes   | No         | Recompute from expr   |
 /// | `Transient`  | No   | No       | Yes   | No         | Re-fetch from source  |
 /// | `Historical` | No   | No       | Yes+backup | No   | From backup           |
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldLifetime {
+    #[default]
     Persistent,
     Computed {
         expr: holon_engine::guard::CompiledExpr,
     },
     Transient,
     Historical,
-}
-
-impl Default for FieldLifetime {
-    fn default() -> Self {
-        Self::Persistent
-    }
 }
 
 // =============================================================================
@@ -223,7 +218,7 @@ impl FieldSchema {
 // =============================================================================
 
 /// Where this type definition originated.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeSource {
     /// Hard-coded in Rust (Block).
@@ -231,15 +226,10 @@ pub enum TypeSource {
     /// Ships with the app but user can extend (Person, Organization).
     PreConfigured,
     /// Created by the user at runtime via YAML.
+    #[default]
     UserDefined,
     /// From an MCP sidecar configuration.
     McpProvider(String),
-}
-
-impl Default for TypeSource {
-    fn default() -> Self {
-        Self::UserDefined
-    }
 }
 
 /// A render variant for an entity type (presentation layer).

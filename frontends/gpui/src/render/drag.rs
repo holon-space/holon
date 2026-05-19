@@ -39,7 +39,7 @@ pub(crate) fn make_drag_preview(
 }
 
 impl Render for DragPreview {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
         let size = gpui::size(px(200.0), px(32.0));
 
         div()

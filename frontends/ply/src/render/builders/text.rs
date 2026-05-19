@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn build(args: &ResolvedArgs, _ctx: &RenderContext) -> PlyWidget {
+pub fn build(args: &ResolvedArgs, _: &RenderContext) -> PlyWidget {
     let content = args
         .get_positional_string(0)
         .map(|s| s.to_string())

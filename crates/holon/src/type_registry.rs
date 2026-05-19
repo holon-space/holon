@@ -37,6 +37,12 @@ pub struct TypeRegistry {
     virtual_children: RwLock<HashMap<String, crate::entity_profile::VirtualChildConfig>>,
 }
 
+impl Default for TypeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeRegistry {
     pub fn new() -> Self {
         Self {
@@ -122,7 +128,7 @@ impl TypeRegistry {
         type_def.profile_variants.extend(variants);
         type_def
             .profile_variants
-            .sort_by(|a, b| b.priority.cmp(&a.priority));
+            .sort_by_key(|v| std::cmp::Reverse(v.priority));
         Ok(())
     }
 
@@ -361,7 +367,7 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
         (COLLECTION_PROFILE_YAML, true), // standalone, needs its own TypeDefinition
     ] {
         let profile = crate::entity_profile::parse_profile_yaml(yaml)
-            .with_context(|| format!("Failed to parse bundled profile YAML"))?;
+            .with_context(|| "Failed to parse bundled profile YAML".to_string())?;
         if create_type {
             registry
                 .register(TypeDefinition::new(&profile.entity_name, vec![]))

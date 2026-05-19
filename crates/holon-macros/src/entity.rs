@@ -55,16 +55,14 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
         let is_jsonb = field.attrs.iter().any(|attr| attr.path().is_ident("jsonb"));
 
         let default_value: Option<String> = field.attrs.iter().find_map(|attr| {
-            if attr.path().is_ident("default_value") {
-                if let syn::Meta::NameValue(nv) = &attr.meta {
-                    if let syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(s),
-                        ..
-                    }) = &nv.value
-                    {
-                        return Some(s.value());
-                    }
-                }
+            if attr.path().is_ident("default_value")
+                && let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+            {
+                return Some(s.value());
             }
             None
         });

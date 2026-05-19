@@ -470,8 +470,7 @@ pub(crate) fn find_position_for_sort_key_hint(
 
     let predecessor_uri = siblings
         .iter()
-        .filter(|(_, fi)| fi.as_str() < sort_key_hint)
-        .next_back()
+        .rfind(|(_, fi)| fi.as_str() < sort_key_hint)
         .map(|(sid, _)| EntityUri::block(sid).to_string());
 
     Some((parent_id_str, predecessor_uri))
@@ -582,20 +581,18 @@ fn resolve_parent_tree_id(
                     ) {
                         continue;
                     }
-                    if let Ok(meta) = tree.get_meta(node.id) {
-                        if let Some(loro::ValueOrContainer::Value(v)) = meta.get(STABLE_ID) {
-                            if v.as_string()
-                                .map(|s| s.as_ref() == parent_uri.id())
-                                .unwrap_or(false)
-                            {
-                                // Found it — also populate the cache for next time
-                                id_cache
-                                    .lock()
-                                    .unwrap()
-                                    .insert(parent_uri.id().to_string(), node.id);
-                                return Some(node.id);
-                            }
-                        }
+                    if let Ok(meta) = tree.get_meta(node.id)
+                        && let Some(loro::ValueOrContainer::Value(v)) = meta.get(STABLE_ID)
+                        && v.as_string()
+                            .map(|s| s.as_ref() == parent_uri.id())
+                            .unwrap_or(false)
+                    {
+                        // Found it — also populate the cache for next time
+                        id_cache
+                            .lock()
+                            .unwrap()
+                            .insert(parent_uri.id().to_string(), node.id);
+                        return Some(node.id);
                     }
                 }
             }
@@ -651,14 +648,9 @@ fn is_node_alive(tree: &loro::LoroTree, node: loro::TreeID) -> bool {
 fn compute_depth(tree: &loro::LoroTree, parent: loro::TreeParentId) -> usize {
     let mut d = 1;
     let mut current = parent;
-    loop {
-        match current {
-            loro::TreeParentId::Node(pid) => {
-                d += 1;
-                current = tree.parent(pid).unwrap_or(loro::TreeParentId::Root);
-            }
-            _ => break,
-        }
+    while let loro::TreeParentId::Node(pid) = current {
+        d += 1;
+        current = tree.parent(pid).unwrap_or(loro::TreeParentId::Root);
     }
     d
 }
@@ -806,10 +798,10 @@ impl LoroBackend {
                     }
                     let meta = tree.get_meta(tree_node.id)?;
                     let properties = read_properties_from_meta(&meta);
-                    if let Some(Value::String(prop_uuid)) = properties.get("ID") {
-                        if prop_uuid == uuid {
-                            return Ok(Some(tree_id_to_uri(tree_node.id).to_string()));
-                        }
+                    if let Some(Value::String(prop_uuid)) = properties.get("ID")
+                        && prop_uuid == uuid
+                    {
+                        return Ok(Some(tree_id_to_uri(tree_node.id).to_string()));
                     }
                 }
                 Ok(None)
@@ -1482,10 +1474,10 @@ impl LoroBackend {
                 ) {
                     continue;
                 }
-                if let Ok(meta) = tree.get_meta(node.id) {
-                    if let Some(sid) = read_stable_id(&meta) {
-                        cache.insert(sid, node.id);
-                    }
+                if let Ok(meta) = tree.get_meta(node.id)
+                    && let Some(sid) = read_stable_id(&meta)
+                {
+                    cache.insert(sid, node.id);
                 }
             }
             Ok(())
@@ -1521,7 +1513,7 @@ impl LoroBackend {
         let mut changes = Vec::new();
 
         // Deleted: in before, not in after
-        for (id, _block) in &before {
+        for id in before.keys() {
             if !after.contains_key(id) {
                 let change = Change::Deleted {
                     id: id.clone(),
@@ -1977,20 +1969,17 @@ impl CoreOperations for LoroBackend {
 
                 let mut result = Vec::new();
                 for tid in &children_tids {
-                    if is_mount_node(&tree, *tid) {
-                        if let (Some(store), Some(info)) =
+                    if is_mount_node(&tree, *tid)
+                        && let (Some(store), Some(info)) =
                             (&shared_trees, read_mount_info(&tree, *tid))
-                        {
-                            if let Some(shared_doc) = store.get_shared_doc(&info.shared_tree_id) {
-                                let shared_tree = shared_doc.get_tree(TREE_NAME);
-                                for shared_root in shared_tree.roots() {
-                                    let meta = shared_tree.get_meta(shared_root)?;
-                                    result
-                                        .push(block_uri_from_meta(&meta, shared_root).to_string());
-                                }
-                                continue;
-                            }
+                        && let Some(shared_doc) = store.get_shared_doc(&info.shared_tree_id)
+                    {
+                        let shared_tree = shared_doc.get_tree(TREE_NAME);
+                        for shared_root in shared_tree.roots() {
+                            let meta = shared_tree.get_meta(shared_root)?;
+                            result.push(block_uri_from_meta(&meta, shared_root).to_string());
                         }
+                        continue;
                     }
                     let meta = tree.get_meta(*tid)?;
                     result.push(block_uri_from_meta(&meta, *tid).to_string());
@@ -2140,10 +2129,10 @@ impl CoreOperations for LoroBackend {
                 tree.mov(tree_id, new_parent_tree_id)?;
 
                 // Handle `after` positioning via mov_after
-                if let Some(after_uri) = &after {
-                    if let Some(after_tid) = uri_to_tree_id(after_uri) {
-                        tree.mov_after(tree_id, after_tid)?;
-                    }
+                if let Some(after_uri) = &after
+                    && let Some(after_tid) = uri_to_tree_id(after_uri)
+                {
+                    tree.mov_after(tree_id, after_tid)?;
                 }
 
                 let meta = tree.get_meta(tree_id)?;
@@ -2223,10 +2212,10 @@ impl CoreOperations for LoroBackend {
                     meta.insert("updated_at", loro::LoroValue::from(now))?;
 
                     // Handle `after` positioning
-                    if let Some(after_uri) = &new_block.after {
-                        if let Some(after_tid) = uri_to_tree_id(after_uri) {
-                            tree.mov_after(node, after_tid)?;
-                        }
+                    if let Some(after_uri) = &new_block.after
+                        && let Some(after_tid) = uri_to_tree_id(after_uri)
+                    {
+                        tree.mov_after(node, after_tid)?;
                     }
 
                     id_cache_entries.push((stable_id.clone(), node));
@@ -2583,12 +2572,11 @@ mod tests {
             ) {
                 continue;
             }
-            if let Ok(meta) = tree.get_meta(node.id) {
-                if let Some(loro::ValueOrContainer::Value(v)) = meta.get(STABLE_ID) {
-                    if v.as_string().is_some_and(|s| s.to_string() == bare) {
-                        return node.id;
-                    }
-                }
+            if let Ok(meta) = tree.get_meta(node.id)
+                && let Some(loro::ValueOrContainer::Value(v)) = meta.get(STABLE_ID)
+                && v.as_string().is_some_and(|s| s.to_string() == bare)
+            {
+                return node.id;
             }
         }
         panic!("resolve_to_tree_id_sync: {id} not found");
@@ -3388,7 +3376,12 @@ mod tests {
             parent_id: "sentinel:no_parent".to_string(),
             content: "ju".to_string(),
         };
-        update_id_map_after_create(&mut id_map, &transition, &ref_blocks, &[loro_block.clone()]);
+        update_id_map_after_create(
+            &mut id_map,
+            &transition,
+            &ref_blocks,
+            std::slice::from_ref(&loro_block),
+        );
         tracing::debug!("id_map after: {:?}", id_map);
 
         assert!(
@@ -3556,7 +3549,7 @@ mod tests {
             // Mount node itself should NOT be in the results
             let has_mount = all
                 .iter()
-                .any(|b| b.properties_map().get("mount_kind").is_some());
+                .any(|b| b.properties_map().contains_key("mount_kind"));
             assert!(!has_mount, "Mount node should not appear in results");
         }
 

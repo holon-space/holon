@@ -2,8 +2,8 @@
 //!
 //! This crate handles file watching, bidirectional sync between org files and
 //! the block store, and DI wiring. Format-level concerns (parsing, rendering,
-//! diffing) live in `holon-org-format` and are re-exported here for backward
-//! compatibility.
+//! diffing) live in `holon-org-format` and are re-exported here so external // ALLOW(compatibility): re-export bridge during the org-format split
+//! callers keep working through the crate split.
 //!
 //! # Type System
 //!

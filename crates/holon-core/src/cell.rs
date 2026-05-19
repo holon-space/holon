@@ -267,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn cell_string_apply_text_op_errs_on_lww_backing() {
         let backing = Arc::new(LwwTextCellBacking::new(
-            Arc::new(|| String::new()),
+            Arc::new(String::new),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             Arc::new(|| Box::pin(futures::stream::empty())),
         ));
@@ -284,7 +284,7 @@ mod tests {
     #[tokio::test]
     async fn cell_string_remote_deltas_empty_on_lww_backing() {
         let backing = Arc::new(LwwTextCellBacking::new(
-            Arc::new(|| String::new()),
+            Arc::new(String::new),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             Arc::new(|| Box::pin(futures::stream::empty())),
         ));

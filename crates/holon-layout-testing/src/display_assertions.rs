@@ -67,7 +67,7 @@ fn find_in_static_children<'a>(
         if entity
             .get("id")
             .and_then(|v| v.as_string())
-            .map_or(false, |id| id == block_id.as_str())
+            .is_some_and(|id| id == block_id.as_str())
         {
             return Some(node);
         }
@@ -89,7 +89,7 @@ pub fn find_state_toggle_deep(
         if entity
             .get("id")
             .and_then(|v| v.as_string())
-            .map_or(false, |id| id == block_id.as_str())
+            .is_some_and(|id| id == block_id.as_str())
         {
             return Some(std::sync::Arc::new(ReactiveViewModel {
                 expr: futures_signals::signal::Mutable::new(node.expr.get_cloned()),
@@ -355,7 +355,7 @@ fn format_value(v: &holon_api::Value) -> String {
         holon_api::Value::Object(m) => format!("{{...{} keys}}", m.len()),
         holon_api::Value::Array(a) => format!("[...{} items]", a.len()),
         holon_api::Value::DateTime(dt) => format!("\"{dt}\""),
-        holon_api::Value::Json(j) => format!("{j}"),
+        holon_api::Value::Json(j) => j.to_string(),
     }
 }
 
@@ -434,7 +434,7 @@ pub fn assert_display_trees_match(actual: &ViewModel, expected: &ViewModel, mess
 pub fn extract_rendered_rows(tree: &ViewModel) -> Vec<HashMap<String, Value>> {
     tree.children()
         .iter()
-        .filter_map(|child| extract_item_data(child))
+        .filter_map(extract_item_data)
         .collect()
 }
 
@@ -524,15 +524,14 @@ pub fn find_state_toggle_for_block<'a>(
     node: &'a ViewModel,
     block_id: &holon_api::EntityUri,
 ) -> Option<&'a ViewModel> {
-    if matches!(&node.kind, ViewKind::StateToggle { .. }) {
-        if node
+    if matches!(&node.kind, ViewKind::StateToggle { .. })
+        && node
             .entity
             .get("id")
             .and_then(|v| v.as_string())
-            .map_or(false, |id| id == block_id.as_str())
-        {
-            return Some(node);
-        }
+            .is_some_and(|id| id == block_id.as_str())
+    {
+        return Some(node);
     }
     node.children()
         .iter()

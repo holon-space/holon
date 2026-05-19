@@ -3,8 +3,8 @@ use holon_frontend::{OperationIntent, ReactiveViewModel};
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let language = node.prop_str("language").unwrap_or_else(|| "text".to_string());
-    let content = node.prop_str("content").unwrap_or_else(|| "".to_string());
-    let name = node.prop_str("name").unwrap_or_else(|| "".to_string());
+    let content = node.prop_str("content").unwrap_or_default();
+    let name = node.prop_str("name").unwrap_or_default();
 
     let mut container = div().flex_col().gap_1();
 

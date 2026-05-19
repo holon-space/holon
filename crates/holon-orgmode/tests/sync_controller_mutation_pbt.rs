@@ -151,7 +151,7 @@ impl OperationProvider for MockOperationProvider {
                     .get("id")
                     .and_then(|v| v.as_string())
                     .expect("delete must have id param");
-                self.store.apply_delete(&id);
+                self.store.apply_delete(id);
             }
             other => panic!("unexpected operation: {other}"),
         }
@@ -208,7 +208,7 @@ fn block_from_params(params: &HashMap<String, Value>) -> Block {
         block.set_sequence(seq);
     }
     if let Some(ts) = params.get("task_state").and_then(|v| v.as_string()) {
-        block.set_task_state(Some(TaskState::from_keyword(&ts)));
+        block.set_task_state(Some(TaskState::from_keyword(ts)));
     }
     if let Some(p) = params.get("priority").and_then(|v| v.as_i64()) {
         if let Ok(priority) = Priority::from_int(p as i32) {
@@ -216,15 +216,15 @@ fn block_from_params(params: &HashMap<String, Value>) -> Block {
         }
     }
     if let Some(t) = params.get("tags").and_then(|v| v.as_string()) {
-        block.set_tags(Tags::from_csv(&t));
+        block.set_tags(Tags::from_csv(t));
     }
     if let Some(s) = params.get("scheduled").and_then(|v| v.as_string()) {
-        if let Ok(ts) = Timestamp::parse(&s) {
+        if let Ok(ts) = Timestamp::parse(s) {
             block.set_scheduled(Some(ts));
         }
     }
     if let Some(d) = params.get("deadline").and_then(|v| v.as_string()) {
-        if let Ok(ts) = Timestamp::parse(&d) {
+        if let Ok(ts) = Timestamp::parse(d) {
             block.set_deadline(Some(ts));
         }
     }
@@ -232,7 +232,7 @@ fn block_from_params(params: &HashMap<String, Value>) -> Block {
         block.set_property("ID", Value::String(id_val.to_string()));
     }
     if let Some(args_json) = params.get("source_header_args").and_then(|v| v.as_string()) {
-        if let Ok(args) = serde_json::from_str::<HashMap<String, Value>>(&args_json) {
+        if let Ok(args) = serde_json::from_str::<HashMap<String, Value>>(args_json) {
             block.set_source_header_args(args);
         }
     }
@@ -878,13 +878,11 @@ fn apply_text_mutation(org_text: &str, mutation: &TextMutation) -> Option<String
                 .find(|kw| {
                     after_stars.starts_with(*kw) && after_stars[kw.len()..].starts_with(' ')
                 });
-            match removed {
-                Some(kw) => {
-                    let stars = "*".repeat(hl.level);
-                    let rest = after_stars[kw.len()..].trim_start();
-                    lines[hl.line_idx] = format!("{} {}", stars, rest);
-                }
-                None => return None,
+            {
+                let kw = removed?;
+                let stars = "*".repeat(hl.level);
+                let rest = after_stars[kw.len()..].trim_start();
+                lines[hl.line_idx] = format!("{} {}", stars, rest);
             }
         }
         TextMutation::AddTag { headline_idx, tag } => {
@@ -1604,7 +1602,7 @@ mod ordering_replay_tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         // Disk org file has two children: alpha then beta.
-        let org_content = "\
+        let _org_content = "\
 * alpha
 * beta
 ";
@@ -1713,7 +1711,7 @@ mod ordering_replay_tests {
         let ordering_probe = Arc::new(ConfigurableOrderingStub::new(
             std::collections::HashMap::new(),
         ));
-        let (_store, _doc_mgr, _ctrl, doc_id, file_path) =
+        let (_store, _doc_mgr, _ctrl, doc_id, _file_path) =
             build_controller_with_ordering(temp_dir.path(), ordering_probe);
 
         // Build the real controller with a live_order that doesn't include our block.

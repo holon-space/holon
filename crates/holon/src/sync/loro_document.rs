@@ -263,10 +263,10 @@ mod tests {
         let origin_seen_clone = origin_seen.clone();
 
         let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
-            if let Ok(mut seen) = origin_seen_clone.lock() {
-                if seen.is_none() {
-                    *seen = Some(event.origin.to_string());
-                }
+            if let Ok(mut seen) = origin_seen_clone.lock()
+                && seen.is_none()
+            {
+                *seen = Some(event.origin.to_string());
             }
         }));
 
@@ -304,10 +304,10 @@ mod tests {
         let origin_seen_clone = origin_seen.clone();
 
         let _sub = doc2.doc().subscribe_root(Arc::new(move |event| {
-            if let Ok(mut seen) = origin_seen_clone.lock() {
-                if seen.is_none() {
-                    *seen = Some(event.origin.to_string());
-                }
+            if let Ok(mut seen) = origin_seen_clone.lock()
+                && seen.is_none()
+            {
+                *seen = Some(event.origin.to_string());
             }
         }));
 
@@ -329,10 +329,10 @@ mod tests {
         let origin_seen_clone = origin_seen.clone();
 
         let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
-            if let Ok(mut seen) = origin_seen_clone.lock() {
-                if seen.is_none() {
-                    *seen = Some(event.origin.to_string());
-                }
+            if let Ok(mut seen) = origin_seen_clone.lock()
+                && seen.is_none()
+            {
+                *seen = Some(event.origin.to_string());
             }
         }));
 

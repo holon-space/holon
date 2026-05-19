@@ -522,10 +522,7 @@ impl TaskOperations<TodoistTask> for TodoistTaskFake {
         let old_due_date = <TodoistTask as TaskEntity>::due_date(&task);
 
         // Convert Option<DateTime<Utc>> to Todoist date string format
-        task.due_date = match due_date {
-            Some(dt) => Some(dt.to_rfc3339()),
-            None => None,
-        };
+        task.due_date = due_date.map(|dt| dt.to_rfc3339());
 
         // Emit change
         self.emit_change(Change::Updated {

@@ -11,7 +11,7 @@ pub fn init(cx: &mut App) {
     cx.set_inspector_renderer(Box::new(render_inspector));
 
     cx.register_inspector_element(
-        |id: InspectorElementId, state: &DivInspectorState, _window: &mut Window, _cx: &mut App| {
+        |id: InspectorElementId, state: &DivInspectorState, _: &mut Window, _: &mut App| {
             render_div_inspector(&id, state)
         },
     );

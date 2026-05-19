@@ -154,15 +154,15 @@ impl DataSource<Block> for LoroBlocksDataSource {
 
 #[async_trait]
 impl CrudOperations<Block> for LoroBlocksDataSource {
-    async fn set_field(&self, _id: &str, _field: &str, _value: Value) -> Result<OperationResult> {
+    async fn set_field(&self, _: &str, _: &str, _: Value) -> Result<OperationResult> {
         Err("Use LoroBlockOperations for mutations".into())
     }
 
-    async fn create(&self, _fields: HashMap<String, Value>) -> Result<(String, OperationResult)> {
+    async fn create(&self, _: HashMap<String, Value>) -> Result<(String, OperationResult)> {
         Err("Use LoroBlockOperations for mutations".into())
     }
 
-    async fn delete(&self, _id: &str) -> Result<OperationResult> {
+    async fn delete(&self, _: &str) -> Result<OperationResult> {
         Err("Use LoroBlockOperations for mutations".into())
     }
 }
@@ -171,7 +171,7 @@ impl CrudOperations<Block> for LoroBlocksDataSource {
 impl ChangeNotifications<Block> for LoroBlocksDataSource {
     async fn watch_changes_since(
         &self,
-        _position: StreamPosition,
+        _: StreamPosition,
     ) -> Pin<
         Box<
             dyn tokio_stream::Stream<Item = std::result::Result<Vec<Change<Block>>, ApiError>>

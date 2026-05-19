@@ -36,6 +36,14 @@ where
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         for id in ref_.all_non_seed_block_ids() {
+            // Synthetic ref-side ids (`block::split-N`, `block::bulk-N-M`) get
+            // remapped to UUIDs production-side; the SUT has no row at the
+            // synthetic id. Skip — the slice's role is content equality on
+            // stable ids; the wider PBT's synthetic-id-mapping does the
+            // cross-side reconciliation for these.
+            if id.contains("::split-") || id.contains("::bulk-") {
+                continue;
+            }
             let ref_content = match ref_.block_content(&id) {
                 Some(c) => c.to_string(),
                 None => continue,

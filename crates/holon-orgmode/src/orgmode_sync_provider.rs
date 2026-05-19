@@ -434,7 +434,7 @@ impl OperationProvider for OrgModeSyncProvider {
         &self,
         entity_name: &EntityName,
         op_name: &str,
-        _params: StorageEntity,
+        _: StorageEntity,
     ) -> Result<OperationResult> {
         let expected_entity_name = format!("{}.sync", self.provider_name());
         if entity_name != expected_entity_name.as_str() {

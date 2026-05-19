@@ -1131,6 +1131,51 @@ where
     }
 }
 
+/// Generate CREATE TABLE SQL with automatic `_change_origin` column
+///
+/// This wraps Schema's field definitions and adds the `_change_origin` column
+/// for trace context propagation. The column stores JSON-serialized `ChangeOrigin`
+/// which allows CDC callbacks to read trace context from each row.
+fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> String {
+    // Mirror `TypeDefinition::to_create_table_sql`: when multiple fields are
+    // flagged `primary_key`, emit a table-level `PRIMARY KEY (a, b, …)`
+    // clause and skip the inline form. SQLite otherwise rejects with
+    // "table has more than one primary key".
+    let pk_count = type_def.fields.iter().filter(|f| f.primary_key).count();
+    let inline_pk = pk_count == 1;
+
+    let mut columns = Vec::new();
+    for field in &type_def.fields {
+        let mut col = format!("{} {}", field.name, field.sql_type);
+        if field.primary_key && inline_pk {
+            col.push_str(" PRIMARY KEY");
+        }
+        if !field.nullable {
+            col.push_str(" NOT NULL");
+        }
+        columns.push(col);
+    }
+
+    // Add _change_origin column for trace context propagation
+    columns.push(format!("{} TEXT", CHANGE_ORIGIN_COLUMN));
+
+    if pk_count >= 2 {
+        let pk_cols: Vec<&str> = type_def
+            .fields
+            .iter()
+            .filter(|f| f.primary_key)
+            .map(|f| f.name.as_str())
+            .collect();
+        columns.push(format!("PRIMARY KEY ({})", pk_cols.join(", ")));
+    }
+
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
+        type_def.name,
+        columns.join(",\n  ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1363,49 +1408,4 @@ mod tests {
         let deleted = cache.get_by_id("1").await.unwrap();
         assert!(deleted.is_none());
     }
-}
-
-/// Generate CREATE TABLE SQL with automatic `_change_origin` column
-///
-/// This wraps Schema's field definitions and adds the `_change_origin` column
-/// for trace context propagation. The column stores JSON-serialized `ChangeOrigin`
-/// which allows CDC callbacks to read trace context from each row.
-fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> String {
-    // Mirror `TypeDefinition::to_create_table_sql`: when multiple fields are
-    // flagged `primary_key`, emit a table-level `PRIMARY KEY (a, b, …)`
-    // clause and skip the inline form. SQLite otherwise rejects with
-    // "table has more than one primary key".
-    let pk_count = type_def.fields.iter().filter(|f| f.primary_key).count();
-    let inline_pk = pk_count == 1;
-
-    let mut columns = Vec::new();
-    for field in &type_def.fields {
-        let mut col = format!("{} {}", field.name, field.sql_type);
-        if field.primary_key && inline_pk {
-            col.push_str(" PRIMARY KEY");
-        }
-        if !field.nullable {
-            col.push_str(" NOT NULL");
-        }
-        columns.push(col);
-    }
-
-    // Add _change_origin column for trace context propagation
-    columns.push(format!("{} TEXT", CHANGE_ORIGIN_COLUMN));
-
-    if pk_count >= 2 {
-        let pk_cols: Vec<&str> = type_def
-            .fields
-            .iter()
-            .filter(|f| f.primary_key)
-            .map(|f| f.name.as_str())
-            .collect();
-        columns.push(format!("PRIMARY KEY ({})", pk_cols.join(", ")));
-    }
-
-    format!(
-        "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
-        type_def.name,
-        columns.join(",\n  ")
-    )
 }

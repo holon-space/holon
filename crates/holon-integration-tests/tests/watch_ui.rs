@@ -483,7 +483,7 @@ fn trigger_presence_on_editable_text_nodes() {
             .await
             .expect("watch_ui should succeed");
 
-        let engine_clone = Arc::clone(&env.engine());
+        let engine_clone = Arc::clone(env.engine());
         let data_rows: Vec<Arc<HashMap<String, Value>>> = vec![];
 
         let display_tree = tokio::task::spawn_blocking(move || {

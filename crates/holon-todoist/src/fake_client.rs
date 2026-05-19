@@ -69,7 +69,7 @@ impl Default for TodoistFakeClient {
 
 #[async_trait]
 impl TodoistApiClient for TodoistFakeClient {
-    async fn sync_items(&self, _sync_token: Option<&str>) -> ApiResult<SyncResponse> {
+    async fn sync_items(&self, _: Option<&str>) -> ApiResult<SyncResponse> {
         info!("[TodoistFakeClient] sync_items called");
         let tasks = self.tasks.read().await;
 
@@ -90,7 +90,7 @@ impl TodoistApiClient for TodoistFakeClient {
         })
     }
 
-    async fn sync_projects(&self, _sync_token: Option<&str>) -> ApiResult<serde_json::Value> {
+    async fn sync_projects(&self, _: Option<&str>) -> ApiResult<serde_json::Value> {
         info!("[TodoistFakeClient] sync_projects called");
         let projects = self.projects.read().await;
 
@@ -233,7 +233,7 @@ impl TodoistApiClient for TodoistFakeClient {
         task_id: &str,
         parent_id: Option<&str>,
         project_id: Option<&str>,
-        _section_id: Option<&str>,
+        _: Option<&str>,
     ) -> ApiResult<()> {
         info!(
             "[TodoistFakeClient] move_task: id={}, parent={:?}, project={:?}",

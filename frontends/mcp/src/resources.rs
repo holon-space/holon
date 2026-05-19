@@ -6,8 +6,8 @@ use rmcp::{service::RequestContext, ErrorData as McpError, RoleServer};
 impl HolonMcpServer {
     pub async fn list_resources_impl(
         &self,
-        _request: Option<PaginatedRequestParam>,
-        _ctx: RequestContext<RoleServer>,
+        _: Option<PaginatedRequestParam>,
+        _: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         // Get all available entity names from operations
         let dispatcher = self.engine().get_dispatcher();
@@ -45,7 +45,7 @@ impl HolonMcpServer {
     pub async fn read_resource_impl(
         &self,
         ReadResourceRequestParam { uri }: ReadResourceRequestParam,
-        _ctx: RequestContext<RoleServer>,
+        _: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         if uri == "holon://operations" {
             // List all operations grouped by entity
@@ -59,7 +59,7 @@ impl HolonMcpServer {
             for op in &all_ops {
                 ops_by_entity
                     .entry(op.entity_name.to_string())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(op);
             }
 

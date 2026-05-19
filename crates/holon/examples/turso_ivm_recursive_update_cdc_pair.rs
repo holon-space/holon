@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)] // standalone repro — type sig clarity beats abstraction here
 //! Reproducer: UPDATEs through a `WITH RECURSIVE` matview emit a same-key
 //! Created+Deleted PAIR (in INSERT-then-DELETE order) instead of a single
 //! Updated event.

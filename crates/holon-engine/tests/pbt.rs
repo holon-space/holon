@@ -188,9 +188,7 @@ fn arb_net_and_marking() -> impl Strategy<Value = (YamlNet, YamlMarking)> {
             .expect("generated net should compile");
 
             let marking = YamlMarking {
-                clock: chrono::DateTime::from_timestamp(1_000_000, 0)
-                    .unwrap()
-                    .into(),
+                clock: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
                 tokens,
             };
 

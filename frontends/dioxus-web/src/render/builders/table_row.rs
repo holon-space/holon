@@ -3,7 +3,7 @@ use super::util::value_to_display;
 use holon_api::widget_spec::DataRow;
 use std::sync::Arc;
 
-pub fn render(data: &Arc<DataRow>, _ctx: &DioxusRenderContext) -> Element {
+pub fn render(data: &Arc<DataRow>, _: &DioxusRenderContext) -> Element {
     let mut cells: Vec<(String, String)> = data
         .iter()
         .filter(|(k, _)| k.as_str() != "id")

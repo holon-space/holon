@@ -139,7 +139,7 @@ impl OrgRenderer {
         // Transfer TODO to task_state if not already set
         if block.task_state().is_none() {
             if let Some(todo) = properties.get("TODO").and_then(|v| v.as_string()) {
-                block.set_task_state(Some(holon_api::TaskState::from_keyword(&todo)));
+                block.set_task_state(Some(holon_api::TaskState::from_keyword(todo)));
             }
         }
 
@@ -169,7 +169,7 @@ impl OrgRenderer {
         // Transfer SCHEDULED if not already set
         if block.scheduled().is_none() {
             if let Some(sched) = properties.get("SCHEDULED").and_then(|v| v.as_string()) {
-                match holon_api::types::Timestamp::parse(&sched) {
+                match holon_api::types::Timestamp::parse(sched) {
                     Ok(ts) => block.set_scheduled(Some(ts)),
                     Err(e) => {
                         tracing::warn!("Ignoring unparseable SCHEDULED property {sched:?}: {e}")
@@ -181,7 +181,7 @@ impl OrgRenderer {
         // Transfer DEADLINE if not already set
         if block.deadline().is_none() {
             if let Some(dead) = properties.get("DEADLINE").and_then(|v| v.as_string()) {
-                match holon_api::types::Timestamp::parse(&dead) {
+                match holon_api::types::Timestamp::parse(dead) {
                     Ok(ts) => block.set_deadline(Some(ts)),
                     Err(e) => {
                         tracing::warn!("Ignoring unparseable DEADLINE property {dead:?}: {e}")

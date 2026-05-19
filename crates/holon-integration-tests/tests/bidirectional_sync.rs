@@ -126,10 +126,10 @@ fn forward_sync_external_edit_updates_content() {
                 )
                 .await
                 .expect("query failed");
-            if let Some(row) = rows.first() {
-                if row.get("content").and_then(|v| v.as_string()) == Some("Updated Content") {
-                    break;
-                }
+            if let Some(row) = rows.first()
+                && row.get("content").and_then(|v| v.as_string()) == Some("Updated Content")
+            {
+                break;
             }
             if tokio::time::Instant::now() > deadline {
                 panic!("Externally updated content did not propagate to backend within timeout");
@@ -516,10 +516,10 @@ fn roundtrip_ui_create_then_external_update_then_verify_backend() {
                 )
                 .await
                 .expect("query failed");
-            if let Some(row) = rows.first() {
-                if row.get("content").and_then(|v| v.as_string()) == Some("Externally Updated") {
-                    break;
-                }
+            if let Some(row) = rows.first()
+                && row.get("content").and_then(|v| v.as_string()) == Some("Externally Updated")
+            {
+                break;
             }
             if tokio::time::Instant::now() > deadline {
                 panic!("External update to block-2 did not propagate to backend");

@@ -351,9 +351,13 @@ pub fn delete_block(doc: &LoroDoc, node: TreeID) {
     doc.commit();
 }
 
-pub fn move_block(doc: &LoroDoc, node: TreeID, new_parent: Option<TreeID>) -> Result<(), ()> {
+pub fn move_block(
+    doc: &LoroDoc,
+    node: TreeID,
+    new_parent: Option<TreeID>,
+) -> Result<(), loro::LoroError> {
     let tree = doc.get_tree(TREE_NAME);
-    tree.mov(node, new_parent).map_err(|_| ())?;
+    tree.mov(node, new_parent)?;
     doc.commit();
     Ok(())
 }

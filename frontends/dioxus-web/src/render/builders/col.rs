@@ -1,6 +1,6 @@
 use super::prelude::*;
 
-pub fn render(gap: &f32, children: &LazyChildren, _ctx: &DioxusRenderContext) -> Element {
+pub fn render(gap: &f32, children: &LazyChildren, _: &DioxusRenderContext) -> Element {
     let gap = *gap;
     rsx! {
         div {

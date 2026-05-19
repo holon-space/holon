@@ -53,7 +53,7 @@ impl Predicate {
                 Some(Value::Float(f)) => *f != 0.0,
                 Some(_) => true,
             },
-            Predicate::Eq { field, value } => context.get(field).map_or(false, |v| v == value),
+            Predicate::Eq { field, value } => context.get(field) == Some(value),
             Predicate::Ne { field, value } => match context.get(field) {
                 None => !value.is_null(),
                 Some(v) => v != value,

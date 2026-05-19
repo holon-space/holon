@@ -50,6 +50,12 @@ struct BoundsState {
     cold: bool,
 }
 
+impl Default for BoundsRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BoundsRegistry {
     pub fn new() -> Self {
         Self {

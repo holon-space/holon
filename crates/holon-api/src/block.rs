@@ -856,32 +856,6 @@ pub struct BlockMetadata {
     pub updated_at: i64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn block_schema_has_correct_jsonb_fields() {
-        let schema = Block::type_definition();
-
-        // These fields should be JSONB
-        assert!(
-            schema.field_is_jsonb("properties"),
-            "properties should be JSONB"
-        );
-
-        // These fields should NOT be JSONB
-        assert!(!schema.field_is_jsonb("id"), "id should NOT be JSONB");
-        assert!(
-            !schema.field_is_jsonb("content"),
-            "content should NOT be JSONB"
-        );
-        assert!(
-            !schema.field_is_jsonb("parent_id"),
-            "parent_id should NOT be JSONB"
-        );
-    }
-}
-
 /// Group blocks by their owning page block.
 ///
 /// Builds a `parent_id → children` index in one pass, then walks from each
@@ -954,4 +928,28 @@ pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn block_schema_has_correct_jsonb_fields() {
+        let schema = Block::type_definition();
+
+        assert!(
+            schema.field_is_jsonb("properties"),
+            "properties should be JSONB"
+        );
+
+        assert!(!schema.field_is_jsonb("id"), "id should NOT be JSONB");
+        assert!(
+            !schema.field_is_jsonb("content"),
+            "content should NOT be JSONB"
+        );
+        assert!(
+            !schema.field_is_jsonb("parent_id"),
+            "parent_id should NOT be JSONB"
+        );
+    }
 }
