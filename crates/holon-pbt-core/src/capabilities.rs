@@ -33,6 +33,7 @@
 //! internal state via interior mutability on the SUT itself).
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 // NOTE — Phase 1 draft uses stringly-typed identifiers and owned values
 // so this crate doesn't grow `holon-api` as a dep before the migration
@@ -633,6 +634,28 @@ pub trait SutLayout {
 
     /// True if any rendered widget is an Error variant.
     async fn any_error_widget(&self) -> bool;
+
+    /// Wait until a widget for `id` is registered in BoundsRegistry, or
+    /// `timeout` elapses. Returns `Err(diagnostic_string)` on timeout —
+    /// callers panic for input-bearing transitions per fail-loud policy.
+    /// Implementations may issue a scroll-into-view RPC if the bounds are
+    /// missing (virtualized lists do not prepaint offscreen rows).
+    async fn wait_for_bounds(&self, id: &CapBlockId, timeout: Duration) -> Result<(), String>;
+
+    /// Wait until the widget rendered at `id` matches one of `accepted`
+    /// kinds (e.g. `["editable_text", "rendered_text"]`), or `timeout`
+    /// elapses. Stronger precondition than `wait_for_bounds`: confirms
+    /// the click target is the *interactive* variant the transition
+    /// expects, not just any element carrying the entity_id.
+    ///
+    /// Returns `Ok(())` when no geometry is installed (headless variants
+    /// don't need widget-kind gating).
+    async fn wait_for_widget_kind(
+        &self,
+        id: &CapBlockId,
+        accepted: &[&str],
+        timeout: Duration,
+    ) -> Result<(), String>;
 }
 
 // ─── Phase 6e — Driver cluster ───────────────────────────────────────
@@ -645,6 +668,23 @@ pub trait SutLayout {
 pub trait SutDriver {
     async fn driver_send_key_chord(&mut self, chord: &str);
     async fn driver_click(&mut self, id: &CapBlockId);
+    /// Region-aware click. Mirrors `UserDriver::click_entity(entity_id,
+    /// region)` (`region` is "main", "left_sidebar", ...). `driver_click`
+    /// is the region-defaulted convenience wrapper that panics on error;
+    /// `click_entity` returns the result so callers can attach their own
+    /// transition-specific diagnostic.
+    async fn click_entity(&mut self, id: &CapBlockId, region: &str) -> Result<(), String>;
+    /// Poll until `engine_focused_block` returns `Some(id)` or `timeout`
+    /// elapses. Used as a post-click barrier — GPUI's mouse-click goes
+    /// through `dispatch_intent` (fire-and-forget), so subsequent
+    /// transitions need an explicit gate before they read focus.
+    async fn wait_for_engine_focus(&self, id: &CapBlockId, timeout: Duration)
+        -> Result<(), String>;
+    /// Send a single raw key with modifiers. `key` is a key name like
+    /// `"home"`, `"right"`, `"enter"`, `"backspace"`, or a single
+    /// character (`"a"`). `modifiers` is a slice of `"cmd"`, `"ctrl"`,
+    /// `"alt"`, `"shift"`. Mirrors `UserDriver::send_raw_keystroke`.
+    async fn send_raw_keystroke(&mut self, key: &str, modifiers: &[&str]) -> Result<(), String>;
     async fn driver_current_focus(&self) -> Option<CapBlockId>;
     /// The globally focused block id as tracked by the reactive/frontend
     /// engine (distinct from the per-region SQL `current_focus` matview).

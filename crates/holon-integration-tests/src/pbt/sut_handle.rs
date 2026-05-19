@@ -3,12 +3,16 @@
 //! PBT runs when proptest hands it a transition variant.
 //!
 //! The trait itself lives in [`crate::pbt::transition_dispatch::SutHandle`].
-//! Many methods are thin chord/driver dispatches; a few (`apply_start_app`,
-//! `apply_bulk_external_add`, `apply_toggle_state`, `apply_split_block`,
-//! `apply_trigger_doc_link`, `apply_click_block`, `apply_edit_via_*`,
-//! `apply_trigger_slash_command`) still carry inline business logic that
-//! Phase C migration will move into per-transition modules under
-//! `pbt/transitions/`.
+//! Many methods are thin chord/driver dispatches; a few
+//! (`apply_start_app`, `apply_bulk_external_add`, `apply_split_block`,
+//! `apply_trigger_doc_link`, `apply_trigger_slash_command`) still carry
+//! inline business logic that Phase C migration will move into
+//! per-transition modules under `pbt/transitions/`.
+//!
+//! `apply_edit_via_display_tree` + `apply_edit_via_view_model` were
+//! deleted in Phase C #5: both were `apply_intent` shortcuts that the
+//! atomic-editor primitives (FocusEditableText + TypeChars +
+//! DeleteBackward) already cover with real user input. See TUI TODO A6.
 //!
 //! Extracted from `sut.rs` (Phase D3).
 
@@ -17,8 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use holon_api::block::Block;
-use holon_api::entity_uri::EntityUri;
 use holon_api::{QueryLanguage, Value};
+use holon_orgmode::OrgBlockExt;
 
 use crate::wait_for_file_condition;
 
@@ -593,412 +597,36 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
 
     async fn apply_toggle_state(&mut self, block_id: &holon_api::EntityUri, new_state: &str) {
         let resolved_block_id = self.resolve_uri(block_id);
-        tracing::trace!(
-            "[apply] ToggleState: block={block_id} (resolved={resolved_block_id}) → {new_state:?}"
-        );
-
-        // Use a fully cross-block-resolved ViewModel: each nested
-        // `live_block` is recursively interpreted via
-        // `engine.snapshot_resolved`, which calls `ensure_watching`
-        // per block so per-region UiWatchers fire. We poll until the
-        // target entity is visible — sidebar/main-panel slots populate
-        // asynchronously, and the older `current_resolved_view_model`
-        // (which only interprets the root) returns an empty
-        // `live_block` for the main-panel slot.
-        let display_tree = self
-            .wait_for_entity_in_resolved_view_model(
-                resolved_block_id.as_str(),
-                Duration::from_secs(5),
-            )
-            .await
-            .unwrap_or_else(|| {
-                panic!(
-                    "[ToggleState] entity {resolved_block_id} did not appear in the \
-                     resolved ViewModel within 5s — sidebar nav may not have populated \
-                     the main panel yet."
-                )
-            });
-
-        let all_toggles = crate::display_assertions::collect_state_toggle_nodes(&display_tree);
-        let toggle = all_toggles.iter().find(|t| {
-            t.row_id()
-                .is_some_and(|id| id == resolved_block_id.as_str())
-        });
-        if toggle.is_none() {
-            eprintln!(
-                "[ToggleState] No StateToggle with id={block_id} in resolved tree \
-                 (found {} toggles, root={:?}).\nTree:\n{}",
-                all_toggles.len(),
-                display_tree.widget_name(),
-                display_tree.pretty_print(0),
-            );
-            panic!("[ToggleState] No StateToggle with id={block_id} in resolved tree");
-        }
-        let toggle = toggle.unwrap();
-
-        let (field, current, states) = match &toggle.kind {
-            holon_frontend::view_model::ViewKind::StateToggle {
-                field,
-                current,
-                states,
-                ..
-            } => (field.clone(), current.clone(), states.clone()),
-            _ => panic!("[ToggleState] Expected StateToggle, got {:?}", toggle.kind),
-        };
-
-        assert!(
-            !toggle.operations.is_empty(),
-            "[ToggleState] StateToggle for {block_id} has no operations"
-        );
-        let op = holon_frontend::operations::find_set_field_op(&field, &toggle.operations);
-        assert!(
-            op.is_some(),
-            "[ToggleState] No set_field op for '{field}' on {block_id}"
-        );
-        let op = op.unwrap();
-
-        let row_id = toggle.row_id();
-        assert!(
-            row_id.is_some(),
-            "[ToggleState] StateToggle for {block_id} has no entity id"
-        );
-        let row_id = row_id.unwrap();
-        let entity_name = toggle
-            .entity_name()
-            .expect("[ToggleState] StateToggle has no entity name");
-
-        let states_vec: Vec<String> = states.split(',').map(|s| s.to_string()).collect();
-        assert!(
-            states_vec.iter().any(|s| s == new_state),
-            "[ToggleState] '{new_state}' not in states {states_vec:?}"
-        );
-
-        // Validate that the keybinding registry's chord for
-        // `cycle_task_state` was joined onto the rendered state_toggle
-        // node's operations. Reading directly off the resolved
-        // ViewModel node we already located — bypasses the older
-        // `assert_keychord_resolves` path that walks
-        // `current_reactive_tree`, whose `live_block` slots are not
-        // synchronously populated in the headless test (the same
-        // limitation we worked around with
-        // `wait_for_entity_in_resolved_view_model`).
-        if let Some(expected_chord) = self.find_keybinding_for_op("cycle_task_state") {
-            let cycle_op_chord = toggle.operations.iter().find_map(|ow| {
-                if ow.descriptor.name == "cycle_task_state" {
-                    ow.descriptor.key_chord().cloned()
-                } else {
-                    None
-                }
-            });
-            assert_eq!(
-                cycle_op_chord.as_ref(),
-                Some(&expected_chord),
-                "[ToggleState] state_toggle on {block_id} is missing the \
-                 keybinding-joined `cycle_task_state` op (expected chord {expected_chord:?}). \
-                 Operations on the node: {:?}",
-                toggle
-                    .operations
-                    .iter()
-                    .map(|ow| (
-                        ow.descriptor.name.clone(),
-                        ow.descriptor.key_chord().cloned()
-                    ))
-                    .collect::<Vec<_>>()
-            );
-            eprintln!(
-                "[ToggleState] keychord validation OK: {expected_chord:?} bound on \
-                 cycle_task_state for {row_id}"
-            );
-        }
-
-        // Dispatch the actual mutation via set_field (PBT controls exact new_state)
-        let intent = holon_frontend::OperationIntent::set_field(
-            &entity_name,
-            &op.name,
-            &row_id,
-            &field,
-            Value::String(new_state.to_string()),
-        );
-        eprintln!("[ToggleState] Dispatching set_field: {current:?} → {new_state:?}");
-        let driver = self
-            .driver
+        // Real-user-input dispatch: compute click_count from the
+        // pre-mutation task_state, then click the state_toggle widget
+        // that many times. Replaces the previous apply_intent backend
+        // shortcut and the ViewModel-walking assertions (those concerns
+        // — keychord-joined op, post-CDC enrichment — are invariant-
+        // shaped; promote to `pbt/invariants/bodies/` if needed).
+        let current_state: String = self
+            .pre_ref_state
             .as_ref()
-            .expect("driver not installed — was start_app called?");
-        driver
-            .apply_intent(intent)
-            .await
-            .expect("ToggleState dispatch failed");
-
-        // Let the CDC event propagate through the enrichment pipeline.
-        // The data matview CDC fires synchronously from the DB write, but
-        // the channel-based forwarding needs a yield to process.
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-
-        // ── Fresh-tree check ─────────────────────────────────
-        // Snapshot the reactive tree NOW — before the structural
-        // re-render can mask CDC enrichment bugs. The structural CDC
-        // also fires for this row change and triggers a re-render
-        // with fresh query_view data (which uses a different JSON
-        // parsing path). By checking here, we observe the
-        // CDC-enriched data before it gets replaced.
-        if let Some((_root, post_tree)) = self.current_reactive_tree() {
-            let post_toggle = crate::display_assertions::find_state_toggle_for_block_reactive(
-                &post_tree,
-                &resolved_block_id,
-            );
-            if let Some(post) = post_toggle
-                && post.widget_name().as_deref() == Some("state_toggle")
-            {
-                let post_current = post.prop_str("current").unwrap_or_else(|| "".to_string());
-                // The value must be either the new state (CDC propagated
-                // correctly) or the old state (CDC hasn't arrived yet).
-                // It must NOT be empty when we set it to a non-empty value
-                // — that would mean the CDC enrichment dropped the property.
-                if !new_state.is_empty() && post_current.is_empty() {
-                    panic!(
-                        "[ToggleState] Post-mutation ViewModel has empty StateToggle \
-                             for block {block_id}! Set '{current}' → '{new_state}' but \
-                             got ''. This means the CDC enrichment pipeline lost the \
-                             task_state property (flatten_properties bug)."
-                    );
-                }
-            }
-        }
-
-        // Live-tree vs fresh-tree check is done in check_invariants
-        // via the HeadlessLiveTree (inv10_live).
-    }
-
-    async fn apply_edit_via_display_tree(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        new_content: &str,
-    ) {
-        let resolved_block_id = self.resolve_uri(block_id);
+            .and_then(|s| s.block_state.blocks.get(block_id))
+            .and_then(|b| b.task_state())
+            .map(|ts| ts.keyword.to_string())
+            .unwrap_or_default();
+        let click_count =
+            crate::pbt::transitions::toggle_state::cycle_click_count(&current_state, new_state);
         tracing::trace!(
-            "[apply] EditViaDisplayTree: block={block_id} (resolved={resolved_block_id}) → {new_content:?}"
+            "[apply] ToggleState: block={block_id} (resolved={resolved_block_id}) \
+             {current_state:?} → {new_state:?} ({click_count} clicks)"
         );
-
-        // In production, leaf blocks are rendered by the render_entity() DSL
-        // function using entity profiles + row data from the parent query.
-        // We replicate this by querying the block's data and interpreting
-        // render_entity() with that data as context.
-        let engine = self.engine();
-        let sql = format!(
-            "SELECT id, content, content_type, source_language, parent_id \
-             FROM block_raw WHERE id = '{}'",
-            resolved_block_id
-        );
-        let data_rows = engine
-            .execute_query(sql, HashMap::new(), None)
-            .await
-            .expect("block query failed in EditViaDisplayTree");
         assert!(
-            !data_rows.is_empty(),
-            "[EditViaDisplayTree] Block {block_id} not found in database"
+            click_count > 0,
+            "[ToggleState] click_count=0 ({current_state:?} == {new_state:?}) \
+             — generator should exclude no-op transitions"
         );
-
-        let render_expr = holon_api::render_types::RenderExpr::FunctionCall {
-            name: "render_entity".to_string(),
-            args: Vec::new(),
-        };
-
-        let engine_clone = Arc::clone(engine);
-        let display_tree = tokio::task::spawn_blocking(move || {
-            let services = holon_frontend::reactive::HeadlessBuilderServices::new(engine_clone);
-            holon_frontend::interpret_pure(
-                &render_expr,
-                &data_rows
-                    .iter()
-                    .cloned()
-                    .map(std::sync::Arc::new)
-                    .collect::<Vec<_>>(),
-                &services,
-            )
-            .snapshot()
-        })
-        .await
-        .expect("spawn_blocking panicked");
-
-        // Walk tree to find EditableText node for this block_id
-        fn find_editable_for_block<'a>(
-            node: &'a holon_frontend::ViewModel,
-            block_id: &EntityUri,
-        ) -> Option<&'a holon_frontend::ViewModel> {
-            if matches!(
-                &node.kind,
-                holon_frontend::view_model::ViewKind::EditableText { .. }
-            ) && node
-                .entity
-                .get("id")
-                .and_then(|v| v.as_string())
-                .is_some_and(|id| id == block_id.as_str())
-            {
-                return Some(node);
-            }
-            node.children()
-                .iter()
-                .find_map(|c| find_editable_for_block(c, block_id))
-        }
-
-        let editable = find_editable_for_block(&display_tree, &resolved_block_id)
-            .or_else(|| find_editable_for_block(&display_tree, &resolved_block_id))
-            .unwrap_or_else(|| {
-                panic!(
-                    "[EditViaDisplayTree] No EditableText with id={resolved_block_id} in display tree.\n\
-                     This means render_entity created the node without entity context.\n{}",
-                    display_tree.pretty_print(0)
-                )
-            });
-
-        assert!(
-            !editable.operations.is_empty(),
-            "[EditViaDisplayTree] EditableText for {block_id} has empty operations.\n\
-             set_field cannot fire on blur.\n{}",
-            display_tree.pretty_print(0)
-        );
-
-        // Extract operation metadata and execute
-        let op = holon_frontend::operations::find_set_field_op("content", &editable.operations)
-            .expect("No set_field operation found on EditableText");
-
-        let row_id = editable.row_id().expect("EditableText entity has no 'id'");
-        let entity_name = editable
-            .entity_name()
-            .expect("EditableText entity has no entity name");
-
-        let intent = holon_frontend::OperationIntent::set_field(
-            &entity_name,
-            &op.name,
-            &row_id,
-            "content",
-            Value::String(new_content.to_string()),
-        );
-
-        let driver = self
-            .driver
-            .as_ref()
-            .expect("driver not installed — was start_app called?");
-        driver
-            .apply_intent(intent)
-            .await
-            .expect("set_field via display tree failed");
-    }
-
-    async fn apply_edit_via_view_model(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        new_content: &str,
-    ) {
-        let resolved_block_id = self.resolve_uri(block_id);
-        tracing::trace!(
-            "[apply] EditViaViewModel: block={block_id} (resolved={resolved_block_id}) → {new_content:?}"
-        );
-
-        // 1. Query block data and render via render_entity() DSL (same as EditViaDisplayTree)
-        let engine = self.engine();
-        let sql = format!(
-            "SELECT id, content, content_type, source_language, parent_id \
-             FROM block_raw WHERE id = '{}'",
-            resolved_block_id
-        );
-        let data_rows = engine
-            .execute_query(sql, HashMap::new(), None)
-            .await
-            .expect("block query failed in EditViaViewModel");
-        assert!(
-            !data_rows.is_empty(),
-            "[EditViaViewModel] Block {resolved_block_id} not found in database"
-        );
-
-        let render_expr = holon_api::render_types::RenderExpr::FunctionCall {
-            name: "render_entity".to_string(),
-            args: Vec::new(),
-        };
-
-        let engine_clone = Arc::clone(engine);
-        let display_tree = tokio::task::spawn_blocking(move || {
-            let services = holon_frontend::reactive::HeadlessBuilderServices::new(engine_clone);
-            holon_frontend::interpret_pure(
-                &render_expr,
-                &data_rows
-                    .iter()
-                    .cloned()
-                    .map(std::sync::Arc::new)
-                    .collect::<Vec<_>>(),
-                &services,
-            )
-            .snapshot()
-        })
-        .await
-        .expect("spawn_blocking panicked");
-
-        // 2. Find EditableText node for this block
-        let editable = display_tree
-            .find_editable_text(resolved_block_id.as_str())
-            .unwrap_or_else(|| {
-                panic!(
-                    "[EditViaViewModel] No EditableText with id={resolved_block_id} in display tree.\n{}",
-                    display_tree.pretty_print(0)
-                )
-            });
-
-        // 3. Verify triggers are present
-        assert!(
-            !editable.triggers.is_empty(),
-            "[EditViaViewModel] EditableText for {block_id} has no triggers.\n{}",
-            display_tree.pretty_print(0)
-        );
-
-        // 4. Build EditorViewModel and verify normal text doesn't fire triggers
-        let mut ctrl = holon_frontend::EditorViewModel::from_view_model(editable);
-        assert!(
-            matches!(
-                ctrl.on_text_changed("hello", 1),
-                holon_frontend::EditorAction::None
-            ),
-            "[EditViaViewModel] Normal text 'hello' should NOT fire any trigger"
-        );
-
-        // 5. Simulate blur with new content
-        let original_value = match &editable.kind {
-            holon_frontend::view_model::ViewKind::EditableText { content, .. } => content.clone(),
-            _ => unreachable!(),
-        };
-        let action = ctrl.on_blur(new_content);
-
-        // 6. Dispatch the resulting operation
-        match action {
-            holon_frontend::EditorAction::Execute(intent) => {
-                let driver = self
-                    .driver
-                    .as_ref()
-                    .expect("driver not installed — was start_app called?");
-                driver
-                    .apply_intent(intent)
-                    .await
-                    .expect("set_field via ViewModel TextSync failed");
-            }
-            holon_frontend::EditorAction::None => {
-                assert_eq!(
-                    new_content,
-                    original_value,
-                    "[EditViaViewModel] on_blur returned None but content changed \
-                     ({original_value:?} → {new_content:?}). \
-                     Operations not wired? ops={:?}",
-                    editable
-                        .operations
-                        .iter()
-                        .map(|o| &o.descriptor.name)
-                        .collect::<Vec<_>>()
-                );
-            }
-            other => panic!(
-                "[EditViaViewModel] Expected Execute from on_blur, got {:?}",
-                other
-            ),
-        }
+        crate::pbt::transitions::toggle_state::apply_toggle_state_to_sut(
+            self,
+            &resolved_block_id.to_string(),
+            click_count,
+        )
+        .await;
     }
 
     async fn apply_bulk_external_add(
@@ -1351,112 +979,11 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         tracing::trace!(
             "[apply] TriggerSlashCommand: block={block_id} (resolved={resolved_block_id})"
         );
-
-        // 1. Query block data and render via render_entity() DSL
-        let engine = self.engine();
-        let sql = format!(
-            "SELECT id, content, content_type, source_language, parent_id \
-             FROM block_raw WHERE id = '{}'",
-            resolved_block_id
-        );
-        let data_rows = engine
-            .execute_query(sql, HashMap::new(), None)
-            .await
-            .expect("block query failed in TriggerSlashCommand");
-        assert!(
-            !data_rows.is_empty(),
-            "[TriggerSlashCommand] Block {block_id} not found in database"
-        );
-
-        let render_expr = holon_api::render_types::RenderExpr::FunctionCall {
-            name: "render_entity".to_string(),
-            args: Vec::new(),
-        };
-
-        let engine_clone = Arc::clone(engine);
-        let display_tree = tokio::task::spawn_blocking(move || {
-            let services = holon_frontend::reactive::HeadlessBuilderServices::new(engine_clone);
-            holon_frontend::interpret_pure(
-                &render_expr,
-                &data_rows
-                    .iter()
-                    .cloned()
-                    .map(std::sync::Arc::new)
-                    .collect::<Vec<_>>(),
-                &services,
-            )
-            .snapshot()
-        })
-        .await
-        .expect("spawn_blocking panicked");
-
-        // 2. Find EditableText node for this block
-        let editable = display_tree
-            .find_editable_text(resolved_block_id.as_str())
-            .unwrap_or_else(|| {
-                panic!(
-                    "[TriggerSlashCommand] No EditableText with id={resolved_block_id}.\n{}",
-                    display_tree.pretty_print(0)
-                )
-            });
-
-        // 3. Build EditorViewModel and simulate typing "/"
-        let mut ctrl = holon_frontend::EditorViewModel::from_view_model(editable);
-        let action = ctrl.on_text_changed("/", 1);
-        assert!(
-            matches!(action, holon_frontend::EditorAction::PopupActivated { .. }),
-            "[TriggerSlashCommand] Expected PopupActivated for '/' on block {block_id}, got {:?}",
-            action
-        );
-
-        // 4. Populate items synchronously (CommandProvider is sync)
-        let context_params: HashMap<String, Value> = editable
-            .entity
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let items = holon_frontend::command_provider::CommandProvider::build_command_items(
-            &editable.operations,
-            &context_params,
-            "",
-        );
-        ctrl.set_popup_items(items);
-
-        let popup_state = ctrl.popup_state().unwrap();
-        let delete_idx = popup_state
-            .items
-            .iter()
-            .position(|item| item.id == "delete")
-            .unwrap_or_else(|| {
-                panic!(
-                    "[TriggerSlashCommand] No 'delete' operation in menu for block {block_id}.\n\
-                     Available: {:?}",
-                    popup_state.items.iter().map(|i| &i.id).collect::<Vec<_>>()
-                )
-            });
-
-        // 5. Navigate to delete entry and select it
-        for _ in 0..delete_idx {
-            ctrl.on_key(holon_frontend::EditorKey::Down);
-        }
-        let action = ctrl.on_key(holon_frontend::EditorKey::Enter);
-        match action {
-            holon_frontend::EditorAction::Execute(intent) => {
-                eprintln!(
-                    "[TriggerSlashCommand] Executing {}.{} with {:?}",
-                    intent.entity_name, intent.op_name, intent.params
-                );
-                let driver = self
-                    .driver
-                    .as_ref()
-                    .expect("driver not installed — was start_app called?");
-                driver
-                    .apply_intent(intent)
-                    .await
-                    .expect("slash command operation failed");
-            }
-            other => panic!("[TriggerSlashCommand] Expected Execute, got {:?}", other),
-        }
+        crate::pbt::transitions::trigger_slash_command::apply_trigger_slash_command_to_sut(
+            self,
+            &resolved_block_id.to_string(),
+        )
+        .await;
     }
 
     async fn apply_trigger_doc_link(
@@ -1699,106 +1226,12 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         tracing::trace!(
             "[apply] ClickBlock: region={region:?} block={block_id} (resolved={resolved_id})"
         );
-
-        // Wait for the entity to actually render — sidebar `live_block`
-        // slots are populated asynchronously by their UiWatchers, and
-        // clicking before they appear is the headless equivalent of
-        // clicking dead pixels. We poll the engine's fully-resolved
-        // `ViewModel` (which calls `ensure_watching` per nested block,
-        // so all watchers fire) until our target entity shows up.
-        let resolved = match self
-            .wait_for_entity_in_resolved_view_model(resolved_id.as_str(), Duration::from_secs(5))
-            .await
-        {
-            Some(vm) => vm,
-            None => panic!(
-                "[ClickBlock] entity {resolved_id} did not appear in the \
-                 resolved ViewModel within 5s. Region={region:?}."
-            ),
-        };
-
-        // Dispatch the bound click action if the rendered widget at this
-        // entity has one (e.g. a sidebar selectable's `navigation.focus`).
-        // Otherwise fall back to `navigation.editor_focus`, mirroring
-        // GPUI's `render_entity` click handler.
-        let driver = self
-            .driver
-            .as_ref()
-            .expect("driver not installed — was start_app called?");
-        // Region-scoped lookup: production GPUI's click handler runs on a
-        // specific element in the clicked region, not across the whole tree.
-        // The same entity_id may appear in multiple regions (e.g. `block:journals`
-        // is both a LeftSidebar list item and a Main-panel doc) and bind
-        // different actions per region. See FU-15.
-        let bound_intent = holon_frontend::focus_path::find_click_intent_in_region(
-            &resolved,
-            resolved_id.as_str(),
+        crate::pbt::transitions::click_block::apply_click_block_to_sut(
+            self,
             region.as_str(),
-        );
-        // Dispatch policy:
-        //  * GPUI variant (frontend_geometry.is_some()) — drive a
-        //    real mouse click so focus, editor mounting, chord
-        //    resolution, and the bound action all run through
-        //    production code. Geometry lookup falls back to
-        //    `selectable-{id}` (default index.org sidebar) and then
-        //    to entity_id scan, so sidebar selectables resolve.
-        //  * Headless variants — no real input pipeline. Use the
-        //    bound action's `synthetic_dispatch` if present;
-        //    otherwise fall back to a synthesized click verb.
-        //
-        // Mouse-driven dispatch is fire-and-forget
-        // (`services.dispatch_intent`, `reactive.rs:1448`) — unlike
-        // the awaitable `dispatch_intent_sync` used by
-        // `apply_intent`. Add an explicit focus-await barrier
-        // before returning so subsequent transitions see a
-        // populated focus.
-        let dispatched_action = if self.frontend_geometry.is_some() {
-            self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
-                .await
-                .unwrap_or_else(|e| {
-                    panic!("[ClickBlock] {e} Region={region:?}.");
-                });
-            driver
-                .click_entity(resolved_id.as_str(), region.as_str())
-                .await
-                .expect("[ClickBlock] click_entity failed");
-
-            self.wait_for_focus_to_match(resolved_id.as_str(), Duration::from_secs(2))
-                .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "[ClickBlock] focus did not propagate within 2s: {e} \
-                     Region={region:?} expected={resolved_id}."
-                    );
-                });
-            false
-        } else if let Some(intent) = bound_intent {
-            driver
-                .apply_intent(intent)
-                .await
-                .expect("[ClickBlock] apply_intent failed");
-            true
-        } else {
-            self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
-                .await
-                .unwrap_or_else(|e| {
-                    panic!("[ClickBlock] {e} Region={region:?}.");
-                });
-            driver
-                .click_entity(resolved_id.as_str(), region.as_str())
-                .await
-                .expect("[ClickBlock] click_entity failed");
-            false
-        };
-        eprintln!(
-            "[ClickBlock] {} (entity={resolved_id})",
-            if dispatched_action {
-                "dispatched bound action"
-            } else {
-                "real input pipeline / editor_focus"
-            }
-        );
-
+            &resolved_id.to_string(),
+        )
+        .await;
         // Let CDC propagate (mirrors the yield_now dance ToggleState uses).
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
@@ -1813,12 +1246,8 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         tracing::trace!("[apply] SplitBlock: block={block_id} position={position}");
         let resolved_id = self.resolve_uri(block_id);
 
-        // Real users press Enter, not Ctrl+x. The Enter handler at
-        // `editor_view.rs:543-575` is a capture_action that reads
-        // `input.read(cx).cursor()` from the live `InputState` and
-        // dispatches `split_block` directly — a separate code path
-        // from the bubble-phase chord resolver that `Ctrl+x` hits.
-        // Driving Enter exercises that production path.
+        // Bounds pre-condition with SQL probe diagnostic on failure
+        // (more actionable than the bare bounds-timeout error).
         if let Err(e) = self
             .wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
             .await
@@ -1835,8 +1264,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         // parent — as the PRE-transition ref-state predicted — has rendered
         // so `require_element_center` returns stable bounds. Uses the
         // pre-state instead of `ref_state` (post-transition) so the
-        // predicate matches what the user can see right now. No-op when
-        // pre-state isn't recorded yet or the parent has no children.
+        // predicate matches what the user can see right now.
         let parent_for_settle = self
             .pre_ref_state
             .as_ref()
@@ -1851,44 +1279,6 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
                     )
                 });
         }
-        // Stronger precondition than bounds-exist: the block must be rendered
-        // as an interactive widget (editable_text or its read-only sibling
-        // rendered_text) so a click can either focus the editor or promote
-        // the read-only variant. Mismatch here (e.g. block rendered as
-        // `text` or not promoted at all) used to surface 1 s later as a
-        // confusing "click didn't change focus" timeout.
-        self.wait_for_widget_kind(
-            resolved_id.as_str(),
-            &["editable_text", "rendered_text"],
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap_or_else(|e| {
-            panic!("[SplitBlock] target not rendered as editable_text/rendered_text: {e:#}")
-        });
-        let driver = self.driver.as_ref().expect("driver not installed");
-        driver
-            .click_entity(resolved_id.as_str(), "main")
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[SplitBlock] click_entity failed for {resolved_id}: {e:#}")
-            });
-        // Fail loud if the click didn't move keyboard focus to the target
-        // editor. The Enter handler at `editor_view.rs:543-575` dispatches
-        // `split_block` against whichever block's editor owns focus when
-        // Enter fires — so a silent focus drift would have us splitting
-        // the wrong block. The previous `dispatch_block_op_via_chord`
-        // path bypassed this because it passed `id` as an explicit op
-        // param; Enter reads `input.read(cx).cursor()` and `row_id` from
-        // the focused editor.
-        self.wait_for_focus_to_match(resolved_id.as_str(), Duration::from_secs(1))
-            .await
-            .unwrap_or_else(|e| {
-                panic!(
-                    "[SplitBlock] click_entity did not focus {resolved_id} \
-                     before Enter — split would have hit the wrong block: {e:#}"
-                )
-            });
         // Pre-Enter SQL snapshot: log the live content + length so panic-time
         // analysis can distinguish "cursor position drift" from "content
         // diverged before the split" cases.
@@ -1904,20 +1294,14 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
                  ref_content_len={ref_content_len:?}\n{sql_pre}"
             );
         }
-        driver
-            .send_raw_keystroke("home", &[])
-            .await
-            .expect("[SplitBlock] home failed");
-        for _ in 0..position {
-            driver
-                .send_raw_keystroke("right", &[])
-                .await
-                .expect("[SplitBlock] right failed");
-        }
-        driver
-            .send_raw_keystroke("enter", &[])
-            .await
-            .expect("[SplitBlock] enter failed");
+        // Drive the input pipeline (widget-kind → click → focus → keys →
+        // Enter) through the capability-bound free helper.
+        crate::pbt::transitions::split_block::apply_split_block_input_pipeline_to_sut(
+            self,
+            &resolved_id.to_string(),
+            position,
+        )
+        .await;
 
         let expected_count = Self::expected_content_block_count(ref_state);
         let expected_ids = self.expected_block_ids(ref_state);
@@ -2052,32 +1436,11 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
     async fn apply_focus_editable_text(&mut self, block_id: &holon_api::EntityUri) {
         let resolved_id = self.resolve_uri(block_id);
         tracing::trace!("[apply] FocusEditableText: block={block_id} (resolved={resolved_id})");
-        let driver = self
-            .driver
-            .as_ref()
-            .expect("driver not installed — was start_app called?");
-        // Fail loud: bounds must be present, click_entity must succeed.
-        // The previous version fell back to `synthetic_dispatch` (engine
-        // fast-path) and printed a warning, which silently masked any
-        // bug in the keyboard nav / Enter pipeline. Per CLAUDE.md
-        // ("fail loud, never fake") let both errors propagate.
-        // 5s budget mirrors the other input-bearing call sites:
-        // `wait_for_entity_bounds` now polls for ~200ms, RPCs a scroll-
-        // into-view on the GPUI main thread (oneshot + layout + flush is
-        // 50–200ms), and keeps polling. The 1s budget that worked when
-        // generators only proposed visible candidates is too tight once
-        // offscreen-virtualized-list entities become legal targets.
-        self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[FocusEditableText] bounds unavailable for {resolved_id}: {e:#}")
-            });
-        driver
-            .click_entity(resolved_id.as_str(), "main")
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[FocusEditableText] click_entity failed for {resolved_id}: {e:#}")
-            });
+        crate::pbt::transitions::focus_editable_text::apply_focus_editable_text_to_sut(
+            self,
+            &resolved_id.to_string(),
+        )
+        .await;
     }
 
     async fn apply_move_cursor(&mut self, byte_position: usize) {

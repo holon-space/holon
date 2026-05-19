@@ -37,7 +37,7 @@ pub mod add_peer;
 mod apply_mutation;
 mod arrow_navigate;
 mod bulk_external_add;
-mod click_block;
+pub mod click_block;
 mod concurrent_mutations;
 mod concurrent_schema_init;
 mod create_directory;
@@ -45,11 +45,9 @@ mod create_document;
 mod create_stale_loro;
 pub mod delete_backward;
 mod drag_drop_block;
-mod edit_via_display_tree;
-mod edit_via_view_model;
 mod emit_mcp_data;
 mod expand_toggle;
-mod focus_editable_text;
+pub mod focus_editable_text;
 mod git_init;
 pub mod indent;
 mod jj_git_init;
@@ -77,9 +75,9 @@ mod start_app;
 mod switch_view;
 mod sync_with_peer;
 mod toggle_collapse;
-mod toggle_state;
+pub mod toggle_state;
 mod trigger_doc_link;
-mod trigger_slash_command;
+pub mod trigger_slash_command;
 pub mod type_chars;
 mod undo_last_mutation;
 mod unpin_block;
@@ -102,8 +100,6 @@ pub use create_document::CreateDocument;
 pub use create_stale_loro::CreateStaleLoro;
 pub use delete_backward::DeleteBackward;
 pub use drag_drop_block::DragDropBlock;
-pub use edit_via_display_tree::EditViaDisplayTree;
-pub use edit_via_view_model::EditViaViewModel;
 pub use emit_mcp_data::EmitMcpData;
 pub use expand_toggle::ExpandToggle;
 pub use focus_editable_text::FocusEditableText;
@@ -222,8 +218,6 @@ crate::declare_e2e_transitions! {
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
         DragDropBlock(DragDropBlock),
-        EditViaDisplayTree(EditViaDisplayTree),
-        EditViaViewModel(EditViaViewModel),
         EmitMcpData(EmitMcpData),
         ExpandToggle(ExpandToggle),
         FocusEditableText(FocusEditableText),

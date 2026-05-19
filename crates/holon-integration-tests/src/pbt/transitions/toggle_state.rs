@@ -6,14 +6,86 @@
 //! `sut.rs:2176-2359` (SUT apply), and
 //! `transition_budgets.rs:279-281` (expected SQL).
 
+use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use std::time::Duration;
 use validated::Validated;
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::validation::{Reason, check};
+
+/// Production task-state cycle order, hardcoded in
+/// `sql_operation_provider.rs:1525-1526` (the `cycle_task_state` op
+/// implementation). Each click of the state_toggle widget advances by
+/// one position; full cycle wraps back to `""`.
+///
+/// Kept in sync with the upstream constant — this lookup table is the
+/// click-count semantics, not a separate model of behaviour.
+pub const TASK_STATE_CYCLE: &[&str] = &["", "TODO", "DOING", "DONE"];
+
+/// Compute how many state_toggle clicks advance the cycle from
+/// `current` to `target`. Panics if either is outside the production
+/// cycle — the generator's `RENDERED_DEFAULT_STATES` matches the
+/// production order, so a mismatch means generator drift.
+///
+/// Returns a value in `1..=TASK_STATE_CYCLE.len()`; `0` is unreachable
+/// because the generator excludes no-op transitions (`current ==
+/// target`), and a same-state cycle would otherwise return 0 here.
+/// The SutHandle adapter asserts `>0` defensively as a generator-drift
+/// guard.
+pub fn cycle_click_count(current: &str, target: &str) -> u8 {
+    let cur_idx = TASK_STATE_CYCLE
+        .iter()
+        .position(|s| *s == current)
+        .unwrap_or_else(|| {
+            panic!(
+                "[ToggleState] current state {current:?} not in production cycle {TASK_STATE_CYCLE:?}"
+            )
+        });
+    let tgt_idx = TASK_STATE_CYCLE
+        .iter()
+        .position(|s| *s == target)
+        .unwrap_or_else(|| {
+            panic!(
+                "[ToggleState] target state {target:?} not in production cycle {TASK_STATE_CYCLE:?}"
+            )
+        });
+    ((tgt_idx + TASK_STATE_CYCLE.len() - cur_idx) % TASK_STATE_CYCLE.len()) as u8
+}
+
+// ── Capability-bound free function (Phase C, Option A — real user input) ──
+//
+// Replaces the previous body's apply_intent backend dispatch with N real
+// clicks on the state_toggle widget — exactly what a user would do.
+// Each click fires the bound `cycle_task_state` op, advancing the cycle
+// one step. Between clicks we yield twice so CDC propagates to the
+// rendered `current` prop before the next cycle reads it.
+
+/// SUT-side body of `ToggleState`. Bound on `SutLayout + SutDriver`.
+/// Click the state_toggle widget `click_count` times to advance the
+/// task_state cycle to the target.
+pub async fn apply_toggle_state_to_sut<S: SutLayout + SutDriver>(
+    sut: &mut S,
+    id: &CapBlockId,
+    click_count: u8,
+) {
+    sut.wait_for_widget_kind(id, &["state_toggle"], Duration::from_secs(2))
+        .await
+        .unwrap_or_else(|e| panic!("[ToggleState] target {id} not rendered as state_toggle: {e}"));
+    for n in 0..click_count {
+        sut.click_entity(id, "main")
+            .await
+            .unwrap_or_else(|e| panic!("[ToggleState] click #{} failed for {id}: {e}", n + 1));
+        // Let CDC propagate so the next click reads the post-cycle
+        // `current` from the matview. Without this the cycle may
+        // double-advance on the next click.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+    }
+}
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
@@ -190,5 +262,66 @@ impl E2ETransitionImpl for ToggleState {
         let blocks = state.block_state.blocks.len();
         let docs = state.documents.len();
         expected_sql_for_kind(MutationKind::Update, watches, blocks, docs)
+    }
+}
+
+#[cfg(test)]
+mod cycle_click_count_tests {
+    use super::{TASK_STATE_CYCLE, cycle_click_count};
+
+    #[test]
+    fn cycle_order_matches_production() {
+        // Locked to sql_operation_provider.rs:1525-1526. If production
+        // changes, this test breaks loudly and we update both sides.
+        assert_eq!(TASK_STATE_CYCLE, &["", "TODO", "DOING", "DONE"]);
+    }
+
+    #[test]
+    fn single_step_clicks() {
+        assert_eq!(cycle_click_count("", "TODO"), 1);
+        assert_eq!(cycle_click_count("TODO", "DOING"), 1);
+        assert_eq!(cycle_click_count("DOING", "DONE"), 1);
+        assert_eq!(cycle_click_count("DONE", ""), 1);
+    }
+
+    #[test]
+    fn multi_step_clicks() {
+        assert_eq!(cycle_click_count("", "DOING"), 2);
+        assert_eq!(cycle_click_count("", "DONE"), 3);
+        assert_eq!(cycle_click_count("TODO", "DONE"), 2);
+    }
+
+    #[test]
+    fn wraps_around_cycle() {
+        // DONE → "" → TODO is 2 clicks (wraps through empty).
+        assert_eq!(cycle_click_count("DONE", "TODO"), 2);
+        assert_eq!(cycle_click_count("DONE", "DOING"), 3);
+        assert_eq!(cycle_click_count("DOING", "TODO"), 3);
+    }
+
+    #[test]
+    fn same_state_returns_full_cycle_length() {
+        // SutHandle adapter asserts > 0 to catch the no-op transition
+        // case; the generator already excludes these. This test pins
+        // the modular-arithmetic edge case so a refactor that breaks
+        // it fails loudly.
+        assert_eq!(
+            cycle_click_count("TODO", "TODO"),
+            0,
+            "same-state click_count is 0 (full cycle would also work); \
+             generator excludes this case"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not in production cycle")]
+    fn panics_on_unknown_current() {
+        cycle_click_count("UNKNOWN", "TODO");
+    }
+
+    #[test]
+    #[should_panic(expected = "not in production cycle")]
+    fn panics_on_unknown_target() {
+        cycle_click_count("TODO", "UNKNOWN");
     }
 }

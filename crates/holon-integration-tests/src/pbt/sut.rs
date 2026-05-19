@@ -367,55 +367,6 @@ impl<V: VariantMarker> E2ESut<V> {
         Some((root_id.clone(), engine.snapshot_reactive(&root_id)))
     }
 
-    /// Poll the engine's fully-resolved `ViewModel` until `entity_id` is
-    /// reachable, mirroring how a user waits for the UI to render before
-    /// clicking. Returns the resolved snapshot at the moment the entity
-    /// became visible, or `None` if the timeout expires.
-    ///
-    /// Uses `BuilderServices::snapshot_resolved` rather than the bare
-    /// `snapshot_reactive`. The resolved variant recursively interprets every
-    /// nested `live_block`, calling `ensure_watching` for each, so all
-    /// per-region UiWatchers fire and the resulting tree is fully populated
-    /// — without us having to manually drain per-block streams into slots
-    /// (the work that `ReactiveShell` does in production).
-    ///
-    /// Polling at ~20 ms intervals is cheap and converges in single-digit
-    /// polls once the watchers have delivered their first emission.
-    #[tracing::instrument(skip(self), name = "pbt.wait_for_entity_in_resolved_view_model", fields(%entity_id))]
-    pub(super) async fn wait_for_entity_in_resolved_view_model(
-        &self,
-        entity_id: &str,
-        timeout: Duration,
-    ) -> Option<holon_frontend::ViewModel> {
-        let reactive = self.reactive_engine.borrow().clone()?;
-        let root_id = self
-            .reactive_root_id
-            .borrow()
-            .clone()
-            .unwrap_or_else(holon_api::root_layout_block_uri);
-        use holon_frontend::reactive::BuilderServices;
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let resolved = reactive.snapshot_resolved(&root_id);
-            if Self::view_model_contains_entity(&resolved, entity_id) {
-                return Some(resolved);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-
-    fn view_model_contains_entity(node: &holon_frontend::ViewModel, entity_id: &str) -> bool {
-        if node.entity_id() == Some(entity_id) {
-            return true;
-        }
-        node.children()
-            .iter()
-            .any(|c| Self::view_model_contains_entity(c, entity_id))
-    }
-
     /// Walk the live reactive tree from `root` and flip the
     /// `expanded` Mutable of the `expand_toggle` whose `target_id`
     /// prop matches `block_id`. Used by `apply_expand_toggle` /

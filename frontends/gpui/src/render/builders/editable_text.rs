@@ -31,6 +31,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let row_id_for_create = row_id.clone();
     let content_for_create = content.clone();
     let field_for_create = field.clone();
+    let bounds_registry_for_create = ctx.bounds_registry.clone();
 
     let key = crate::entity_view_registry::CacheKey::Ephemeral(el_id.clone());
     let any = ctx.local.get_or_create(key, || {
@@ -46,6 +47,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                     services,
                     nav,
                     data_handle,
+                    bounds_registry_for_create,
                     window,
                     cx,
                 )

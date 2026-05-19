@@ -299,6 +299,13 @@ impl GeometryDriver {
         highlight_element: Option<&str>,
         overlay: Option<&Overlay>,
     ) -> Option<PathBuf> {
+        // Per-step screen capture costs ~180ms each (xcap + PNG encode). For
+        // perf-sensitive runs callers can set `PBT_VISUAL=1` to enable; default
+        // off keeps the test fast. Failure-path captures should bypass this
+        // gate (none currently do; add `PBT_VISUAL_ON_FAILURE=1` if needed).
+        if std::env::var("PBT_VISUAL").ok().as_deref() != Some("1") {
+            return None;
+        }
         let config = self.screenshots.as_mut()?;
 
         // Pre advances the counter; Post reuses it so a per-step pair shares
@@ -767,6 +774,7 @@ impl UiDriver for GeometryDriver {
         }
     }
 
+    #[tracing::instrument(level = "info", skip_all, name = "pbt.driver_settle_sleep")]
     async fn settle(&mut self) {
         // GPUI debug builds are ~10x slower than release. The render pipeline:
         // mutation → CDC → watcher signal → ReactiveEngine → structural signal

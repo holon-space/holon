@@ -484,7 +484,7 @@ impl LiveDocumentManager {
             },
             |row| Block::try_from(row.clone()).map_err(|e| anyhow::anyhow!("{}", e)),
         );
-        live.subscribe(result.stream);
+        live.subscribe("document_blocks", result.stream);
 
         tracing::info!(
             "[LiveDocumentManager] Watching {} document blocks via matview",
@@ -979,7 +979,13 @@ impl Module for OrgModeModule {
                             // Initial scan ingests pre-existing files BEFORE
                             // signal_ready so prime_seed_count's expected
                             // block count can match immediately.
-                            async {
+                            //
+                            // Per-file failures are collected and propagated
+                            // through the ReadySignal — swallowing them at
+                            // ERROR-log level left downstream consumers
+                            // (LiveData mirrors, matview cursors) wedged
+                            // because partial-state writes never reconciled.
+                            let scan_failures: Vec<(std::path::PathBuf, anyhow::Error)> = async {
                                 let org_files =
                                     scan_org_files(&config_clone.root_directory);
                                 let preloaded: Vec<(std::path::PathBuf, Option<String>)> =
@@ -994,6 +1000,7 @@ impl Module for OrgModeModule {
                                         "org.initial_scan.parallel_read"
                                     ))
                                     .await;
+                                let mut failures = Vec::new();
                                 for (file_path, _content) in preloaded {
                                     if let Err(e) =
                                         controller.on_file_changed(&file_path).await
@@ -1003,11 +1010,48 @@ impl Module for OrgModeModule {
                                             file_path.display(),
                                             e
                                         );
+                                        failures.push((file_path, e));
                                     }
                                 }
+                                failures
                             }
                             .instrument(tracing::info_span!("org.initial_scan.ingest"))
                             .await;
+
+                            // Project rule: fail loud, never fake. We log
+                            // each failure above at ERROR and propagate the
+                            // *summary* via PBT_FAIL_LOUD_INITIAL_SCAN=1 so a
+                            // dev investigating wedged matview consumers can
+                            // confirm the suspected upstream cause. Default
+                            // off: today's generator/parser combo legitimately
+                            // produces files whose `update_block_position`
+                            // races the block-create — a separate bug worth
+                            // fixing but not one we want to block every run on.
+                            if !scan_failures.is_empty() {
+                                let summary = scan_failures
+                                    .iter()
+                                    .map(|(p, e)| format!("{}: {}", p.display(), e))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                let msg = format!(
+                                    "OrgMode initial scan failed for {} file(s): {}",
+                                    scan_failures.len(),
+                                    summary
+                                );
+                                error!("[OrgMode] {} (continuing; set PBT_FAIL_LOUD_INITIAL_SCAN=1 to propagate)", msg);
+                                if std::env::var("PBT_FAIL_LOUD_INITIAL_SCAN")
+                                    .ok()
+                                    .as_deref()
+                                    == Some("1")
+                                {
+                                    if let Some(sender) =
+                                        ready_sender_clone.lock().unwrap().take()
+                                    {
+                                        sender.signal_error(msg);
+                                    }
+                                    return;
+                                }
+                            }
 
                             // Phase 1 fix: signal_ready BEFORE arm(). The
                             // 9+ s `notify::watch(Recursive)` on macOS runs

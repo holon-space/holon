@@ -6,6 +6,33 @@ set dotenv-load
 default:
     @just --list
 
+# --- Setup ------------------------------------------------------------------
+
+# Install cargo plugins used by this workspace (idempotent, uses cargo-binstall).
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v cargo-binstall >/dev/null 2>&1; then
+        echo "Installing cargo-binstall..."
+        cargo install cargo-binstall
+    fi
+    cargo binstall --no-confirm \
+        cargo-llvm-cov \
+        cargo-crap \
+        cargo-deny \
+        cargo-machete \
+        cargo-mutants \
+        cargo-nextest \
+        cargo-watch \
+        samply
+    # polydup: cross-language duplicate detector. Pinned to nightscape's
+    # incremental-rolling-hash fork (no crates.io / binstall release yet).
+    cargo install --git https://github.com/nightscape/polydup-fork \
+        --branch perf/incremental-rolling-hash polydup
+    rustup component add llvm-tools-preview
+    echo ""
+    echo "Setup complete. Try: just analyze"
+
 # --- Property-Based Tests ---------------------------------------------------
 
 # Run a PBT by name: general, petri, orgmode, loro
@@ -124,6 +151,60 @@ lint:
     fi
     echo "All checks passed."
 
+# --- Code Analysis ----------------------------------------------------------
+# Individual analyzers write logs to /tmp/holon-analyze-*.log so CI can collect.
+
+# CRAP metric (complexity × inverse coverage). Requires lcov.info.
+analyze-crap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f lcov.info ] || [ $(find lcov.info -mmin -60 2>/dev/null | wc -l) -eq 0 ]; then
+        echo "Generating fresh lcov.info via cargo-llvm-cov..."
+        cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 \
+            | tee /tmp/holon-analyze-coverage.log
+    fi
+    cargo crap --lcov lcov.info 2>&1 | tee /tmp/holon-analyze-crap.log
+
+# Dependency audit (vulnerabilities, licenses, bans).
+analyze-deny:
+    cargo deny check 2>&1 | tee /tmp/holon-analyze-deny.log
+
+# Unused dependency detection.
+analyze-machete:
+    cargo machete 2>&1 | tee /tmp/holon-analyze-machete.log
+
+# Lint with clippy at the workspace level, warnings as errors.
+analyze-clippy:
+    cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
+        | tee /tmp/holon-analyze-clippy.log
+
+# Copy-paste / duplication detection via polydup.
+analyze-duplication:
+    polydup scan . 2>&1 | tee /tmp/holon-analyze-duplication.log
+
+# Architecture lints (cycles, banned imports, etc.).
+analyze-arch:
+    cargo run -p archlint -- --all 2>&1 | tee /tmp/holon-analyze-arch.log
+
+# Run every analyzer. Continues on failure; reports a summary at the end.
+analyze:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    failed=()
+    for step in clippy deny machete arch duplication crap; do
+        echo ""
+        echo "=== analyze-${step} ==="
+        if ! just "analyze-${step}"; then
+            failed+=("${step}")
+        fi
+    done
+    echo ""
+    if [ "${#failed[@]}" -ne 0 ]; then
+        echo "Failed analyzers: ${failed[*]}"
+        exit 1
+    fi
+    echo "All analyzers passed."
+
 # Watch & run a UI frontend (recompiles on source changes)
 # chrome-trace available for: gpui, blinc, ply
 # Only kills the old app if the new build succeeds.
@@ -165,10 +246,6 @@ watch ui='gpui' *FLAGS:
     while kill -0 "$WATCH_PID" 2>/dev/null; do
         wait "$WATCH_PID" 2>/dev/null || true
     done
-
-# --- Flutter Frontend (submodule) -------------------------------------------
-
-mod flutter 'frontends/flutter'
 
 # --- Profiling -------------------------------------------------------------
 

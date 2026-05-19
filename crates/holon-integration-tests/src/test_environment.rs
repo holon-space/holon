@@ -2050,18 +2050,21 @@ impl TestEnvironment {
                 hasher.finish()
             };
 
-            // Strip a leading `#+TODO: ...` header from actual content before
-            // hashing — same rationale as above.
-            fn strip_todo_header(content: &str) -> &str {
-                let trimmed = content.trim_start();
-                if trimmed.starts_with("#+TODO:") {
-                    trimmed
-                        .find('\n')
-                        .map(|i| trimmed[i + 1..].trim_start())
-                        .unwrap_or(trimmed)
-                } else {
-                    trimmed
+            // Strip leading `#+KEY: …` directive lines from actual content
+            // before hashing. Production's `render_document` emits any of
+            // `#+ID:`, `#+TITLE:`, `#+TODO:` at the head of the file; the
+            // expected side here is rendered via `render_entitys` (body
+            // only), so the comparison must drop the whole header block,
+            // not just a single `#+TODO:` line.
+            fn strip_file_header(content: &str) -> &str {
+                let mut rest = content.trim_start();
+                while rest.starts_with("#+") {
+                    match rest.find('\n') {
+                        Some(i) => rest = rest[i + 1..].trim_start(),
+                        None => return "",
+                    }
                 }
+                rest
             }
 
             let remaining = timeout.saturating_sub(start.elapsed());
@@ -2078,7 +2081,7 @@ impl TestEnvironment {
                     let actual_hash = {
                         use std::hash::{Hash, Hasher};
                         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        strip_todo_header(content).trim().hash(&mut hasher);
+                        strip_file_header(content).trim().hash(&mut hasher);
                         hasher.finish()
                     };
                     actual_hash == expected_hash

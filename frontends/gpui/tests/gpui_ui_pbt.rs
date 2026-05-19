@@ -111,8 +111,14 @@ fn main() {
 
         let _signal_watcher = driver.spawn_signal_watcher();
 
-        let result =
-            run_pbt_with_driver_sync_callback(50, &mut driver, |pbt_ctx: &PbtReadyContext| {
+        let num_steps: u32 = std::env::var("PBT_NUM_STEPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50);
+        let result = run_pbt_with_driver_sync_callback(
+            num_steps,
+            &mut driver,
+            |pbt_ctx: &PbtReadyContext| {
                 // Send the DI-resolved context to main thread for GPUI window creation.
                 // This ensures the GPUI window shares the same ReactiveEngine, session,
                 // and tokio runtime as the PBT — no cross-executor waker issues.
@@ -163,7 +169,8 @@ fn main() {
                     frontend_geometry: Some(Box::new(inv14_registry)),
                     frontend_visual_state: Some(inv14_visual_state),
                 })
-            });
+            },
+        );
 
         match result {
             Ok(summary) => {

@@ -7,8 +7,10 @@
 //! `transition_budgets.rs:190-196` (expected SQL).
 
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use std::time::Duration;
 use validated::Validated;
 
 use super::E2ETransitionImpl;
@@ -21,6 +23,41 @@ use crate::pbt::transition_budgets::{
 };
 
 use holon_api::{ContentType, EntityUri, Region};
+
+// ── Capability-bound free function (Phase C) ──────────────────────
+
+/// SUT-side body of `ClickBlock`. Bound on `SutLayout + SutDriver` so any
+/// slice supplying both capabilities can include this transition.
+///
+/// Three-step protocol — and only three steps. The driver's
+/// `click_entity` impl already encodes the medium difference: GPUI
+/// dispatches a real MouseDown; ReactiveEngineDriver polls
+/// `snapshot_resolved`, looks up the bound click intent via
+/// `find_click_intent_in_region`, and either applies it or falls back
+/// to `synthetic_dispatch("navigation", "editor_focus", ...)`. The
+/// transition layer trusts that contract and stays medium-agnostic.
+///
+/// 1. `wait_for_bounds` — GPUI's `click_entity` reads BoundsRegistry, so
+///    the target must be registered first. Headless: no-op.
+/// 2. `click_entity` — unified dispatch.
+/// 3. `wait_for_engine_focus` — GPUI's dispatch_intent is
+///    fire-and-forget; the focus mirror needs an explicit barrier
+///    before subsequent transitions read it.
+pub async fn apply_click_block_to_sut<S: SutLayout + SutDriver>(
+    sut: &mut S,
+    region: &str,
+    id: &CapBlockId,
+) {
+    sut.wait_for_bounds(id, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|e| panic!("[ClickBlock] bounds unavailable for {id}: {e}"));
+    sut.click_entity(id, region)
+        .await
+        .unwrap_or_else(|e| panic!("[ClickBlock] click_entity failed for {id}: {e}"));
+    sut.wait_for_engine_focus(id, Duration::from_secs(2))
+        .await
+        .unwrap_or_else(|e| panic!("[ClickBlock] focus did not propagate within 2s for {id}: {e}"));
+}
 
 /// Click on a rendered block to focus it. When clicking in LeftSidebar,
 /// also pushes a navigation-history entry for Region::Main.

@@ -6,8 +6,10 @@
 //! `sut.rs:3250-3362` (SUT apply), and
 //! `transition_budgets.rs:284-286` (expected SQL).
 
+use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use std::time::Duration;
 use validated::Validated;
 
 use super::E2ETransitionImpl;
@@ -19,6 +21,75 @@ use crate::pbt::validation::{Reason, check};
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
 
 use holon_api::{ContentType, EntityUri};
+
+// ── Capability-bound free function (Phase C, Option A — real user input) ──
+//
+// Replaces the previous body that built the EditorViewModel apparatus from
+// SQL + interpret_pure and dispatched the resulting intent via apply_intent.
+// The user-faithful path: click the target editor, type "/", type "delete"
+// to filter the popup, then press Enter.
+//
+// The popup renders each item as a tracked widget (editor_view.rs:889) with
+// `widget_type` = "popup_item" or "popup_item_selected" and entity_id =
+// op.id. The selected-item assertion is the precondition for pressing
+// Enter — if the filter didn't land on "delete" (a future op-name
+// collision, a popup-filter regression), the test fails loudly with
+// "delete not selected" instead of silently dispatching the wrong op.
+//
+// In headless mode (no geometry installed) `wait_for_widget_kind` returns
+// `Ok(())` and the EditorViewModel's popup state advances internally via
+// `on_text_changed`. Enter routes through the popup_handler.
+
+/// SUT-side body of `TriggerSlashCommand`. Bound on `SutLayout + SutDriver`.
+/// Clicks the target editor, opens the slash menu via "/", filters to
+/// "delete" by typing the op name, asserts the popup_item_selected is
+/// the delete op, then presses Enter.
+pub async fn apply_trigger_slash_command_to_sut<S: SutLayout + SutDriver>(
+    sut: &mut S,
+    id: &CapBlockId,
+) {
+    sut.wait_for_widget_kind(
+        id,
+        &["editable_text", "rendered_text"],
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("[TriggerSlashCommand] target {id} not rendered: {e}"));
+    sut.click_entity(id, "main")
+        .await
+        .unwrap_or_else(|e| panic!("[TriggerSlashCommand] click_entity failed for {id}: {e}"));
+    sut.wait_for_engine_focus(id, Duration::from_secs(1))
+        .await
+        .unwrap_or_else(|e| panic!("[TriggerSlashCommand] focus did not propagate for {id}: {e}"));
+    // Open the slash menu.
+    sut.send_raw_keystroke("/", &[])
+        .await
+        .unwrap_or_else(|e| panic!("[TriggerSlashCommand] '/' keystroke failed: {e}"));
+    // Type the op name to narrow the popup's filter. Each keystroke
+    // re-fires `on_text_changed` with the cumulative input line, which
+    // updates the popup state.
+    for ch in "delete".chars() {
+        sut.send_raw_keystroke(&ch.to_string(), &[])
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[TriggerSlashCommand] filter char {ch:?} keystroke failed: {e}")
+            });
+    }
+    // Confirm Enter would actually fire `delete` — i.e. the filter
+    // narrowed the popup to a state where the selected item is "delete".
+    // Headless: no-op (popup doesn't reach BoundsRegistry).
+    let delete_id: CapBlockId = "delete".to_string();
+    sut.wait_for_widget_kind(&delete_id, &["popup_item_selected"], Duration::from_secs(2))
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "[TriggerSlashCommand] 'delete' popup item not selected after typing filter: {e}"
+            )
+        });
+    sut.send_raw_keystroke("enter", &[])
+        .await
+        .unwrap_or_else(|e| panic!("[TriggerSlashCommand] Enter keystroke failed: {e}"));
+}
 
 /// Trigger the "/" slash-command menu on the focused block and select "delete".
 #[derive(Clone, Debug)]

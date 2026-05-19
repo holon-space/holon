@@ -9,10 +9,79 @@
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
     CapBlockId, CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocusMut, RefLifecycle,
+    SutDriver, SutLayout,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use std::time::Duration;
 use validated::Validated;
+
+// ── Capability-bound free function (Phase C input pipeline) ──────────
+
+/// SUT-side input-pipeline body of `SplitBlock`. Bound on
+/// `SutLayout + SutDriver`. Drives the physical sequence a real user
+/// would perform: ensure target is rendered as an editable widget,
+/// click to focus, then type `home` + N×`right` + `Enter`.
+///
+/// The Enter handler at `editor_view.rs:543-575` is a capture_action
+/// that reads `input.read(cx).cursor()` from the live `InputState` and
+/// dispatches `split_block` against the focused editor — a separate
+/// code path from the bubble-phase chord resolver that `Ctrl+x` hits.
+/// Driving Enter exercises that production path.
+///
+/// `wait_for_widget_kind` is a stronger precondition than
+/// `wait_for_bounds`: confirms the target is rendered as the
+/// interactive `editable_text` or its read-only `rendered_text` sibling
+/// (a click can either focus the editor or promote the read-only
+/// variant). Mismatches surface here instead of as a confusing focus
+/// timeout 1 s later.
+///
+/// `wait_for_engine_focus` after the click prevents focus drift: if the
+/// click silently focuses a different block, Enter would fire against
+/// the wrong editor and `split_block` would split the wrong content.
+///
+/// Caller responsibility: pre-condition gates that depend on
+/// pre-transition state (`wait_for_children_settled` on the original
+/// parent) and post-transition assertions (block-count sync,
+/// synthetic-id mapping). Those stay in the SutHandle adapter because
+/// they read from E2ESut-internal state.
+pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
+    sut: &mut S,
+    id: &CapBlockId,
+    position: usize,
+) {
+    sut.wait_for_widget_kind(
+        id,
+        &["editable_text", "rendered_text"],
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!("[SplitBlock] target {id} not rendered as editable_text/rendered_text: {e}")
+    });
+    sut.click_entity(id, "main")
+        .await
+        .unwrap_or_else(|e| panic!("[SplitBlock] click_entity failed for {id}: {e}"));
+    sut.wait_for_engine_focus(id, Duration::from_secs(1))
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "[SplitBlock] click_entity did not focus {id} before Enter \
+                 — split would have hit the wrong block: {e}"
+            )
+        });
+    sut.send_raw_keystroke("home", &[])
+        .await
+        .unwrap_or_else(|e| panic!("[SplitBlock] home failed: {e}"));
+    for _ in 0..position {
+        sut.send_raw_keystroke("right", &[])
+            .await
+            .unwrap_or_else(|e| panic!("[SplitBlock] right failed: {e}"));
+    }
+    sut.send_raw_keystroke("enter", &[])
+        .await
+        .unwrap_or_else(|e| panic!("[SplitBlock] enter failed: {e}"));
+}
 
 use super::E2ETransitionImpl;
 use crate::pbt::reference_state::ReferenceState;

@@ -359,7 +359,7 @@ async fn create_live_data_keyed_by(
                 },
                 |row| Ok(row.clone()),
             );
-            live.subscribe(result.stream);
+            live.subscribe("entity_keyed", result.stream);
             Some(live)
         }
         Err(e) => {
@@ -418,7 +418,7 @@ async fn create_profile_resolver(
                     parse_entity_profile(content)
                 },
             );
-            live_profiles.subscribe(result.stream);
+            live_profiles.subscribe("entity_profile", result.stream);
             Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,
                 ui_info,

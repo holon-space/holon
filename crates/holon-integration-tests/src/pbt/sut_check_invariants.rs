@@ -61,7 +61,7 @@ impl<V: VariantMarker> E2ESut<V> {
                     .ok_or_else(|| anyhow::anyhow!("parse_block_row returned None for row {row:?}"))
             },
         );
-        live.subscribe(watch.stream);
+        live.subscribe("block", watch.stream);
         *self.live_blocks_cell.borrow_mut() = Some(Arc::clone(&live));
         live
     }
@@ -114,7 +114,7 @@ impl<V: VariantMarker> E2ESut<V> {
                 })
             },
         );
-        live.subscribe(watch.stream);
+        live.subscribe("focus_roots", watch.stream);
         *self.live_focus_roots_cell.borrow_mut() = Some(Arc::clone(&live));
         live
     }
@@ -210,6 +210,7 @@ impl<V: VariantMarker> E2ESut<V> {
     /// has been stamped with a `seq`, so once each mirror's `consumed_seq`
     /// catches that watermark we know it has applied every CDC batch the
     /// matview emitted before this call.
+    #[tracing::instrument(skip(self), name = "pbt.wait_for_live_data_mirrors")]
     async fn wait_for_live_data_mirrors(&self, timeout: std::time::Duration) {
         // Pre-startup transitions (e.g. `WriteOrgFile` before `StartApp`)
         // run through this drain block too, but the engine doesn't exist
@@ -217,15 +218,17 @@ impl<V: VariantMarker> E2ESut<V> {
         if !self.ctx.is_running() {
             return;
         }
-        let target = self.ctx.engine().db_handle().cdc_emitted_watermark();
-        if target == 0 {
-            return;
-        }
+        // Quiescence semantics: each mirror has drained when no new batch
+        // has arrived for `quiet_for`. The previous `wait_for_seq(target,
+        // timeout)` approach compared per-stream seq against a global
+        // `cdc_emitted_watermark`, which structurally always timed out
+        // because other matviews emit batches the mirror never sees.
+        let quiet_for = std::time::Duration::from_millis(50);
         if let Some(live) = self.live_blocks_cell.borrow().clone() {
-            live.wait_for_seq(target, timeout).await;
+            live.wait_for_quiescent(quiet_for, timeout).await;
         }
         if let Some(live) = self.live_focus_roots_cell.borrow().clone() {
-            live.wait_for_seq(target, timeout).await;
+            live.wait_for_quiescent(quiet_for, timeout).await;
         }
     }
 

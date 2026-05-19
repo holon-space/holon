@@ -9,8 +9,10 @@
 use crate::pbt::validation::{Reason, check};
 use holon_api::ContentType;
 use holon_api::entity_uri::EntityUri;
+use holon_pbt_core::capabilities::{CapBlockId, SutDriver, SutLayout};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use std::time::Duration;
 use validated::Validated;
 
 use super::E2ETransitionImpl;
@@ -19,6 +21,28 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
+
+// ── Capability-bound free function (Phase C) ──────────────────────
+
+/// SUT-side body of `FocusEditableText`. Bound on `SutLayout + SutDriver`
+/// so any slice supplying both capabilities can include this transition.
+///
+/// Fails loud per CLAUDE.md: bounds must resolve within 5 s and the click
+/// must succeed. The 5-second budget mirrors GPUI's scroll → layout →
+/// flush window for offscreen virtualized list items
+/// (`wait_for_entity_bounds` polls for ~200 ms before issuing a
+/// scroll-into-view RPC, then keeps polling).
+pub async fn apply_focus_editable_text_to_sut<S: SutLayout + SutDriver>(
+    sut: &mut S,
+    id: &CapBlockId,
+) {
+    sut.wait_for_bounds(id, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|e| panic!("[FocusEditableText] bounds unavailable for {id}: {e}"));
+    sut.click_entity(id, "main")
+        .await
+        .unwrap_or_else(|e| panic!("[FocusEditableText] click_entity failed for {id}: {e}"));
+}
 
 /// Focus a live-rendered editable text block in the main panel.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.

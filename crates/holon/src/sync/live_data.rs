@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use futures_signals::signal_map::{MutableBTreeMap, MutableBTreeMapLockRef, MutableSignalMap};
 use holon_api::{Change, Value};
+use tokio::sync::Notify;
 
 use crate::storage::turso::RowChange;
 use crate::storage::types::StorageEntity;
@@ -45,6 +46,9 @@ pub struct LiveData<T: Clone + Send + Sync + 'static> {
     /// the mirror to catch up — see `wait_for_seq`. `0` until the first
     /// CDC batch is applied (initial-load rows don't carry a seq).
     last_consumed_seq: Arc<AtomicU64>,
+    /// Signalled after every `last_consumed_seq` advance so `wait_for_seq`
+    /// can wake immediately instead of polling on a 1ms timer.
+    seq_advanced: Arc<Notify>,
     /// Maps Turso's internal `rowid` (strings, populated from `_rowid` in
     /// CDC `data`) to the user-defined key produced by `id_fn`.
     ///
@@ -87,6 +91,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             id_fn: Box::new(id_fn),
             parse_fn: Box::new(parse_fn),
             last_consumed_seq: Arc::new(AtomicU64::new(0)),
+            seq_advanced: Arc::new(Notify::new()),
             rowid_to_key: Mutex::new(rowid_to_key),
         })
     }
@@ -97,27 +102,68 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         self.last_consumed_seq.load(Ordering::SeqCst)
     }
 
-    /// Wait until this mirror has applied every CDC batch up to and including
-    /// `target_seq`. Pair with `TursoBackend::cdc_emitted_watermark()` sampled
-    /// before the wait — `subscribe` updates the consumed seq after each
-    /// `apply_changes`, so once `consumed_seq() >= target_seq` the mirror is
-    /// guaranteed to reflect every batch the matview emitted before sampling.
+    /// Wait until this mirror is *quiescent* — no new CDC batch has been
+    /// applied for `quiet_for`. Bounded by an overall `timeout`.
     ///
-    /// Returns silently on timeout — callers should treat that as a probe
-    /// failure (likely unrelated wedge upstream) rather than a hard fault.
-    pub async fn wait_for_seq(&self, target_seq: u64, timeout: std::time::Duration) {
-        if target_seq == 0 {
-            return;
-        }
-        let deadline = tokio::time::Instant::now() + timeout;
+    /// Why not `wait_for_seq(target)` against `cdc_emitted_watermark()`? That
+    /// API is fundamentally mismatched: `cdc_emitted_watermark` is a global
+    /// counter incremented by *every* matview's batches, but each mirror only
+    /// sees its own matview's batches (filtered by the `MatviewManager` demux).
+    /// So a mirror's `consumed_seq` only reaches the global watermark by
+    /// coincidence — every wait timed out (verified by trace 2026-05-19).
+    ///
+    /// Quiescence is what callers actually need: "the mirror has drained
+    /// everything pending for its source." `apply_changes` calls
+    /// `notify_waiters` after every successful batch, so we reset the
+    /// quiet-deadline each time the notify fires and only return when the
+    /// silence has lasted `quiet_for`.
+    ///
+    /// Returns silently if the overall `timeout` fires — callers treat that
+    /// as a probe failure, not a hard fault.
+    pub async fn wait_for_quiescent(
+        &self,
+        quiet_for: std::time::Duration,
+        timeout: std::time::Duration,
+    ) {
+        use tracing::field;
+        let span = tracing::info_span!(
+            "live_data.wait_for_quiescent",
+            quiet_for_ms = quiet_for.as_millis() as u64,
+            timeout_ms = timeout.as_millis() as u64,
+            batches_seen = field::Empty,
+            final_seq = field::Empty,
+            timed_out = field::Empty,
+        );
+        let _enter = span.enter();
+        let overall = tokio::time::sleep(timeout);
+        tokio::pin!(overall);
+        let mut batches_seen: u64 = 0;
         loop {
-            if self.consumed_seq() >= target_seq {
-                return;
+            // Arm the notification BEFORE the seq snapshot so a notify
+            // landing between snapshot and await still wakes us.
+            let notified = self.seq_advanced.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let quiet = tokio::time::sleep(quiet_for);
+            tokio::pin!(quiet);
+            tokio::select! {
+                _ = &mut notified => {
+                    batches_seen += 1;
+                    // Loop and re-arm; another batch may be inbound.
+                }
+                _ = &mut quiet => {
+                    span.record("batches_seen", batches_seen);
+                    span.record("final_seq", self.consumed_seq());
+                    span.record("timed_out", false);
+                    return;
+                }
+                _ = &mut overall => {
+                    span.record("batches_seen", batches_seen);
+                    span.record("final_seq", self.consumed_seq());
+                    span.record("timed_out", true);
+                    return;
+                }
             }
-            if tokio::time::Instant::now() >= deadline {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
     }
 
@@ -193,17 +239,53 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     /// Each batch's `metadata.seq` is recorded after `apply_changes` returns,
     /// so callers can `wait_for_seq` until the mirror has caught up to a
     /// specific CDC watermark.
-    pub fn subscribe(self: &Arc<Self>, mut stream: crate::storage::turso::RowChangeStream) {
+    ///
+    /// `source_name` should identify the underlying table/matview (e.g. "block",
+    /// "focus_roots") so traces can tell mirrors apart when one stops draining.
+    pub fn subscribe(
+        self: &Arc<Self>,
+        source_name: &'static str,
+        mut stream: crate::storage::turso::RowChangeStream,
+    ) {
         let live = Arc::clone(self);
         crate::util::spawn_actor(async move {
             use tokio_stream::StreamExt;
-            while let Some(batch) = stream.next().await {
+            use tracing::Instrument;
+            let span =
+                tracing::info_span!("live_data.subscribe_actor", source = source_name);
+            let _enter = span.enter();
+            let mut batches_seen: u64 = 0;
+            loop {
+                let next = async { stream.next().await }
+                    .instrument(tracing::info_span!(
+                        "live_data.stream_next",
+                        source = source_name,
+                    ))
+                    .await;
+                let Some(batch) = next else {
+                    tracing::warn!(
+                        source = source_name,
+                        batches_seen,
+                        last_seq = live.last_consumed_seq.load(Ordering::SeqCst),
+                        "LiveData stream ended — actor exiting"
+                    );
+                    return;
+                };
+                batches_seen += 1;
                 let seq = batch.metadata.seq;
                 let changes: Vec<RowChange> = batch.inner.items.into_iter().collect();
+                let change_count = changes.len();
                 live.apply_changes(changes);
                 if seq > 0 {
                     live.last_consumed_seq.store(seq, Ordering::SeqCst);
+                    live.seq_advanced.notify_waiters();
                 }
+                tracing::trace!(
+                    source = source_name,
+                    seq,
+                    changes = change_count,
+                    "LiveData batch applied"
+                );
             }
         });
     }

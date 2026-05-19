@@ -16,6 +16,7 @@ use holon_frontend::navigation::{Boundary, CursorHint, NavDirection};
 use holon_frontend::popup_menu::PopupState;
 use holon_frontend::reactive::BuilderServices;
 
+use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
 use crate::share_ui::ShareTrigger;
 
@@ -50,6 +51,11 @@ pub struct EditorView {
     /// Cancelled on drop. Subscribes to `MutableText.remote_deltas()`
     /// and splices remote edits into InputState via `replace_text_in_range_silent`.
     _remote_delta_subscription: Option<Task<()>>,
+    /// Bounds registry threaded from `GpuiRenderContext` so the popup
+    /// overlay can register each item as a tracked widget. Lets the PBT
+    /// driver observe the popup state via `wait_for_widget_kind` instead
+    /// of poking the EditorViewModel directly.
+    bounds_registry: BoundsRegistry,
 }
 
 impl EditorView {
@@ -67,6 +73,7 @@ impl EditorView {
         // backend updates. When `None` (snapshot/test paths), the editor
         // shows the initial `content` and never updates from data.
         data: Option<ReadOnlyMutable<Arc<DataRow>>>,
+        bounds_registry: BoundsRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -473,6 +480,7 @@ impl EditorView {
             row_id,
             services,
             nav,
+            bounds_registry,
             _data_subscription,
             _cursor_subscription,
             previous_text,
@@ -502,7 +510,8 @@ impl Render for EditorView {
         let editor_entity_id = self.input.entity_id();
         let popup_overlay = {
             let ctrl = self.controller.lock().unwrap();
-            ctrl.popup_state().map(|s| render_popup(&s, cx))
+            ctrl.popup_state()
+                .map(|s| render_popup(&s, &self.bounds_registry, cx))
         };
 
         let window_handle = window.window_handle();
@@ -887,7 +896,15 @@ fn handle_cross_block_nav(
 }
 
 /// Render the unified popup overlay.
-fn render_popup(state: &PopupState, cx: &App) -> Deferred {
+///
+/// Each visible popup item is wrapped in `crate::geometry::tracked` so it
+/// registers in `BoundsRegistry` as `widget_type="popup_item"` with
+/// `entity_id = item.id` (and `el_id = "popup-item-{item.id}"`). Lets PBT
+/// drivers observe the popup via `wait_for_widget_kind` / element lookups
+/// instead of poking the EditorViewModel directly. The currently-
+/// highlighted item is also tagged `widget_type="popup_item_selected"`
+/// so a precondition can confirm Enter would fire the expected op.
+fn render_popup(state: &PopupState, bounds_registry: &BoundsRegistry, cx: &App) -> Deferred {
     use gpui::prelude::*;
     use gpui::{div, px};
     use gpui_component::theme::ActiveTheme;
@@ -945,7 +962,21 @@ fn render_popup(state: &PopupState, cx: &App) -> Deferred {
             } else {
                 row = row.child(item.label.clone());
             }
-            container = container.child(row);
+            let widget_type = if is_selected {
+                "popup_item_selected"
+            } else {
+                "popup_item"
+            };
+            let tracked = crate::geometry::tracked(
+                format!("popup-item-{}", item.id),
+                row.into_any_element(),
+                bounds_registry,
+                widget_type,
+                Some(item.id.as_str()),
+                true,
+                Some(item.label.clone()),
+            );
+            container = container.child(tracked);
         }
     }
 

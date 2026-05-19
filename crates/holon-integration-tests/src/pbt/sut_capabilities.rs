@@ -5,6 +5,7 @@
 //! over existing inherent / `SutHandle` methods.
 
 use std::collections::{BTreeSet, HashSet};
+use std::time::Duration;
 
 use holon_pbt_core::capabilities::{
     CapBlockId, SutCdc, SutDriver, SutLayout, SutLifecycle, SutLoro, SutLoroLog, SutLoroTaskState,
@@ -538,6 +539,10 @@ fn view_model_to_snapshot(
         ViewKind::EditableText { content, field } => {
             props.insert("field".into(), field.clone());
             props.insert("content".into(), content.clone());
+            // Encode trigger count so `inv-viewmodel-editable-text-triggers`
+            // can assert non-empty triggers for editors with bound operations
+            // without exposing the InputTrigger type to the cross-slice IR.
+            props.insert("trigger_count".into(), vm.triggers.len().to_string());
         }
         ViewKind::RenderedText { content, field } => {
             props.insert("field".into(), field.clone());
@@ -630,6 +635,27 @@ impl<V: VariantMarker> SutLayout for E2ESut<V> {
         let vm = engine.snapshot(&root_uri);
         crate::display_assertions::count_error_nodes(&vm) > 0
     }
+
+    /// Delegate to `E2ESut::wait_for_entity_bounds` (sut.rs:613), which
+    /// owns the polling loop + scroll-into-view RPC + diagnostic dump.
+    async fn wait_for_bounds(&self, id: &CapBlockId, timeout: Duration) -> Result<(), String> {
+        self.wait_for_entity_bounds(id.as_str(), timeout)
+            .await
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    /// Delegate to `E2ESut::wait_for_widget_kind` (sut.rs:735).
+    async fn wait_for_widget_kind(
+        &self,
+        id: &CapBlockId,
+        accepted: &[&str],
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.wait_for_widget_kind(id.as_str(), accepted, timeout)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+    }
 }
 
 // ─── SutDriver ────────────────────────────────────────────────────────
@@ -652,19 +678,39 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
         )
     }
 
-    /// Click an entity by id via the installed UserDriver.
-    /// Delegates to the driver's `click_entity` with region "main",
-    /// the same default used for most SplitBlock / ClickBlock transitions
-    /// (sut.rs:2228–2256).
+    /// Click an entity by id via the installed UserDriver. Defaults to
+    /// region "main" — the convenience wrapper around `click_entity` used
+    /// by SplitBlock / ClickBlock-style transitions.
     async fn driver_click(&mut self, id: &CapBlockId) {
+        <Self as SutDriver>::click_entity(self, id, "main")
+            .await
+            .unwrap_or_else(|e| panic!("SutDriver::driver_click failed for {id}: {e}"));
+    }
+
+    /// Region-aware click via the installed UserDriver. Returns the
+    /// driver error verbatim so callers attach their own
+    /// transition-specific diagnostic.
+    async fn click_entity(&mut self, id: &CapBlockId, region: &str) -> Result<(), String> {
         let driver = self
             .driver
             .as_ref()
-            .expect("SutDriver::driver_click: driver not installed");
+            .ok_or_else(|| "SutDriver::click_entity: driver not installed".to_string())?;
         driver
-            .click_entity(id.as_str(), "main")
+            .click_entity(id.as_str(), region)
             .await
-            .unwrap_or_else(|e| panic!("SutDriver::driver_click failed for {id}: {e:#}"));
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    /// Delegate to `E2ESut::wait_for_focus_to_match` (sut.rs:793), which
+    /// owns the polling loop + focus-and-render diagnostic dump.
+    async fn wait_for_engine_focus(
+        &self,
+        id: &CapBlockId,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.wait_for_focus_to_match(id.as_str(), timeout)
+            .await
+            .map_err(|e| format!("{e:#}"))
     }
 
     /// Returns the current SQL-side focus block id from the `current_focus`
@@ -709,6 +755,20 @@ impl<V: VariantMarker> SutDriver for E2ESut<V> {
     fn resolve_ref_block_id(&self, id: &CapBlockId) -> CapBlockId {
         let uri = holon_api::EntityUri::from_raw(id);
         self.resolve_uri(&uri).as_str().to_string()
+    }
+
+    /// Delegate to the installed UserDriver. Returns the driver error
+    /// verbatim so callers attach their own transition-specific
+    /// diagnostic.
+    async fn send_raw_keystroke(&mut self, key: &str, modifiers: &[&str]) -> Result<(), String> {
+        let driver = self
+            .driver
+            .as_ref()
+            .ok_or_else(|| "SutDriver::send_raw_keystroke: driver not installed".to_string())?;
+        driver
+            .send_raw_keystroke(key, modifiers)
+            .await
+            .map_err(|e| format!("{e:#}"))
     }
 }
 

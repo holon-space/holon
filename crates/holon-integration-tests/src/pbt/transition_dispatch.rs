@@ -268,20 +268,6 @@ pub trait SutHandle {
     /// Post-startup: toggle a block's task state via the StateToggle widget path.
     async fn apply_toggle_state(&mut self, block_id: &holon_api::EntityUri, new_state: &str);
 
-    /// Post-startup: edit a block's content via the display tree path.
-    async fn apply_edit_via_display_tree(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        new_content: &str,
-    );
-
-    /// Post-startup: edit a block's content via the ViewModel path.
-    async fn apply_edit_via_view_model(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        new_content: &str,
-    );
-
     /// Post-startup: bulk add blocks to a document by writing an org file.
     async fn apply_bulk_external_add(
         &mut self,
