@@ -31,7 +31,7 @@ use crate::pbt::types::{Mutation, MutationEvent};
 use holon_api::block::Block;
 
 /// Concurrent UI + external mutations on (possibly overlapping) blocks.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConcurrentMutations {
     pub ui_mutation: MutationEvent,
     pub external_mutation: MutationEvent,

@@ -23,7 +23,7 @@ use crate::pbt::validation::{Reason, check};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Edit a block's LoroText container on a peer at the character level.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PeerCharEdit {
     pub peer_idx: usize,
     pub block_id: String,

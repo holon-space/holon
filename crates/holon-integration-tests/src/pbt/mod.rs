@@ -15,6 +15,7 @@ pub mod query;
 pub mod query_ast;
 pub mod reference_capabilities;
 pub mod reference_state;
+pub mod slice;
 pub mod state_machine;
 pub mod sut;
 pub mod sut_capabilities;

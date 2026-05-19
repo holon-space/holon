@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// Direction an item wants to navigate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NavDirection {
     Up,
     Down,

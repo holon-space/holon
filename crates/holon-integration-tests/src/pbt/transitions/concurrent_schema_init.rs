@@ -19,7 +19,7 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Test that sequential schema operations don't cause database lock errors.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConcurrentSchemaInit;
 
 impl E2ETransitionFactory for ConcurrentSchemaInit {

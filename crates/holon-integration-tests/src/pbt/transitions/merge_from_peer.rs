@@ -19,7 +19,7 @@ use crate::pbt::validation::{Reason, check};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// One-directional merge: peer's changes → primary.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MergeFromPeer {
     pub peer_idx: usize,
 }

@@ -20,7 +20,7 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Create a stale/corrupted .loro file BEFORE the system starts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CreateStaleLoro {
     /// The org filename this .loro file corresponds to (e.g., "test.org")
     pub org_filename: String,

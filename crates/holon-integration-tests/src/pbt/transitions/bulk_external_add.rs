@@ -28,7 +28,7 @@ use crate::assign_reference_sequences_canonical;
 use crate::pbt::types::normalize_content_for_org_roundtrip;
 
 /// Add multiple blocks to a document by writing an updated org file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BulkExternalAdd {
     pub doc_uri: EntityUri,
     pub blocks: Vec<Block>,

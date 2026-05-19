@@ -13,21 +13,21 @@ use holon_api::{EntityUri, QueryLanguage, Value};
 pub type TestPredicate = Predicate;
 
 /// A watched query specification: query + language.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WatchSpec {
     pub query: TestQuery,
     pub language: QueryLanguage,
 }
 
 /// Which table a TestQuery targets.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum QueryTable {
     Blocks,
 }
 
 /// A language-neutral query that can compile to PRQL, SQL, or GQL and also
 /// evaluate against the reference model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TestQuery {
     pub table: QueryTable,
     pub columns: Vec<String>,

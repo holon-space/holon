@@ -23,7 +23,7 @@ use holon_api::{ContentType, EntityUri};
 
 /// Drag the currently-focused block onto a target block, re-parenting the source
 /// as a child of the target at the beginning (after=None).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DragDropBlock {
     pub source: EntityUri,
     pub target: EntityUri,

@@ -24,7 +24,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for
 
 /// Indent the focused block: re-parent it under its previous sibling via the
 /// `Alt+Right` / Tab chord.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Indent {
     pub block_id: EntityUri,
 }

@@ -31,7 +31,7 @@ use holon_api::entity_uri::EntityUri;
 /// `Self` = "this row". `Edge { name }` = "the row currently bound by an
 /// EdgeExists predicate to traverse `name`". The AST is intentionally
 /// shallow — only one level of correlation is needed for the now-query.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Alias {
     /// Outer block alias (`b` in the canonical SQL).
     Outer,
@@ -50,7 +50,7 @@ impl Alias {
 }
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SortDir {
     Asc,
     Desc,
@@ -58,7 +58,7 @@ pub enum SortDir {
 
 /// One sort key. `key` is either a property name (`"priority"`) or the
 /// pseudo-key `"id"` (the canonical now-query uses both).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SortKey {
     pub key: String,
     pub dir: SortDir,
@@ -69,7 +69,7 @@ pub struct SortKey {
 ///
 /// `Block` edges traverse to another block on the target side; `Scalar`
 /// edges store a literal payload (e.g. a tag string).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EdgeRef {
     /// `block_requires(block_id, required_id)` — the inner row is the
     /// *required* block, accessible through `Alias::EdgeTarget`.
@@ -84,7 +84,7 @@ pub enum EdgeRef {
 /// Stays narrow on purpose: the `gql-to-sql` compiler's job is to
 /// expand a richer surface into SQL. This AST is the *PBT ground truth*,
 /// not a general query engine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Predicate {
     /// `json_extract(<alias>.properties, '$.<key>') = <value>`
     PropEq {

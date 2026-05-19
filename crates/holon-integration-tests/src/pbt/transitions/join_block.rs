@@ -27,7 +27,7 @@ use crate::pbt::transition_budgets::{
 
 /// Join a block into its previous text sibling, or (when first child) into
 /// its non-layout text parent. Mirrors Backspace-at-position-0 semantics.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JoinBlock {
     pub block_id: EntityUri,
 }

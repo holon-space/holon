@@ -1,0 +1,31 @@
+{
+  "name": "shrunk_2026-05-19",
+  "description": "Shrunk counterexample from split_block_content_pbt's first run. Split of 'YbhbxldHfz1 Cot paD' (19 chars) at position 15 in a parser-created block. Expected: original='YbhbxldHfz1 Cot', new='paD'. Actual SqlOnly: original='', new=full content. Reproduces deterministically — the original block's truncating UPDATE silently no-ops in SqlOnly mode. See devlog/2026-05-19-phase-c-validation-diagnosis.md + the slice's module docs for the three working hypotheses.",
+  "transitions": [
+    {
+      "WriteOrgFile": {
+        "filename": "__53060.org",
+        "content": "* Maj8GF9h  KIopludr\n:PROPERTIES:\n:ID: -c3rctclv8st1643\n:END:\n* YbhbxldHfz1 Cot paD\n:PROPERTIES:\n:ID: 3u-oe55w05-d64k0w-7209i-2---1\n:END:\n* Xcf 62ro H\n:PROPERTIES:\n:ID: 9g-51b-jn0ti2-vv--r6drwf1-94-\n:END:\n* ZmD 6\n:PROPERTIES:\n:ID: m452-87bf2ll8y-h6gu7v4ueb--8l\n:END:\n* Quz  vuzHot4MlH\n:PROPERTIES:\n:ID: y5ky-o-fwcv--6-1-81-1nj-pv40\n:END:\n"
+      }
+    },
+    {
+      "StartApp": {
+        "wait_for_ready": true,
+        "enable_todoist": true,
+        "enable_loro": false
+      }
+    },
+    {
+      "NavigateFocus": {
+        "region": "main",
+        "block_id": "block:ref-doc-0"
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block:3u-oe55w05-d64k0w-7209i-2---1",
+        "position": 15
+      }
+    }
+  ]
+}

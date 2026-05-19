@@ -23,7 +23,7 @@ use crate::pbt::transition_budgets::{
 
 /// Pop one entry forward in the active navigation history for `region`.
 /// Mirrors the forward-button in production's per-region history stack.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NavigateForward {
     pub region: Region,
 }

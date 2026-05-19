@@ -24,10 +24,38 @@ use holon_api::block::Block;
 use holon_orgmode::OrgBlockExt;
 
 /// Write an org file to the temp directory (before app starts).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WriteOrgFile {
     pub filename: String,
     pub content: String,
+}
+
+/// Parse the `#+TODO:` directive from raw org content. Returns the full
+/// keyword set (active and done keywords, in order). Returns `None` if
+/// no `#+TODO:` line is present.
+///
+/// Self-contained mirror of the keyword set the production org parser
+/// will pick up — used so `apply_to_ref` doesn't need to read randomly-
+/// initialised `state.keyword_set` and can instead derive everything
+/// from `self.content`.
+fn parse_todo_directive(content: &str) -> Option<Vec<String>> {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("#+TODO:") {
+            // `#+TODO: TODO DOING | DONE CANCELLED` — split off the `|` divider
+            // and collect every non-empty whitespace-separated token.
+            let kws: Vec<String> = rest
+                .split_whitespace()
+                .filter(|tok| *tok != "|")
+                .map(|tok| tok.to_string())
+                .collect();
+            if kws.is_empty() {
+                return None;
+            }
+            return Some(kws);
+        }
+    }
+    None
 }
 
 impl E2ETransitionFactory for WriteOrgFile {
@@ -39,7 +67,7 @@ impl E2ETransitionFactory for WriteOrgFile {
         // path on a vanilla seed layout. Restore to `true` after verification.
         let state_for_preconditions = state.clone();
         let strat = crate::pbt::generators::generate_org_file_content_with_keywords(
-            state.keyword_set.clone(),
+            None,
             std::env::var("HOLON_PBT_NO_LAYOUT_OVERRIDE").is_err(), // LAYOUT_MUTATIONS_ENABLED
         )
         .prop_filter("WriteOrgFile preconditions", move |(filename, content)| {
@@ -117,13 +145,22 @@ impl E2ETransitionImpl for WriteOrgFile {
             state.layout_blocks.remove(id);
         }
 
+        // Parse #+TODO from self.content so the transition is self-contained:
+        // fixture replay must reproduce todo-keyword behaviour from the saved
+        // transitions alone, without depending on a randomly-initialised
+        // state.keyword_set (the previous source of hidden randomness — see
+        // devlog/2026-05-19-phase-c-validation-diagnosis.md).
+        let parsed_todo_keywords: Option<Vec<String>> = parse_todo_directive(&self.content);
+
         // Add the page block (tags ⊇ ["Page"]) for this org file.
         let mut doc_block =
             Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name.clone());
         doc_block.set_page(true);
-        if let Some(ref ks) = state.keyword_set {
+        if let Some(ref kws) = parsed_todo_keywords {
+            use holon_api::types::TaskState;
             use holon_orgmode::models::OrgDocumentExt;
-            doc_block.set_todo_keywords(Some(ks.0.clone()));
+            let states: Vec<TaskState> = kws.iter().map(|kw| TaskState::from_keyword(kw)).collect();
+            doc_block.set_todo_keywords(Some(states));
         }
         state.block_state.blocks.insert(doc_uri.clone(), doc_block);
         state
@@ -155,11 +192,8 @@ impl E2ETransitionImpl for WriteOrgFile {
                 let block_id = caps.get(1).unwrap().as_str().to_string();
                 let raw_headline = current_headline.clone().unwrap_or_default();
 
-                let known_keywords: Vec<String> = state
-                    .keyword_set
-                    .as_ref()
-                    .map(|ks| ks.all_keywords())
-                    .unwrap_or_else(|| {
+                let known_keywords: Vec<String> =
+                    parsed_todo_keywords.clone().unwrap_or_else(|| {
                         vec!["TODO".to_string(), "DOING".to_string(), "DONE".to_string()]
                     });
                 let (content, task_keyword) = known_keywords

@@ -36,7 +36,7 @@ use holon_api::{ContentType, QueryLanguage, Region, RenderExpr, SourceLanguage, 
 use holon_frontend::{FrontendSession, HolonConfig, SessionConfig};
 
 /// Types of corruption for stale .loro files (for testing recovery)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoroCorruptionType {
     /// Empty file (0 bytes)
     Empty,

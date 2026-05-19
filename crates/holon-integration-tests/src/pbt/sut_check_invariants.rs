@@ -507,9 +507,8 @@ impl<V: VariantMarker> E2ESut<V> {
             self.wait_for_org_files_stable(25, Duration::from_millis(5000))
                 .await;
 
-            let todo_header = ref_state.keyword_set.as_ref().map(|ks| ks.to_org_header());
             let org_blocks = self
-                .parse_org_file_blocks(todo_header.as_deref())
+                .parse_org_file_blocks(None)
                 .await
                 .expect("Failed to parse Org file");
             assert_blocks_equivalent(

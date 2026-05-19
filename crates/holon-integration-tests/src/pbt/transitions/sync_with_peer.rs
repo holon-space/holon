@@ -19,7 +19,7 @@ use crate::pbt::validation::{Reason, check};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Bidirectional sync between primary's LoroDoc and a peer via DirectSync.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SyncWithPeer {
     pub peer_idx: usize,
 }

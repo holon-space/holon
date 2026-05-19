@@ -25,7 +25,7 @@ use crate::pbt::transition_budgets::{
 
 /// Return to root (home) in a region's navigation history.
 /// Clears all navigation state for the region and sets focus to None globally.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NavigateHome {
     pub region: Region,
 }

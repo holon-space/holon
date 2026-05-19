@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 proptest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 validated = "1.0"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 

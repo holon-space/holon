@@ -23,7 +23,7 @@ use crate::pbt::transition_budgets::{
 };
 
 /// Navigate via arrow keys from the currently focused block in a region.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ArrowNavigate {
     pub region: Region,
     pub direction: NavDirection,

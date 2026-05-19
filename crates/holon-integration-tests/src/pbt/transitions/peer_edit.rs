@@ -20,7 +20,7 @@ use crate::pbt::validation::{Reason, check};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Edit a block on a peer's LoroDoc directly (no SQL, no BackendEngine).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PeerEdit {
     pub peer_idx: usize,
     pub op: PeerEditOp,

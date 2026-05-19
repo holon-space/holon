@@ -92,7 +92,7 @@ pub async fn apply_trigger_slash_command_to_sut<S: SutLayout + SutDriver>(
 }
 
 /// Trigger the "/" slash-command menu on the focused block and select "delete".
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TriggerSlashCommand {
     pub block_id: EntityUri,
 }

@@ -28,7 +28,7 @@ use crate::pbt::transition_budgets::{
 };
 
 /// Pin a block to the right sidebar via shift+click semantics.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PinBlock {
     pub region: Region,
     pub block_id: EntityUri,

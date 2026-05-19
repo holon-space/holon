@@ -19,7 +19,7 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
 
 /// Switch the current view (e.g. "all", "sidebar", "main").
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SwitchView {
     pub view_name: String,
 }

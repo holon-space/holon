@@ -19,7 +19,7 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
 
 /// Remove an active query watch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RemoveWatch {
     pub query_id: String,
 }

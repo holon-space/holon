@@ -14,7 +14,6 @@ use proptest_state_machine::ReferenceStateMachine;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 
-use super::generators::*;
 use super::reference_state::{ReferenceState, ShadowInterpreter};
 use super::types::*;
 
@@ -181,6 +180,16 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
     type Transition = crate::pbt::transitions::E2ETransition;
 
     fn init_state() -> BoxedStrategy<Self::State> {
+        // Init is **constant**. All previously-random init inputs (notably
+        // `keyword_set`) have been lifted into transitions so a fixture's
+        // `Vec<E2ETransition>` fully reproduces a run — no hidden randomness
+        // hiding in `state.*` that would silently drift between proptest's
+        // generation and a saved fixture's replay.
+        //
+        // See `devlog/2026-05-19-phase-c-validation-diagnosis.md` for the
+        // bug class this prevents (BulkExternalAdd reading
+        // `state.keyword_set` at apply time, with the random init being the
+        // hidden bug-triggering input).
         let injector = Injector::root();
         let interp = Shared::new(holon_frontend::shadow_builders::build_shadow_interpreter());
         injector.provide::<ShadowInterpreter>(Provider::root({
@@ -189,25 +198,10 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
         }));
         let interpreter: Arc<ShadowInterpreter> = injector.resolve::<ShadowInterpreter>();
 
-        prop_oneof![
-            // ~50% with keyword set (exercises task_state mutations)
-            1 => {
-                let interp = interpreter.clone();
-                todo_keyword_set_strategy().prop_map(move |ks| {
-                    let mut state = ReferenceState::new(V::variant(), interp.clone());
-                    state.keyword_set = Some(ks);
-                    VariantRef(state, PhantomData)
-                })
-            },
-            // ~50% without (exercises no-keyword path)
-            1 => {
-                let interp = interpreter.clone();
-                Just(VariantRef(
-                    ReferenceState::new(V::variant(), interp),
-                    PhantomData,
-                ))
-            },
-        ]
+        Just(VariantRef(
+            ReferenceState::new(V::variant(), interpreter),
+            PhantomData,
+        ))
         .boxed()
     }
 

@@ -26,7 +26,7 @@ use crate::pbt::transition_budgets::{
 };
 
 /// Navigate to focus on a specific block within a region.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NavigateFocus {
     pub region: Region,
     pub block_id: EntityUri,

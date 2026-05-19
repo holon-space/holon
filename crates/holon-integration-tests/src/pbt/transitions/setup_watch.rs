@@ -24,7 +24,7 @@ use holon_api::QueryLanguage;
 use crate::pbt::query::TestQuery;
 
 /// Set up a new query watch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SetupWatch {
     pub query_id: String,
     pub query: TestQuery,

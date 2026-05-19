@@ -400,4 +400,104 @@ mod tests {
         let result = menu.on_key(MenuKey::Enter);
         assert!(matches!(result, PopupResult::NotActive));
     }
+
+    /// Provider that returns `InsertText` on select, mirroring the
+    /// doc_link / wiki_link flow. Ported from the deleted PBT
+    /// `apply_trigger_doc_link` body (Phase C #8) to keep coverage of
+    /// the `PopupResult::InsertText` API contract: on Enter, the
+    /// menu's `on_key` returns the provider's `InsertText` verbatim,
+    /// carrying both `replacement` and `prefix_start`.
+    struct InsertTextMockProvider {
+        items: Vec<PopupItem>,
+    }
+
+    impl PopupProvider for InsertTextMockProvider {
+        fn source(&self) -> &str {
+            "insert_text_mock"
+        }
+
+        fn candidates(
+            &self,
+            _: Pin<Box<dyn Signal<Item = String> + Send + Sync>>,
+        ) -> Pin<Box<dyn SignalVec<Item = PopupItem> + Send>> {
+            let items = self.items.clone();
+            Box::pin(futures_signals::signal_vec::always(items))
+        }
+
+        fn on_select(&self, item: &PopupItem, filter: &str) -> PopupResult {
+            // Mimics doc_link semantics: existing entity → `[[id][label]]`,
+            // "create new" sentinel → `[[<filter>]]`.
+            let replacement = if item.id == "__create_new__" {
+                format!("[[{}]]", filter)
+            } else {
+                format!("[[{}][{}]]", item.id, item.label)
+            };
+            PopupResult::InsertText {
+                replacement,
+                prefix_start: 4,
+            }
+        }
+    }
+
+    #[test]
+    fn enter_returns_insert_text_from_provider() {
+        let items = vec![
+            PopupItem {
+                id: "block-target-7".into(),
+                label: "Target Block".into(),
+                icon: None,
+            },
+            PopupItem {
+                id: "__create_new__".into(),
+                label: "Create new: proj".into(),
+                icon: None,
+            },
+        ];
+        let mut menu = PopupMenu::new();
+        let provider = Arc::new(InsertTextMockProvider {
+            items: items.clone(),
+        });
+        let _signal = menu.activate(provider, "proj");
+        *menu.items.lock().unwrap() = items;
+
+        // Selected index defaults to 0 — the existing-entity item.
+        let result = menu.on_key(MenuKey::Enter);
+        match result {
+            PopupResult::InsertText {
+                replacement,
+                prefix_start,
+            } => {
+                assert_eq!(replacement, "[[block-target-7][Target Block]]");
+                assert_eq!(prefix_start, 4);
+            }
+            other => panic!("Expected InsertText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_create_new_uses_filter_text() {
+        let items = vec![PopupItem {
+            id: "__create_new__".into(),
+            label: "Create new: proj".into(),
+            icon: None,
+        }];
+        let mut menu = PopupMenu::new();
+        let provider = Arc::new(InsertTextMockProvider {
+            items: items.clone(),
+        });
+        let _signal = menu.activate(provider, "proj");
+        *menu.items.lock().unwrap() = items;
+
+        let result = menu.on_key(MenuKey::Enter);
+        match result {
+            PopupResult::InsertText {
+                replacement,
+                prefix_start,
+            } => {
+                assert_eq!(replacement, "[[proj]]");
+                assert_eq!(prefix_start, 4);
+            }
+            other => panic!("Expected InsertText, got {other:?}"),
+        }
+    }
 }

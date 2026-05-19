@@ -94,7 +94,7 @@ use holon_api::EntityUri;
 use holon_orgmode::OrgBlockExt;
 
 /// Toggle the task state of a block via the StateToggle widget.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToggleState {
     pub block_id: EntityUri,
     pub new_state: String,
@@ -128,6 +128,10 @@ impl E2ETransitionFactory for ToggleState {
             .map(super::super::reference_state::block_to_data_row)
             .collect();
         let arc_rows: Vec<std::sync::Arc<_>> = rows.into_iter().map(std::sync::Arc::new).collect();
+        // Generator-side use: computes which blocks render a state_toggle so the
+        // generator only proposes valid candidates. Not in the SUT application path
+        // (which goes through SutDriver clicks).
+        // ALLOW(pbt-sut-handle-frontend-simulation): generator-side render lookup
         let vm = holon_frontend::interpret_pure(&owned_render_expr, &arc_rows, state);
         let toggle_block_ids: Vec<EntityUri> = vm
             .snapshot()
@@ -137,21 +141,10 @@ impl E2ETransitionFactory for ToggleState {
             .collect();
 
         const RENDERED_DEFAULT_STATES: [&str; 4] = ["", "TODO", "DOING", "DONE"];
-        let candidate_states: Vec<String> = match &state.keyword_set {
-            Some(ks) => {
-                let allowed: std::collections::HashSet<String> =
-                    ks.all_keywords().into_iter().collect();
-                RENDERED_DEFAULT_STATES
-                    .iter()
-                    .filter(|s| s.is_empty() || allowed.contains(**s))
-                    .map(|s| s.to_string())
-                    .collect()
-            }
-            None => RENDERED_DEFAULT_STATES
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        };
+        let candidate_states: Vec<String> = RENDERED_DEFAULT_STATES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let pairs: Vec<(EntityUri, String)> = toggle_block_ids
             .iter()
             .filter(|id| {

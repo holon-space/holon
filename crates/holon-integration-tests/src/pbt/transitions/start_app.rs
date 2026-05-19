@@ -22,7 +22,7 @@ use crate::pbt::validation::{Reason, check};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Start the application (triggers sync, may race with DDL).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StartApp {
     pub wait_for_ready: bool,
     /// Enable Todoist fake mode (adds concurrent DDL during startup)
@@ -89,10 +89,12 @@ impl E2ETransitionImpl for StartApp {
                 "__default__",
             );
             seed_doc_block.set_page(true);
-            if let Some(ref ks) = state.keyword_set {
-                use holon_orgmode::models::OrgDocumentExt;
-                seed_doc_block.set_todo_keywords(Some(ks.0.clone()));
-            }
+            // No keyword-set seeding here: random init is gone (see
+            // `state_machine.rs::init_state`), and the default `__default__`
+            // doc is not user-written content. If a user wants a `#+TODO:`
+            // header on a doc, they emit a `WriteOrgFile` transition whose
+            // content contains it — and that transition's `apply_to_ref`
+            // parses the directive from its own `self.content`.
             state
                 .block_state
                 .blocks

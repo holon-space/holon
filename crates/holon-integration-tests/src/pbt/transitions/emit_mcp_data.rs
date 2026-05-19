@@ -20,7 +20,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, docs_tolerance};
 
 /// Trigger IVM re-evaluation to detect CDC re-emission bugs.
 /// Generated with low weight — useful after navigation transitions.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EmitMcpData;
 
 impl E2ETransitionFactory for EmitMcpData {

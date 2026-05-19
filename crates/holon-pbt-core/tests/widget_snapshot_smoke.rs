@@ -145,6 +145,9 @@ impl SutSqlProjection for ToySut {
     async fn block_task_state(&self, _: &CapBlockId) -> Option<String> {
         None
     }
+    async fn block_content(&self, _: &CapBlockId) -> Option<String> {
+        None
+    }
 }
 
 #[allow(async_fn_in_trait)]

@@ -409,9 +409,6 @@ pub struct ReferenceState {
     /// Test variant configuration (which components are enabled)
     pub variant: TestVariant,
 
-    /// TODO keyword set for task_state mutations (generated once per test case)
-    pub keyword_set: Option<super::generators::TodoKeywordSet>,
-
     /// Active render expressions per render source block (block_id → RenderExpr).
     /// Updated when render source blocks are created or mutated.
     /// `BTreeMap` for deterministic iteration (see `BlockState::blocks`).
@@ -621,7 +618,6 @@ impl ReferenceState {
             profile_block_ids: HashSet::new(),
             active_profiles: HashMap::new(),
             variant,
-            keyword_set: None,
             render_expressions: BTreeMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),

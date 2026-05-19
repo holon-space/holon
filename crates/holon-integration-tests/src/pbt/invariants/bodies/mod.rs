@@ -9,6 +9,7 @@
 //! them in Phase 10.
 
 pub mod backend_blocks_match_ref;
+pub mod block_content_matches_ref;
 pub mod block_ids_match_ref;
 pub mod block_tags_references_exist;
 pub mod displayed_text;

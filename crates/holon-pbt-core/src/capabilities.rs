@@ -445,6 +445,11 @@ pub trait SutSqlProjection {
     /// Returns `None` if the block doesn't exist or has no `task_state`
     /// property. Used by `inv-task-state-storage-coherence`.
     async fn block_task_state(&self, id: &CapBlockId) -> Option<String>;
+
+    /// `content` column of `block_raw` for `id`. Returns `None` if the block
+    /// doesn't exist. Used by `inv-block-content-matches-ref` (split-block
+    /// content-routing slice).
+    async fn block_content(&self, id: &CapBlockId) -> Option<String>;
 }
 
 /// Loro-side task_state projection. Phase 7 addition for

@@ -592,8 +592,20 @@ impl DocumentManager for LiveDocumentManager {
     async fn update_metadata(&self, doc: &Block) -> anyhow::Result<()> {
         use crate::block_params::build_block_params;
         let params = build_block_params(doc, &doc.parent_id, &doc.id);
+        // Tag as `EventOrigin::Org` mirroring sibling `create` above
+        // (di.rs:551). Without this, the `LoroSyncController` inbound gate
+        // drops the event as a generic SQL-direct write — and on doc rows
+        // whose `properties` contain `todo_keywords` from a `#+TODO:`
+        // directive, the keyword list is silently lost. Surfaced as the
+        // `inv-org-render-fixed-point` PBT flake (May 2026, see
+        // `devlog/2026-05-19-phase-c-validation-diagnosis.md`).
         self.command_bus
-            .execute_operation(&EntityName::new("block"), "update", params)
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "update",
+                params,
+                EventOrigin::Org,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         // Update in-memory cache

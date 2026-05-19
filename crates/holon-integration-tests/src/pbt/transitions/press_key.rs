@@ -23,7 +23,7 @@ use crate::pbt::transition_budgets::{
 
 /// Press a structural key chord (Enter, Backspace, Escape) in the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PressKey {
     pub chord: KeyChord,
 }

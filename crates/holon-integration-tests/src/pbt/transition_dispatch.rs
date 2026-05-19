@@ -294,14 +294,6 @@ pub trait SutHandle {
     /// Post-startup: trigger the "/" slash-command menu on a block and select "delete".
     async fn apply_trigger_slash_command(&mut self, block_id: &holon_api::EntityUri);
 
-    /// Post-startup: trigger the "[[" doc-link popup and validate the InsertText pipeline.
-    async fn apply_trigger_doc_link(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        target_block_id: &holon_api::EntityUri,
-        ref_state: &ReferenceState,
-    );
-
     /// Post-startup: indent the focused block (re-parent under previous sibling).
     async fn apply_indent(&mut self, block_id: &holon_api::EntityUri);
 
@@ -454,7 +446,7 @@ macro_rules! declare_e2e_transitions {
                     -> $crate::pbt::transition_budgets::ExpectedSql;
             }
 
-            #[derive(Clone, Debug)]
+            #[derive(Clone, Debug, ::serde::Serialize, ::serde::Deserialize)]
             $vis enum $enum_name {
                 $( $variant($ty) ),*
             }

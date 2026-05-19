@@ -46,7 +46,7 @@ pub async fn apply_focus_editable_text_to_sut<S: SutLayout + SutDriver>(
 
 /// Focus a live-rendered editable text block in the main panel.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FocusEditableText {
     pub block_id: EntityUri,
 }

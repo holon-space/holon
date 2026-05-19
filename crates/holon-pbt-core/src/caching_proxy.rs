@@ -149,4 +149,8 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
     async fn block_task_state(&self, id: &CapBlockId) -> Option<String> {
         self.inner.block_task_state(id).await
     }
+
+    async fn block_content(&self, id: &CapBlockId) -> Option<String> {
+        self.inner.block_content(id).await
+    }
 }

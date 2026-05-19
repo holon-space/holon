@@ -19,7 +19,7 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
 
 /// Redo the last undone mutation via the engine's redo stack.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Redo;
 
 impl E2ETransitionFactory for Redo {

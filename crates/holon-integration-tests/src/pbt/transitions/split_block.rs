@@ -95,7 +95,7 @@ use crate::pbt::transition_budgets::{
 
 /// Split an editable text block at a byte position.
 /// Only the currently focused (editable) block is a candidate.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SplitBlock {
     pub block_id: EntityUri,
     pub position: usize,

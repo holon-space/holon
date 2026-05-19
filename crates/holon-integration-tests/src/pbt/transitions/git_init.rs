@@ -19,7 +19,7 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Initialize git repository (runs `git init`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GitInit;
 
 impl E2ETransitionFactory for GitInit {

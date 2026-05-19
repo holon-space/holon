@@ -9,7 +9,7 @@ use holon_api::{ContentType, SourceLanguage, Value};
 use holon_orgmode::models::OrgBlockExt;
 
 /// Source of a mutation
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MutationSource {
     /// User action via BackendEngine operations (through ctx.execute_op)
     UI,
@@ -20,7 +20,7 @@ pub enum MutationSource {
 }
 
 /// A mutation to the data model
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Mutation {
     Create {
         entity: String,
@@ -359,7 +359,7 @@ impl Mutation {
 }
 
 /// A mutation event with source information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MutationEvent {
     pub source: MutationSource,
     pub mutation: Mutation,

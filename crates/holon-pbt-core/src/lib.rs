@@ -28,6 +28,7 @@ use validated::Validated;
 
 pub mod caching_proxy;
 pub mod capabilities;
+pub mod fixture;
 pub mod interactions;
 pub mod invariant;
 

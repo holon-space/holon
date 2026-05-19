@@ -24,7 +24,7 @@ use holon_api::EntityUri;
 use holon_api::block::Block;
 
 /// Create a new empty document (post-startup).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CreateDocument {
     pub file_name: String,
 }

@@ -23,7 +23,7 @@ use crate::pbt::transition_dispatch::{E2ETransitionFactory, SutHandle};
 use crate::pbt::transition_budgets::{ExpectedSql, JOURNAL_READS, REACTIVE_BASE, docs_tolerance};
 
 /// Unpin (close) one open `navigation_history` row by its id.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UnpinBlock {
     pub history_id: i64,
 }

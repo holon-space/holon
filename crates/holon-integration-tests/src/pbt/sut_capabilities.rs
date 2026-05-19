@@ -263,6 +263,24 @@ impl<V: VariantMarker> SutSqlProjection for E2ESut<V> {
         })
     }
 
+    /// `block_raw.content` for `id`. Returns `None` if the block doesn't
+    /// exist. Used by the split-block content-routing slice
+    /// (`inv-block-content-matches-ref`).
+    async fn block_content(&self, id: &CapBlockId) -> Option<String> {
+        let escaped = id.replace('\'', "''");
+        let sql = format!("SELECT content FROM block_raw WHERE id = '{escaped}'");
+        let rows = self
+            .ctx
+            .query_sql(&sql)
+            .await
+            .expect("SutSqlProjection::block_content query failed");
+        rows.into_iter().next().and_then(|r| {
+            r.get("content")
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+        })
+    }
+
     /// Returns all distinct block_id values from `block_tags`. Mirrors
     /// `SELECT DISTINCT block_id FROM block_tags` — same table used by
     /// `inv-block-tags-references-exist`.

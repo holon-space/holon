@@ -26,7 +26,7 @@ use crate::pbt::transition_budgets::{
 /// Mirrors what production's history `Back` button does. The reference
 /// model also clears per-region focus to match how the SUT lets engine
 /// focus drift to whatever last touched it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NavigateBack {
     pub region: Region,
 }

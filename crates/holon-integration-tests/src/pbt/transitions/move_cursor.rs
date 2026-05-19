@@ -23,7 +23,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
 
 /// Move the active editor caret to a given byte position.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MoveCursor {
     pub byte_position: usize,
 }

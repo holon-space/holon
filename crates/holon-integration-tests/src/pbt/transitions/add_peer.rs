@@ -20,7 +20,7 @@ use crate::pbt::validation::{Reason, check};
 use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Add a Loro-only peer instance that shares the primary's current state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AddPeer;
 
 // ── Capability-bound free functions (Phase 6a) ────────────────────

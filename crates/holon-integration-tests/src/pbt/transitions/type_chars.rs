@@ -24,7 +24,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
 
 /// Type a short ASCII string into the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeChars {
     pub text: String,
 }

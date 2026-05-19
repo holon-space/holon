@@ -30,7 +30,7 @@ use crate::pbt::state_machine::LAYOUT_MUTATIONS_ENABLED;
 use crate::pbt::types::{Mutation, MutationEvent, MutationSource};
 
 /// Apply a single mutation (UI or external).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ApplyMutation {
     pub event: MutationEvent,
 }
@@ -162,7 +162,7 @@ impl E2ETransitionFactory for ApplyMutation {
                 if !headline_ids.is_empty() {
                     arms.push((
                         1,
-                        generate_layout_headline_mutation(headline_ids, state.keyword_set.clone())
+                        generate_layout_headline_mutation(headline_ids, None)
                             .prop_map(|mutation| ApplyMutation {
                                 event: MutationEvent {
                                     source: MutationSource::UI,

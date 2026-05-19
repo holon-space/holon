@@ -32,7 +32,7 @@ use crate::pbt::value_fn_invariants::rhai_mentions;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExpandToggle {
     pub block_id: EntityUri,
 }

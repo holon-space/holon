@@ -76,7 +76,6 @@ mod switch_view;
 mod sync_with_peer;
 mod toggle_collapse;
 pub mod toggle_state;
-mod trigger_doc_link;
 pub mod trigger_slash_command;
 pub mod type_chars;
 mod undo_last_mutation;
@@ -130,7 +129,6 @@ pub use start_app::StartApp;
 pub use switch_view::SwitchView;
 pub use sync_with_peer::SyncWithPeer;
 pub use toggle_state::ToggleState;
-pub use trigger_doc_link::TriggerDocLink;
 pub use trigger_slash_command::TriggerSlashCommand;
 pub use type_chars::TypeChars;
 pub use undo_last_mutation::UndoLastMutation;
@@ -171,7 +169,7 @@ pub fn deterministic_peer_block_id(
 }
 
 /// Character-level text operations on a peer's LoroText container.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TextOp {
     Insert {
         pos_codepoint: usize,
@@ -184,7 +182,7 @@ pub enum TextOp {
 }
 
 /// Operations that can be performed on a peer's Loro tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PeerEditOp {
     Create {
         parent_stable_id: Option<String>,
@@ -245,7 +243,6 @@ crate::declare_e2e_transitions! {
         SwitchView(SwitchView),
         SetupWatch(SetupWatch),
         ToggleState(ToggleState),
-        TriggerDocLink(TriggerDocLink),
         TriggerSlashCommand(TriggerSlashCommand),
         TypeChars(TypeChars),
         UndoLastMutation(UndoLastMutation),

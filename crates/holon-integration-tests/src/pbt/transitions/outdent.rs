@@ -24,7 +24,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for
 
 /// Outdent the focused block: move it up one level to its grandparent via the
 /// `Alt+Left` / Shift+Tab chord.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Outdent {
     pub block_id: EntityUri,
 }

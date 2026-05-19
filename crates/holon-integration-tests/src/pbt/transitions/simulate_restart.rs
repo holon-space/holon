@@ -20,7 +20,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance}
 
 /// Simulate an app restart: clears last_projection and triggers re-sync.
 /// Blocks are preserved; the system re-processes files from disk.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimulateRestart;
 
 impl E2ETransitionFactory for SimulateRestart {

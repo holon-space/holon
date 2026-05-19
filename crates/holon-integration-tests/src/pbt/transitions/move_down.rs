@@ -24,7 +24,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for
 use holon_api::EntityUri;
 
 /// Move the focused block down: swap its sort_key with its next sibling's.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MoveDown {
     pub block_id: EntityUri,
 }
