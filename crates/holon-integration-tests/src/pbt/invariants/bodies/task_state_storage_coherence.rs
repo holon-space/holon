@@ -1,4 +1,4 @@
-//! Phase 7 — `inv-task-state-storage-coherence` (STORAGE, NEW INVARIANT).
+//! `inv-task-state-storage-coherence`.
 //!
 //! Cross-checks `task_state` between `block_raw.properties` (SQL) and
 //! the Loro tag projection, catching Loro↔SQL desync at the data layer
@@ -10,12 +10,11 @@
 //! ## Deferral note
 //!
 //! The Loro side (`SutLoroTaskState::loro_task_state_of`) is `unimplemented!`
-//! on `E2ESut` in Phase 7: projecting task_state from Loro tags requires
-//! exposing the LoroSyncController's tag map through `TestContext`, which
-//! is deferred to Phase 8. The invariant body is wired here so it compiles
-//! and the ID is reserved; at runtime this invariant will panic with the
-//! `unimplemented!` message if invoked against `E2ESut`. It is NOT added
-//! to any live PBT runner until Phase 8 lands the plumbing.
+//! on `E2ESut`: projecting task_state from Loro tags requires exposing the
+//! LoroSyncController's tag map through `TestContext`, which is not yet wired.
+//! The invariant body is defined so it compiles and the ID is reserved; at
+//! runtime it will panic with the `unimplemented!` message if invoked against
+//! `E2ESut`, so it is NOT added to any live PBT runner until the plumbing lands.
 //!
 //! ## Mismatch policy
 //!
@@ -29,7 +28,7 @@
 use std::marker::PhantomData;
 
 use holon_pbt_core::capabilities::{SutLoroTaskState, SutSqlProjection};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvTaskStateStorageCoherence<R>(pub PhantomData<R>);
 
@@ -44,10 +43,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

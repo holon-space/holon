@@ -118,6 +118,7 @@ pub fn classify_link(target: &str) -> LinkTarget {
 
     // Already resolved: starts with known entity scheme followed by ':'
     if target.starts_with("doc:") || target.starts_with("block:") {
+        // ALLOW(entity_uri_from_raw): raw org-file wiki-link target string (doc:/block: prefixed)
         let uri = EntityUri::from_raw(target);
         return LinkTarget::Resolved(uri);
     }

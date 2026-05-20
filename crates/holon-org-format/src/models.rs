@@ -40,9 +40,9 @@ pub trait BlockResolver {
 ///
 /// Walks up the parent chain until it finds a page block (one tagged
 /// with `"Page"`).
-pub fn find_document_id<R: BlockResolver>(block: &Block, resolver: &R) -> Option<String> {
+pub fn find_document_id<R: BlockResolver>(block: &Block, resolver: &R) -> Option<EntityUri> {
     if block.is_page() {
-        return Some(block.id.to_string());
+        return Some(block.id.clone());
     }
 
     let mut current_parent_id = block.parent_id.to_string();
@@ -56,7 +56,7 @@ pub fn find_document_id<R: BlockResolver>(block: &Block, resolver: &R) -> Option
 
         let parent = resolver.get_block(&current_parent_id)?;
         if parent.is_page() {
-            return Some(parent.id.to_string());
+            return Some(parent.id.clone());
         }
         if parent.parent_id.is_no_parent() || parent.parent_id.is_sentinel() {
             return None;
@@ -70,8 +70,7 @@ pub fn find_document_id<R: BlockResolver>(block: &Block, resolver: &R) -> Option
 /// Walks up to the nearest page ancestor and returns its title.
 pub fn get_block_file_path<R: BlockResolver>(block: &Block, resolver: &R) -> Option<String> {
     let doc_id = find_document_id(block, resolver)?;
-    let uri = EntityUri::from_raw(&doc_id);
-    let doc_block = resolver.get_block(uri.as_str())?;
+    let doc_block = resolver.get_block(doc_id.as_str())?;
     Some(doc_block.title())
 }
 
@@ -706,7 +705,7 @@ impl OrgBlockExt for Block {
         // the block_requires junction) — the parser pulls it out of the drawer
         // and the renderer must put it back. Stored values are `block:` URIs
         // (added at parse boundary); strip the scheme on the way out so the
-        // org file keeps bare slugs (per docs/ORG_SYNTAX.md). Joined with
+        // org file keeps bare slugs (per docs/Reference/ORG_SYNTAX.md). Joined with
         // spaces (org-edna convention).
         if !self.requires.is_empty() {
             let bare: Vec<String> = self
@@ -1062,7 +1061,7 @@ mod tests {
         let resolver = HashMapBlockResolver::from_blocks(vec![doc, block.clone()]);
 
         let doc_id = find_document_id(&block, &resolver);
-        assert_eq!(doc_id, Some(doc_uri().to_string()));
+        assert_eq!(doc_id, Some(doc_uri()));
     }
 
     #[test]
@@ -1078,7 +1077,7 @@ mod tests {
         let resolver = HashMapBlockResolver::from_blocks(vec![doc, block1.clone(), block2.clone()]);
 
         let doc_id = find_document_id(&block2, &resolver);
-        assert_eq!(doc_id, Some(doc_uri().to_string()));
+        assert_eq!(doc_id, Some(doc_uri()));
     }
 
     #[test]
@@ -1104,7 +1103,7 @@ mod tests {
         ]);
 
         let doc_id = find_document_id(&block3, &resolver);
-        assert_eq!(doc_id, Some(doc_uri().to_string()));
+        assert_eq!(doc_id, Some(doc_uri()));
     }
 
     #[test]

@@ -6,9 +6,11 @@
 
 use holon_api::streaming::ChangeSubscribers;
 
+use super::event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
 use super::repository::{CoreOperations, Lifecycle};
 use super::types::NewBlock;
 use async_trait::async_trait;
+use holon_api::block_mutation::{BlockMutation, BlockTreeView};
 use holon_api::streaming::ChangeNotifications;
 use holon_api::{
     ApiError, Block, BlockChange, BlockContent, Change, ChangeOrigin, EntityUri, StreamPosition,
@@ -57,7 +59,6 @@ impl Clone for MemoryBackend {
             deleted_ids: state.deleted_ids.clone(),
             children_by_parent: state.children_by_parent.clone(),
             next_id_counter: state.next_id_counter,
-            version_counter: state.version_counter,
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: state.event_log.clone(),
         };
@@ -80,13 +81,40 @@ struct MemoryState {
     children_by_parent: HashMap<String, Vec<String>>,
     /// Counter for deterministic ID generation (increments with each create)
     next_id_counter: u64,
-    /// Version counter (increments with each mutation)
-    version_counter: u64,
     /// Active change notification subscribers
     subscribers: ChangeSubscribers<Block>,
-    /// Event log for replaying past events to new watchers
-    /// Maps version -> events that created that version
-    event_log: Vec<BlockChange>,
+    /// Bounded ring of past events for watermark replay to new watchers.
+    /// `next_seq` doubles as the version counter (one event = one version
+    /// step, including each element of a batch op — the old separate
+    /// per-*operation* `version_counter` drifted from the log on batch ops).
+    event_log: EventRing<BlockChange>,
+}
+
+/// Lets the domain run ADR-0005 move/cycle preconditions
+/// ([`BlockMutation::validate`]) directly against the in-memory tree.
+impl BlockTreeView for MemoryState {
+    fn block_exists(&self, id: &EntityUri) -> bool {
+        let k = id.as_str();
+        self.blocks.contains_key(k) && !self.deleted_ids.contains(k)
+    }
+
+    fn parent_of(&self, id: &EntityUri) -> Option<EntityUri> {
+        self.blocks.get(id.as_str()).and_then(|b| {
+            if b.parent_id.is_no_parent() {
+                None
+            } else {
+                Some(b.parent_id.clone())
+            }
+        })
+    }
+
+    fn children_of(&self, parent: &EntityUri) -> Vec<EntityUri> {
+        self.children_by_parent
+            .get(parent.as_str())
+            // ALLOW(entity_uri_from_raw): id/parent key String from MemoryState store
+            .map(|kids| kids.iter().map(|s| EntityUri::from_raw(s)).collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Default for MemoryState {
@@ -96,9 +124,8 @@ impl Default for MemoryState {
             deleted_ids: HashSet::new(),
             children_by_parent: HashMap::new(),
             next_id_counter: 0,
-            version_counter: 0,
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            event_log: Vec::new(),
+            event_log: EventRing::new(DEFAULT_EVENT_RING_CAPACITY),
         }
     }
 }
@@ -112,10 +139,6 @@ impl MemoryBackend {
         let id = format!("local://{}", state.next_id_counter);
         state.next_id_counter += 1;
         id
-    }
-
-    fn increment_version(state: &mut MemoryState) {
-        state.version_counter += 1;
     }
 
     /// Get current Unix timestamp in milliseconds.
@@ -134,7 +157,7 @@ impl MemoryBackend {
         let subscribers = state.subscribers.clone();
         tokio::spawn(async move {
             let mut subscribers = subscribers.lock().await;
-            subscribers.retain(|sender| sender.try_send(Ok(batch.clone())).is_ok());
+            deliver_to_subscribers(&mut subscribers, batch).await;
         });
     }
 
@@ -234,6 +257,7 @@ impl CoreOperations for MemoryBackend {
 
         // Start traversal from root nodes
         for parent_key in state.children_by_parent.keys() {
+            // ALLOW(entity_uri_from_raw): id/parent key String from MemoryState store
             let uri = EntityUri::from_raw(parent_key);
             if (uri.is_no_parent() || uri.is_sentinel())
                 && let Some(children) = state.children_by_parent.get(parent_key)
@@ -295,8 +319,6 @@ impl CoreOperations for MemoryBackend {
             .or_default()
             .push(block_id_str);
 
-        Self::increment_version(&mut state);
-
         Self::notify_subscribers(
             &mut state,
             Change::Created {
@@ -329,8 +351,6 @@ impl CoreOperations for MemoryBackend {
         block.set_block_content(content);
 
         let result_block = block.clone();
-
-        Self::increment_version(&mut state);
 
         Self::notify_subscribers(
             &mut state,
@@ -370,8 +390,6 @@ impl CoreOperations for MemoryBackend {
             children.retain(|child_id| child_id != id);
         }
 
-        Self::increment_version(&mut state);
-
         // Notify subscribers
         Self::notify_subscribers(
             &mut state,
@@ -389,33 +407,35 @@ impl CoreOperations for MemoryBackend {
 
     async fn move_block(
         &self,
-        id: &str,
+        id: &EntityUri,
         new_parent: EntityUri,
         after: Option<EntityUri>,
     ) -> Result<(), ApiError> {
         let new_parent_str = new_parent.as_str().to_string();
 
-        // Cycle detection using get_ancestor_chain
-        let ancestors = self.get_ancestor_chain(&new_parent_str).await?;
-
-        if ancestors.contains(&id.to_string()) {
-            return Err(ApiError::CyclicMove {
-                id: id.to_string(),
-                target_parent: new_parent_str.clone(),
-            });
+        // Domain-level precondition gate (ADR 0005): existence + cycle (+ the
+        // `after` table) live in `BlockMutation::validate`, not re-derived here.
+        {
+            let state = self.state.read().unwrap();
+            BlockMutation::Move {
+                id: id.clone(),
+                new_parent: new_parent.clone(),
+                after: after.clone(),
+            }
+            .validate(&*state)?;
         }
 
         let mut state = self.state.write().unwrap();
 
         // Check if deleted
-        if state.deleted_ids.contains(id) {
+        if state.deleted_ids.contains(id.as_str()) {
             return Err(ApiError::BlockNotFound { id: id.to_string() });
         }
 
         // Get block and verify it exists
         let block = state
             .blocks
-            .get(id)
+            .get(id.as_str())
             .ok_or_else(|| ApiError::BlockNotFound { id: id.to_string() })?;
 
         let old_parent = block.parent_id.as_raw_str().to_string();
@@ -431,7 +451,7 @@ impl CoreOperations for MemoryBackend {
 
         // Remove from old location
         if let Some(children) = state.children_by_parent.get_mut(&old_parent) {
-            children.retain(|child_id| child_id != id);
+            children.retain(|child_id| child_id != id.as_str());
         }
 
         // Add to new location
@@ -450,13 +470,11 @@ impl CoreOperations for MemoryBackend {
         }
 
         // Update block's parent_id and updated_at
-        let block = state.blocks.get_mut(id).unwrap();
+        let block = state.blocks.get_mut(id.as_str()).unwrap();
         block.parent_id = new_parent;
         block.updated_at = Self::now_millis();
 
         let result_block = block.clone();
-
-        Self::increment_version(&mut state);
 
         // Notify subscribers
         Self::notify_subscribers(
@@ -548,8 +566,6 @@ impl CoreOperations for MemoryBackend {
             created.push(block);
         }
 
-        Self::increment_version(&mut state);
-
         Ok(created)
     }
 
@@ -598,8 +614,6 @@ impl CoreOperations for MemoryBackend {
             );
         }
 
-        Self::increment_version(&mut state);
-
         Ok(())
     }
 }
@@ -636,17 +650,24 @@ impl ChangeNotifications<Block> for MemoryBackend {
                     .collect::<Vec<_>>()
             }
             StreamPosition::Version(version) => {
-                // Collect events while holding the lock
+                // Watermark replay from the bounded ring. An evicted
+                // watermark fails loud — re-subscribe from `Beginning` —
+                // instead of silently replaying partial history.
                 let state = self.state.read().unwrap();
-                let start_version =
-                    u64::from_le_bytes(version.as_slice().try_into().unwrap_or([0; 8]));
+                let watermark = u64::from_le_bytes(version.as_slice().try_into().unwrap_or([0; 8]));
 
-                state
-                    .event_log
-                    .iter()
-                    .skip(start_version as usize)
-                    .cloned()
-                    .collect::<Vec<_>>()
+                match state.event_log.replay_since(watermark) {
+                    Ok(events) => events,
+                    Err(expired) => {
+                        tracing::error!("[MemoryBackend] watch_changes_since: {expired}");
+                        let error_stream = tokio_stream::iter(vec![Err(ApiError::InternalError {
+                            message: expired.to_string(),
+                        })]);
+                        let (_tx, rx) =
+                            mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
+                        return Box::pin(error_stream.chain(ReceiverStream::new(rx)));
+                    }
+                }
             }
         };
 
@@ -677,6 +698,6 @@ impl ChangeNotifications<Block> for MemoryBackend {
 
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
         let state = self.state.read().unwrap();
-        Ok(state.version_counter.to_le_bytes().to_vec())
+        Ok(state.event_log.next_seq().to_le_bytes().to_vec())
     }
 }

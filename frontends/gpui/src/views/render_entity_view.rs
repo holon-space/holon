@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::render::builders::prelude::hashed_id;
+use crate::render::builders::prelude::click_to_focus;
 use gpui::*;
 use holon_api::EntityUri;
 use holon_frontend::reactive::BuilderServices;
@@ -35,6 +35,11 @@ pub struct RenderEntityView {
     /// cyclic creation across the row's entity boundary (mirrors the
     /// equivalent field on `ReactiveShell`).
     live_block_ancestors: LiveBlockAncestors,
+    /// Latched when this row's block held focus; armed → the next unfocused
+    /// render evicts the cached `EditorView` (see `render`). A latch rather
+    /// than an every-render sweep so templates that render `editable_text`
+    /// unconditionally don't thrash create/drop each frame.
+    editor_pending_evict: bool,
 }
 
 impl RenderEntityView {
@@ -57,6 +62,7 @@ impl RenderEntityView {
             entity_cache: Default::default(),
             parent_cache,
             live_block_ancestors,
+            editor_pending_evict: false,
         }
     }
 
@@ -117,36 +123,41 @@ impl Render for RenderEntityView {
 
         let is_focused = gpui_ctx.services().focused_block().as_ref() == Some(id);
         if is_focused {
+            self.editor_pending_evict = true;
             return child_el;
         }
 
-        let id_for_click = id.clone();
+        let eviction_enabled = std::env::var("HOLON_EDITOR_EVICT")
+            .map(|v| v != "off")
+            .unwrap_or(true);
+        if eviction_enabled && self.editor_pending_evict {
+            // Defocused: drop the row's cached editor so InputState + undo
+            // history + line layouts don't accumulate one-per-ever-focused
+            // block. Keep an editor whose input still holds window focus —
+            // on an A→B move this row can re-render before B's editor has
+            // mounted; evicting then would blur the window. The latch stays
+            // armed and retries next render.
+            let all_gone = crate::entity_view_registry::evict_ephemeral_with_prefix(
+                &self.entity_cache,
+                "editable-text-",
+                |any| {
+                    any.clone()
+                        .downcast::<crate::views::EditorView>()
+                        .map(|editor| {
+                            use gpui::Focusable;
+                            let input = editor.read(cx).input_entity();
+                            input.focus_handle(cx).is_focused(window)
+                        })
+                        .unwrap_or(true)
+                },
+            );
+            if all_gone {
+                self.editor_pending_evict = false;
+            }
+        }
+
         let el_id = format!("render-entity-{}", id);
         let services = gpui_ctx.services.clone();
-        div()
-            .id(hashed_id(&el_id))
-            .cursor_pointer()
-            .child(child_el)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
-                // Dispatch `navigation.editor_focus` so the bridge in
-                // `lib.rs` (watch_editor_cursor → set_focus → render →
-                // EditorView::mount → window.focus(input)) fires. The
-                // mirror in `dispatch_intent` also updates UiState
-                // synchronously, so a separate `set_focus` call would be
-                // redundant. Without the SQL write the freshly-mounted
-                // editor never grabs window focus and clicks on
-                // non-focused blocks appear to do nothing.
-                let bare_id = id_for_click.id().to_string();
-                let mut params = std::collections::HashMap::new();
-                params.insert("region".into(), holon_api::Value::String("main".into()));
-                params.insert("block_id".into(), holon_api::Value::String(bare_id));
-                params.insert("cursor_offset".into(), holon_api::Value::Integer(0));
-                services.dispatch_intent(holon_frontend::OperationIntent::new(
-                    "navigation".into(),
-                    "editor_focus".into(),
-                    params,
-                ));
-            })
-            .into_any_element()
+        click_to_focus(&el_id, child_el, id.clone(), services).into_any_element()
     }
 }

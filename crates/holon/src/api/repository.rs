@@ -218,7 +218,7 @@ pub trait CoreOperations: Send + Sync {
     /// * `ApiError::CyclicMove` - Would create a cycle (block to its descendant)
     async fn move_block(
         &self,
-        id: &str,
+        id: &EntityUri,
         new_parent: EntityUri,
         after: Option<EntityUri>,
     ) -> Result<(), ApiError>;
@@ -292,8 +292,7 @@ pub trait CoreOperations: Send + Sync {
             .unwrap_or_else(|| block.parent_id.clone());
         let after_id = after.map(|a| a.id.clone());
 
-        self.move_block(block.id.as_str(), parent_id, after_id)
-            .await
+        self.move_block(&block.id, parent_id, after_id).await
     }
 
     // ===== Batch Operations =====

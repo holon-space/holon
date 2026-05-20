@@ -372,7 +372,7 @@ async fn main() -> Result<()> {
 
     let app = {
         use fluxdi::{Injector, Module, ModuleLifecycleFuture, Shared};
-        use holon_frontend::frontend_module::FrontendInjectorExt;
+        use holon_app::FrontendInjectorExt;
 
         fn to_di_err(phase: &str, e: &dyn std::fmt::Display) -> fluxdi::Error {
             fluxdi::Error::module_lifecycle_failed("McpStandaloneModule", phase, &e.to_string())
@@ -389,8 +389,12 @@ async fn main() -> Result<()> {
             fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
                 let db_path = self.holon_config.resolve_db_path(&self.config_dir);
 
-                holon::di::open_and_register_core(injector, db_path)
-                    .map_err(|e| to_di_err("configure", &e))?;
+                holon::di::open_and_register_core(
+                    injector,
+                    db_path,
+                    holon::di::StorageSelector::Turso,
+                )
+                .map_err(|e| to_di_err("configure", &e))?;
 
                 injector
                     .add_frontend(
@@ -445,10 +449,10 @@ async fn main() -> Result<()> {
     };
 
     let injector = app.injector();
-    let engine = injector
-        .resolve::<holon_frontend::FrontendSession>()
-        .engine()
-        .clone();
+    // Resolve the BackendEngine directly — `FrontendSession` no longer exposes
+    // `engine()` (ADR 0004 Phase 9). The MCP binary is a Turso wiring, so the
+    // engine is registered in the container.
+    let engine = injector.resolve::<holon::api::backend_engine::BackendEngine>();
     let debug = injector.resolve::<DebugServices>();
 
     // Shutdown flush: spawn a task that awaits Ctrl+C and flushes any

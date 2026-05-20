@@ -116,6 +116,7 @@ pub struct BlockTreeTest<R: CoreOperations + Lifecycle> {
 ///
 /// Document URIs and sentinel URIs are never translated - they're the same in all backends
 pub fn translate_id(mem_id: &str, id_map: &HashMap<String, String>) -> Option<String> {
+    // ALLOW(entity_uri_from_raw): mem_id String key of PBT id-translation map
     let pr = EntityUri::from_raw(mem_id);
     if pr.is_no_parent() || pr.is_sentinel() {
         return Some(mem_id.to_string());
@@ -194,6 +195,7 @@ pub async fn apply_transition<R: CoreOperations>(
         BlockTransition::CreateBlock { parent_id, content } => {
             let block = backend
                 .create_block(
+                    // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
                     EntityUri::from_raw(parent_id),
                     BlockContent::text(content),
                     None,
@@ -213,7 +215,12 @@ pub async fn apply_transition<R: CoreOperations>(
         }
         BlockTransition::MoveBlock { id, new_parent } => {
             backend
-                .move_block(id, EntityUri::from_raw(new_parent), None)
+                // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
+                .move_block(
+                    &EntityUri::from_raw(id),
+                    EntityUri::from_raw(new_parent),
+                    None,
+                )
                 .await?;
             Ok(vec![])
         }
@@ -221,6 +228,7 @@ pub async fn apply_transition<R: CoreOperations>(
             let new_blocks: Vec<NewBlock> = blocks
                 .iter()
                 .map(|(parent_id, content)| NewBlock {
+                    // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
                     parent_id: EntityUri::from_raw(parent_id),
                     content: BlockContent::text(content),
                     id: None,
@@ -281,16 +289,15 @@ pub fn verify_backends_match<R1, R2>(
 
     fn compute_depth_in_slice(block: &Block, all_blocks: &[Block]) -> usize {
         let mut depth = 0;
-        let mut current_parent = block.parent_id.as_str();
+        let mut current_parent = &block.parent_id;
         loop {
-            let parent_uri = EntityUri::from_raw(current_parent);
-            if parent_uri.is_no_parent() || parent_uri.is_sentinel() {
+            if current_parent.is_no_parent() || current_parent.is_sentinel() {
                 break;
             }
-            match all_blocks.iter().find(|b| b.id.as_str() == current_parent) {
+            match all_blocks.iter().find(|b| &b.id == current_parent) {
                 Some(parent) => {
                     depth += 1;
-                    current_parent = parent.parent_id.as_str();
+                    current_parent = &parent.parent_id;
                 }
                 None => break,
             }
@@ -430,6 +437,7 @@ pub fn update_id_map_after_create(
                 .filter(|b| {
                     !id_map.contains_key(b.id.as_str())
                         && b.content_text() == content
+                        // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
                         && b.parent_id == EntityUri::from_raw(parent_id)
                 })
                 .collect();
@@ -444,6 +452,7 @@ pub fn update_id_map_after_create(
                 // appearing last in the parent's child list (the most recently appended).
                 let sibling_ids: Vec<&str> = ref_blocks
                     .iter()
+                    // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
                     .filter(|b| b.parent_id == EntityUri::from_raw(parent_id))
                     .map(|b| b.id.as_str())
                     .collect();
@@ -479,6 +488,7 @@ pub fn update_id_map_after_create(
                         !id_map.contains_key(b.id.as_str())
                             && !used_ref_ids.contains(b.id.as_str())
                             && b.content_text() == content
+                            // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
                             && b.parent_id == EntityUri::from_raw(parent_id)
                     })
                     .collect();
@@ -491,6 +501,7 @@ pub fn update_id_map_after_create(
                 } else {
                     let sibling_ids: Vec<&str> = ref_blocks
                         .iter()
+                        // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
                         .filter(|b| b.parent_id == EntityUri::from_raw(parent_id))
                         .map(|b| b.id.as_str())
                         .collect();
@@ -611,6 +622,7 @@ pub async fn check_transition_preconditions<B: CoreOperations>(
 
     match transition {
         BlockTransition::CreateBlock { parent_id, .. } => {
+            // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
             let parent_uri = EntityUri::from_raw(parent_id);
             parent_uri.is_no_parent() || parent_uri.is_sentinel() || block_ids.contains(parent_id)
         }
@@ -630,6 +642,7 @@ pub async fn check_transition_preconditions<B: CoreOperations>(
             }
         }
         BlockTransition::CreateBlocks { blocks } => blocks.iter().all(|(parent_id, _)| {
+            // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
             let parent_uri = EntityUri::from_raw(parent_id);
             parent_uri.is_no_parent() || parent_uri.is_sentinel() || block_ids.contains(parent_id)
         }),

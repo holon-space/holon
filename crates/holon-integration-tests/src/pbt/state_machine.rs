@@ -1,10 +1,10 @@
-//! Reference state machine: `VariantRef` wrapper and `ReferenceStateMachine` impl.
+//! Reference state machine: the `ReferenceMachine` (Full wiring) and the
+//! `ReferenceStateMachine` impl.
 //!
 //! This contains the transition generation, preconditions, and reference model
 //! application logic for the property-based test.
 
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use fluxdi::{Injector, Provider, Shared};
@@ -86,21 +86,52 @@ pub(crate) fn loro_merge_text(original: &str, update_a: &str, update_b: &str) ->
     peer_a.get_text("content").to_string()
 }
 
+/// Build a fresh, constant `ReferenceState` for the given [`Wiring`]. Used by
+/// every reference state machine's `init_state` (the canonical full-coverage
+/// [`ReferenceMachine`] and each `declare_pbt_slice!`-generated machine), so
+/// the wiring is the *only* thing that differs between manifests.
+///
+/// Init is **constant** apart from the wiring. All previously-random init
+/// inputs (notably `keyword_set`) have been lifted into transitions so a
+/// fixture's `Vec<E2ETransition>` fully reproduces a run — no hidden
+/// randomness in `state.*` that would silently drift between proptest's
+/// generation and a saved fixture's replay. See
+/// `devlog/2026-05-19-phase-c-validation-diagnosis.md`.
+pub fn fresh_reference_state(wiring: holon_pbt_core::Wiring) -> ReferenceState {
+    let injector = Injector::root();
+    let interp = Shared::new(holon_frontend::shadow_builders::build_shadow_interpreter());
+    injector.provide::<ShadowInterpreter>(Provider::root({
+        let s = interp;
+        move |_| s.clone()
+    }));
+    let interpreter: Arc<ShadowInterpreter> = injector.resolve::<ShadowInterpreter>();
+    ReferenceState::new(wiring, interpreter)
+}
+
+/// Map a PBT [`Wiring`](holon_pbt_core::Wiring) manifest onto the SUT storage
+/// substrate it implies (ADR 0004 Phase 9, part (a)). A manifest that includes
+/// the query-capable `Turso` adapter builds the historical Turso SUT; a
+/// Loro-only manifest (`Wiring::loro_backend()`) builds the no-Turso
+/// `LoroMemory` SUT (no `BackendEngine`; reads via `BlockQuerySource`, mutations
+/// via the Loro-native `OperationEngine`). This is what makes a slice's
+/// `wiring:` select its backend instead of always getting Turso.
+pub fn storage_selector_for_wiring(wiring: &holon_pbt_core::Wiring) -> holon::di::StorageSelector {
+    if wiring
+        .storage_adapters
+        .contains(&holon_pbt_core::StorageAdapter::Turso)
+    {
+        holon::di::StorageSelector::Turso
+    } else {
+        holon::di::StorageSelector::LoroMemory
+    }
+}
+
+/// The canonical full-coverage reference state machine (Full wiring). Drives
+/// the GPUI real-window replay (`phased.rs`) and is `E2ESut`'s `Reference`.
+/// `declare_pbt_slice!` generates its own per-manifest machine instead of
+/// using this one, so each slice's `init_state` carries that slice's wiring.
 #[derive(Debug, Clone)]
-pub struct VariantRef<V: VariantMarker>(pub ReferenceState, PhantomData<V>);
-
-impl<V: VariantMarker> std::ops::Deref for VariantRef<V> {
-    type Target = ReferenceState;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<V: VariantMarker> std::ops::DerefMut for VariantRef<V> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
+pub struct ReferenceMachine;
 
 /// Reset a peer's baseline tracking to its current `blocks` snapshot.
 ///
@@ -175,34 +206,12 @@ pub(crate) fn merge_peer_blocks_into_primary(
     }
 }
 
-impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
-    type State = Self;
+impl ReferenceStateMachine for ReferenceMachine {
+    type State = ReferenceState;
     type Transition = crate::pbt::transitions::E2ETransition;
 
     fn init_state() -> BoxedStrategy<Self::State> {
-        // Init is **constant**. All previously-random init inputs (notably
-        // `keyword_set`) have been lifted into transitions so a fixture's
-        // `Vec<E2ETransition>` fully reproduces a run — no hidden randomness
-        // hiding in `state.*` that would silently drift between proptest's
-        // generation and a saved fixture's replay.
-        //
-        // See `devlog/2026-05-19-phase-c-validation-diagnosis.md` for the
-        // bug class this prevents (BulkExternalAdd reading
-        // `state.keyword_set` at apply time, with the random init being the
-        // hidden bug-triggering input).
-        let injector = Injector::root();
-        let interp = Shared::new(holon_frontend::shadow_builders::build_shadow_interpreter());
-        injector.provide::<ShadowInterpreter>(Provider::root({
-            let s = interp;
-            move |_| s.clone()
-        }));
-        let interpreter: Arc<ShadowInterpreter> = injector.resolve::<ShadowInterpreter>();
-
-        Just(VariantRef(
-            ReferenceState::new(V::variant(), interpreter),
-            PhantomData,
-        ))
-        .boxed()
+        Just(fresh_reference_state(holon_pbt_core::Wiring::full())).boxed()
     }
 
     fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
@@ -212,7 +221,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
         // Dispatched through the per-transition `TransitionRef` trait
         // (ref-side, S-independent); each variant's precondition lives in
-        // `transitions/<name>.rs`. VariantRef derefs to ReferenceState.
+        // `transitions/<name>.rs`.
         use holon_pbt_core::TransitionRef;
         use validated::Validated;
         match transition.preconditions(state) {
@@ -226,7 +235,7 @@ impl<V: VariantMarker> ReferenceStateMachine for VariantRef<V> {
     fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
         use holon_pbt_core::TransitionRef;
         transition.apply_to_ref(&mut state);
-        state.last_transition_kind = Some(transition.variant_name());
+        state.action.last_transition_kind = Some(transition.variant_name());
         state
     }
 }

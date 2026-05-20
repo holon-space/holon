@@ -124,13 +124,13 @@ fn make_provider(handle: holon::storage::turso::DbHandle) -> SqlOperationProvide
     )
 }
 
-fn create_params(id: &str, content: &str, requires: &[&str]) -> HashMap<String, Value> {
-    let mut p = HashMap::new();
-    p.insert("id".to_string(), Value::String(id.to_string()));
-    p.insert("content".to_string(), Value::String(content.to_string()));
+fn create_params(id: &str, content: &str, requires: &[&str]) -> holon_api::StorageEntity {
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String(id.to_string()));
+    p.insert("content".into(), Value::String(content.to_string()));
     if !requires.is_empty() {
         p.insert(
-            "requires".to_string(),
+            "requires".into(),
             Value::Array(
                 requires
                     .iter()
@@ -154,9 +154,9 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
 
     // --- pre-create the blocker rows so the FK is satisfied -------------
     for id in ["B", "C", "D"] {
-        let mut p = HashMap::new();
-        p.insert("id".to_string(), Value::String(id.to_string()));
-        p.insert("content".to_string(), Value::String(id.to_string()));
+        let mut p: holon_api::StorageEntity = HashMap::new();
+        p.insert("id".into(), Value::String(id.to_string()));
+        p.insert("content".into(), Value::String(id.to_string()));
         provider
             .execute_operation(&entity_name, "create", p)
             .await
@@ -184,10 +184,10 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
     );
 
     // --- update A: requires = [C, D] (drop B, add D) --------------------
-    let mut update = HashMap::new();
-    update.insert("id".to_string(), Value::String("A".to_string()));
+    let mut update: holon_api::StorageEntity = HashMap::new();
+    update.insert("id".into(), Value::String("A".to_string()));
     update.insert(
-        "requires".to_string(),
+        "requires".into(),
         Value::Array(vec![
             Value::String("C".to_string()),
             Value::String("D".to_string()),
@@ -206,10 +206,10 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
     );
 
     // --- set_field with empty Array clears the edges -------------------
-    let mut clear = HashMap::new();
-    clear.insert("id".to_string(), Value::String("A".to_string()));
-    clear.insert("field".to_string(), Value::String("requires".to_string()));
-    clear.insert("value".to_string(), Value::Array(Vec::new()));
+    let mut clear: holon_api::StorageEntity = HashMap::new();
+    clear.insert("id".into(), Value::String("A".to_string()));
+    clear.insert("field".into(), Value::String("requires".to_string()));
+    clear.insert("value".into(), Value::Array(Vec::new()));
     provider
         .execute_operation(&entity_name, "set_field", clear)
         .await
@@ -222,11 +222,11 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
     );
 
     // --- set_field with a non-empty Array re-installs them -------------
-    let mut reset = HashMap::new();
-    reset.insert("id".to_string(), Value::String("A".to_string()));
-    reset.insert("field".to_string(), Value::String("requires".to_string()));
+    let mut reset: holon_api::StorageEntity = HashMap::new();
+    reset.insert("id".into(), Value::String("A".to_string()));
+    reset.insert("field".into(), Value::String("requires".to_string()));
     reset.insert(
-        "value".to_string(),
+        "value".into(),
         Value::Array(vec![Value::String("B".to_string())]),
     );
     provider
@@ -238,8 +238,8 @@ async fn edge_field_routes_through_junction_on_create_update_and_delete() {
     assert_eq!(requires, vec!["B".to_string()]);
 
     // --- FK CASCADE: deleting block B drops the junction row -----------
-    let mut delete_b = HashMap::new();
-    delete_b.insert("id".to_string(), Value::String("B".to_string()));
+    let mut delete_b: holon_api::StorageEntity = HashMap::new();
+    delete_b.insert("id".into(), Value::String("B".to_string()));
     provider
         .execute_operation(&entity_name, "delete", delete_b)
         .await
@@ -272,11 +272,11 @@ async fn non_edge_array_param_still_panics_at_partition() {
     let provider = Arc::new(make_provider(handle.clone()));
     let entity_name: EntityName = ENTITY.to_string().into();
 
-    let mut create = HashMap::new();
-    create.insert("id".to_string(), Value::String("Z".to_string()));
-    create.insert("content".to_string(), Value::String("Z".into()));
+    let mut create: holon_api::StorageEntity = HashMap::new();
+    create.insert("id".into(), Value::String("Z".to_string()));
+    create.insert("content".into(), Value::String("Z".into()));
     create.insert(
-        "labels".to_string(),
+        "labels".into(),
         Value::Array(vec![
             Value::String("alpha".to_string()),
             Value::String("beta".to_string()),
@@ -435,9 +435,9 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
 
     // pre-create the required blocks
     for id in ["X", "Y"] {
-        let mut p = HashMap::new();
-        p.insert("id".to_string(), Value::String(id.to_string()));
-        p.insert("content".to_string(), Value::String(id.to_string()));
+        let mut p: holon_api::StorageEntity = HashMap::new();
+        p.insert("id".into(), Value::String(id.to_string()));
+        p.insert("content".into(), Value::String(id.to_string()));
         provider
             .execute_operation(&entity_name, "create", p)
             .await
@@ -445,18 +445,18 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
     }
 
     // create task A with requires = [X, Y] and tags = [work, urgent]
-    let mut create = HashMap::new();
-    create.insert("id".to_string(), Value::String("A".to_string()));
-    create.insert("content".to_string(), Value::String("task A".to_string()));
+    let mut create: holon_api::StorageEntity = HashMap::new();
+    create.insert("id".into(), Value::String("A".to_string()));
+    create.insert("content".into(), Value::String("task A".to_string()));
     create.insert(
-        "requires".to_string(),
+        "requires".into(),
         Value::Array(vec![
             Value::String("X".to_string()),
             Value::String("Y".to_string()),
         ]),
     );
     create.insert(
-        "tags".to_string(),
+        "tags".into(),
         Value::Array(vec![
             Value::String("urgent".to_string()),
             Value::String("work".to_string()),
@@ -505,10 +505,10 @@ async fn edge_field_create_with_empty_array_writes_no_junction_rows() {
     let provider = Arc::new(make_provider(handle.clone()));
     let entity_name: EntityName = ENTITY.to_string().into();
 
-    let mut create = HashMap::new();
-    create.insert("id".to_string(), Value::String("X".to_string()));
-    create.insert("content".to_string(), Value::String("X".into()));
-    create.insert("requires".to_string(), Value::Array(Vec::new()));
+    let mut create: holon_api::StorageEntity = HashMap::new();
+    create.insert("id".into(), Value::String("X".to_string()));
+    create.insert("content".into(), Value::String("X".into()));
+    create.insert("requires".into(), Value::Array(Vec::new()));
     provider
         .execute_operation(&entity_name, "create", create)
         .await

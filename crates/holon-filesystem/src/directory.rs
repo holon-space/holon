@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use futures::stream;
-use holon::core::datasource::MaybeSendSync;
+use holon_api::EntityUri;
+use holon_core::traits::MaybeSendSync;
 use holon_macros::Entity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,14 +12,15 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 
-use holon::core::datasource::{
-    CrudOperations, DataSource, OperationDescriptor, OperationProvider, OperationRegistry,
-    OperationResult, RenameOperations, Result,
-};
-use holon::storage::types::StorageEntity;
 use holon_api::streaming::ChangeNotifications;
+use holon_api::OperationDescriptor;
+use holon_api::StorageEntity;
 use holon_api::{ApiError, Change, StreamPosition};
 use holon_api::{BatchMetadata, EntityName, Value, WithMetadata};
+use holon_core::traits::{
+    CrudOperations, DataSource, OperationProvider, OperationRegistry, OperationResult,
+    RenameOperations, Result,
+};
 
 /// Synthetic root ID for top-level directories
 pub const ROOT_ID: &str = "null";
@@ -29,14 +31,14 @@ pub const ROOT_ID: &str = "null";
 pub struct Directory {
     #[primary_key]
     #[indexed]
-    pub id: String,
+    pub id: EntityUri,
 
     /// Directory name (relative to parent)
     pub name: String,
 
     /// Parent directory ID (ROOT_ID for top-level directories)
     #[indexed]
-    pub parent_id: String,
+    pub parent_id: EntityUri,
 
     /// Nesting level from root (0 for root children)
     pub depth: i64,
@@ -45,9 +47,11 @@ pub struct Directory {
 impl Directory {
     pub fn new(id: String, name: String, parent_id: String, depth: i64) -> Self {
         Self {
-            id,
+            // ALLOW(entity_uri_from_raw): construction boundary — `Directory::new` takes raw `String` ids from the org sync provider; parse once here.
+            id: EntityUri::from_raw(&id),
             name,
-            parent_id,
+            // ALLOW(entity_uri_from_raw): construction boundary — see `id` above.
+            parent_id: EntityUri::from_raw(&parent_id),
             depth,
         }
     }
@@ -65,17 +69,13 @@ pub trait DirectoryOperations: MaybeSendSync {
     async fn move_directory(&self, id: &str, parent_id: &str) -> Result<OperationResult>;
 }
 
-impl holon::core::datasource::BlockEntity for Directory {
-    fn id(&self) -> &str {
+impl holon_core::traits::BlockEntity for Directory {
+    fn id(&self) -> &EntityUri {
         &self.id
     }
 
-    fn parent_id(&self) -> Option<&str> {
+    fn parent_id(&self) -> Option<&EntityUri> {
         Some(&self.parent_id)
-    }
-
-    fn sort_key(&self) -> &str {
-        &self.name
     }
 
     fn depth(&self) -> i64 {
@@ -90,8 +90,8 @@ impl holon::core::datasource::BlockEntity for Directory {
     }
 }
 
-impl holon::core::datasource::OperationRegistry for Directory {
-    fn all_operations() -> Vec<holon::core::datasource::OperationDescriptor> {
+impl holon_core::traits::OperationRegistry for Directory {
+    fn all_operations() -> Vec<OperationDescriptor> {
         let entity_name = Self::entity_name();
         let short_name = Self::short_name().expect("Directory must have short_name");
         let table = entity_name;
@@ -99,7 +99,7 @@ impl holon::core::datasource::OperationRegistry for Directory {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use holon::core::datasource::{
+            use holon_core::traits::{
                 __operations_block_operations, __operations_crud_operations,
                 __operations_move_operations, __operations_rename_operations,
             };
@@ -224,7 +224,7 @@ impl<P: DirectoryChangeProvider> CrudOperations<Directory> for DirectoryDataSour
         Err("Directory field updates not implemented".into())
     }
 
-    async fn create(&self, _: HashMap<String, Value>) -> Result<(String, OperationResult)> {
+    async fn create(&self, _: holon_api::StorageEntity) -> Result<(String, OperationResult)> {
         Err("Directory creation not implemented".into())
     }
 
@@ -329,7 +329,7 @@ impl<P: DirectoryChangeProvider> OperationProvider for DirectoryDataSource<P> {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<OperationResult> {
-        use holon::core::datasource::{
+        use holon_core::traits::{
             __operations_crud_operations, __operations_rename_operations, UnknownOperationError,
         };
 

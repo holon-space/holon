@@ -143,7 +143,7 @@ fn scroll_to_reveal_item_makes_far_item_visible_in_bounds(cx: &mut TestAppContex
     let all_ids: Vec<String> = bounds
         .all_elements()
         .iter()
-        .filter_map(|(_, info)| info.entity_id.clone())
+        .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
         .collect();
 
     assert!(

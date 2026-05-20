@@ -39,19 +39,19 @@ use std::time::Instant;
 use proptest::strategy::Strategy;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
-use holon_integration_tests::declare_pbt_slice;
+use holon_integration_tests::component_pbt;
 use holon_integration_tests::pbt::enable_atomic_editor_if_unset;
 use holon_integration_tests::pbt::transitions::{
     AddPeer, BulkExternalAdd, DeleteBackward, Indent, JoinBlock, MergeFromPeer, MoveDown, MoveUp,
     Outdent, PeerCharEdit, PeerEdit, SplitBlock, SyncWithPeer, TypeChars,
 };
 
-declare_pbt_slice! {
+component_pbt! {
     test_fn: storage_consistency_pbt,
-    variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
-    inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
+    set: holon_pbt_core::ComponentSet::sql_only(),
     transitions: [
         preset lifecycle,
+        preset org_writes,
         BulkExternalAdd,
         AddPeer,
         PeerEdit,

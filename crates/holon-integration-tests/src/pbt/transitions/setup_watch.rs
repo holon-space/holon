@@ -33,6 +33,12 @@ pub struct SetupWatch {
 
 impl TransitionFactory<ReferenceState> for SetupWatch {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: the navigation / CDC-watch / MCP providers this transition
+        // dispatches have no Loro-native source in the no-Turso wiring
+        // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Create a dummy instance to validate preconditions (no query/language needed yet);
         // if they fail, the generator is disabled entirely (no weight=0 fallback).
@@ -42,6 +48,7 @@ impl TransitionFactory<ReferenceState> for SetupWatch {
                 table: crate::pbt::query::QueryTable::Blocks,
                 columns: vec!["id".to_string()],
                 predicates: vec![],
+                source: crate::pbt::query::QuerySource::AllBlocks,
             },
             language: QueryLanguage::HolonSql,
         };
@@ -67,7 +74,7 @@ impl TransitionRef<ReferenceState> for SetupWatch {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
         ];
 
@@ -78,7 +85,7 @@ impl TransitionRef<ReferenceState> for SetupWatch {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.active_watches.insert(
+        state.mcp.active_watches.insert(
             self.query_id.clone(),
             WatchSpec {
                 query: self.query.clone(),
@@ -99,8 +106,8 @@ impl<S: SutHandle> TransitionImpl<ReferenceState, S> for SetupWatch {
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for SetupWatch {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let blocks = state.block_state.blocks.len();
-        let _docs = state.documents.len();
+        let blocks = state.domain.block_state.blocks.len();
+        let _docs = state.files.documents.len();
         // reactive base (5) + view existence check (2) + turso internal check (1)
         //   + initial matview data read (1) = 9 reads, 0 writes, 1 DDL.
         // Pending CDC events from prior transitions drain during SetupWatch,

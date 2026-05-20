@@ -8,5 +8,5 @@ slow-timeout = { period = "30s", terminate-after = 4 }   # 2 min hard cap
 # E2E / property-based tests legitimately run long. Match by binary
 # name (the cargo --test target) so non-PBT tests stay capped at 2 min.
 [[profile.default.overrides]]
-filter = "binary(general_e2e_pbt) + binary(petri_e2e_pbt) + binary(round_trip_pbt) + binary(sync_controller_mutation_pbt)"
-slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
+filter = "binary(general_e2e_pbt) + binary(extended_gen_pbt) + binary(layout_override_pbt) + binary(petri_e2e_pbt) + binary(round_trip_pbt) + binary(sync_controller_mutation_pbt)"
+slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap

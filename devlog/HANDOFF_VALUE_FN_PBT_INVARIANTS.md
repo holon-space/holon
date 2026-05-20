@@ -120,7 +120,7 @@ invisible from outside.
 > of the inner provider for unchanged outer rows."
 
 **Why it matters**: the layout proptest's `stable_cache_key` already
-catches `ReactiveQueryResults`-backed views. Synthetic providers
+catches `ReactiveRenderedRows`-backed views. Synthetic providers
 (focus_chain, ops_of) need the same guarantee, otherwise mobile-bar
 items will visibly flicker on every CDC tick.
 

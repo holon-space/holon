@@ -33,12 +33,55 @@
 //! Setup helpers (loading fixtures, seeding files, harness DI wiring)
 //! are exempt — they aren't simulating a user action.
 
+/// Model the click that `dispatch_block_op_via_chord` performs before
+/// pressing a chord: focus the block (editor focus, no nav-history entry —
+/// same semantics as `ClickBlock`'s non-navigating branch) and open its
+/// editor at end-of-text (the plain-click caret-seed default). Chord-driven
+/// structural ops (Indent / Outdent / MoveUp / MoveDown) call this from
+/// their ref applies so `inv-focus-matches-ref` and editor-state invariants
+/// see the same focus move the SUT's real input pipeline produced.
+///
+/// When the block's editor is ALREADY active, no driver clicks: the GPUI
+/// driver skips its click-to-focus (the chord goes to the focused editor
+/// directly, like a real user) and headless drivers never click at all —
+/// so the ref must leave the editor and its caret untouched. Re-seeding
+/// the caret to end-of-text here diverged from every SUT after
+/// `SplitBlock → <chord op>` on the freshly-focused new block
+/// (`inv-editor-caret-matches-ref`: ref end-of-text vs SUT 0).
+pub fn model_chord_click_focus<
+    R: holon_pbt_core::capabilities::RefBlockTree
+        + holon_pbt_core::capabilities::RefBlockTreeMut
+        + holon_pbt_core::capabilities::RefFocus
+        + holon_pbt_core::capabilities::RefFocusMut
+        + holon_pbt_core::capabilities::RefEditorMirrorMut,
+>(
+    block_id: &holon_api::EntityUri,
+    state: &mut R,
+) {
+    use holon_pbt_core::capabilities::{CapCursor, CapRegion, commit_active_editor_if_dirty};
+    if state.active_editor_block().as_ref() == Some(block_id) {
+        return;
+    }
+    // Click-away BLURS the previously focused editor; in SqlOnly prod's
+    // on_blur commits its user-authored pending text. Dirty-gated: a clean
+    // mirror that merely diverged from block.content is stale against an
+    // external change and must NOT be committed (prod's editor would have
+    // been refreshed by the data subscription).
+    commit_active_editor_if_dirty(state);
+    let content = state
+        .block_content(block_id)
+        .unwrap_or_default()
+        .to_string();
+    let caret = content.len();
+    state.set_focus(CapRegion::Main, block_id.clone(), CapCursor::default());
+    state.open_active_editor(block_id.clone(), content, caret);
+}
+
 pub mod add_peer;
-mod apply_mutation;
+pub mod apply_mutation;
 mod arrow_navigate;
-mod bulk_external_add;
+pub mod bulk_external_add;
 pub mod click_block;
-mod concurrent_mutations;
 mod concurrent_schema_init;
 mod create_directory;
 mod create_document;
@@ -92,7 +135,6 @@ pub use apply_mutation::ApplyMutation;
 pub use arrow_navigate::ArrowNavigate;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
-pub use concurrent_mutations::ConcurrentMutations;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
@@ -168,36 +210,9 @@ pub fn deterministic_peer_block_id(
     format!("peer-{hi:08x}-{lo:08x}-{peer_idx:04x}-{seq:04x}")
 }
 
-/// Character-level text operations on a peer's LoroText container.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum TextOp {
-    Insert {
-        pos_codepoint: usize,
-        text: String,
-    },
-    Delete {
-        pos_codepoint: usize,
-        len_codepoint: usize,
-    },
-}
-
-/// Operations that can be performed on a peer's Loro tree.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum PeerEditOp {
-    Create {
-        parent_stable_id: Option<String>,
-        content: String,
-        /// Deterministic stable ID from `deterministic_peer_block_id`.
-        stable_id: String,
-    },
-    Update {
-        stable_id: String,
-        content: String,
-    },
-    Delete {
-        stable_id: String,
-    },
-}
+// Peer edit operations live in `holon-pbt-core` so the `SutLoro` capability
+// trait there can name them. Re-exported here for the transition call sites.
+pub use holon_pbt_core::capabilities::{PeerEditOp, TextOp};
 
 crate::declare_e2e_transitions! {
     pub enum E2ETransition {
@@ -210,7 +225,6 @@ crate::declare_e2e_transitions! {
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
         ClickBlock(ClickBlock),
-        ConcurrentMutations(ConcurrentMutations),
         CreateDocument(CreateDocument),
         WriteOrgFile(WriteOrgFile),
         CreateDirectory(CreateDirectory),
@@ -367,7 +381,10 @@ mod arch_tests {
         let mut registered_modules: Vec<String> = Vec::new();
         for line in module_source.lines() {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("mod ")
+            let decl = trimmed
+                .strip_prefix("pub mod ")
+                .or_else(|| trimmed.strip_prefix("mod "));
+            if let Some(rest) = decl
                 && let Some((name, _)) = rest.split_once(';')
             {
                 registered_modules.push(name.to_string());

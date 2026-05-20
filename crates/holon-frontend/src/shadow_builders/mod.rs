@@ -26,7 +26,7 @@ use crate::render_interpreter::{shared_col_build, RenderInterpreter};
 ///
 /// The remaining legitimate call sites are:
 /// - `HolonFrontendModule::configure()` — the canonical DI registration
-/// - `HeadlessBuilderServices::new()` / `StubBuilderServices::new()` —
+/// - holon-app's `HeadlessBuilderServices::new()` / `StubBuilderServices::new()` —
 ///   test/stub services that bypass DI and build their own instance
 /// - PBT test harnesses that instantiate `ReactiveEngine` manually
 ///
@@ -46,7 +46,7 @@ pub fn register_render_dsl_widget_names() {
         "state_accent",
         "column",
     ]);
-    holon::render_dsl::register_widget_names(&all_names);
+    holon_api::render_dsl::register_widget_names(&all_names);
 }
 
 pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {

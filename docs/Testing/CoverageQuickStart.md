@@ -72,5 +72,5 @@ apt-get install lcov
 
 ## Full Documentation
 
-See [docs/CODE_COVERAGE.md](docs/CODE_COVERAGE.md) for detailed instructions.
+See [docs/HowTo/CODE_COVERAGE.md](docs/HowTo/CODE_COVERAGE.md) for detailed instructions.
 

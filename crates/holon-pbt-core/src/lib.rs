@@ -26,14 +26,20 @@
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+pub mod bisect;
 pub mod caching_proxy;
 pub mod capabilities;
+pub mod component_set;
 pub mod fixture;
 pub mod interactions;
 pub mod invariant;
+pub mod wiring;
 
+pub use bisect::{bisect, bisect_downward, bisect_upward, Localization};
 pub use caching_proxy::{cached, CachingProxy};
+pub use component_set::{Component, ComponentSet, ComponentSetError, Projection};
 pub use invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+pub use wiring::{Actor, RequiredWiring, StorageAdapter, SyncAdapter, Wiring, WiringError};
 
 pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};
 
@@ -45,6 +51,55 @@ pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, Togg
 pub trait TransitionFactory<Ref>: Sized {
     type Reason;
     fn weighted_generator(state: &Ref) -> Validated<(u32, BoxedStrategy<Self>), Self::Reason>;
+
+    /// Structural wiring requirement (ADR 0007 item 3). The transition is
+    /// excluded from a manifest's alphabet unless this is satisfied. It is
+    /// **necessary, not sufficient** — `weighted_generator` still gates
+    /// dynamically (e.g. "a block exists to edit"); the manifest gates
+    /// structurally. Default: no requirement.
+    ///
+    /// Ref-independent in practice (the same transition type needs the same
+    /// wiring regardless of which reference model drives it), but declared
+    /// here so the generator can read it off the factory it already names.
+    fn required_wiring() -> crate::wiring::RequiredWiring {
+        crate::wiring::RequiredWiring::Any
+    }
+}
+
+/// Build one weighted arm of a transition `Union` from a single
+/// [`TransitionFactory`] variant. This is the shared core every PBT's
+/// generator repeats: call the factory, apply a per-variant weight
+/// multiplier, drop zero-weight arms, and `prop_map` the generated
+/// variant struct into the caller's transition enum.
+///
+/// Returns:
+/// - `Good(Some((weight, strategy)))` — the variant applies; push it.
+/// - `Good(None)` — applies but its effective weight is 0; skip it.
+/// - `Fail(reasons)` — the variant rejected; the caller decides whether
+///   to record the reasons (the wide PBT does via `record_rejection`,
+///   the layout/pure slices discard them).
+///
+/// Pass `weight_multiplier = 1` when no per-variant tuning applies.
+/// Returning `Validated` (rather than taking a rejection callback) keeps
+/// this crate free of the `NEVec` payload type while letting callers
+/// `Fail(reasons) => …` with the original reasons in hand.
+pub fn weighted_arm<R, F, T>(
+    state: &R,
+    weight_multiplier: u32,
+    into: impl Fn(F) -> T + 'static,
+) -> Validated<Option<(u32, BoxedStrategy<T>)>, F::Reason>
+where
+    F: TransitionFactory<R> + std::fmt::Debug + 'static,
+    T: std::fmt::Debug + 'static,
+{
+    use proptest::strategy::Strategy;
+    match F::weighted_generator(state) {
+        Validated::Good((w, s)) => {
+            let final_weight = w.saturating_mul(weight_multiplier);
+            Validated::Good((final_weight > 0).then(|| (final_weight, s.prop_map(into).boxed())))
+        }
+        Validated::Fail(reasons) => Validated::Fail(reasons),
+    }
 }
 
 /// Ref-side per-variant behaviour: preconditions against the reference

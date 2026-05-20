@@ -58,7 +58,11 @@ impl NavigationState {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(entity_id))]
-    pub fn bubble_input(&self, entity_id: &str, input: &WidgetInput) -> Option<InputAction> {
+    pub fn bubble_input(
+        &self,
+        entity_id: &holon_api::EntityUri,
+        input: &WidgetInput,
+    ) -> Option<InputAction> {
         self.input_router.bubble_input(entity_id, input)
     }
 

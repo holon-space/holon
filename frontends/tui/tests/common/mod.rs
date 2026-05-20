@@ -6,5 +6,6 @@
 //! covers that — the items aren't actually unused in aggregate.
 #![allow(dead_code)]
 
+pub mod pbt_main;
 pub mod screenshot;
 pub mod test_harness;

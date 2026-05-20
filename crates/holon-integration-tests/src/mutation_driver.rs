@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use holon::api::backend_engine::BackendEngine;
-use holon_api::{EntityName, KeyChord, Value};
+use holon_api::{EntityName, EntityUri, KeyChord, Value};
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
 
@@ -38,8 +38,16 @@ impl UserDriver for DirectUserDriver {
         op: &str,
         params: HashMap<String, Value>,
     ) -> Result<()> {
+        let params: holon_api::StorageEntity = params
+            .into_iter()
+            .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+            .collect();
         self.engine
-            .execute_operation(&EntityName::new(entity), op, params)
+            .execute_operation(
+                &EntityName::new(entity),
+                op,
+                params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            )
             .await
             .map(|_| ())
             .context(format!("execute_operation({entity}, {op}) failed"))
@@ -49,7 +57,7 @@ impl UserDriver for DirectUserDriver {
     /// bypasses the reactive layer where draggable / drop_zone widgets live.
     /// Tests that need drag&drop must install a driver with widget-tree
     /// access (e.g. `ReactiveEngineDriver` or `GpuiUserDriver`).
-    async fn drop_entity(&self, _: &str, _: &str, _: &str) -> Result<bool> {
+    async fn drop_entity(&self, _: &EntityUri, _: &EntityUri, _: &EntityUri) -> Result<bool> {
         anyhow::bail!(
             "DirectUserDriver does not implement drop_entity — install \
              ReactiveEngineDriver or a native frontend driver to exercise \
@@ -67,9 +75,9 @@ impl UserDriver for DirectUserDriver {
 
     async fn send_key_chord(
         &self,
-        _: &str,
+        _: &EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
     ) -> Result<bool> {
@@ -85,7 +93,7 @@ impl UserDriver for DirectUserDriver {
                 entity_id,
             }) => {
                 let mut params = HashMap::new();
-                params.insert("id".into(), Value::String(entity_id));
+                params.insert("id".into(), Value::String(entity_id.to_string()));
                 params.extend(extra_params);
                 self.synthetic_dispatch(entity_name.as_str(), &operation.name, params)
                     .await?;
@@ -95,20 +103,24 @@ impl UserDriver for DirectUserDriver {
         }
     }
 
-    async fn click_entity(&self, entity_id: &str, region: &str) -> Result<()> {
-        let mut params = HashMap::new();
-        params.insert("region".into(), Value::String(region.to_string()));
-        params.insert("block_id".into(), Value::String(entity_id.to_string()));
-        params.insert("cursor_offset".into(), Value::Integer(0));
-        self.synthetic_dispatch("navigation", "editor_focus", params)
-            .await
+    /// Click-to-focus is a frontend concern: since ADR 0010 editor focus is
+    /// pure in-memory UI state (`UiState.focused_block`), not a backend op.
+    /// `DirectUserDriver` only has a `BackendEngine`, so it can't set focus —
+    /// bail loudly, like `drop_entity` and the observation verbs. Tests that
+    /// need click-to-focus must install `ReactiveEngineDriver`.
+    async fn click_entity(&self, _: &EntityUri, _: &str) -> Result<()> {
+        anyhow::bail!(
+            "DirectUserDriver cannot click-to-focus: editor focus is frontend \
+             in-memory state (ADR 0010), not a backend op. Install \
+             ReactiveEngineDriver to exercise focus transitions"
+        )
     }
 
     async fn click_entity_with_tree(
         &self,
-        _: &str,
+        _: &EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         region: &str,
     ) -> Result<bool> {
         if let Some(intent) =
@@ -121,24 +133,17 @@ impl UserDriver for DirectUserDriver {
         Ok(false)
     }
 
-    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()> {
-        let mut params = HashMap::new();
-        params.insert("id".into(), Value::String(entity_id.to_string()));
-        params.insert("content".into(), Value::String(text.to_string()));
-        self.synthetic_dispatch("block", "update", params).await
-    }
-
     // ── Observation verbs ───────────────────────────────────────────────
     //
     // DirectUserDriver has no reactive state, so it can't faithfully
     // answer "what's visible" or "what's clickable". Bail loudly. Tests
     // that need observation must install ReactiveEngineDriver.
 
-    fn is_widget_visible(&self, _: &str) -> bool {
+    fn is_widget_visible(&self, _: &EntityUri) -> bool {
         false
     }
 
-    fn is_in_region(&self, _: &str, _: holon_api::Region) -> bool {
+    fn is_in_region(&self, _: &EntityUri, _: holon_api::Region) -> bool {
         false
     }
 
@@ -150,15 +155,15 @@ impl UserDriver for DirectUserDriver {
         Vec::new()
     }
 
-    async fn scroll_to_entity(&self, _: &str) -> Result<()> {
+    async fn scroll_to_entity(&self, _: &EntityUri) -> Result<()> {
         Ok(())
     }
 
-    fn click_intent_of(&self, _: &str) -> Option<OperationIntent> {
+    fn click_intent_of(&self, _: &EntityUri) -> Option<OperationIntent> {
         None
     }
 
-    fn displayed_text(&self, _: &str) -> Option<String> {
+    fn displayed_text(&self, _: &EntityUri) -> Option<String> {
         None
     }
 }

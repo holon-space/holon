@@ -27,8 +27,8 @@ pub mod lane_filtered_provider;
 /// `holon-core` dep just to import `Cell<String>` / `TextOp` / etc.
 pub mod cell {
     pub use holon_core::cell::{
-        Cell, CellBacking, CursorAnchor, CursorBias, DeltaOp, LwwTextCellBacking, TextCellBacking,
-        TextDelta, TextOp,
+        compute_text_delta, Cell, CellBacking, CursorAnchor, CursorBias, DeltaOp,
+        LwwTextCellBacking, TextCellBacking, TextDelta, TextOp,
     };
     pub use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
 }
@@ -53,16 +53,14 @@ pub mod command_provider;
 pub mod config;
 pub mod editor_view_model;
 pub mod focus_path;
-pub mod frontend_module;
 pub mod geometry;
+pub mod render_services;
 pub use geometry::{drawer_toggle_id_for, expand_toggle_id_for, vms_button_id_for};
 pub mod headless_editor_mirror;
 pub mod input;
 pub mod input_trigger;
 pub(crate) mod link_provider;
 pub mod logging;
-#[cfg(not(target_arch = "wasm32"))]
-mod mcp_integrations;
 pub mod memory_monitor;
 pub mod mutable_tree;
 pub mod navigation;
@@ -92,8 +90,6 @@ pub mod widget_gallery;
 pub use config::{HolonConfig, SessionConfig, UiConfig, WidgetState};
 use holon_api::{EntityName, EntityUri};
 pub use input::{InputAction, Key, WidgetInput};
-#[cfg(not(target_arch = "wasm32"))]
-pub use mcp_integrations::McpIntegrationRegistry;
 pub use navigation::{
     CollectionNavigator, CursorHint, CursorPlacement, ListNavigator, NavDirection, NavTarget,
     TableNavigator, TreeNavigator,
@@ -115,20 +111,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use holon::api::BackendEngine;
-use holon::storage::BLOCK_READ_TABLE;
-use holon::sync::PublishErrorTracker;
+use holon_core::PublishErrorTracker;
 
-/// Re-export of the block-table const so frontends that depend only on
-/// `holon-frontend` (e.g. `dioxus-web`) can stay aligned with the eventual
-/// matview switch (Task #3) without taking a direct dep on `holon`.
-pub use holon::storage::BLOCK_READ_TABLE as BLOCK_READ_TABLE_PUB;
 pub use holon_api::UiInfo;
 
 // Re-export types needed by consumers
 pub use editor_view_model::{EditorAction, EditorKey, EditorViewModel};
-pub use holon::api::backend_engine::QueryContext;
-pub use holon::storage::turso::RowChangeStream;
+pub use holon_api::QueryContext;
 pub use holon_api::{OperationDescriptor, ProviderAuthStatus, UiEvent, Value, WatcherCommand};
 pub use operations::OperationIntent;
 pub use reactive::LiveBlock;
@@ -144,10 +133,36 @@ pub use reactive::StubBuilderServices;
 /// For tests that need additional services (e.g., LoroDocumentStore), use
 /// `new_with_extras` which allows resolving additional services from DI.
 pub struct FrontendSession<T = ()> {
-    engine: Arc<BackendEngine>,
+    /// The query-execution capability (ADR 0004 Phase 9). `Some` only when the
+    /// Turso query engine is wired (an upcast of its `BackendEngine`); `None` for
+    /// a no-Turso (Loro-only) session, which renders from `block_query` instead.
+    /// Consumers reach it through [`FrontendSession::query_engine`] and degrade
+    /// visibly when it is absent rather than branching on the storage backend.
+    query_engine: Option<Arc<dyn holon_api::QueryEngine>>,
+    /// The block read seam (ADR 0004 Phase 9). Present in **both** wirings: the
+    /// Turso session holds a `TursoBlockQuerySource` over its CDC mirrors, a
+    /// no-Turso session a `LoroBlockQuerySource`. Consumers read blocks through
+    /// this handle and never branch on which storage backend is wired.
+    block_query: Arc<dyn holon_core::storage::BlockQuerySource>,
+    /// The operation-execution capability (ADR 0004 Phase 9, Stage 4). Present in
+    /// **both** wirings: the Turso session holds an upcast of its `BackendEngine`,
+    /// a no-Turso session a `DispatchingOperationEngine` over Loro-native
+    /// providers. `None` only when no operation capability is wired at all. The
+    /// mutating paths route through here, never through `engine()`.
+    operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
+    /// The UI-render/watch capability (ADR 0004 Phase 9). Present in **both**
+    /// wirings: a Turso session holds its `BackendEngine` (renders off CDC), a
+    /// no-Turso session a `LoroUiWatcher` (renders from `block_query`). `watch_ui`
+    /// dispatches through this capability with no backend branch.
+    ui_watcher: Arc<dyn holon_api::UiWatcher>,
+    /// The profile resolver — an `Arc<dyn ProfileResolving>`, present in **both**
+    /// wirings (ADR 0004 Phase 9). Profile resolution is not a Turso-only
+    /// capability: the Turso session populates this from `engine.profile_resolver()`,
+    /// a no-Turso session from the bundled type registry. Consumers read profiles
+    /// through this handle and never branch on which storage backend is wired.
+    profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
     error_tracker: PublishErrorTracker,
-    #[cfg(not(target_arch = "wasm32"))]
-    ready_signal: Option<holon_orgmode::di::FileWatcherReadySignal>,
+    ready_signal: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
     /// Extra services resolved from DI (for tests)
     extras: T,
     /// Keeps the background memory monitor alive (logs RSS every 30s)
@@ -163,25 +178,50 @@ pub struct FrontendSession<T = ()> {
     locked_keys: HashSet<preferences::PrefKey>,
 }
 
-impl FrontendSession<()> {
-    /// Wrap an existing BackendEngine into a FrontendSession.
-    ///
-    /// Used by the PBT UI test: the PBT creates its own engine (via E2ESut),
-    /// and this wraps it into a FrontendSession suitable for GLOBAL_SESSION
-    /// so the Flutter app reuses the PBT's database.
-    pub fn from_engine(engine: Arc<BackendEngine>) -> Self {
+/// Everything a wiring crate (holon-app) supplies to construct a
+/// [`FrontendSession`]: the five capabilities plus the session context.
+/// Keeps the session's fields private while letting all backend assembly
+/// live outside this crate (storage de-leak Stage 6).
+pub struct SessionParts {
+    pub query_engine: Option<Arc<dyn holon_api::QueryEngine>>,
+    pub block_query: Arc<dyn holon_core::storage::BlockQuerySource>,
+    pub operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
+    pub ui_watcher: Arc<dyn holon_api::UiWatcher>,
+    pub profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+    pub error_tracker: PublishErrorTracker,
+    pub ready_signal: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
+    pub preference_defs: Arc<Vec<preferences::PreferenceDef>>,
+    pub theme_registry: Arc<theme::ThemeRegistry>,
+    pub holon_config: config::HolonConfig,
+    pub config_dir: PathBuf,
+    pub locked_keys: HashSet<preferences::PrefKey>,
+}
+
+impl SessionParts {
+    /// Context defaults for a session constructed outside the config-driven
+    /// DI path (e.g. the no-Turso wiring): freshly loaded theme + preference
+    /// schema, default config, no ready signal.
+    pub fn with_capabilities(
+        query_engine: Option<Arc<dyn holon_api::QueryEngine>>,
+        block_query: Arc<dyn holon_core::storage::BlockQuerySource>,
+        operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
+        ui_watcher: Arc<dyn holon_api::UiWatcher>,
+        profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+    ) -> Self {
         let theme_registry = Arc::new(theme::ThemeRegistry::load(None));
         let preference_defs = Arc::new(preferences::define_preferences(&theme_registry));
         Self {
-            engine,
+            query_engine,
+            block_query,
+            operation_engine,
+            ui_watcher,
+            profiles,
             error_tracker: PublishErrorTracker::new(),
             #[cfg(not(target_arch = "wasm32"))]
             ready_signal: None,
-            extras: (),
-            _memory_monitor: memory_monitor::MemoryMonitorHandle::start(),
             preference_defs,
             theme_registry,
-            holon_config: Mutex::new(config::HolonConfig::default()),
+            holon_config: config::HolonConfig::default(),
             config_dir: PathBuf::new(),
             locked_keys: HashSet::new(),
         }
@@ -189,69 +229,27 @@ impl FrontendSession<()> {
 }
 
 impl FrontendSession<()> {
-    /// Create a new frontend session from a premortem-loaded `HolonConfig`.
-    ///
-    /// This is the preferred constructor. CLI frontends use `cli::build_session()`
-    /// which calls this. Uses FluxDI to wire all services.
-    pub async fn new_from_config(
-        holon_config: config::HolonConfig,
-        session_config: config::SessionConfig,
-        config_dir: PathBuf,
-        locked_keys: HashSet<preferences::PrefKey>,
-    ) -> Result<Arc<Self>> {
-        let (session, ()) = Self::new_from_config_with_di(
-            holon_config,
-            session_config,
-            config_dir,
-            locked_keys,
-            |_| Ok(()),
-            |_| (),
-        )
-        .await?;
-        Ok(session)
-    }
-
-    /// Create a new frontend session with additional DI registrations.
-    ///
-    /// The `extra_setup` closure runs on the DI injector after `FrontendModule`
-    /// is registered but before anything is resolved. Use it to register
-    /// frontend-specific services (e.g. `set_render_interpreter`).
-    ///
-    /// The `extra_resolve` closure runs after session creation and can resolve
-    /// additional services from the same DI container (e.g. `ReactiveEngine`).
-    pub async fn new_from_config_with_di<F, G, T>(
-        holon_config: config::HolonConfig,
-        session_config: config::SessionConfig,
-        config_dir: PathBuf,
-        locked_keys: HashSet<preferences::PrefKey>,
-        extra_setup: F,
-        extra_resolve: G,
-    ) -> Result<(Arc<Self>, T)>
-    where
-        F: FnOnce(&fluxdi::Injector) -> Result<()> + Send + 'static,
-        G: FnOnce(&fluxdi::Injector) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        use crate::frontend_module::FrontendInjectorExt;
-
-        let db_path = holon_config.resolve_db_path(&config_dir);
-
-        let (_engine, (session, extra)) = holon::di::create_backend_engine_with_extras(
-            db_path,
-            move |injector| {
-                injector.add_frontend(holon_config, session_config, config_dir, locked_keys)?;
-                extra_setup(injector)?;
-                Ok(())
-            },
-            |injector| async move {
-                let session = injector.resolve_async::<FrontendSession>().await;
-                let extra = extra_resolve(&injector);
-                (session, extra)
-            },
-        )
-        .await?;
-
-        Ok((session, extra))
+    /// Construct a session from pre-assembled capabilities. The only public
+    /// constructor — all backend assembly (Turso DI, no-Turso Loro stack)
+    /// lives in the wiring crate and funnels through here.
+    pub fn from_parts(parts: SessionParts) -> Self {
+        Self {
+            query_engine: parts.query_engine,
+            block_query: parts.block_query,
+            operation_engine: parts.operation_engine,
+            ui_watcher: parts.ui_watcher,
+            profiles: parts.profiles,
+            error_tracker: parts.error_tracker,
+            #[cfg(not(target_arch = "wasm32"))]
+            ready_signal: parts.ready_signal,
+            extras: (),
+            _memory_monitor: memory_monitor::MemoryMonitorHandle::start(),
+            preference_defs: parts.preference_defs,
+            theme_registry: parts.theme_registry,
+            holon_config: Mutex::new(parts.holon_config),
+            config_dir: parts.config_dir,
+            locked_keys: parts.locked_keys,
+        }
     }
 }
 
@@ -266,9 +264,53 @@ impl<T> FrontendSession<T> {
         &self.extras
     }
 
-    /// Get the backend engine
-    pub fn engine(&self) -> &Arc<BackendEngine> {
-        &self.engine
+    /// The block read seam, present in **both** wirings (ADR 0004 Phase 9).
+    /// Consumers capture a [`BlockSnapshot`](holon_core::storage::BlockSnapshot)
+    /// via `snapshot()` and never branch on the storage backend.
+    pub fn block_query(&self) -> &Arc<dyn holon_core::storage::BlockQuerySource> {
+        &self.block_query
+    }
+
+    /// The profile resolver, available in **both** wirings (ADR 0004 Phase 9).
+    ///
+    /// Profile resolution is not a Turso-only capability: a no-Turso session
+    /// builds this from the bundled type registry, and the Turso session reuses
+    /// `engine().profile_resolver()`. The render path reads profiles through here
+    /// so it never panics for lack of an engine.
+    pub fn profiles(&self) -> &Arc<dyn holon_api::entity_profile::ProfileResolving> {
+        &self.profiles
+    }
+
+    /// The query-execution capability (ADR 0004 — "Turso is one of four").
+    ///
+    /// `Some` only when the Turso query engine is wired; `None` for a no-Turso
+    /// (Loro-only) session. The frontend's query path depends on this capability
+    /// rather than the concrete `BackendEngine`, and degrades visibly (query
+    /// blocks show their `source`) when it is absent — never panicking.
+    pub fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        self.query_engine.clone()
+    }
+
+    /// The operation-execution capability (ADR 0004 — "Turso is one of four").
+    ///
+    /// Covers dispatching operations, operation discovery, and undo/redo. Present
+    /// in both wirings — the Turso session upcasts its `BackendEngine`, a no-Turso
+    /// session holds a `DispatchingOperationEngine` over Loro-native providers
+    /// (Stage 4). `None` only when no operation capability is wired. Callers route
+    /// through this rather than `engine()`, surfacing absence as a typed error.
+    pub fn operation_engine(&self) -> Option<Arc<dyn holon_api::OperationEngine>> {
+        self.operation_engine.clone()
+    }
+
+    /// The operation engine, or a typed error when none is wired. Used by the
+    /// mutating operation paths (dispatch, undo, redo) that must fail loud rather
+    /// than silently no-op when the capability is absent.
+    fn require_operation_engine(&self) -> Result<Arc<dyn holon_api::OperationEngine>> {
+        self.operation_engine().ok_or_else(|| {
+            anyhow::anyhow!(
+                "this operation requires an operation engine, which is not wired in this (no-Turso) session"
+            )
+        })
     }
 
     /// Resolve the entity profile for a data row.
@@ -280,8 +322,8 @@ impl<T> FrontendSession<T> {
     pub fn resolve_row_profile(
         &self,
         row: &holon_api::widget_spec::DataRow,
-    ) -> Option<holon::entity_profile::RowProfile> {
-        let (profile, _computed) = self.engine.profile_resolver().resolve_with_variants(row);
+    ) -> Option<holon_api::RenderProfile> {
+        let (profile, _computed) = self.profiles().resolve_with_variants(row);
         Some(profile.as_ref().clone())
     }
 
@@ -396,20 +438,16 @@ impl<T> FrontendSession<T> {
 
     /// Check if the file watcher has completed startup (success or failure).
     pub fn is_ready(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        return self
-            .ready_signal
+        self.ready_signal
             .as_ref()
-            .map_or(true, |s| s.is_completed());
-        #[cfg(target_arch = "wasm32")]
-        true
+            .map_or(true, |rx| rx.borrow().is_some())
     }
 
     // =========================================================================
     // Default Layout Seeding
     // =========================================================================
 
-    fn default_doc_uri() -> holon_api::EntityUri {
+    pub fn default_doc_uri() -> holon_api::EntityUri {
         // A real block id, NOT the `sentinel:no_parent` marker. Using the
         // sentinel here made the `__default__` doc a self-referential block
         // (`id == parent == sentinel:no_parent`) that could never be a Loro
@@ -417,7 +455,7 @@ impl<T> FrontendSession<T> {
         // tripped `prepare_delete`'s cascade. The `__default__` page is hidden
         // from the Pages sidebar by an explicit `b.id != 'block:__default__'`
         // filter in `index.org`.
-        holon_api::EntityUri::block("__default__")
+        holon_api::default_doc_block_uri()
     }
 
     /// Seed a default layout into the database if no real layout exists.
@@ -432,46 +470,18 @@ impl<T> FrontendSession<T> {
     /// Uses raw SQL via db_handle because OperationProviders may not be
     /// registered (e.g. TUI without orgmode). This is a bootstrap operation
     /// that doesn't need events, undo, or observers.
-    /// Seed a default layout from the bundled `index.org`.
-    ///
-    /// Available on native and wasm32-wasip1-threads (which has std::time and
-    /// std::path). NOT available on wasm32-unknown-unknown (browser main thread)
-    /// where the org parser's path/time dependencies are absent.
-    ///
-    /// Loro is the authority and is seeded DIRECTLY from the bundled Org assets
-    /// via intents (`BlockOrdering::create_in_tree`) — never from Turso. The
-    /// outbound projector writes `block_raw`. In SqlOnly mode (no Loro)
-    /// `create_in_tree` returns `false`, so each block falls back to the block
-    /// `OperationProvider`'s `create` (idempotent) to populate `block_raw`.
-    /// Document order is preserved (`create_in_tree` appends), so the layout
-    /// columns keep their order without a separate place pass.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tracing::instrument(skip(engine, ordering), name = "seed_default_layout")]
-    pub async fn seed_default_layout(
-        engine: &BackendEngine,
-        ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
-    ) -> Result<()> {
+    /// Build the default-layout seed blocks — the fixed-document-page shells
+    /// (e.g. `block:journals`) and the `__default__` page. Always returns
+    /// these. Callers that want the full `index.org` layout must append the
+    /// parsed org blocks separately (see `holon-app/src/seed.rs`).
+    pub fn build_default_layout_blocks(fresh: bool) -> Result<Vec<holon_api::block::Block>> {
         use holon_api::block::Block;
 
-        let db = engine.db_handle();
         let default_doc_uri = Self::default_doc_uri();
-
-        // Idempotent: the root layout existing means a prior boot already seeded.
-        let root_id = holon_api::ROOT_LAYOUT_BLOCK_ID;
-        let fresh = db
-            .query(
-                &format!("SELECT id FROM {BLOCK_READ_TABLE} WHERE id = '{root_id}'"),
-                HashMap::new(),
-            )
-            .await?
-            .is_empty();
-
-        // Build the seed entries from the bundled Org assets.
         let mut entries: Vec<Block> = Vec::new();
 
-        // Fixed-id document pages (e.g. block:journals). Seeded on every boot so
-        // a missing page shell is repaired; create_in_tree / the existence guard
-        // below make it idempotent.
+        // Fixed-id document pages (e.g. block:journals). Always built so a
+        // missing page shell is repaired; persisting is idempotent.
         for asset in crate::DEFAULT_ASSETS {
             if let Some(doc_id) = asset.fixed_doc_id {
                 let title = asset
@@ -479,6 +489,7 @@ impl<T> FrontendSession<T> {
                     .strip_suffix(".org")
                     .unwrap_or(asset.filename);
                 let mut page = Block::new_text(
+                    // ALLOW(entity_uri_from_raw): static asset literal asset.fixed_doc_id
                     EntityUri::from_raw(doc_id),
                     EntityUri::no_parent(),
                     title.to_string(),
@@ -497,89 +508,9 @@ impl<T> FrontendSession<T> {
             );
             def_page.set_page(true);
             entries.push(def_page);
-
-            // The bundled `index.org` layout (root-layout + sidebars + sources).
-            // Top-level blocks reparent from the file doc to `__default__`.
-            let content = include_str!("../../../assets/default/index.org");
-            let parse_result = holon_orgmode::parse_org_file(
-                Path::new("index.org"),
-                content,
-                &default_doc_uri,
-                Path::new(""),
-            )?;
-            let file_doc_uri = parse_result.document.id.clone();
-            for mut block in parse_result.blocks {
-                if block.parent_id == file_doc_uri {
-                    block.parent_id = default_doc_uri.clone();
-                }
-                entries.push(block);
-            }
         }
 
-        for block in &entries {
-            let persisted = ordering
-                .create_in_tree(
-                    &block.parent_id,
-                    None,
-                    &block.id,
-                    block.to_block_content(),
-                    &block.properties,
-                    &block.tags,
-                    &block.requires,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("seed create_in_tree({}): {e:#}", block.id))?;
-            if !persisted {
-                // SqlOnly: no Loro authority — write through the block
-                // OperationProvider, skipping rows that already exist.
-                let exists = !db
-                    .query(
-                        &format!(
-                            "SELECT 1 FROM {BLOCK_READ_TABLE} WHERE id = '{}'",
-                            block.id.as_str()
-                        ),
-                        HashMap::new(),
-                    )
-                    .await?
-                    .is_empty();
-                if !exists {
-                    let doc_uri = if block.parent_id.is_no_parent() {
-                        &block.id
-                    } else {
-                        &default_doc_uri
-                    };
-                    let params =
-                        holon_orgmode::build_block_params(block, &block.parent_id, doc_uri);
-                    engine
-                        .execute_operation(&EntityName::from("block"), "create", params)
-                        .await?;
-                }
-            }
-        }
-
-        if fresh {
-            // Land first-launch users on the Journals overview block. Going
-            // through `navigation::focus` keeps navigation_history + cursor
-            // atomically in sync so the focus matviews resolve on first render.
-            let mut nav_params: HashMap<String, holon_api::Value> = HashMap::new();
-            nav_params.insert(
-                "region".to_string(),
-                holon_api::Value::from(holon_api::Region::Main),
-            );
-            nav_params.insert(
-                "block_id".to_string(),
-                holon_api::Value::String(EntityUri::block("journals").as_str().to_string()),
-            );
-            engine
-                .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
-                .await?;
-            tracing::info!(
-                "[FrontendSession] Seeded default layout via intents ({} entries); \
-                 main panel focused on block:journals",
-                entries.len()
-            );
-        }
-        Ok(())
+        Ok(entries)
     }
 
     // =========================================================================
@@ -594,29 +525,33 @@ impl<T> FrontendSession<T> {
     /// `UiEvent::Structure` events with error WidgetSpecs — the stream stays open
     /// and recovers when the underlying block is fixed.
     pub async fn watch_ui(&self, block_id: &EntityUri) -> Result<holon_api::WatchHandle> {
-        holon::api::watch_ui(Arc::clone(&self.engine), block_id.clone()).await
+        // Dispatch through the `UiWatcher` capability — `BackendEngine` (CDC) for
+        // Turso, `LoroUiWatcher` (block_query snapshot) for no-Turso. No branch.
+        self.ui_watcher.clone().watch_ui(block_id.clone()).await
     }
 
-    /// Execute a query and set up CDC streaming with enrichment.
+    /// Compile a query (PRQL/GQL/SQL) and set up CDC streaming with enrichment.
     ///
     /// Returns an `EnrichedChangeStream` whose first batch contains the initial
     /// query results as `Change::Created` items, followed by CDC deltas.
     /// All rows are `EnrichedRow`: `properties` JSON is flattened to top-level
     /// keys and computed fields (from entity profile resolution) are injected.
     ///
-    /// This is the canonical boundary where raw storage data enters the frontend.
-    /// All reactive consumers (`ensure_query_watching`,
-    /// `start_query`, frontend live_query builders) go through this method,
-    /// ensuring uniform enrichment.
-    pub async fn query_and_watch(
+    /// SQL compilation and enrichment both happen behind the `QueryEngine`
+    /// capability — this layer never sees SQL strings or the raw Turso stream.
+    /// All reactive consumers (`ensure_query_watching`, frontend live_query
+    /// builders) go through this method, ensuring uniform enrichment.
+    pub async fn watch_query(
         &self,
-        prql: String,
+        query: &str,
+        language: holon_api::QueryLanguage,
         params: HashMap<String, Value>,
         context: Option<QueryContext>,
-    ) -> Result<holon::api::ui_watcher::EnrichedChangeStream> {
-        let raw = self.engine.query_and_watch(prql, params, context).await?;
-        let resolver = self.engine.profile_resolver().clone();
-        Ok(holon::api::ui_watcher::enrich_stream(raw, resolver))
+    ) -> Result<holon_api::EnrichedChangeStream> {
+        self.query_engine()
+            .ok_or_else(|| anyhow::anyhow!("watch_query requires the Turso query engine, which is not wired in this (no-Turso) session"))?
+            .watch_query(query, language, params, context)
+            .await
     }
 
     /// Execute an operation on an entity
@@ -634,46 +569,63 @@ impl<T> FrontendSession<T> {
         op_name: &str,
         params: HashMap<String, Value>,
     ) -> Result<Option<Value>> {
-        self.engine
-            .execute_operation(entity_name, op_name, params)
+        self.require_operation_engine()?
+            .execute_operation(
+                entity_name,
+                op_name,
+                params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            )
             .await
     }
 
     /// Get available operations for an entity
     ///
     /// Returns a list of operation descriptors available for the given entity_name.
-    /// Use "*" as entity_name to get wildcard operations.
+    /// Use "*" as entity_name to get wildcard operations. Empty when no operation
+    /// engine is wired (a no-Turso session has no operations to offer yet).
     pub async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
-        self.engine.available_operations(entity_name).await
+        match self.operation_engine() {
+            Some(ops) => ops.available_operations(entity_name).await,
+            None => Vec::new(),
+        }
     }
 
     /// Check if an operation is available for an entity
     pub async fn has_operation(&self, entity_name: &str, op_name: &str) -> bool {
-        self.engine.has_operation(entity_name, op_name).await
+        match self.operation_engine() {
+            Some(ops) => ops.has_operation(entity_name, op_name).await,
+            None => false,
+        }
     }
 
     /// Undo the last operation
     ///
     /// Returns true if an operation was undone, false if the undo stack is empty.
     pub async fn undo(&self) -> Result<bool> {
-        self.engine.undo().await
+        self.require_operation_engine()?.undo().await
     }
 
     /// Redo the last undone operation
     ///
     /// Returns true if an operation was redone, false if the redo stack is empty.
     pub async fn redo(&self) -> Result<bool> {
-        self.engine.redo().await
+        self.require_operation_engine()?.redo().await
     }
 
     /// Check if undo is available
     pub async fn can_undo(&self) -> bool {
-        self.engine.can_undo().await
+        match self.operation_engine() {
+            Some(ops) => ops.can_undo().await,
+            None => false,
+        }
     }
 
     /// Check if redo is available
     pub async fn can_redo(&self) -> bool {
-        self.engine.can_redo().await
+        match self.operation_engine() {
+            Some(ops) => ops.can_redo().await,
+            None => false,
+        }
     }
 
     /// Look up a block's path from the blocks_with_paths materialized view
@@ -681,19 +633,13 @@ impl<T> FrontendSession<T> {
     /// Returns the hierarchical path for a block (e.g., "/parent/block_id").
     /// This path is used for descendants queries via path prefix matching.
     pub async fn lookup_block_path(&self, block_id: &EntityUri) -> Result<String> {
-        self.engine.blocks().lookup_block_path(block_id).await
-    }
-
-    /// Execute a raw SQL query
-    ///
-    /// This is a lower-level method for direct SQL access.
-    /// Prefer `query_and_watch` for reactive queries.
-    pub async fn execute_query(
-        &self,
-        sql: String,
-        params: HashMap<String, Value>,
-        context: Option<QueryContext>,
-    ) -> Result<Vec<HashMap<String, Value>>> {
-        self.engine.execute_query(sql, params, context).await
+        self.query_engine()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "lookup_block_path requires the Turso query engine, which is not wired in this (no-Turso) session"
+                )
+            })?
+            .lookup_block_path(block_id)
+            .await
     }
 }

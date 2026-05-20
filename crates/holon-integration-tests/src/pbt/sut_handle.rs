@@ -1,4 +1,4 @@
-//! `SutHandle` trait impl for `E2ESut<V>` — the per-transition SUT-side
+//! `SutHandle` trait impl for `E2ESut` — the per-transition SUT-side
 //! dispatch surface. Each method here is the concrete reaction the wide
 //! PBT runs when proptest hands it a transition variant.
 //!
@@ -20,16 +20,16 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use holon_api::{QueryLanguage, Value};
+use holon_frontend::reactive::BuilderServices;
 use holon_orgmode::OrgBlockExt;
-
-use crate::wait_for_file_condition;
+use holon_pbt_core::capabilities::{EngineFocus, SutDriver};
 
 use super::reference_state::ReferenceState;
 use super::sut::E2ESut;
 use super::types::*;
 
 #[allow(async_fn_in_trait)]
-impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> {
+impl crate::pbt::transition_dispatch::SutHandle for E2ESut {
     /// Override the default-panicking SutHandle stub: route the layout-PBT
     /// `Clickable::click_at_element` capability through the same
     /// `UserDriver::click_entity` path the rich-PBT chord transitions use.
@@ -41,7 +41,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .driver
             .as_ref()
             .expect("driver not installed — was start_app called?");
-        // The driver's editor_focus fallback requires a valid region. Infer
+        // The driver's click-to-focus fallback requires a valid region. Infer
         // from the element_id prefix; default to "main" for generic clicks.
         let region = if element_id.contains("left-sidebar") || element_id.contains("left_sidebar") {
             "left_sidebar"
@@ -50,8 +50,28 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         } else {
             "main"
         };
+        // Element ids come in two shapes: a plain block EntityUri, or a
+        // geometry HANDLE `<kind>::<block-uri>` minted by
+        // `holon_frontend::geometry::{drawer_toggle,expand_toggle,vms_button}_id_for`.
+        // Handles are NOT EntityUris (the kind prefix isn't a scheme); the
+        // headless intent walker resolves clicks by the TARGET block's uri,
+        // so unwrap the handle and click that. Parse fail-loud either way —
+        // a bare unmappable id means a transition generated a bogus handle.
+        let target = match element_id.split_once("::") {
+            // `block::split-N` synthetic ids also contain "::" but their
+            // prefix is the `block` scheme, not a widget kind — only unwrap
+            // when the suffix itself parses as a schemed uri.
+            Some((kind, suffix)) if !kind.contains(':') && suffix.contains(':') => suffix,
+            _ => element_id,
+        };
+        let element_uri = holon_api::EntityUri::parse(target).unwrap_or_else(|e| {
+            panic!(
+                "[LayoutPBT::click_at_element] {element_id:?} (target {target:?}) \
+                 is not an EntityUri: {e}"
+            )
+        });
         driver
-            .click_entity(element_id, region)
+            .click_entity(&element_uri, region)
             .await
             .unwrap_or_else(|e| {
                 panic!("[LayoutPBT::click_at_element] click_entity({element_id}) failed: {e:#}")
@@ -92,13 +112,16 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .await
             .expect("Failed to write org file");
 
-        // If app is running, wait for OrgSyncController to ingest the file
+        // If app is running, wait for FileSyncController to ingest the file
         // and re-key ctx.documents from `file:<filename>` to the resolved
         // doc URI. Mirrors the start_app loop (see apply_start_app body):
         // without this, subsequent transitions like apply_bulk_external_add
         // that resolve the doc via `resolve_uri` (which checks doc_uri_map)
         // and then `ctx.documents.get(&resolved)` will miss because docs
-        // added post-startup never got re-keyed.
+        // added post-startup never got re-keyed. Backend-agnostic now:
+        // `resolve_doc_uri_by_name` reads Turso's `block_raw` or the Loro
+        // snapshot per the active storage (the no-Turso org→Loro ingest runs
+        // through the Loro-wired `FileSyncController`).
         if !self.ctx.is_running() {
             return;
         }
@@ -113,8 +136,9 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
                     // The synthetic URI minted by the ref-model equals
                     // the resolved URI (WriteOrgFile.apply_to_sut
                     // injects `#+ID: <synthetic>` into the file).
-                    if !self.doc_uri_map.contains_key(&resolved) {
-                        self.doc_uri_map.insert(resolved.clone(), resolved.clone());
+                    let mut map = self.doc_uri_map.lock().unwrap();
+                    if !map.contains_key(&resolved) {
+                        map.insert(resolved.clone(), resolved.clone());
                     }
                     break;
                 }
@@ -125,10 +149,8 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
 
     async fn apply_create_directory(&mut self, path: &str) {
         tracing::trace!("[apply] CreateDirectory: {}", path);
-        let full_path = self.temp_dir.path().join(path);
-        tokio::fs::create_dir_all(&full_path)
-            .await
-            .expect("Failed to create directory");
+        let full_path = self.org_root().join(path);
+        self.org_fs.mkdir_all(&full_path);
     }
 
     async fn apply_git_init(&mut self) {
@@ -170,23 +192,23 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
 
     #[tracing::instrument(
         skip(self, ref_state),
-        fields(wait_for_ready, enable_todoist, enable_loro),
+        fields(wait_for_ready, enable_fake_mcp, enable_loro),
         name = "pbt.apply_start_app"
     )]
     async fn apply_start_app(
         &mut self,
         ref_state: &ReferenceState,
         wait_for_ready: bool,
-        enable_todoist: bool,
+        enable_fake_mcp: bool,
         enable_loro: bool,
     ) {
         tracing::trace!(
-            "[apply] StartApp (wait_for_ready={}, enable_todoist={}, enable_loro={})",
+            "[apply] StartApp (wait_for_ready={}, enable_fake_mcp={}, enable_loro={})",
             wait_for_ready,
-            enable_todoist,
+            enable_fake_mcp,
             enable_loro
         );
-        self.set_enable_todoist(enable_todoist);
+        self.set_enable_fake_mcp(enable_fake_mcp);
         self.set_enable_loro(enable_loro);
         self.start_app(wait_for_ready)
             .await
@@ -195,6 +217,78 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         // Install the default mutation driver now that the engine exists.
         if self.driver.is_none() {
             self.install_driver();
+        }
+
+        // No-Turso (Loro-only) session: the Turso machinery below — MCP
+        // `DebugServices`, `render_entity`, CDC region/all-blocks watches, org
+        // doc-uri resolution, seed priming — does not exist in this wiring. This
+        // is the one place that branches on the *backend the harness chose to
+        // start* (an explicit `StorageSelector`, not a capability-presence proxy),
+        // because it sets up backend-specific test scaffolding rather than reading
+        // through a unified capability. The reactive engine renders structural
+        // blocks straight from `block_query`, so the driver install above is the
+        // whole start-time setup. Kick off a root watcher so geometry/data exist.
+        if matches!(self.ctx.storage(), holon::di::StorageSelector::LoroMemory) {
+            // No-Turso seeds through the real org→Loro ingestion path: the
+            // pre-startup org files written by `WriteOrgFile` are scanned and
+            // parsed into the Loro backend by the Loro-wired `FileSyncController`
+            // at container build time (see `build_no_turso_container`). Ref and
+            // SUT each derive from the rendered org independently — no reference
+            // state is read to populate the SUT.
+            let root_id = ref_state
+                .root_layout_block_id()
+                .unwrap_or_else(holon_api::root_layout_block_uri);
+            if let Some(reactive) = self.ctx.reactive_engine.as_ref() {
+                reactive.ensure_watching(&root_id);
+            }
+
+            // Map pre-startup documents the same way the Turso path does below:
+            // the FileSyncController ingested each `WriteOrgFile` file into Loro,
+            // so resolve its page block by name and re-key `ctx.documents` from
+            // the `file:<filename>` placeholder to the real doc URI. Reading
+            // `ref_state.files.documents` here is only `#+ID` identity-pinning
+            // (the synthetic URI was injected into the file the SUT itself
+            // wrote) — not seeding SUT content from ref output.
+            for (synthetic_uri, filename) in &ref_state.files.documents {
+                if self.doc_uri_map.lock().unwrap().contains_key(synthetic_uri) {
+                    continue;
+                }
+                match self.ctx.resolve_doc_uri_by_name(filename).await {
+                    Ok(resolved) => {
+                        self.doc_uri_map
+                            .lock()
+                            .unwrap()
+                            .insert(synthetic_uri.clone(), resolved.clone());
+                        let file_key = holon_api::EntityUri::file(filename);
+                        if let Some(path) = self.ctx.documents.remove(&file_key) {
+                            self.ctx.documents.insert(resolved, path);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::trace!(
+                            "[apply] (no-Turso) could not resolve pre-startup doc {}: {}",
+                            synthetic_uri,
+                            e
+                        );
+                    }
+                }
+            }
+
+            // Install the LoroSut peer surface so CRDT peer transitions
+            // (AddPeer, PeerEdit, …) — gated `HasStorage(Loro)`, hence generated
+            // under {Loro} — have their owned peer state. The no-Turso session
+            // has a doc_store but no LoroSyncController, so `sync_handle` is None.
+            if self.ctx.doc_store().is_some() {
+                let doc_store = self.ctx.doc_store().unwrap().clone();
+                let sync_handle = self.ctx.loro_sync_handle().cloned();
+                let doc_uri_map = self.doc_uri_map.clone();
+                self.loro_sut = Some(crate::pbt::sut_loro::LoroSut::new(
+                    doc_store,
+                    sync_handle,
+                    doc_uri_map,
+                ));
+            }
+            return;
         }
 
         // Initialize real MCP integration for IVM re-evaluation testing.
@@ -275,39 +369,53 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .await;
 
         // Populate doc_uri_map for pre-startup documents whose document
-        // entities were created by OrgSyncController during startup.
-        for (synthetic_uri, filename) in &ref_state.documents {
-            if !self.doc_uri_map.contains_key(synthetic_uri) {
-                match self.ctx.resolve_doc_uri_by_name(filename).await {
-                    Ok(resolved) => {
-                        tracing::trace!(
-                            "[apply] Mapped pre-startup doc: {} → {}",
-                            synthetic_uri,
-                            resolved
-                        );
-                        self.doc_uri_map
-                            .insert(synthetic_uri.clone(), resolved.clone());
-                        // Re-key ctx.documents from file-based to UUID-based URI
-                        let file_key = holon_api::EntityUri::file(filename);
-                        if let Some(path) = self.ctx.documents.remove(&file_key) {
-                            self.ctx.documents.insert(resolved, path);
-                        }
+        // entities were created by FileSyncController during startup.
+        for (synthetic_uri, filename) in &ref_state.files.documents {
+            // Short-lived lock (never held across the `.await` below).
+            if self.doc_uri_map.lock().unwrap().contains_key(synthetic_uri) {
+                continue;
+            }
+            match self.ctx.resolve_doc_uri_by_name(filename).await {
+                Ok(resolved) => {
+                    tracing::trace!(
+                        "[apply] Mapped pre-startup doc: {} → {}",
+                        synthetic_uri,
+                        resolved
+                    );
+                    self.doc_uri_map
+                        .lock()
+                        .unwrap()
+                        .insert(synthetic_uri.clone(), resolved.clone());
+                    // Re-key ctx.documents from file-based to UUID-based URI
+                    let file_key = holon_api::EntityUri::file(filename);
+                    if let Some(path) = self.ctx.documents.remove(&file_key) {
+                        self.ctx.documents.insert(resolved, path);
                     }
-                    Err(e) => {
-                        tracing::trace!(
-                            "[apply] Could not resolve pre-startup doc {}: {}",
-                            synthetic_uri,
-                            e
-                        );
-                    }
+                }
+                Err(e) => {
+                    tracing::trace!(
+                        "[apply] Could not resolve pre-startup doc {}: {}",
+                        synthetic_uri,
+                        e
+                    );
                 }
             }
         }
 
-        // Initialize LoroSut if Loro is enabled
-        if let Some(doc_store) = self.ctx.doc_store() {
+        // Initialize LoroSut if Loro is enabled. It owns the peer surface and
+        // is self-sufficient: it gets the primary doc_store, the sync-controller
+        // handle (for quiescence), and a clone of the shared doc_uri_map (for
+        // stable-id resolution that sees ids minted after this point).
+        if self.ctx.doc_store().is_some() {
             tracing::trace!("[apply] Loro enabled — initializing LoroSut for invariant checking");
-            self.loro_sut = Some(crate::pbt::loro_sut::LoroSut::new(doc_store.clone()));
+            let doc_store = self.ctx.doc_store().unwrap().clone();
+            let sync_handle = self.ctx.loro_sync_handle().cloned();
+            let doc_uri_map = self.doc_uri_map.clone();
+            self.loro_sut = Some(crate::pbt::sut_loro::LoroSut::new(
+                doc_store,
+                sync_handle,
+                doc_uri_map,
+            ));
         }
 
         // Initialize the ReactiveEngine now so all subsequent
@@ -347,17 +455,94 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         self.wait_for_entity_bounds(resolved_id.as_str(), Duration::from_secs(5))
             .await
             .unwrap_or_else(|e| panic!("[NavigateFocus] {e}"));
-        let driver = self
-            .driver
-            .as_ref()
-            .expect("driver not installed — was start_app called?");
-        driver
-            .click_entity(resolved_id.as_str(), "left_sidebar")
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[NavigateFocus] click_entity failed for sidebar entry {resolved_id}: {e:#}")
-            });
-        self.ctx.drain_region_cdc_events().await;
+        // The headless `click_entity` silently falls through to a plain
+        // `set_focus` (click-to-focus) when the sidebar entry's bound
+        // `navigation.focus` intent isn't yet resolvable — the sidebar
+        // `live_block` streams in asynchronously after a fresh layout load /
+        // block-matview propagation, so a click that lands before it paints
+        // hits that focus-only fallback. The fallback does NOT write
+        // `navigation_history`, so `current_focus` stays on the journals
+        // default while the ref records the focus move — a silent divergence
+        // that only surfaces ~1000 lines later in check_invariants.
+        //
+        // A real user waits for the sidebar to paint before clicking. Mirror
+        // that: click, verify `current_focus` actually moved to the target,
+        // and retry until it does. Fail loud (dumping what the sidebar can
+        // see) if it never does within the deadline — that's a genuine
+        // render/projection bug, not something to paper over.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let driver = self
+                .driver
+                .clone()
+                .expect("driver not installed — was start_app called?");
+            driver
+                .click_entity(&resolved_id, "left_sidebar")
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "[NavigateFocus] click_entity failed for sidebar entry {resolved_id}: {e:#}"
+                    )
+                });
+            self.ctx.drain_region_cdc_events().await;
+
+            let focus_rows = self
+                .engine()
+                .execute_query(
+                    "SELECT block_id FROM current_focus WHERE region = 'main'".to_string(),
+                    HashMap::new(),
+                    None,
+                )
+                .await
+                .expect("[NavigateFocus] query current_focus");
+            let actual = focus_rows
+                .first()
+                .and_then(|r| r.get("block_id"))
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            if actual.as_deref() == Some(resolved_id.as_str()) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let page_rows = self
+                    .engine()
+                    .execute_query(
+                        "SELECT b.id FROM block b JOIN block_tags bt ON bt.block_id = b.id \
+                         WHERE bt.tag = 'Page'"
+                            .to_string(),
+                        HashMap::new(),
+                        None,
+                    )
+                    .await
+                    .expect("[NavigateFocus] query Page rows");
+                let pages: Vec<String> = page_rows
+                    .iter()
+                    .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+                    .collect();
+                let intent = self
+                    .driver
+                    .as_ref()
+                    .and_then(|d| d.click_intent_of(&resolved_id));
+                self.dump_nav_tables("NavigateFocus FAILED").await;
+                panic!(
+                    "[NavigateFocus] sidebar click never moved current_focus(main) to \
+                     {resolved_id} within 10s (last seen {actual:?}). The LeftSidebar entry's \
+                     navigation.focus intent was not dispatched — the sidebar live_block has not \
+                     rendered the target. sidebar Page rows={pages:?}; click_intent_of={intent:?}"
+                );
+            }
+            // Re-click as soon as a fresh frame commits (the usual reason the
+            // click missed is the sidebar hadn't painted yet); the timeout
+            // keeps the old 50 ms cadence as a floor for non-painting windows
+            // and headless providers on the default 20 ms tick.
+            match self.render.frontend_geometry.as_ref() {
+                Some(geometry) => {
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(50), geometry.changed()).await;
+                }
+                None => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
         self.dump_nav_tables("after NavigateFocus").await;
     }
 
@@ -397,13 +582,17 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             Ok(uuid_uri) => {
                 // Find the synthetic URI from ref_state (keyed by filename)
                 let synthetic_uri = ref_state
+                    .files
                     .documents
                     .iter()
                     .find(|(_, name)| *name == file_name)
                     .map(|(uri, _)| uri.clone())
                     .expect("CreateDocument: synthetic URI not found in reference state");
                 tracing::trace!("[apply] Created document: {} → {}", synthetic_uri, uuid_uri);
-                self.doc_uri_map.insert(synthetic_uri, uuid_uri);
+                self.doc_uri_map
+                    .lock()
+                    .unwrap()
+                    .insert(synthetic_uri, uuid_uri);
             }
             Err(e) => panic!("Failed to create document: {}", e),
         }
@@ -525,7 +714,11 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .expect("Watch setup failed");
     }
 
-    async fn apply_toggle_state(&mut self, block_id: &holon_api::EntityUri, new_state: &str) {
+    async fn apply_toggle_state(
+        &mut self,
+        block_id: &holon_api::EntityUri,
+        new_state: crate::pbt::transitions::toggle_state::CycleTarget,
+    ) {
         let resolved_block_id = self.resolve_uri(block_id);
         // Real-user-input dispatch: compute click_count from the
         // pre-mutation task_state, then click the state_toggle widget
@@ -536,7 +729,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         let current_state: String = self
             .pre_ref_state
             .as_ref()
-            .and_then(|s| s.block_state.blocks.get(block_id))
+            .and_then(|s| s.domain.block_state.blocks.get(block_id))
             .and_then(|b| b.task_state())
             .map(|ts| ts.keyword.to_string())
             .unwrap_or_default();
@@ -565,334 +758,10 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         blocks: &[holon_api::block::Block],
         ref_state: &ReferenceState,
     ) {
-        tracing::trace!(
-            "[apply] BulkExternalAdd: adding {} blocks to {}",
-            blocks.len(),
-            doc_uri
-        );
-
-        // Resolve file-based URI to UUID-based URI (documents map uses UUID keys after StartApp)
-        let resolved_uri = self.resolve_uri(doc_uri);
-        let file_path = self.ctx.documents.get(&resolved_uri).unwrap_or_else(|| {
-            panic!(
-                "Document not found for BulkExternalAdd: {} (resolved: {})",
-                doc_uri, resolved_uri
-            )
-        });
-
-        // Get all blocks for this document from reference state.
-        // Note: ref_state already includes the new blocks (from apply_reference).
-        // Resolve parent_ids so blocks_by_document matches UUID-based doc URIs.
-        let resolved_blocks = self.resolve_ref_blocks(ref_state, true);
-        let grouped = holon_api::blocks_by_document(&resolved_blocks);
-        let all_blocks: Vec<holon_api::block::Block> = grouped
-            .into_iter()
-            .find(|(uri, _)| *uri == resolved_uri)
-            .map(|(_, blocks)| blocks)
-            .unwrap_or_default();
-        let existing_count = all_blocks.len().saturating_sub(blocks.len());
-
-        // Find the document block for this document (needed for #+TODO: header)
-        let doc_block = resolved_blocks
-            .iter()
-            .find(|b| b.id == resolved_uri && b.is_page());
-
-        // Serialize to org file (with document header so custom keywords round-trip)
-        let live_blocks: Vec<&holon_api::block::Block> = all_blocks.iter().collect();
-        let org_content =
-            crate::serialize_blocks_to_org_with_doc(&live_blocks, &resolved_uri, doc_block);
-
-        tracing::trace!(
-            "[BulkExternalAdd] Writing {} total blocks ({} new) to {:?}",
-            all_blocks.len(),
-            blocks.len(),
-            file_path
-        );
-        // DEBUG: print blocks being serialized
-        for b in &all_blocks {
-            tracing::trace!(
-                "[BulkExternalAdd] block: {} parent_id={} type={}",
-                b.id,
-                b.parent_id,
-                b.content_type
-            );
-        }
-        tracing::trace!("[BulkExternalAdd] ORG CONTENT:\n{}", org_content);
-        tokio::fs::write(file_path, &org_content)
-            .await
-            .expect("Failed to write bulk external add");
-
-        // =========================================================================
-        // FLUTTER STARTUP BUG REPRODUCTION:
-        // Immediately after writing bulk data, spawn concurrent query_and_watch calls
-        // while IVM is still processing the block_with_path materialized view.
-        // This simulates what Flutter does: UI requests reactive queries while
-        // the backend is still processing the initial data sync.
-        // =========================================================================
-        let engine = self.test_ctx().engine();
-        let num_concurrent_watches = 3; // Simulate multiple UI components requesting data
-        let mut watch_tasks = Vec::new();
-
-        // Timeout for query_and_watch calls.
-        // If the OperationScheduler's mark_available bug is present, these calls
-        // will hang forever because:
-        // 1. query_and_watch creates a materialized view via execute_ddl_with_deps
-        // 2. The DDL requires Schema("block") dependency
-        // 3. OperationScheduler checks if "block" is in available set - it's NOT
-        // 4. Operation is queued in pending, response_rx.await hangs forever
-        // 5. mark_available() was never called for core tables during DI init
-        let query_timeout = Duration::from_secs(10);
-
-        for i in 0..num_concurrent_watches {
-            let engine_clone = engine.clone();
-            let prql = format!(
-                "from block_raw | select {{id, content}} | filter id != \"bulk-race-{}\" ",
-                i
-            );
-            let sql = engine
-                .compile_to_sql(&prql, QueryLanguage::HolonPrql)
-                .expect("PRQL compilation should succeed");
-            let task = tokio::spawn(async move {
-                let start = Instant::now();
-                // Use timeout to detect scheduler hangs
-                let result = tokio::time::timeout(
-                    query_timeout,
-                    engine_clone.query_and_watch(sql.clone(), HashMap::new(), None),
-                )
-                .await;
-                (i, start.elapsed(), sql, result)
-            });
-            watch_tasks.push(task);
-        }
-
-        // Note: Schema initialization happens during app startup via SchemaRegistry.
-        // We don't need to test concurrent schema init here - the query_and_watch
-        // calls above already test the critical concurrency path.
-
-        // Check results - database lock/schema change errors indicate the Flutter bug
-        // These manifest as various error messages:
-        // - "database is locked" - SQLite busy timeout expired
-        // - "Database schema changed" - IVM detected concurrent schema modifications
-        // - "Failed to lock connection pool" - Connection pool contention
-        fn is_concurrency_error(error_str: &str) -> bool {
-            error_str.contains("database is locked")
-                || error_str.contains("Database schema changed")
-                || error_str.contains("Failed to lock connection pool")
-        }
-
-        for task in watch_tasks {
-            match task.await {
-                Ok((i, elapsed, _prql, Ok(Ok(_)))) => {
-                    tracing::trace!(
-                        "[BulkExternalAdd] Concurrent query_and_watch {} succeeded in {:?}",
-                        i,
-                        elapsed
-                    );
-                }
-                Ok((i, elapsed, prql, Ok(Err(e)))) => {
-                    let error_str = format!("{:?}", e);
-                    if is_concurrency_error(&error_str) {
-                        panic!(
-                            "FLUTTER STARTUP BUG REPRODUCED: query_and_watch {} failed with concurrency error \
-                                 after {:?} while bulk data ({} blocks) was being synced!\n\
-                                 This is the exact bug that causes Flutter app to get stuck during startup.\n\
-                                 Query: {}\n\
-                                 Error: {}",
-                            i,
-                            elapsed,
-                            blocks.len(),
-                            prql,
-                            error_str
-                        );
-                    } else {
-                        panic!(
-                            "Concurrent query_and_watch {} failed after {:?}: {}\nQuery: {}",
-                            i, elapsed, error_str, prql
-                        );
-                    }
-                }
-                Ok((i, elapsed, prql, Err(_timeout))) => {
-                    // Timeout occurred - this indicates the scheduler bug
-                    panic!(
-                        "SCHEDULER BUG: query_and_watch {} timed out after {:?}!\n\n\
-                             Root cause: OperationScheduler's mark_available() was never called for 'blocks' table.\n\n\
-                             The materialized view creation is stuck in the scheduler's pending queue:\n\
-                             - execute_ddl_with_deps submitted with requires=[Schema(\"blocks\")]\n\
-                             - can_execute() returned false (blocks not in available set)\n\
-                             - Operation queued in pending, response_rx.await blocks forever\n\n\
-                             Query: {}\n\n\
-                             Fix required:\n\
-                             1. Call scheduler_handle.mark_available() for core tables after schema creation in DI\n\
-                             2. Ensure MarkAvailable command calls process_pending_queue() to wake pending ops",
-                        i, elapsed, prql
-                    );
-                }
-                Err(e) => {
-                    panic!("Query task panicked: {:?}", e);
-                }
-            }
-        }
-
-        // Poll until file contains expected block count (with timeout)
-        let expected_block_count = all_blocks.len();
-        let file_path_clone = file_path.clone();
-        let start = Instant::now();
-        let timeout = Duration::from_millis(5000);
-
-        let condition_met = wait_for_file_condition(
-            &file_path_clone,
-            |content| {
-                let text_count = content.matches(":ID:").count();
-                let src_count = content.to_lowercase().matches("#+begin_src").count();
-                text_count + src_count == expected_block_count
-            },
-            timeout,
+        crate::pbt::transitions::bulk_external_add::apply_bulk_external_add_to_sut(
+            self, doc_uri, blocks, ref_state,
         )
         .await;
-
-        let elapsed = start.elapsed();
-        let final_content = tokio::fs::read_to_string(file_path)
-            .await
-            .expect("Failed to read file after bulk add");
-        let text_block_count = final_content.matches(":ID:").count();
-        let source_block_count = final_content.to_lowercase().matches("#+begin_src").count();
-        let actual_block_count = text_block_count + source_block_count;
-
-        if !condition_met || actual_block_count < expected_block_count {
-            panic!(
-                "SYNC LOOP BUG: BulkExternalAdd wrote {} blocks but only {} remain after {:?}!\n\
-                     Expected {} blocks total ({} existing + {} new).\n\
-                     File content:\n{}",
-                expected_block_count,
-                actual_block_count,
-                elapsed,
-                expected_block_count,
-                existing_count,
-                blocks.len(),
-                final_content
-            );
-        }
-        tracing::trace!(
-            "[BulkExternalAdd] File verified with {} blocks after {:?}",
-            actual_block_count,
-            elapsed
-        );
-
-        // Now wait for the blocks to sync to the DATABASE.
-        let expected_db_count = Self::expected_content_block_count(ref_state);
-        let expected_ids = self.expected_block_ids(ref_state);
-        let db_timeout = Duration::from_millis(10000);
-        let db_start = Instant::now();
-
-        let actual_rows = self.wait_for_blocks_synced(&expected_ids, db_timeout).await;
-        let db_elapsed = db_start.elapsed();
-
-        if actual_rows.len() == expected_db_count {
-            tracing::trace!(
-                "[BulkExternalAdd] Database synced ({} blocks) in {:?}",
-                expected_db_count,
-                db_elapsed
-            );
-        } else {
-            // Diagnostic: print which ref_state blocks are missing from SQL.
-            let sql_ids: std::collections::HashSet<String> = actual_rows
-                .iter()
-                .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
-                .collect();
-            let ref_non_doc: Vec<&holon_api::block::Block> = ref_state
-                .block_state
-                .blocks
-                .values()
-                .filter(|b| !b.is_page())
-                .collect();
-            let mut missing: Vec<String> = Vec::new();
-            let mut extra: Vec<String> = Vec::new();
-            for b in &ref_non_doc {
-                let resolved = self.resolve_uri(&b.id);
-                if !sql_ids.contains(resolved.as_str()) {
-                    missing.push(format!(
-                        "{} (resolved={}) parent={} doc={:?}",
-                        b.id,
-                        resolved,
-                        b.parent_id,
-                        ref_state.block_state.block_documents.get(&b.id)
-                    ));
-                }
-            }
-            let ref_ids: std::collections::HashSet<String> = ref_non_doc
-                .iter()
-                .map(|b| self.resolve_uri(&b.id).to_string())
-                .collect();
-            for sid in &sql_ids {
-                if !ref_ids.contains(sid) {
-                    extra.push(sid.clone());
-                }
-            }
-            panic!(
-                "[BulkExternalAdd] WARNING: Database has {} blocks, expected {} after {:?}\n\
-                 MISSING from SQL ({}):\n  {}\n\
-                 EXTRA in SQL ({}):\n  {}",
-                actual_rows.len(),
-                expected_db_count,
-                db_elapsed,
-                missing.len(),
-                missing.join("\n  "),
-                extra.len(),
-                extra.join("\n  "),
-            );
-        }
-
-        // Poll until org files stabilize (sync controller finishes re-rendering)
-        self.wait_for_org_files_stable(25, Duration::from_millis(5000))
-            .await;
-    }
-
-    async fn apply_concurrent_mutations(
-        &mut self,
-        ui_mutation: crate::pbt::types::MutationEvent,
-        external_mutation: crate::pbt::types::MutationEvent,
-        ref_state: &ReferenceState,
-    ) {
-        tracing::trace!(
-            "[apply] ConcurrentMutations: UI={:?}, External={:?}",
-            ui_mutation.mutation,
-            external_mutation.mutation
-        );
-        // Delegate to the inherent impl method (Rust resolves inherent before trait).
-        let ui = ui_mutation;
-        let ext = external_mutation;
-        let start = std::time::Instant::now();
-        tracing::trace!("[apply_concurrent_mutations] ext_event: {:?}", ext);
-        let expected_blocks = self.resolve_ref_blocks(ref_state, false);
-        if let Err(e) = self.ctx.apply_external_mutation(&expected_blocks).await {
-            eprintln!("[ConcurrentMutations] External mutation failed: {:?}", e);
-        }
-        let (entity, op, mut params) = ui.mutation.to_operation();
-        if let Some(holon_api::Value::String(pid)) = params.get("parent_id") {
-            let pid = holon_api::EntityUri::parse(pid).expect("Unable to parse parent_id");
-            let resolved = self.resolve_uri(&pid);
-            params.insert("parent_id".to_string(), resolved.clone().into());
-        }
-        let driver = self
-            .driver
-            .as_ref()
-            .expect("driver not installed — was start_app called?");
-        match driver.synthetic_dispatch(&entity, &op, params).await {
-            Ok(()) => {}
-            Err(e) => panic!("Concurrent UI mutation {}.{} failed: {:?}", entity, op, e),
-        }
-        let expected_count = ref_state.block_state.blocks.len();
-        let expected_ids = self.expected_block_ids(ref_state);
-        self.await_block_count_or_panic(
-            &expected_ids,
-            expected_count,
-            std::time::Duration::from_millis(15000),
-            "ConcurrentMutations",
-        )
-        .await;
-        let expected_blocks = self.resolve_ref_blocks(ref_state, true);
-        self.await_org_file_convergence(&expected_blocks).await;
-        let _ = start;
     }
 
     async fn apply_apply_mutation(
@@ -938,11 +807,7 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .as_ref()
             .expect("[DragDropBlock] driver not installed");
         let dispatched = driver
-            .drop_entity(
-                root_id.as_str(),
-                resolved_source.as_str(),
-                resolved_target.as_str(),
-            )
+            .drop_entity(&root_id, &resolved_source, &resolved_target)
             .await
             .expect("[DragDropBlock] drop_entity failed");
         assert!(
@@ -1067,10 +932,80 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         // ref-synthetic-id and panics on what is logically the same
         // block.
         if has_enter {
-            let expected_ids = self.expected_block_ids(ref_state);
-            let timeout = std::time::Duration::from_secs(5);
-            let db_rows = self.wait_for_blocks_synced(&expected_ids, timeout).await;
-            self.map_unmapped_split_synthetic_ids(ref_state, &db_rows, "[PressKey-Enter]");
+            // Turso barrier: let block_raw converge to the projected split row
+            // before the mapper reads it. The placeholder split id is treated as
+            // count-only by `wait_for_blocks_synced` (synthetic ids never reach
+            // CDC), so this converges as soon as the real split row lands —
+            // non-convergence surfaces in the mapper's count assert below.
+            // No-Turso's Loro split is synchronous — the mapper reads the
+            // snapshot directly, no barrier needed.
+            if matches!(self.ctx.storage(), holon::di::StorageSelector::Turso) {
+                let expected_ids = self.expected_block_ids(ref_state);
+                let timeout = std::time::Duration::from_secs(5);
+                self.wait_for_blocks_synced(&expected_ids, timeout).await;
+            }
+            self.map_unmapped_split_synthetic_ids(ref_state, "[PressKey-Enter]")
+                .await;
+            // Prod's split sets focus + caret on the new block (caret 0) via
+            // the op response, applied in-process (ADR 0010). VERIFY the SUT's
+            // own focus landed where the ref expects before parking the
+            // mirror's caret — deriving the target from `ref_state` alone
+            // would re-impose the expected focus and mask a regressed
+            // focus handoff (the oracle-circularity the Jun-2026 review
+            // flagged). The caret seed itself (`home`) stays: the headless
+            // mirror tracks its caret independently and defaults to
+            // end-of-text.
+            if let Some(active) = ref_state.ui.tab.active_editor.as_ref() {
+                let expected_id = self.resolve_uri(&active.block_id);
+                // The op-response focus handoff (`apply_structural_focus`,
+                // ADR 0010) runs in the spawned dispatch task — block_raw
+                // converging (the barrier above) does NOT imply focus has
+                // moved yet. A single sample here raced that task and
+                // produced flaky "handoff DIVERGED, engine focused <old
+                // block>" failures (2026-06-11, window-active runs where
+                // the busier main thread widened the race window). Poll
+                // until convergence; the deadline keeps a genuinely
+                // regressed handoff loud.
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    match SutDriver::engine_focused_block(self).await {
+                        EngineFocus::Focused(actual) => {
+                            if actual == expected_id {
+                                break;
+                            }
+                            if tokio::time::Instant::now() >= deadline {
+                                panic!(
+                                    "[PressKey-Enter] split focus handoff DIVERGED: engine \
+                                     focused {actual}, ref expects the new split block \
+                                     {expected_id} (after 2s — async op-response focus \
+                                     application never converged)"
+                                );
+                            }
+                        }
+                        EngineFocus::Unfocused => {
+                            if tokio::time::Instant::now() >= deadline {
+                                panic!(
+                                    "[PressKey-Enter] split focus handoff LOST: engine has no \
+                                     focused block, ref expects the new split block \
+                                     {expected_id} (after 2s)"
+                                );
+                            }
+                        }
+                        // No frontend engine wired (SqlOnly headless): the op-response
+                        // focus is unobservable here — disclosed, not silently skipped.
+                        EngineFocus::NoEngine => {
+                            eprintln!(
+                                "[PressKey-Enter] split focus handoff UNVERIFIED \
+                                 (no frontend engine); seeding caret on ref expectation \
+                                 {expected_id}"
+                            );
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                self.sync_caret_to_new_split_block(&expected_id).await;
+            }
         }
     }
 
@@ -1094,6 +1029,8 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
         // assertion downstream catches it as a real bug instead of
         // forcing a match.
         let predicted_focus = ref_state
+            .ui
+            .tab
             .focused_entity_id
             .get(&region)
             .expect("ArrowNavigate requires focused entity")
@@ -1118,153 +1055,16 @@ impl<V: VariantMarker> crate::pbt::transition_dispatch::SutHandle for E2ESut<V> 
             .as_ref()
             .expect("ArrowNavigate: driver not installed — was start_app called?");
         for _ in 0..steps {
+            // Retry-until-consumed: after a focus-moving op (e.g. a split
+            // landing focus on a freshly created row) the consuming editor
+            // may mount on a later render pass — or need the focused row
+            // scrolled back into the virtualized viewport first.
             driver
-                .send_raw_keystroke(keystroke, &[])
+                .send_raw_keystroke_until_handled(keystroke, &[], Duration::from_secs(2))
                 .await
                 .unwrap_or_else(|e| {
                     panic!("[ArrowNavigate] keystroke '{keystroke}' failed: {e:#}")
                 });
-        }
-    }
-
-    async fn apply_add_peer(&mut self) {
-        tracing::trace!("[apply] AddPeer (peer_idx={})", self.peers.len());
-        let doc_store = self
-            .ctx
-            .doc_store()
-            .expect("AddPeer requires Loro to be enabled");
-        let store = doc_store.read().await;
-        let global_doc = store
-            .get_global_doc()
-            .await
-            .expect("Failed to get global doc for AddPeer");
-        let snapshot = global_doc
-            .export_snapshot()
-            .expect("Failed to export snapshot for AddPeer");
-        let peer_id = (self.peers.len() as u64) + 100;
-        let peer_doc = holon::sync::multi_peer::init_doc(peer_id);
-        peer_doc
-            .import(&snapshot)
-            .expect("Failed to import snapshot into peer");
-        self.peers.push(holon::sync::multi_peer::PeerState {
-            doc: peer_doc,
-            peer_id,
-            online: true,
-            data: (),
-        });
-    }
-
-    async fn apply_peer_edit(&mut self, peer_idx: usize, op: &crate::pbt::transitions::PeerEditOp) {
-        use super::transitions::PeerEditOp;
-        let peer = &self.peers[peer_idx];
-        tracing::trace!("[apply] PeerEdit peer_idx={} op={:?}", peer_idx, op);
-        match op {
-            PeerEditOp::Create {
-                parent_stable_id,
-                content,
-                stable_id,
-            } => {
-                super::peer_ops::peer_create_block(
-                    &peer.doc,
-                    parent_stable_id.as_deref(),
-                    content,
-                    stable_id,
-                );
-            }
-            PeerEditOp::Update { stable_id, content } => {
-                let resolved = self.resolve_stable_id(stable_id);
-                super::peer_ops::peer_update_block(&peer.doc, &resolved, content);
-            }
-            PeerEditOp::Delete { stable_id } => {
-                let resolved = self.resolve_stable_id(stable_id);
-                super::peer_ops::peer_delete_block(&peer.doc, &resolved);
-            }
-        }
-    }
-
-    async fn apply_sync_with_peer(&mut self, peer_idx: usize) {
-        tracing::trace!("[apply] SyncWithPeer peer_idx={}", peer_idx);
-        let doc_store = self
-            .ctx
-            .doc_store()
-            .expect("SyncWithPeer requires Loro to be enabled");
-        let store = doc_store.read().await;
-        let global_doc = store
-            .get_global_doc()
-            .await
-            .expect("Failed to get global doc for SyncWithPeer");
-        let primary_doc = global_doc.doc();
-        let primary = &*primary_doc;
-        let peer = &self.peers[peer_idx];
-        holon::sync::multi_peer::sync_docs_direct(primary, &peer.doc);
-        drop(store);
-        // Give the controller's spawned task time to process the
-        // peer import via subscribe_root → on_loro_changed → SQL.
-        self.ctx
-            .wait_for_loro_quiescence(Duration::from_secs(10))
-            .await;
-    }
-
-    async fn apply_merge_from_peer(&mut self, peer_idx: usize) {
-        tracing::trace!("[apply] MergeFromPeer peer_idx={}", peer_idx);
-        let doc_store = self
-            .ctx
-            .doc_store()
-            .expect("MergeFromPeer requires Loro to be enabled");
-        let store = doc_store.read().await;
-        let global_doc = store
-            .get_global_doc()
-            .await
-            .expect("Failed to get global doc for MergeFromPeer");
-        // One-directional merge: export the peer's delta relative
-        // to the primary's current version and import it into the
-        // primary. The raw `doc.import` is enough — the
-        // `LoroSyncController`'s `subscribe_root` will fire and
-        // reconcile the diff into SQL via the command bus.
-        let primary_doc = global_doc.doc();
-        let primary = &*primary_doc;
-        let peer = &self.peers[peer_idx];
-        let peer_vv = primary.oplog_vv();
-        let delta = peer
-            .doc
-            .export(loro::ExportMode::updates(&peer_vv))
-            .expect("Failed to export peer delta");
-        if !delta.is_empty() {
-            primary.import(&delta).expect("Failed to import peer delta");
-        }
-        drop(store);
-        self.ctx
-            .wait_for_loro_quiescence(Duration::from_secs(10))
-            .await;
-    }
-
-    async fn apply_peer_char_edit(
-        &mut self,
-        peer_idx: usize,
-        block_id: &str,
-        op: &crate::pbt::transitions::TextOp,
-    ) {
-        use super::transitions::TextOp;
-        let peer = &self.peers[peer_idx];
-        let resolved_id = self.resolve_stable_id(block_id);
-        match op {
-            TextOp::Insert {
-                pos_codepoint,
-                text,
-            } => {
-                super::peer_ops::peer_insert_text(&peer.doc, &resolved_id, *pos_codepoint, text);
-            }
-            TextOp::Delete {
-                pos_codepoint,
-                len_codepoint,
-            } => {
-                super::peer_ops::peer_delete_text(
-                    &peer.doc,
-                    &resolved_id,
-                    *pos_codepoint,
-                    *len_codepoint,
-                );
-            }
         }
     }
 

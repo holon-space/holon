@@ -37,7 +37,7 @@ fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Optio
         holon_config.loro.enabled = Some(true);
         let config_dir = holon_frontend::config::resolve_config_dir(None);
         let session_config = SessionConfig::new(ui_info);
-        FrontendSession::new_from_config(
+        holon_app::new_from_config(
             holon_config,
             session_config,
             config_dir,

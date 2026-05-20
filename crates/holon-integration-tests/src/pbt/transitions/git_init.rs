@@ -36,7 +36,7 @@ impl TransitionRef<ReferenceState> for GitInit {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.app_started, Reason::AppAlreadyStarted),
+            check(!state.action.app_started, Reason::AppAlreadyStarted),
             check(!state.git_initialized, Reason::VcsAlreadyInitialized),
             check(!state.jj_initialized, Reason::VcsAlreadyInitialized),
         ];

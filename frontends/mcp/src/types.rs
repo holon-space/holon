@@ -290,20 +290,41 @@ pub struct ExecuteCommandParams {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ClickParams {
-    /// X coordinate in logical pixels.
+    /// Optional entity id (block id). When set, the click is dispatched at
+    /// the center of the rendered element via the same entity-addressed
+    /// `UserDriver::click_entity` path the PBT/E2E tests use — it resolves
+    /// the element bounds, hit-tests the point, and warns if a different
+    /// element is on top. `x`/`y`/`button`/`modifiers` are ignored (the
+    /// driver synthesizes a plain left click). Prefer this over raw
+    /// coordinates: it survives relayout/scroll and self-verifies the hit.
+    #[serde(default)]
+    pub entity_id: Option<String>,
+    /// Panel region for the entity click, e.g. "main", "left_sidebar".
+    /// Only used with `entity_id`. Defaults to "main".
+    #[serde(default = "default_main")]
+    pub region: String,
+    /// X coordinate in logical pixels. Ignored if `entity_id` is set.
+    #[serde(default)]
     pub x: f32,
-    /// Y coordinate in logical pixels.
+    /// Y coordinate in logical pixels. Ignored if `entity_id` is set.
+    #[serde(default)]
     pub y: f32,
-    /// Mouse button: "left" (default), "right", "middle".
+    /// Mouse button: "left" (default), "right", "middle". Ignored if
+    /// `entity_id` is set.
     #[serde(default = "default_left")]
     pub button: String,
-    /// Modifier keys held during click, e.g. ["cmd", "shift"].
+    /// Modifier keys held during click, e.g. ["cmd", "shift"]. Ignored if
+    /// `entity_id` is set.
     #[serde(default)]
     pub modifiers: Vec<String>,
 }
 
 fn default_left() -> String {
     "left".to_string()
+}
+
+fn default_main() -> String {
+    "main".to_string()
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

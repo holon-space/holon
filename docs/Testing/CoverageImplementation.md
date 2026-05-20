@@ -18,7 +18,7 @@ This document summarizes the code coverage implementation for runtime dead code 
 
 ### 3. Documentation
 
-- **Full Guide**: `docs/CODE_COVERAGE.md` - Comprehensive coverage documentation
+- **Full Guide**: `docs/HowTo/CODE_COVERAGE.md` - Comprehensive coverage documentation
 - **Quick Start**: `CoverageQuickStart.md` - Quick reference guide
 - **Makefile Targets**: Added coverage targets to `frontends/flutter/Makefile`
 
@@ -60,7 +60,7 @@ open frontends/flutter/coverage/html/index.html  # if genhtml installed
 - `scripts/process-rust-coverage.sh` - Rust coverage processor
 - `scripts/process-flutter-coverage.sh` - Flutter coverage processor
 - `scripts/collect-flutter-coverage-vm-service.dart` - VM Service helper
-- `docs/CODE_COVERAGE.md` - Full documentation
+- `docs/HowTo/CODE_COVERAGE.md` - Full documentation
 - `CoverageQuickStart.md` - Quick reference
 - `CoverageImplementation.md` - This file
 
@@ -122,7 +122,7 @@ apt-get install lcov  # Linux
 
 ## Troubleshooting
 
-See `docs/CODE_COVERAGE.md` for detailed troubleshooting guide.
+See `docs/HowTo/CODE_COVERAGE.md` for detailed troubleshooting guide.
 
 ## References
 

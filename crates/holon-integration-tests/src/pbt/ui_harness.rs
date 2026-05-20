@@ -22,7 +22,6 @@ use std::sync::mpsc::{Receiver, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use holon_frontend::FrontendSession;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 
@@ -96,6 +95,55 @@ pub fn enable_atomic_editor_if_unset() {
     }
 }
 
+/// Print the per-transition rejection histogram on every panic. Without this
+/// the `proptest_state_machine!` path swallows the `print_rejection_histogram()`
+/// hook that the phased-PBT path runs in `pbt_teardown`, so the histogram is
+/// never surfaced when a headless case fails. Idempotent — installs once per
+/// process. Shared by the native-mode slices (`proptest_config:`); the
+/// cases-based macro arm wires its own.
+pub fn install_rejection_histogram_panic_hook() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            crate::pbt::validation::print_rejection_histogram();
+            prev(info);
+        }));
+    });
+}
+
+/// The standard `ProptestConfig` for a native-mode (`proptest_config:`) slice:
+/// activates the atomic editor, installs the rejection-histogram panic hook, and
+/// pins the failure-persistence file to `tests/<slice_name>.proptest-regressions`
+/// (the default `SourceParallel` mode mislocates `lib.rs`/`main.rs` for
+/// macro-generated tests and warns). `cases` defaults to 8 — `PROPTEST_CASES`
+/// overrides at runtime; `PROPTEST_MAX_SHRINK_ITERS` overrides the shrink budget
+/// (default 50). Slices sharing one state machine pass the *same* `slice_name`
+/// to share one regressions file (e.g. `general_e2e_pbt` + its `_sql_only` peer).
+pub fn standard_pbt_config(slice_name: &str) -> proptest::test_runner::Config {
+    use proptest::test_runner::{Config, FileFailurePersistence};
+
+    enable_atomic_editor_if_unset();
+    install_rejection_histogram_panic_hook();
+    let max_shrink = std::env::var("PROPTEST_MAX_SHRINK_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    let regressions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(format!("{slice_name}.proptest-regressions"));
+    Config {
+        cases: 8,
+        max_shrink_iters: max_shrink,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            // proptest wants a 'static str, so leak the resolved path.
+            Box::leak(regressions.to_string_lossy().into_owned().into_boxed_str()),
+        ))),
+        ..Config::default()
+    }
+}
+
 /// Build `<cwd>/target/pbt-screenshots/<subdir>`.
 ///
 /// The directory itself is created lazily by `GeometryDriver::with_screenshots`,
@@ -119,7 +167,7 @@ pub fn screenshot_dir(subdir: &str) -> PathBuf {
 /// between simultaneous PBTs.
 pub fn try_start_embedded_mcp(
     runtime: &tokio::runtime::Handle,
-    session: &Arc<FrontendSession>,
+    engine: &Arc<holon::api::BackendEngine>,
     reactive_engine: &Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
     env_var: &str,
@@ -139,7 +187,7 @@ pub fn try_start_embedded_mcp(
     let Some(port) = port else {
         return;
     };
-    let engine = Some(session.engine().clone());
+    let engine = Some(engine.clone());
     let services: Arc<dyn BuilderServices> = reactive_engine.clone();
     let _guard = runtime.enter();
     holon_mcp::di::start_embedded_mcp_server_with_debug(engine, Some(services), port, debug);
@@ -185,11 +233,11 @@ pub fn wait_for_geometry_ready(
         if Instant::now() > deadline {
             let mut hist: BTreeMap<String, usize> = BTreeMap::new();
             for (_, info) in &elements {
-                *hist.entry(info.widget_type.clone()).or_default() += 1;
+                *hist.entry(info.widget_type.to_string()).or_default() += 1;
             }
             let sample_ids: Vec<String> = elements
                 .iter()
-                .filter_map(|(_, i)| i.entity_id.clone())
+                .filter_map(|(_, i)| i.entity_id.as_deref().map(str::to_string))
                 .take(5)
                 .collect();
             eprintln!(

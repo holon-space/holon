@@ -1,3 +1,4 @@
+use holon_api::EntityUri;
 use std::collections::HashMap;
 
 /// Direction an item wants to navigate.
@@ -38,7 +39,7 @@ pub enum CursorPlacement {
 /// What the collection tells the frontend to focus next.
 #[derive(Debug, Clone)]
 pub struct NavTarget {
-    pub block_id: String,
+    pub block_id: EntityUri,
     pub placement: CursorPlacement,
 }
 
@@ -47,7 +48,7 @@ pub struct NavTarget {
 pub trait CollectionNavigator: Send + Sync {
     fn navigate(
         &self,
-        current_id: &str,
+        current_id: &EntityUri,
         direction: NavDirection,
         hint: &CursorHint,
     ) -> Option<NavTarget>;
@@ -59,12 +60,12 @@ pub trait CollectionNavigator: Send + Sync {
 
 /// Linear Up/Down navigation over an ordered list of block IDs.
 pub struct ListNavigator {
-    ordered_ids: Vec<String>,
-    index: HashMap<String, usize>,
+    ordered_ids: Vec<EntityUri>,
+    index: HashMap<EntityUri, usize>,
 }
 
 impl ListNavigator {
-    pub fn new(ordered_ids: Vec<String>) -> Self {
+    pub fn new(ordered_ids: Vec<EntityUri>) -> Self {
         let index = ordered_ids
             .iter()
             .enumerate()
@@ -77,7 +78,7 @@ impl ListNavigator {
 impl CollectionNavigator for ListNavigator {
     fn navigate(
         &self,
-        current_id: &str,
+        current_id: &EntityUri,
         direction: NavDirection,
         hint: &CursorHint,
     ) -> Option<NavTarget> {
@@ -111,14 +112,14 @@ impl CollectionNavigator for ListNavigator {
 // ---------------------------------------------------------------------------
 // TreeNavigator
 // ---------------------------------------------------------------------------
-
+// TODO: This seems to duplicate functionality from MutableTree. Please analyze and DRY.
 /// Tree navigation: Up/Down follow DFS order, Left goes to parent,
 /// Right goes to first child.
 pub struct TreeNavigator {
-    dfs_order: Vec<String>,
-    dfs_index: HashMap<String, usize>,
-    parent_of: HashMap<String, String>,
-    first_child_of: HashMap<String, String>,
+    dfs_order: Vec<EntityUri>,
+    dfs_index: HashMap<EntityUri, usize>,
+    parent_of: HashMap<EntityUri, EntityUri>,
+    first_child_of: HashMap<EntityUri, EntityUri>,
 }
 
 impl TreeNavigator {
@@ -127,8 +128,8 @@ impl TreeNavigator {
     /// `parent_map` maps child_id → parent_id. Pass the same parent_id column
     /// used by `OutlineTree` / `shared_tree_build`.
     pub fn from_dfs_and_parents(
-        dfs_order: Vec<String>,
-        parent_map: HashMap<String, String>,
+        dfs_order: Vec<EntityUri>,
+        parent_map: HashMap<EntityUri, EntityUri>,
     ) -> Self {
         let dfs_index = dfs_order
             .iter()
@@ -138,7 +139,7 @@ impl TreeNavigator {
 
         // Derive first_child_of by walking DFS order: for each node, if its
         // parent doesn't already have a first-child entry, this node is it.
-        let mut first_child_of: HashMap<String, String> = HashMap::new();
+        let mut first_child_of: HashMap<EntityUri, EntityUri> = HashMap::new();
         for id in &dfs_order {
             if let Some(parent) = parent_map.get(id) {
                 first_child_of.entry(parent.clone()).or_insert(id.clone());
@@ -169,10 +170,11 @@ impl TreeNavigator {
 
         tree.walk_depth_first(|row, _depth| {
             if let Some(id) = row.get(id_col).and_then(|v| v.as_string()) {
-                let id = id.to_string();
+                // Typed-id boundary: matview row columns → EntityUri, once.
+                let id = holon_api::entity_uri_from_id_str(id);
                 dfs_order.push(id.clone());
                 if let Some(pid) = row.get(parent_id_col).and_then(|v| v.as_string()) {
-                    parent_map.insert(id, pid.to_string());
+                    parent_map.insert(id, holon_api::entity_uri_from_id_str(pid));
                 }
             }
         });
@@ -184,7 +186,7 @@ impl TreeNavigator {
 impl CollectionNavigator for TreeNavigator {
     fn navigate(
         &self,
-        current_id: &str,
+        current_id: &EntityUri,
         direction: NavDirection,
         hint: &CursorHint,
     ) -> Option<NavTarget> {
@@ -239,8 +241,8 @@ impl CollectionNavigator for TreeNavigator {
 /// 2D grid navigation: Up/Down move between rows in the same column,
 /// Left/Right move between columns in the same row.
 pub struct TableNavigator {
-    cells: HashMap<(usize, usize), String>,
-    cell_positions: HashMap<String, (usize, usize)>,
+    cells: HashMap<(usize, usize), EntityUri>,
+    cell_positions: HashMap<EntityUri, (usize, usize)>,
     row_count: usize,
     col_count: usize,
 }
@@ -248,7 +250,7 @@ pub struct TableNavigator {
 impl TableNavigator {
     /// Build from a grid of cell IDs. `rows[r][c]` is the block ID at row r, column c.
     /// Cells that are `None` are skipped (not navigable).
-    pub fn from_grid(rows: Vec<Vec<Option<String>>>) -> Self {
+    pub fn from_grid(rows: Vec<Vec<Option<EntityUri>>>) -> Self {
         let row_count = rows.len();
         let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut cells = HashMap::new();
@@ -273,7 +275,7 @@ impl TableNavigator {
 
     /// Build from a flat list of row IDs (single-column table, behaves like a list
     /// but allows extension to multi-column later).
-    pub fn from_row_ids(row_ids: Vec<String>) -> Self {
+    pub fn from_row_ids(row_ids: Vec<EntityUri>) -> Self {
         Self::from_grid(row_ids.into_iter().map(|id| vec![Some(id)]).collect())
     }
 }
@@ -281,7 +283,7 @@ impl TableNavigator {
 impl CollectionNavigator for TableNavigator {
     fn navigate(
         &self,
-        current_id: &str,
+        current_id: &EntityUri,
         direction: NavDirection,
         hint: &CursorHint,
     ) -> Option<NavTarget> {
@@ -441,67 +443,79 @@ mod tests {
 
     // -- ListNavigator --
 
+    /// Test-helper: a bare id becomes a `block:` EntityUri (the canonical
+    /// form the typed-id boundary produces for block rows).
+    fn eu(s: &str) -> EntityUri {
+        EntityUri::block(s)
+    }
+
     #[test]
     fn list_nav_down_up() {
-        let nav = ListNavigator::new(vec!["a".into(), "b".into(), "c".into()]);
+        let nav = ListNavigator::new(vec![eu("a"), eu("b"), eu("c")]);
         let hint = CursorHint {
             column: 5,
             boundary: Boundary::Bottom,
         };
 
-        let target = nav.navigate("a", NavDirection::Down, &hint).unwrap();
-        assert_eq!(target.block_id, "b");
+        let target = nav.navigate(&eu("a"), NavDirection::Down, &hint).unwrap();
+        assert_eq!(target.block_id, eu("b"));
         assert_eq!(target.placement, CursorPlacement::FirstLine { column: 5 });
 
-        let target = nav.navigate("b", NavDirection::Up, &hint).unwrap();
-        assert_eq!(target.block_id, "a");
+        let target = nav.navigate(&eu("b"), NavDirection::Up, &hint).unwrap();
+        assert_eq!(target.block_id, eu("a"));
         assert_eq!(target.placement, CursorPlacement::LastLine { column: 5 });
     }
 
     #[test]
     fn list_nav_at_boundary() {
-        let nav = ListNavigator::new(vec!["a".into(), "b".into()]);
+        let nav = ListNavigator::new(vec![eu("a"), eu("b")]);
         let hint = CursorHint {
             column: 0,
             boundary: Boundary::Top,
         };
-        assert!(nav.navigate("a", NavDirection::Up, &hint).is_none());
-        assert!(nav.navigate("b", NavDirection::Down, &hint).is_none());
+        assert!(nav.navigate(&eu("a"), NavDirection::Up, &hint).is_none());
+        assert!(nav.navigate(&eu("b"), NavDirection::Down, &hint).is_none());
     }
 
     #[test]
     fn list_nav_left_right_returns_none() {
-        let nav = ListNavigator::new(vec!["a".into(), "b".into()]);
+        let nav = ListNavigator::new(vec![eu("a"), eu("b")]);
         let hint = CursorHint {
             column: 0,
             boundary: Boundary::Right,
         };
-        assert!(nav.navigate("a", NavDirection::Left, &hint).is_none());
-        assert!(nav.navigate("a", NavDirection::Right, &hint).is_none());
+        assert!(nav.navigate(&eu("a"), NavDirection::Left, &hint).is_none());
+        assert!(nav.navigate(&eu("a"), NavDirection::Right, &hint).is_none());
     }
 
     #[test]
     fn list_nav_single_element_up_down_returns_none() {
         // Single-element collection: both Up and Down hit boundary immediately.
-        let nav = ListNavigator::new(vec!["only".into()]);
+        let nav = ListNavigator::new(vec![eu("only")]);
         let hint = CursorHint {
             column: 0,
             boundary: Boundary::Top,
         };
-        assert!(nav.navigate("only", NavDirection::Up, &hint).is_none());
-        assert!(nav.navigate("only", NavDirection::Down, &hint).is_none());
+        assert!(nav.navigate(&eu("only"), NavDirection::Up, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Down, &hint)
+            .is_none());
     }
 
     #[test]
     fn list_nav_unknown_id_returns_none() {
         // Navigating from an ID not in the list returns None (doesn't panic).
-        let nav = ListNavigator::new(vec!["a".into(), "b".into()]);
+        let nav = ListNavigator::new(vec![eu("a"), eu("b")]);
         let hint = CursorHint {
             column: 0,
             boundary: Boundary::Top,
         };
-        assert!(nav.navigate("ghost", NavDirection::Up, &hint).is_none());
-        assert!(nav.navigate("ghost", NavDirection::Down, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("ghost"), NavDirection::Up, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("ghost"), NavDirection::Down, &hint)
+            .is_none());
     }
 
     // -- TreeNavigator --
@@ -512,11 +526,11 @@ mod tests {
         //   ├── a
         //   │   └── a1
         //   └── b
-        let dfs = vec!["root".into(), "a".into(), "a1".into(), "b".into()];
-        let parents: HashMap<String, String> = [
-            ("a".into(), "root".into()),
-            ("a1".into(), "a".into()),
-            ("b".into(), "root".into()),
+        let dfs = vec![eu("root"), eu("a"), eu("a1"), eu("b")];
+        let parents: HashMap<EntityUri, EntityUri> = [
+            (eu("a"), eu("root")),
+            (eu("a1"), eu("a")),
+            (eu("b"), eu("root")),
         ]
         .into();
         let nav = TreeNavigator::from_dfs_and_parents(dfs, parents);
@@ -526,22 +540,22 @@ mod tests {
         };
 
         // Down from a → a1 (DFS order)
-        let t = nav.navigate("a", NavDirection::Down, &hint).unwrap();
-        assert_eq!(t.block_id, "a1");
+        let t = nav.navigate(&eu("a"), NavDirection::Down, &hint).unwrap();
+        assert_eq!(t.block_id, eu("a1"));
 
         // Down from a1 → b
-        let t = nav.navigate("a1", NavDirection::Down, &hint).unwrap();
-        assert_eq!(t.block_id, "b");
+        let t = nav.navigate(&eu("a1"), NavDirection::Down, &hint).unwrap();
+        assert_eq!(t.block_id, eu("b"));
 
         // Up from b → a1
-        let t = nav.navigate("b", NavDirection::Up, &hint).unwrap();
-        assert_eq!(t.block_id, "a1");
+        let t = nav.navigate(&eu("b"), NavDirection::Up, &hint).unwrap();
+        assert_eq!(t.block_id, eu("a1"));
     }
 
     #[test]
     fn tree_nav_left_right() {
-        let dfs = vec!["root".into(), "child".into()];
-        let parents: HashMap<String, String> = [("child".into(), "root".into())].into();
+        let dfs = vec![eu("root"), eu("child")];
+        let parents: HashMap<EntityUri, EntityUri> = [(eu("child"), eu("root"))].into();
         let nav = TreeNavigator::from_dfs_and_parents(dfs, parents);
         let hint = CursorHint {
             column: 0,
@@ -549,48 +563,60 @@ mod tests {
         };
 
         // Right from root → first child
-        let t = nav.navigate("root", NavDirection::Right, &hint).unwrap();
-        assert_eq!(t.block_id, "child");
+        let t = nav
+            .navigate(&eu("root"), NavDirection::Right, &hint)
+            .unwrap();
+        assert_eq!(t.block_id, eu("child"));
         assert_eq!(t.placement, CursorPlacement::Start);
 
         // Left from child → parent
-        let t = nav.navigate("child", NavDirection::Left, &hint).unwrap();
-        assert_eq!(t.block_id, "root");
+        let t = nav
+            .navigate(&eu("child"), NavDirection::Left, &hint)
+            .unwrap();
+        assert_eq!(t.block_id, eu("root"));
         assert_eq!(t.placement, CursorPlacement::End);
 
         // Left from root → None (no parent)
-        assert!(nav.navigate("root", NavDirection::Left, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("root"), NavDirection::Left, &hint)
+            .is_none());
     }
 
     #[test]
     fn tree_nav_at_dfs_boundary() {
         // Up from first DFS node → None; Down from last DFS node → None.
-        let dfs = vec!["root".into(), "a".into(), "b".into()];
-        let parents: HashMap<String, String> =
-            [("a".into(), "root".into()), ("b".into(), "root".into())].into();
+        let dfs = vec![eu("root"), eu("a"), eu("b")];
+        let parents: HashMap<EntityUri, EntityUri> =
+            [(eu("a"), eu("root")), (eu("b"), eu("root"))].into();
         let nav = TreeNavigator::from_dfs_and_parents(dfs, parents);
         let hint = CursorHint {
             column: 0,
             boundary: Boundary::Top,
         };
-        assert!(nav.navigate("root", NavDirection::Up, &hint).is_none());
-        assert!(nav.navigate("b", NavDirection::Down, &hint).is_none());
+        assert!(nav.navigate(&eu("root"), NavDirection::Up, &hint).is_none());
+        assert!(nav.navigate(&eu("b"), NavDirection::Down, &hint).is_none());
     }
 
     #[test]
     fn tree_nav_single_node_right_left_returns_none() {
         // Leaf node with no children: Right returns None. Root with no parent: Left returns None.
-        let dfs = vec!["solo".into()];
-        let parents: HashMap<String, String> = HashMap::new();
+        let dfs = vec![eu("solo")];
+        let parents: HashMap<EntityUri, EntityUri> = HashMap::new();
         let nav = TreeNavigator::from_dfs_and_parents(dfs, parents);
         let hint = CursorHint {
             column: 0,
             boundary: Boundary::Left,
         };
-        assert!(nav.navigate("solo", NavDirection::Left, &hint).is_none());
-        assert!(nav.navigate("solo", NavDirection::Right, &hint).is_none());
-        assert!(nav.navigate("solo", NavDirection::Up, &hint).is_none());
-        assert!(nav.navigate("solo", NavDirection::Down, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("solo"), NavDirection::Left, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("solo"), NavDirection::Right, &hint)
+            .is_none());
+        assert!(nav.navigate(&eu("solo"), NavDirection::Up, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("solo"), NavDirection::Down, &hint)
+            .is_none());
     }
 
     // -- TableNavigator --
@@ -601,8 +627,8 @@ mod tests {
         //   a0  a1  a2
         //   b0  b1  b2
         let nav = TableNavigator::from_grid(vec![
-            vec![Some("a0".into()), Some("a1".into()), Some("a2".into())],
-            vec![Some("b0".into()), Some("b1".into()), Some("b2".into())],
+            vec![Some(eu("a0")), Some(eu("a1")), Some(eu("a2"))],
+            vec![Some(eu("b0")), Some(eu("b1")), Some(eu("b2"))],
         ]);
         let hint = CursorHint {
             column: 3,
@@ -610,31 +636,33 @@ mod tests {
         };
 
         // Down from a1 → b1 (same column)
-        let t = nav.navigate("a1", NavDirection::Down, &hint).unwrap();
-        assert_eq!(t.block_id, "b1");
+        let t = nav.navigate(&eu("a1"), NavDirection::Down, &hint).unwrap();
+        assert_eq!(t.block_id, eu("b1"));
 
         // Right from a1 → a2
-        let t = nav.navigate("a1", NavDirection::Right, &hint).unwrap();
-        assert_eq!(t.block_id, "a2");
+        let t = nav.navigate(&eu("a1"), NavDirection::Right, &hint).unwrap();
+        assert_eq!(t.block_id, eu("a2"));
         assert_eq!(t.placement, CursorPlacement::Start);
 
         // Left from a1 → a0
-        let t = nav.navigate("a1", NavDirection::Left, &hint).unwrap();
-        assert_eq!(t.block_id, "a0");
+        let t = nav.navigate(&eu("a1"), NavDirection::Left, &hint).unwrap();
+        assert_eq!(t.block_id, eu("a0"));
         assert_eq!(t.placement, CursorPlacement::End);
 
         // Boundary: right from a2 → None
-        assert!(nav.navigate("a2", NavDirection::Right, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("a2"), NavDirection::Right, &hint)
+            .is_none());
         // Boundary: down from b1 → None
-        assert!(nav.navigate("b1", NavDirection::Down, &hint).is_none());
+        assert!(nav.navigate(&eu("b1"), NavDirection::Down, &hint).is_none());
     }
 
     #[test]
     fn table_nav_sparse_grid() {
         // Sparse: cell (0,1) is None
         let nav = TableNavigator::from_grid(vec![
-            vec![Some("a0".into()), None, Some("a2".into())],
-            vec![Some("b0".into()), Some("b1".into()), Some("b2".into())],
+            vec![Some(eu("a0")), None, Some(eu("a2"))],
+            vec![Some(eu("b0")), Some(eu("b1")), Some(eu("b2"))],
         ]);
         let hint = CursorHint {
             column: 0,
@@ -643,20 +671,28 @@ mod tests {
 
         // Down from missing cell position doesn't crash
         // Right from a0 → skips None, returns None (no cell at (0,1))
-        assert!(nav.navigate("a0", NavDirection::Right, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("a0"), NavDirection::Right, &hint)
+            .is_none());
     }
 
     #[test]
     fn table_nav_single_cell_all_directions_return_none() {
         // 1x1 grid: every direction hits boundary.
-        let nav = TableNavigator::from_grid(vec![vec![Some("only".into())]]);
+        let nav = TableNavigator::from_grid(vec![vec![Some(eu("only"))]]);
         let hint = CursorHint {
             column: 0,
             boundary: Boundary::Top,
         };
-        assert!(nav.navigate("only", NavDirection::Up, &hint).is_none());
-        assert!(nav.navigate("only", NavDirection::Down, &hint).is_none());
-        assert!(nav.navigate("only", NavDirection::Left, &hint).is_none());
-        assert!(nav.navigate("only", NavDirection::Right, &hint).is_none());
+        assert!(nav.navigate(&eu("only"), NavDirection::Up, &hint).is_none());
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Down, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Left, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Right, &hint)
+            .is_none());
     }
 }

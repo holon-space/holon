@@ -54,7 +54,7 @@ impl TransitionRef<ReferenceState> for SwitchView {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.app_started, Reason::AppNotStarted)];
+            vec![check(state.action.app_started, Reason::AppNotStarted)];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
@@ -62,7 +62,7 @@ impl TransitionRef<ReferenceState> for SwitchView {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.current_view = self.view_name.clone();
+        state.ui.user.current_view = self.view_name.clone();
     }
 }
 

@@ -72,7 +72,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         "text",
         Some(&row_id),
         has_content,
-        Some(content),
+        Some(std::sync::Arc::from(content)),
     )
     .into_any_element()
 }

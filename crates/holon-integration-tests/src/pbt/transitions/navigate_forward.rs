@@ -48,7 +48,7 @@ impl TransitionRef<ReferenceState> for NavigateForward {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
                 state.can_go_forward(self.region),
                 Reason::NoNavigationHistory,
@@ -61,16 +61,16 @@ impl TransitionRef<ReferenceState> for NavigateForward {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        if let Some(history) = state.navigation_history.get_mut(&self.region)
+        if let Some(history) = state.ui.tab.navigation_history.get_mut(&self.region)
             && history.cursor < history.entries.len() - 1
         {
             history.cursor += 1;
         }
-        state.focused_entity_id.remove(&self.region);
-        state.focused_cursor.remove(&self.region);
+        state.ui.tab.focused_entity_id.remove(&self.region);
+        state.ui.tab.focused_cursor.remove(&self.region);
 
         // Blur on nav: see `navigate_focus.rs` for verification.
-        state.active_editor = None;
+        state.blur_active_editor();
     }
 }
 

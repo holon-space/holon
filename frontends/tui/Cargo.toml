@@ -17,6 +17,11 @@ name = "tui_ui_pbt"
 path = "tests/tui_ui_pbt.rs"
 harness = false
 
+[[test]]
+name = "tui_ui_pbt_no_loro"
+path = "tests/tui_ui_pbt_no_loro.rs"
+harness = false
+
 [dependencies]
 # R3BL TUI Framework
 r3bl_tui.workspace = true
@@ -24,6 +29,7 @@ r3bl_tui.workspace = true
 # Holon workspace crates
 holon.workspace = true
 holon-frontend = { workspace = true, features = ["otel"] }
+holon-app.workspace = true
 holon-api.workspace = true
 holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }
@@ -54,3 +60,4 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 holon-integration-tests = { path = "../../crates/holon-integration-tests" }
+holon-pbt-core = { path = "../../crates/holon-pbt-core" }

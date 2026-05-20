@@ -23,10 +23,12 @@ use crate::storage::turso::{DbHandle, TursoBackend};
 
 // Re-export public API
 pub use lifecycle::{
-    CoreInfraModule, create_backend_engine, create_backend_engine_with_extras,
-    open_and_register_core, preload_startup_views,
+    CoreInfraModule, StorageSelector, build_no_turso_container, create_backend_engine,
+    create_backend_engine_with_extras, open_and_register_core, preload_startup_views,
 };
-pub use registration::{register_core_services, register_core_services_with_backend};
+pub use registration::{
+    register_core_services, register_core_services_no_turso, register_core_services_with_backend,
+};
 pub use runtime::{create_queryable_cache, create_queryable_cache_async, run_async_in_sync};
 pub use schema_providers::{DbReady, DbResource};
 

@@ -83,18 +83,15 @@ impl ReactiveRowProvider for FocusChainProvider {
 
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (String, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
         Box::pin(
             self.focused
                 .signal_cloned()
                 .map(|opt| build_chain(&opt))
                 .to_signal_vec()
                 .map(|row| {
-                    let id = row
-                        .get("id")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or_default()
-                        .to_string();
+                    let id = holon_api::data_row_entity_uri(&row)
+                        .unwrap_or_else(|| EntityUri::block(""));
                     (id, row)
                 }),
         )
@@ -112,7 +109,7 @@ impl ValueFn for FocusChainValueFn {
         &self,
         args: &ResolvedArgs,
         services: &dyn BuilderServices,
-        _ctx: &RenderContext,
+        _: &RenderContext,
     ) -> InterpValue {
         let focused = match services.focused_block_mutable() {
             Some(f) => f,
@@ -148,6 +145,7 @@ mod tests {
 
     #[test]
     fn snapshot_emits_one_row_at_level_zero() {
+        // ALLOW(entity_uri_from_raw): test literal (#[cfg(test)])
         let uri = EntityUri::from_raw("block:abc");
         let provider = FocusChainProvider::new(Mutable::new(Some(uri.clone())));
         let rows = provider.rows_snapshot();
@@ -165,6 +163,7 @@ mod tests {
         let provider = FocusChainProvider::new(focus.clone());
         assert!(provider.rows_snapshot().is_empty());
 
+        // ALLOW(entity_uri_from_raw): test literal (#[cfg(test)])
         focus.set(Some(EntityUri::from_raw("block:next")));
         let rows = provider.rows_snapshot();
         assert_eq!(rows.len(), 1);

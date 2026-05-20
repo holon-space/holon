@@ -23,7 +23,7 @@ use holon_api::{BatchMetadata, EntityName, SyncTokenUpdate, Value, WithMetadata}
 use holon_filesystem::{
     directory::{ChangesWithMetadata, DirectoryChangeProvider},
     directory::{Directory, ROOT_ID},
-    File,
+    File, FileSystem,
 };
 
 use crate::parser::{compute_content_hash, generate_directory_id, generate_file_id};
@@ -43,15 +43,21 @@ pub struct OrgModeSyncProvider {
     token_store: Arc<dyn SyncTokenStore>,
     directory_tx: broadcast::Sender<ChangesWithMetadata<Directory>>,
     file_tx: broadcast::Sender<ChangesWithMetadata<File>>,
+    fs: Arc<dyn FileSystem>,
 }
 
 impl OrgModeSyncProvider {
-    pub fn new(root_directory: PathBuf, token_store: Arc<dyn SyncTokenStore>) -> Self {
+    pub fn new(
+        root_directory: PathBuf,
+        token_store: Arc<dyn SyncTokenStore>,
+        fs: Arc<dyn FileSystem>,
+    ) -> Self {
         Self {
             root_directory,
             token_store,
             directory_tx: broadcast::channel(1000).0,
             file_tx: broadcast::channel(1000).0,
+            fs,
         }
     }
 
@@ -95,7 +101,9 @@ impl OrgModeSyncProvider {
         let mut seen_dirs: HashMap<String, bool> = HashMap::new();
         let mut seen_files: HashMap<String, bool> = HashMap::new();
 
-        let scanned = crate::file_watcher::scan_directory(&self.root_directory);
+        let scanned = crate::file_watcher::scan_directory(self.fs.as_ref(), &self.root_directory)
+            .await
+            .map_err(|e| format!("Failed to scan {}: {e}", self.root_directory.display()))?;
 
         for path in &scanned.directories {
             let dir_id = generate_directory_id(path, &self.root_directory);
@@ -134,14 +142,19 @@ impl OrgModeSyncProvider {
             new_state.known_dirs.insert(dir_id, true);
         }
 
-        let canonical_root = std::fs::canonicalize(&self.root_directory)
+        let canonical_root = self
+            .fs
+            .canonicalize(&self.root_directory)
             .unwrap_or_else(|_| self.root_directory.clone());
         for path in &scanned.files {
-            let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let canonical_path = self.fs.canonicalize(path).unwrap_or_else(|_| path.clone());
             let file_id = generate_file_id(&canonical_path, &canonical_root).to_string();
             seen_files.insert(file_id.clone(), true);
 
-            let content = std::fs::read_to_string(path)
+            let content = self
+                .fs
+                .read_to_string(path)
+                .await
                 .with_context(|| format!("Failed to read {}", path.display()))?;
 
             let content_hash = compute_content_hash(&content);
@@ -281,7 +294,7 @@ impl SyncableProvider for OrgModeSyncProvider {
         );
 
         // Check if directory exists
-        if !self.root_directory.exists() {
+        if !self.fs.exists(&self.root_directory) {
             info!(
                 "[OrgModeSyncProvider] WARNING: Root directory does not exist: {}",
                 self.root_directory.display()
@@ -400,13 +413,20 @@ impl SyncableProvider for OrgModeSyncProvider {
         let old_state = self.load_state().await?;
         let mut new_state = old_state.clone();
 
-        let canonical_root_sync = std::fs::canonicalize(&self.root_directory)
+        let canonical_root_sync = self
+            .fs
+            .canonicalize(&self.root_directory)
             .unwrap_or_else(|_| self.root_directory.clone());
         for file_path in file_paths {
-            let canonical_fp =
-                std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
+            let canonical_fp = self
+                .fs
+                .canonicalize(&file_path)
+                .unwrap_or_else(|_| file_path.clone());
             let file_id = generate_file_id(&canonical_fp, &canonical_root_sync).to_string();
-            let content = std::fs::read_to_string(&file_path)
+            let content = self
+                .fs
+                .read_to_string(&file_path)
+                .await
                 .map_err(|e| format!("Failed to read file {}: {}", file_path.display(), e))?;
             let content_hash = compute_content_hash(&content);
             new_state.file_hashes.insert(file_id, content_hash);
@@ -496,7 +516,11 @@ mod tests {
     async fn test_sync_empty_directory() {
         let dir = tempdir().unwrap();
         let token_store = Arc::new(MockSyncTokenStore::new());
-        let provider = OrgModeSyncProvider::new(dir.path().to_path_buf(), token_store);
+        let provider = OrgModeSyncProvider::new(
+            dir.path().to_path_buf(),
+            token_store,
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
 
         let result = provider.sync(StreamPosition::Beginning).await;
         assert!(result.is_ok());
@@ -509,7 +533,11 @@ mod tests {
         std::fs::write(&org_file, "* Headline 1\n** Nested headline\n").unwrap();
 
         let token_store = Arc::new(MockSyncTokenStore::new());
-        let provider = OrgModeSyncProvider::new(dir.path().to_path_buf(), token_store);
+        let provider = OrgModeSyncProvider::new(
+            dir.path().to_path_buf(),
+            token_store,
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
 
         let mut file_rx = provider.subscribe_files();
 
@@ -521,6 +549,6 @@ mod tests {
         assert_eq!(file_batch.inner.len(), 1);
 
         // Blocks are no longer emitted by OrgModeSyncProvider — they go through
-        // OrgSyncController → command_bus → EventBus instead.
+        // FileSyncController → command_bus → EventBus instead.
     }
 }

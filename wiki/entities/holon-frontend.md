@@ -52,7 +52,7 @@ pub struct ReactiveView {
 
 `start()` spawns the driver task. `stop()` / `Drop` abort it.
 
-### ReactiveQueryResults
+### ReactiveRenderedRows
 
 `crates/holon-frontend/src/reactive.rs` — the reactive cache for a single query. Owns:
 - `render_expr: Mutable<RenderExpr>` — initialized to `loading()`, replaced on first `Structure` event

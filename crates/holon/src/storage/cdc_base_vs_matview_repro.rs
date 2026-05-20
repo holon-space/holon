@@ -25,7 +25,6 @@
 
 use super::turso::{ChangeData, RowChange, TursoBackend};
 use holon_api::streaming::{Batch, BatchMetadata, WithMetadata};
-use std::collections::HashMap;
 
 type RawCdcRx = tokio::sync::broadcast::Receiver<WithMetadata<Batch<RowChange>, BatchMetadata>>;
 
@@ -254,7 +253,7 @@ async fn matview_created_event_carries_full_row() {
         })
         .expect("missing Created on 'block_mirror'");
 
-    let pick = |data: &HashMap<String, holon_api::Value>, key: &str| {
+    let pick = |data: &holon_api::StorageEntity, key: &str| {
         data.get(key)
             .and_then(|v| v.as_string())
             .unwrap_or("<missing>")

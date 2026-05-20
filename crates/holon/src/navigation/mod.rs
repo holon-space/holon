@@ -20,9 +20,11 @@
 //! Navigation schema is managed by `NavigationSchemaModule` via the `SchemaRegistry`.
 //! See `storage/schema_modules.rs` for the schema definition.
 
+mod in_memory_provider;
 mod provider;
 
-pub use provider::NavigationProvider;
+pub use in_memory_provider::InMemoryNavigationProvider;
+pub use provider::{NavigationProvider, navigation_operation_descriptors};
 
 #[cfg(test)]
 mod loro_exclusion_test {

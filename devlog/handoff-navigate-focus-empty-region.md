@@ -28,7 +28,7 @@ The reference model returned the focus target PLUS its children, but `focus_root
 
 ### 4. PBT inv10 code used outdated `Option<RenderExpr>` API
 
-`ReactiveEngine::interpret_fn`, `ReactiveQueryResults::snapshot()`, and related code were updated to use non-optional `RenderExpr`. The PBT invariant #10 code still had `Option` handling and a removed `wait_until_ready()` method.
+`ReactiveEngine::interpret_fn`, `ReactiveRenderedRows::snapshot()`, and related code were updated to use non-optional `RenderExpr`. The PBT invariant #10 code still had `Option` handling and a removed `wait_until_ready()` method.
 
 **Fix**: Updated closure to pass `&RenderExpr` directly, removed `Option` unwrap from snapshot, removed `wait_until_ready` call.
 

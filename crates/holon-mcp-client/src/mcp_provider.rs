@@ -26,7 +26,7 @@ use crate::mcp_sidecar::{McpSidecar, UndoConfig};
 /// Type-erased entity field reader — reads entity fields as HashMap<String, Value>.
 /// Allows McpOperationProvider to capture old state without knowing concrete entity types.
 type FieldReadFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Option<HashMap<String, Value>>>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Option<holon_api::StorageEntity>>> + Send + 'a>>;
 
 pub trait EntityFieldReader: Send + Sync {
     fn get_fields(&self, id: &str) -> FieldReadFuture<'_>;
@@ -42,11 +42,11 @@ impl<T: IntoEntity + TryFromEntity + Send + Sync + 'static> EntityFieldReader
     fn get_fields(
         &self,
         id: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<HashMap<String, Value>>>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<holon_api::StorageEntity>>> + Send + '_>> {
         let id = id.to_string();
         Box::pin(async move {
             let entity: Option<T> = self.get_by_id(&id).await?;
-            Ok(entity.map(|e| e.to_entity().fields))
+            Ok(entity.map(|e| e.to_entity().fields.into_iter().collect()))
         })
     }
 }
@@ -330,7 +330,7 @@ impl McpOperationProvider {
 
         let mut captured = HashMap::new();
         for field in capture_fields {
-            if let Some(value) = all_fields.get(field) {
+            if let Some(value) = all_fields.get(field.as_str()) {
                 captured.insert(field.clone(), value.clone());
             }
         }
@@ -363,7 +363,7 @@ impl McpOperationProvider {
                 };
 
                 let id_col = entity_config.id_column_or_default();
-                let entity_id = match params.get(&id_col) {
+                let entity_id = match params.get(id_col.as_str()) {
                     Some(Value::String(id)) => id.clone(),
                     _ => return UndoAction::Irreversible,
                 };
@@ -432,7 +432,7 @@ impl OperationProvider for McpOperationProvider {
 
         let json_params: serde_json::Map<String, serde_json::Value> = params
             .into_iter()
-            .map(|(k, v)| (k, to_json_value(v)))
+            .map(|(k, v)| (k.to_string(), to_json_value(v)))
             .collect();
 
         let result = self
@@ -482,14 +482,14 @@ mod tests {
     use super::*;
 
     struct FakeFieldReader {
-        fields: HashMap<String, HashMap<String, Value>>,
+        fields: HashMap<String, holon_api::StorageEntity>,
     }
 
     impl EntityFieldReader for FakeFieldReader {
         fn get_fields(
             &self,
             id: &str,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<HashMap<String, Value>>>> + Send + '_>>
+        ) -> Pin<Box<dyn Future<Output = Result<Option<holon_api::StorageEntity>>> + Send + '_>>
         {
             let result = self.fields.get(id).cloned();
             Box::pin(async move { Ok(result) })
@@ -522,17 +522,14 @@ tools:
 
     fn make_test_reader() -> Arc<dyn EntityFieldReader> {
         let mut fields = HashMap::new();
-        let mut task_fields = HashMap::new();
-        task_fields.insert("id".to_string(), Value::String("123".to_string()));
+        let mut task_fields = holon_api::StorageEntity::new();
+        task_fields.insert("id".into(), Value::String("123".to_string()));
+        task_fields.insert("content".into(), Value::String("Old content".to_string()));
         task_fields.insert(
-            "content".to_string(),
-            Value::String("Old content".to_string()),
-        );
-        task_fields.insert(
-            "description".to_string(),
+            "description".into(),
             Value::String("Old description".to_string()),
         );
-        task_fields.insert("priority".to_string(), Value::Integer(1));
+        task_fields.insert("priority".into(), Value::Integer(1));
         fields.insert("123".to_string(), task_fields);
         Arc::new(FakeFieldReader { fields })
     }
@@ -545,11 +542,8 @@ tools:
         entity_readers.insert("todoist_task".to_string(), reader);
 
         let mut params = StorageEntity::new();
-        params.insert("id".to_string(), Value::String("123".to_string()));
-        params.insert(
-            "content".to_string(),
-            Value::String("New content".to_string()),
-        );
+        params.insert("id".into(), Value::String("123".to_string()));
+        params.insert("content".into(), Value::String("New content".to_string()));
 
         // We can't call build_undo_action directly without a full McpOperationProvider,
         // so test via capture_old_state + UndoConfig logic
@@ -574,9 +568,9 @@ tools:
 
                 // Build inverse params as the provider would
                 let mut inverse_params: HashMap<String, Value> = HashMap::new();
-                inverse_params.insert("id".to_string(), Value::String("123".to_string()));
+                inverse_params.insert("id".into(), Value::String("123".to_string()));
                 for field in capture {
-                    if let Some(value) = old_fields.get(field) {
+                    if let Some(value) = old_fields.get(field.as_str()) {
                         inverse_params.insert(field.clone(), value.clone());
                     }
                 }

@@ -25,7 +25,7 @@ pub fn assert_all_nonzero_except(snap: &BoundsSnapshot, fixture_label: &str, all
         .entries
         .iter()
         .filter(|(_, info)| info.width <= 0.0 || info.height <= 0.0)
-        .filter(|(_, info)| !allow_zero.contains(&info.widget_type.as_str()))
+        .filter(|(_, info)| !allow_zero.contains(&info.widget_type.as_ref()))
         .collect();
 
     if !zeros.is_empty() {
@@ -65,7 +65,7 @@ pub fn assert_containment(snap: &BoundsSnapshot, fixture_label: &str, allow_over
         let mut cursor_parent = info.parent_id.as_deref();
         while let Some(pid) = cursor_parent {
             if let Some(parent) = by_id.get(pid) {
-                if CLIPPING_PARENT_TYPES.contains(&parent.widget_type.as_str()) {
+                if CLIPPING_PARENT_TYPES.contains(&parent.widget_type.as_ref()) {
                     inside_scrollable.insert(id.as_str());
                     break;
                 }
@@ -79,7 +79,7 @@ pub fn assert_containment(snap: &BoundsSnapshot, fixture_label: &str, allow_over
     let mut violations: Vec<String> = Vec::new();
 
     for (id, info) in &snap.entries {
-        if allow_overflow.contains(&info.widget_type.as_str()) {
+        if allow_overflow.contains(&info.widget_type.as_ref()) {
             continue;
         }
         if inside_scrollable.contains(id.as_str()) {
@@ -88,7 +88,7 @@ pub fn assert_containment(snap: &BoundsSnapshot, fixture_label: &str, allow_over
         let Some(parent_id) = info.parent_id.as_ref() else {
             continue;
         };
-        let Some(parent) = by_id.get(parent_id.as_str()) else {
+        let Some(parent) = by_id.get(parent_id.as_ref()) else {
             continue;
         };
         let child_rect = Rect::of(info);
@@ -134,7 +134,7 @@ pub fn assert_no_sibling_overlap(
         std::collections::HashMap::new();
     for (id, info) in &snap.entries {
         if let Some(pid) = info.parent_id.as_ref() {
-            groups.entry(pid.as_str()).or_default().push((id, info));
+            groups.entry(pid.as_ref()).or_default().push((id, info));
         }
     }
 
@@ -142,7 +142,7 @@ pub fn assert_no_sibling_overlap(
 
     for (parent_id, siblings) in groups {
         if let Some(parent_info) = by_id.get(parent_id) {
-            if allow_overlap_parents.contains(&parent_info.widget_type.as_str()) {
+            if allow_overlap_parents.contains(&parent_info.widget_type.as_ref()) {
                 continue;
             }
         }
@@ -194,7 +194,7 @@ pub fn assert_content_fidelity(snap: &BoundsSnapshot, fixture_label: &str) {
     let shells: Vec<&(String, ElementInfo)> = snap
         .entries
         .iter()
-        .filter(|(_, info)| info.widget_type == "reactive_shell")
+        .filter(|(_, info)| info.widget_type.as_ref() == "reactive_shell")
         .collect();
 
     let mut violations: Vec<String> = Vec::new();
@@ -207,7 +207,7 @@ pub fn assert_content_fidelity(snap: &BoundsSnapshot, fixture_label: &str) {
             if let Some(kids) = children_of.get(node_id) {
                 for (kid_id, kid_info) in kids {
                     total_descendants += 1;
-                    if VISIBLE_LEAF_TYPES.contains(&kid_info.widget_type.as_str()) {
+                    if VISIBLE_LEAF_TYPES.contains(&kid_info.widget_type.as_ref()) {
                         visible_leaves += 1;
                     }
                     stack.push(kid_id.as_str());

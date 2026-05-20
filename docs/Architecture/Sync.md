@@ -8,7 +8,7 @@ The `crates/holon/src/sync/` module provides synchronization primitives for both
 
 The core architectural pattern is **Authority + Projection**: each entity type has exactly one *authority* (the system that can refuse a write); Turso is uniformly downstream as a query-shaped projection of that authority. For blocks the authority is **Loro** (post the 2026-05 authority-flip — see the Cells plan); for external systems (Todoist, JIRA) the authority is the third-party API; for org-only data the authority is the file on disk.
 
-Reads flow `authority → event log → Turso projection → Cell → UI`. Writes flow `chord op / UI → Cell → typed CrudOperations method → authority → event emission → SqlBlockProjector → Turso`. The UI never queries an authority directly; it reads cells, which read the projection.
+Reads flow `authority → event log → Turso projection → Cell → UI`. Writes flow `chord op / UI → Cell → typed CrudOperations method → authority → event emission → LoroProjection/BlockConsolidator → Turso`. The UI never queries an authority directly; it reads cells, which read the projection.
 
 When Loro is disabled (SqlOnly mode), `LwwScalarBacking` / `LwwTextCellBacking` substitute Loro-backed cells with last-write-wins semantics — same cell interface, different protocol.
 
@@ -49,7 +49,7 @@ Holon uses a **hybrid data model** where different storage technologies are used
 │  │  Turso (projection only)    │ │  │                          │
 │  │  - matviews, IVM, query     │ │  │ ✓ Server-authoritative   │
 │  │  - written by               │ │  │ ✓ Operation queue        │
-│  │    SqlBlockProjector        │ │  │ ✓ Turso projection       │
+│  │    BlockConsolidator        │ │  │ ✓ Turso projection       │
 │  └──────┬──────────────────────┘ │  └──────────────────────────┘
 │         ▲ projects from           │
 │         │ FieldsChanged events    │
@@ -77,8 +77,8 @@ Holon uses a **hybrid data model** where different storage technologies are used
 
 **Key Distinctions**:
 
-- **Loro = authority for blocks** (post-2026-05 authority-flip). Every block write — from chord ops, MCP, OrgMode runtime updates — flows through `LoroOperationProvider`, lands in the LoroDoc, fires `on_loro_changed`, gets projected to Turso by `SqlBlockProjector`. Turso never holds block state Loro hasn't accepted.
-- **Turso = projection only** for blocks. The `block` table is downstream of Loro; matviews built on top of `block` (focus_roots, blocks_with_paths, etc.) project from there. Direct SQL writes to the `block` table from runtime code paths are forbidden (architecture-test enforced).
+- **Loro = authority for blocks** (post-2026-05 authority-flip). The vast majority of block writes — from chord ops, MCP, OrgMode runtime updates — flows through `LoroBlockOperations`, lands in the LoroDoc, fires `on_loro_changed`, gets projected to Turso by `LoroProjection` / `BlockConsolidator`. **Exceptions handled in `BlockCellRegistry::write_field`** (`crates/holon/src/sync/block_cell_registry.rs`): the fields `id`, `depth`, `content_type`, and `source_name` are routed to the SQL path (no clean Loro encoding today); `_expected_*` watermark control fields pass through to SQL; and any block whose tree node is absent in the LoroDoc (unseeded vault) falls back to SQL with a disclosed `tracing::warn!`. These carve-outs are documented and visible — Turso may hold these fields' values without a Loro write.
+- **Turso = projection only** for blocks (with above carve-outs). The `block` table is downstream of Loro; matviews built on top of `block` (focus_roots, blocks_with_paths, etc.) project from there. Direct SQL writes to the `block` table outside `BlockConsolidator` and the startup-seed path are forbidden (archlint-enforced via the `sole_block_writer` smell — see [Archlint.md](Archlint.md)).
 - **Sync Adapters (Iroh, local file persist)**: Transport-only. Iroh syncs Loro CRDT documents between devices via P2P. Local persistence serializes Loro state to disk. These are independently optional.
 - **OrgMode runtime updates** go through the cell layer, not direct SQL writes — same path as UI. The org-startup-seeding code path (parse files at boot, populate Loro) is the only OrgMode-to-storage write that bypasses cells.
 - **External Systems (right)**: Third-party data where the external API is authoritative. Changes are queued and synced via API calls, which may be rejected. Their cell registries (Phase F5 follow-up) will give consumers the same uniform read interface.
@@ -104,7 +104,7 @@ All 4 combinations of OrgMode × Loro are valid:
 
 **Lost Update Prevention**
 
-When Loro is enabled (the production configuration), all writes — from OrgMode runtime updates, UI, MCP, or P2P — flow through cells, which dispatch to `LoroOperationProvider`. This is critical because:
+When Loro is enabled (the production configuration), all writes — from OrgMode runtime updates, UI, MCP, or P2P — flow through cells, which dispatch to `LoroBlockOperations`. This is critical because:
 
 1. Org file changes are coarse-grained ("block content is now X"), not character-level diffs
 2. If org writes bypassed Loro and went directly to Turso, concurrent P2P changes could be silently overwritten
@@ -115,12 +115,11 @@ When Loro is disabled (SqlOnly mode), `LwwScalarBacking` / `LwwTextCellBacking` 
 
 **Loro Data Model in Holon**
 
-Loro stores hierarchical block data using an adjacency-list model:
+Loro stores hierarchical block data using a single `LoroTree` named `"blocks"` (constant `TREE_NAME` in `loro_backend.rs`). Each tree node carries a meta map for block fields. The old adjacency-list model (`blocks_by_id` / `children_by_parent` maps) was replaced with the tree structure.
 
 | Container | Type | Purpose |
 |-----------|------|---------|
-| `blocks_by_id` | `LoroMap<String, BlockData>` | O(1) lookup of block by ID |
-| `children_by_parent` | `LoroMap<String, LoroList<String>>` | Parent → children mapping |
+| `"blocks"` tree | `LoroTree` | Single tree; each node = one block; parent/child structure is native to the tree |
 
 Each block contains:
 - `content_type`, `content_raw` (or `source_*` for code blocks)
@@ -133,17 +132,14 @@ Each block contains:
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `LoroModule` | `crates/holon/src/sync/loro_module.rs` | Standalone DI module for Loro services (registers `LoroOperationProvider`, cell backings) |
-| `LoroOperationProvider` | `crates/holon/src/api/loro_operation_provider.rs` | `OperationProvider` for `entity_name="block"` — primary writer; translates set_field/create/delete to Loro mutations |
-| `BlockCellRegistry` | `crates/holon/src/sync/block_cell_registry.rs` | Per-entity cell registry; picks `Loro*CellBacking` (Full mode) or `Lww*Backing` (SqlOnly) per field |
+| `LoroModule` | `crates/holon/src/sync/loro_module.rs` | Standalone DI module for Loro services (registers `LoroBlockOperations`, cell backings) |
+| `LoroBlockOperations` | `crates/holon/src/sync/loro_block_operations.rs` | `OperationProvider` for `entity_name="block"` — primary writer; translates set_field/create/delete to Loro mutations |
+| `BlockCellRegistry` | `crates/holon/src/sync/block_cell_registry.rs` | Per-entity cell registry; picks `LoroTextCellBacking` (Full mode, `content` field) or `Lww*Backing` (SqlOnly) per field |
 | `LoroTextCellBacking` | `crates/holon/src/sync/loro_text_cell_backing.rs` | Wraps `LoroText` for `content`; produces TextOps + commit |
-| `LoroMetaCellBacking<T>` | `crates/holon/src/sync/loro_meta_cell_backing.rs` | Wraps `LoroMap` meta entry for scalar block fields |
-| `LoroSyncController` | `crates/holon/src/sync/loro_sync_controller.rs` | Subscribes to Loro doc; emits FieldsChanged/Created/Deleted events on commit |
-| `SqlBlockProjector` | `crates/holon/src/sync/sql_block_projector.rs` | EventBus subscriber; applies Loro-emitted events to Turso (raw INSERT/UPDATE/DELETE) |
+| `LoroSyncController` / `LoroProjection` | `crates/holon/src/sync/loro_sync_controller.rs` | Observes Loro doc commits; diffs vs a persisted base and projects the delta into SQL |
+| `BlockConsolidator` | `crates/holon/src/sync/consolidator.rs` | The single writer that applies projected ops to Turso `block_raw` (raw INSERT/UPDATE/DELETE) |
 | `LoroDocumentStore` | `crates/holon/src/sync/loro_document_store.rs` | Manages Loro CRDT documents on disk |
 | `SqlOperationProvider` | `crates/holon/src/core/sql_operation_provider.rs` | Used for non-block entities; SqlOnly mode fallback for blocks |
-| `CollaborativeDoc` | `crates/holon/src/sync/collaborative_doc.rs` | Low-level Loro document wrapper with P2P sync |
-| `Iroh Endpoint` | Bundled with CollaborativeDoc | P2P networking for sync (Unix only) |
 
 **Data Flow: Authority + Projection (Loro enabled)**
 
@@ -154,17 +150,18 @@ Each block contains:
   Cell<T>.set / Cell<String>.apply_text_op
         │
         ▼
-  LoroOperationProvider → Loro mutation + commit ←── Iroh P2P
+  LoroBlockOperations → Loro mutation + commit ←── Iroh P2P
         │
-        ▼ (on_loro_changed observes commit)
-  EventBus FieldsChanged event (origin=Loro)
+        ▼ (on_loro_changed observes commit, diffs vs base)
+  LoroProjection + BlockConsolidator (single writer)
         │
-        ▼ (subscribe)
-  SqlBlockProjector → Turso INSERT/UPDATE/DELETE
+        ▼ (raw write, tagged origin=loro on _change_origin)
+  Turso block_raw INSERT/UPDATE/DELETE
         │
         ▼
   Turso CDC → matviews update incrementally
         │
+        ├──▶ LiveData<Block> (BlockFeed) → OrgMode re-render, block_link indexer
         ▼
   Cell.signal() fires → UI re-renders
 ```
@@ -200,82 +197,31 @@ Loro CRDTs converge → materialize to Turso → CDC → UI
 
 See [ADR 0001: Hybrid Sync Architecture](docs/adr/0001-hybrid-sync-architecture.md) for the complete architectural rationale.
 
-### CollaborativeDoc (Loro CRDT + P2P Transport)
+### P2P Transport (Iroh)
 
-`CollaborativeDoc` provides the low-level Loro CRDT document wrapper with optional P2P sync via Iroh. Currently Iroh is bundled here; a future refactoring will extract Iroh into a separate `SyncAdapter` trait to fully decouple transport from storage.
+`CollaborativeDoc` was removed. P2P transport is now handled by three focused components:
 
-**Location**: `crates/holon/src/sync/collaborative_doc.rs`
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| `IrohSyncAdapter` | `crates/holon/src/sync/iroh_sync_adapter.rs` | Transport-only Iroh adapter: exports snapshots, applies updates, manages `iroh::Endpoint` |
+| `LoroShareBackend` | `crates/holon/src/sync/loro_share_backend.rs` | Coordinates document sharing over P2P; produces / consumes Loro export bytes |
+| `MultiPeer` | `crates/holon/src/sync/multi_peer.rs` | Multi-peer session management |
 
-```rust
-pub struct CollaborativeDoc {
-    doc: Arc<RwLock<LoroDoc>>,
-    endpoint: Arc<Endpoint>,  // Iroh endpoint for P2P
-    peer_id: PeerID,
-    doc_id: String,
-}
-```
-
-**Key Features:**
-
-| Feature | Description |
-|---------|-------------|
-| Loro CRDT | Conflict-free replicated data type for text and structured data |
-| Iroh P2P | Decentralized peer discovery and connection via `iroh::Endpoint` |
-| ALPN routing | Documents identified by `loro-sync/{doc_id}` protocol string |
-| Offline-first | Works locally, syncs when peers connect |
-| WASM support | Falls back to local-only mode on `wasm32` (no Iroh) |
-
-**Document Operations:**
-
-```rust
-// Text operations
-doc.insert_text("editor", 0, "Hello").await?;
-let text = doc.get_text("editor").await?;
-
-// Sync operations
-let update = doc.export_snapshot().await?;
-doc.apply_update(&update).await?;
-
-// P2P sync
-doc.connect_and_sync_to_peer(peer_addr).await?;
-doc.accept_sync_from_peer().await?;
-
-// Transaction-like access
-doc.with_read(|loro_doc| { /* read-only access */ }).await?;
-doc.with_write(|loro_doc| { /* mutations with auto-sync */ }).await?;
-```
-
-**Sync Flow:**
-
-```
-Peer A                                    Peer B
-   │                                         │
-   │──────── connect_and_sync_to_peer ──────>│
-   │                                         │
-   │<──────── export_snapshot() ─────────────│
-   │                                         │
-   │────────── apply_update() ──────────────>│
-   │                                         │
-   ▼                                         ▼
-Documents converge via CRDT merge
-```
-
-**Platform Support:**
-- **Unix-like systems**: Full Iroh P2P support
-- **WASM**: Local-only mode (document operations work, no P2P sync)
+Iroh P2P is independently optional (bundled with Loro; future: separate env var). On WASM, Iroh is unavailable and documents operate in local-only mode.
 
 ### LoroBackend (Document Repository)
 
-The high-level repository implementation that provides the primary API for block document operations. `LoroBackend` wraps `CollaborativeDoc` and implements the repository trait hierarchy.
+The high-level repository implementation that provides the primary API for block document operations. `LoroBackend` wraps `LoroDocument` (an internal thin wrapper around `loro::LoroDoc`) and implements the repository trait hierarchy.
 
 **Location**: `crates/holon/src/api/loro_backend.rs`
 
 ```rust
 pub struct LoroBackend {
-    collab_doc: Arc<CollaborativeDoc>,  // Loro CRDT + Iroh P2P
-    doc_id: String,
-    subscribers: ChangeSubscribers<Block>,  // Active change notification subscribers
-    event_log: Arc<Mutex<Vec<Change<Block>>>>,  // In-memory log for late subscribers
+    collab_doc: Arc<LoroDocument>,   // thin wrapper around loro::LoroDoc
+    subscribers: ChangeSubscribers<Block>,
+    event_log: Arc<Mutex<EventRing<Change<Block>>>>,
+    shared_trees: Option<Arc<dyn SharedTreeStore>>,
+    id_cache: Arc<Mutex<HashMap<String, loro::TreeID>>>,
 }
 ```
 
@@ -291,17 +237,17 @@ pub struct LoroBackend {
 **Responsibilities:**
 
 1. **Block Operations**: Creates, updates, moves, and deletes blocks in the Loro document
-2. **Tree Management**: Maintains parent-child relationships via `children_by_parent` map
+2. **Tree Management**: Maintains parent-child relationships via the `LoroTree`
 3. **Change Notification**: Emits changes to subscribers for reactive UI updates
 4. **Cycle Detection**: Prevents moving a block under its own descendant via `is_ancestor()` check
 5. **Batch Operations**: Supports `get_blocks`, `create_blocks`, `delete_blocks` for efficiency
-6. **P2P Coordination**: Delegates P2P operations to CollaborativeDoc's Iroh endpoint
+6. **P2P Coordination**: Delegates P2P operations to `IrohSyncAdapter` / `LoroShareBackend`
 
 **Component Interaction (Authority + Projection):**
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                         Frontend (Flutter/Blinc/MCP)                          │
+│                         Frontend (GPUI / TUI / MCP)                           │
 └──────────────────────────────────┬───────────────────────────────────────────┘
                                    │
             ┌──────────────────────┼──────────────────────┐
@@ -320,19 +266,19 @@ pub struct LoroBackend {
 │                    Authority + Projection                                     │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
 │  │ Loro CRDT (authority for blocks, when Loro enabled)                    │  │
-│  │ • LoroOperationProvider: set_field/create/delete → Loro mutations      │  │
+│  │ • LoroBlockOperations: set_field/create/delete → Loro mutations        │  │
 │  │ • LoroBackend underneath: tree, text, meta containers                  │  │
 │  │ • CRDT merge: concurrent edits resolved automatically                  │  │
 │  │ • on_loro_changed observes commits → emits FieldsChanged events        │  │
 │  ├────────────────────────────────────────────────────────────────────────┤  │
-│  │ SqlBlockProjector (when Loro enabled)                                  │  │
+│  │ LoroProjection / BlockConsolidator (when Loro enabled)                 │  │
 │  │ • Subscribes to FieldsChanged/Created/Deleted events (origin=Loro)     │  │
 │  │ • Applies to Turso via raw INSERT/UPDATE/DELETE                        │  │
 │  │ • The ONLY runtime writer to the `block` table                         │  │
 │  ├────────────────────────────────────────────────────────────────────────┤  │
 │  │ SqlOperationProvider (SqlOnly mode — Loro disabled, tests / dev)       │  │
 │  │ • Direct SQL writes to Turso (last-write-wins)                         │  │
-│  │ • Replaced by LoroOperationProvider when Loro is enabled               │  │
+│  │ • Replaced by LoroBlockOperations when Loro is enabled                 │  │
 │  ├────────────────────────────────────────────────────────────────────────┤  │
 │  │ Turso (always present — SQL projection + matview + CDC)                │  │
 │  │ • Projection of resolved authority state                               │  │
@@ -515,84 +461,91 @@ pub trait FileFormatAdapter: Send + Sync {
 }
 ```
 
-`OrgFormatAdapter` (`crates/holon-orgmode/src/file_format.rs`) is the first impl; `MarkdownFormatAdapter` (`crates/holon-markdown/src/file_format.rs`) is the second, targeting Obsidian-style vaults (CommonMark + GFM task lists + YAML frontmatter + `[[wikilinks]]` + `^block-id` markers). `OrgSyncController` holds `format: Arc<dyn FileFormatAdapter>` and routes parse + render through the trait — for a vault, swap in a `MarkdownFormatAdapter` via `OrgSyncController::with_format(...)`. New formats land as new `*FormatAdapter` impls; the watcher, change-origin filter, and EventBus echo suppression stay generic. No new sync controller is needed per format.
+`OrgFormatAdapter` (`crates/holon-orgmode/src/file_format.rs`) is the first impl; `MarkdownFormatAdapter` (`crates/holon-markdown/src/file_format.rs`) is the second, targeting Obsidian-style vaults (CommonMark + GFM task lists + YAML frontmatter + `[[wikilinks]]` + `^block-id` markers). `FileSyncController` holds `format: Arc<dyn FileFormatAdapter>` and routes parse + render through the trait — for a vault, swap in a `MarkdownFormatAdapter` via `FileSyncController::with_format(...)`. New formats land as new `*FormatAdapter` impls; the watcher, the change-origin filter, and `_change_origin`-based echo suppression stay generic. No new sync controller is needed per format.
 
 #### Deferred adapter responsibilities (informed by the second impl)
 
 Phase 1 of `codev/specs/0006-pre-velocity-refactors.md` deferred two responsibilities to "decide once a markdown adapter exists." Now that it does, the verdict:
 
-- **Image handling** (`materialize_images` + `ingest_images` in `OrgSyncController`): stays in the controller. Both org and markdown carry image children as `ContentType::Image` blocks with a relative file path on `block.content`; the disk-side materialize/ingest is identical and format-agnostic. The format-specific bit is only the *syntax* (org's `[[file:path.png]]` vs markdown's `![[path.png]]`), which already lives in each adapter's parser/renderer. No optional adapter method is needed.
+- **Image handling** (`materialize_images` + `ingest_images` in `FileSyncController`): stays in the controller. Both org and markdown carry image children as `ContentType::Image` blocks with a relative file path on `block.content`; the disk-side materialize/ingest is identical and format-agnostic. The format-specific bit is only the *syntax* (org's `[[file:path.png]]` vs markdown's `![[path.png]]`), which already lives in each adapter's parser/renderer. No optional adapter method is needed.
 - **`post_org_write_hook`**: rename to `post_write_hook` and keep on the controller. Same shape applies to a vault (e.g. trigger an Obsidian plugin reload). Renaming is a follow-up cleanup; not required for landing this adapter.
 
-### EventBus and Event Sourcing
+### Sync Wiring (no EventBus)
 
-The `EventBus` provides unified event publication/subscription across all data sources with origin-based loop prevention. It connects the authority (Loro for blocks) and adapters (OrgMode, external systems) to the projection (Turso) and to subscribers (UI cells).
+There is **no EventBus**. An earlier design routed every change through a
+`TursoEventBus` (publish/subscribe over an `events` table); it was decommissioned
+once each source was wired to its sink directly. The authority (Loro for blocks)
+projects into Turso through a single writer, and reactive consumers read the
+projection back through a CDC-driven mirror.
 
-**Location**: `crates/holon/src/sync/event_bus.rs`, `crates/holon/src/sync/event_subscriber.rs`
+**Location**: `crates/holon/src/sync/{loro_sync_controller,consolidator,live_data}.rs`. The
+residual `event_bus.rs` keeps only shared vocabulary (`EventOrigin`,
+`PublishErrorTracker`) — no bus.
 
-**Key Features:**
-- Unified event publication across all data sources
-- **Origin-based loop prevention**: Each `EventSubscriber` declares its `origin()` (e.g., "loro", "org") and skips events from its own origin
-- Event origin tracking (Loro, Org, Turso, UI)
-- Filter-based subscriptions via `EventSubscriber` trait
-
-**Event Flow (Authority + Projection):**
+**Block Flow (Authority → Projection → Reactive read):**
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                            Event Flow Architecture                            │
+│                              Block Sync Flow                                   │
 └──────────────────────────────────────────────────────────────────────────────┘
 
   OrgMode runtime update                Iroh P2P receives change
   (writes via cell layer)                       │
         │                                         │
         ▼                                         ▼
-  LoroOperationProvider                   CollaborativeDoc / Iroh apply
+  LoroBlockOperations                     IrohSyncAdapter / Iroh apply
   (Loro mutation + commit)                (CRDT merge into LoroDoc)
         │                                         │
         └──────────────────┬──────────────────────┘
                            ▼
                   LoroSyncController.on_loro_changed
-                  (observes commit, emits FieldsChanged)
+                  (observes commit, diffs vs base)
                            │
                            ▼
-                  EventBus [origin=loro]
+          LoroProjection / BlockConsolidator      ← single writer
+          (writes block_raw, tagged origin=loro on _change_origin)
+                           │
+                           ▼
+                  Turso CDC → block matview
                            │
             ┌──────────────┼──────────────────┐
             ▼              ▼                   ▼
-    SqlBlockProjector    OrgMode subscriber    Cell.signal()
-    (Turso write)        (skips origin=org,    fires for active
-            │             writes .org files)   consumers
-            ▼                                   │
-       CDC → matviews → UI cell signals ◄──────┘
+   LiveData<Block>   OrgMode re-render    Cell.signal()
+   (BlockFeed)       (FileSyncController,  fires for active
+        │             skips _change_origin consumers
+        ▼             = "loro" echoes)        │
+   block_link indexer ◄───────────────────────┘
+   (LinkEventSubscriber::start_from_live_data)
 ```
 
-**Loop Prevention via EventSubscriber:**
+**Loop Prevention via `_change_origin`:** every write is tagged with an
+`EventOrigin` (`Loro`, `Org`, `Todoist`, `Ui`, …) carried on the `_change_origin`
+CDC column. The inbound direction inspects that column and echo-suppresses changes
+carrying its own origin (e.g. the OrgMode re-render skips `_change_origin = "loro"`
+rows that are just its own projection echoing back). The chain also terminates
+because CRDT convergence makes re-applied writes no-ops.
 
-```rust
-pub trait EventSubscriber: Send + Sync {
-    fn origin(&self) -> &str;  // e.g., "loro", "org"
-    async fn handle_event(&self, event: &Event) -> Result<()>;
-    // Events with matching origin are automatically skipped
-}
-```
-
-This prevents infinite loops: OrgMode writes → Loro merge → EventBus [origin=loro] → OrgMode subscriber sees origin="loro" ≠ "org" → writes .org file → Loro merge → EventBus [origin=loro] → OrgMode subscriber writes .org... The chain terminates because each write produces the same resolved content (CRDT convergence), so the OrgMode subscriber detects no-change and stops.
+**External caches (directory/file, Todoist)** bypass blocks entirely: their sync
+providers expose a `tokio::broadcast` and the target `QueryableCache` ingests it
+directly via `QueryableCache::ingest_stream_with_metadata`. There is no reactive
+read mirror for them — nothing in the UI reacts to those rows beyond ordinary
+queries.
 
 **Startup Sequencing:**
 
-At startup, pending changes may exist in multiple sources. The defined sequence prevents lost updates:
+At startup, pending changes may exist in multiple sources. The defined sequence
+prevents lost updates:
 
 1. Turso loads from disk (instant, local)
 2. Loro loads CRDT state from disk (includes offline P2P changes)
-3. Loro compares state against Turso → publishes deltas [origin=loro]
+3. Loro diffs against its persisted base → projects deltas into `block_raw` [origin=loro]
 4. OrgMode scanner detects file changes → writes to store [origin=org]
-5. EventBus delivers org events to Loro → CRDT merges → publishes resolutions
+5. The org→block path applies org changes to Loro → CRDT merges → re-projects
 6. OrgMode writer receives any Loro resolutions → updates .org files
 
 Step 3 before step 4 ensures Loro's P2P state is "known" before org file diffs arrive.
 
-External systems remain server-authoritative via the existing QueryableCache pattern.
+External systems remain server-authoritative via the QueryableCache pattern above.
 
 ### Operation Log (Undo/Redo)
 

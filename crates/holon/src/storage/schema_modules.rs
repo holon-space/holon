@@ -296,8 +296,6 @@ impl SchemaModule for NavigationSchemaModule {
             Resource::schema("navigation_cursor"),
             Resource::schema("current_focus"),
             Resource::schema("focus_roots"),
-            Resource::schema("editor_cursor"),
-            Resource::schema("current_editor_focus"),
         ]
     }
 
@@ -327,10 +325,6 @@ impl SchemaModule for NavigationSchemaModule {
             (
                 "current_focus",
                 include_str!("../../sql/schema/matview_current_focus.sql"),
-            ),
-            (
-                "current_editor_focus",
-                include_str!("../../sql/schema/matview_current_editor_focus.sql"),
             ),
             (
                 "focus_roots",

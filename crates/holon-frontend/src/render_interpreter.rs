@@ -212,7 +212,7 @@ impl<W> RenderInterpreter<W> {
     pub fn parse_dsl(&self, source: &str) -> anyhow::Result<holon_api::render_types::RenderExpr> {
         let names = self.dsl_names();
         let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        holon::render_dsl::parse_render_dsl_with_names(source, &name_refs)
+        holon_api::render_dsl::parse_render_dsl_with_names(source, &name_refs)
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -529,7 +529,10 @@ pub fn shared_live_block_build<W>(ba: &BuilderArgs<'_, W>) -> Result<W, String> 
 /// needed for reactive subscriptions.
 pub struct LiveQueryResult<W> {
     pub content: W,
-    pub compiled_sql: String,
+    /// Source query text (PRQL/GQL/SQL) — compilation to SQL happens behind
+    /// the query capability when the platform layer subscribes.
+    pub query: String,
+    pub query_lang: holon_api::QueryLanguage,
     pub query_context_id: Option<String>,
     pub render_expr: holon_api::render_types::RenderExpr,
 }
@@ -562,14 +565,6 @@ pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryRe
         return Err("[empty query]".to_string());
     }
 
-    let query = if language != QueryLanguage::HolonPrql {
-        ba.services
-            .compile_to_sql(&query, language)
-            .map_err(|e| format!("Query compile error: {e}"))?
-    } else {
-        query
-    };
-
     let context_id = ba
         .args
         .get_string("context")
@@ -583,6 +578,7 @@ pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryRe
         });
 
     let query_context = context_id.as_ref().map(|id| {
+        // ALLOW(entity_uri_from_raw): context_id from render-spec arg or matview row 'id' field
         let uri = holon_api::EntityUri::from_raw(id);
         crate::QueryContext {
             current_block_id: Some(uri.clone()),
@@ -591,13 +587,13 @@ pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryRe
         }
     });
 
-    let sql = ba
+    // Validate-by-doing: start (and immediately drop) a watch. Compilation
+    // errors and missing-live-query capability both surface as an error
+    // render node, exactly as the old compile + start_query pair did. The
+    // platform layer starts the *real* watcher from the node props.
+    let result = ba
         .services
-        .compile_to_sql(&query, QueryLanguage::HolonPrql)
-        .unwrap_or_else(|_| query.clone());
-
-    let compiled_sql = sql.clone();
-    let result = ba.services.start_query(sql, query_context);
+        .watch_query(&query, language, query_context.clone());
 
     let deeper_ctx = ba.ctx.deeper_query();
 
@@ -626,7 +622,8 @@ pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryRe
             let content = (ba.interpret)(&live_query_render_expr, &child_ctx);
             Ok(LiveQueryResult {
                 content,
-                compiled_sql,
+                query,
+                query_lang: language,
                 query_context_id: context_id,
                 render_expr: live_query_render_expr,
             })
@@ -714,7 +711,7 @@ pub fn shared_render_entity_build<W>(ba: &BuilderArgs<'_, W>) -> RenderBlockResu
 /// Returns the first matching candidate's render expression, or falls back
 /// to the profile's default render.
 fn pick_active_variant(
-    profile: &holon::entity_profile::RowProfile,
+    profile: &holon_api::RenderProfile,
     ctx: &RenderContext,
     services: &dyn BuilderServices,
 ) -> RenderExpr {
@@ -727,6 +724,7 @@ fn pick_active_variant(
         .row()
         .get("id")
         .and_then(|v| v.as_string())
+        // ALLOW(entity_uri_from_raw): block_id from matview row 'id' field
         .map(|s| EntityUri::from_raw(s));
 
     let mut ui_state = match block_id {

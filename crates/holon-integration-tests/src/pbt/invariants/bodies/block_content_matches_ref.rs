@@ -12,7 +12,7 @@
 //! enables the storage backing.
 
 use holon_pbt_core::capabilities::{RefBlockTree, SutSqlProjection};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvBlockContentMatchesRef;
 
@@ -30,10 +30,6 @@ where
         Self::ID
     }
 
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
-    }
-
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         for id in ref_.all_non_seed_block_ids() {
             // Synthetic ref-side ids (`block::split-N`, `block::bulk-N-M`) get
@@ -41,7 +37,7 @@ where
             // synthetic id. Skip — the slice's role is content equality on
             // stable ids; the wider PBT's synthetic-id-mapping does the
             // cross-side reconciliation for these.
-            if id.as_str().contains("::split-") || id.as_str().contains("::bulk-") {
+            if crate::pbt::is_synthetic_ref_id(&id) {
                 continue;
             }
             let ref_content = match ref_.block_content(&id) {

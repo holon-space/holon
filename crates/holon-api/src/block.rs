@@ -327,28 +327,6 @@ pub struct Block {
 
     /// Unix timestamp (milliseconds) when block was last updated
     pub updated_at: i64,
-
-    /// Fractional-index sort key. Hex-encoded bytes consumed by
-    /// `gen_key_between` (`loro_fractional_index`). Defaults to
-    /// `"a0"` to match the SQL column default. Without this field on
-    /// the struct, `BlockEntity::sort_key()` had no actual sort_key
-    /// to return — it fell back to `self.id.as_str()` which contains
-    /// non-hex `:`/`-` characters and made `gen_key_between` panic
-    /// inside any `move_block` / `outdent` / `split_block` flow.
-    #[serde(default = "default_sort_key")]
-    pub sort_key: String,
-}
-
-fn default_sort_key() -> String {
-    // Must lex-sort consistently with `FractionalIndex::to_string()` outputs,
-    // which use upper-case hex (e.g. `"7F80"`, `"A180"`). Lower-case `"a0"`
-    // (ASCII 0x61) sorts AFTER `"FF"` but BEFORE `"a"` itself, so a default
-    // `"a0"` collides with — and lex-orders incorrectly against — keys
-    // produced by `gen_key_between(Some("a0"), None)` which returns
-    // `"A180"`. Upper-case `"A0"` keeps lex order in agreement with
-    // fractional-index order across both the SQL renderer and direct
-    // string compares.
-    "A0".to_string()
 }
 
 impl Default for Block {
@@ -367,7 +345,6 @@ impl Default for Block {
             marks: None,
             created_at: now,
             updated_at: now,
-            sort_key: default_sort_key(),
         }
     }
 }
@@ -718,9 +695,9 @@ impl Block {
     }
 }
 
-impl TryFrom<HashMap<String, Value>> for Block {
+impl TryFrom<crate::StorageEntity> for Block {
     type Error = anyhow::Error;
-    fn try_from(row: HashMap<String, Value>) -> Result<Self, Self::Error> {
+    fn try_from(row: crate::StorageEntity) -> Result<Self, Self::Error> {
         let id = row_id(&row).expect("No id found");
         let parent_id = uri_from_row(&row, "parent_id").expect("No parent_id found");
         let content = row
@@ -800,11 +777,6 @@ impl TryFrom<HashMap<String, Value>> for Block {
                 _ => Vec::new(),
             })
             .unwrap_or_default();
-        let sort_key = row
-            .get("sort_key")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string())
-            .unwrap_or_else(default_sort_key);
         let marks = row.get("marks").cloned().and_then(|v| match v {
             Value::Json(s) => {
                 Some(crate::marks_from_json(&s).expect("stored marks JSON must be valid"))
@@ -825,7 +797,6 @@ impl TryFrom<HashMap<String, Value>> for Block {
             marks,
             created_at,
             updated_at,
-            sort_key,
         })
     }
 }

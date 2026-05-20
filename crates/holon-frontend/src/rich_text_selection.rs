@@ -6,6 +6,7 @@
 //!
 //! # What this is NOT
 //!
+//! ALLOW(frontend-storage-backend): doc comment explaining the boundary, not an import
 //! - **Not a Loro cursor.** Cursors are framework-coupled (`loro::cursor::Cursor`
 //!   needs the `loro` crate). The GPUI integration layer owns the cursor
 //!   handles and re-resolves them to scalar positions after every backend

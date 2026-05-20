@@ -166,13 +166,28 @@ fn build_live_block(block_id: &str, ctx: &RenderContext) -> AnyView {
     let bid = block_id.to_string();
 
     let result = std::thread::scope(|s| {
-        s.spawn(|| handle.block_on(session.engine().blocks().render_entity(&bid, &None)))
-            .join()
-            .unwrap()
+        s.spawn(|| {
+            handle.block_on(async {
+                let mut watch = session
+                    // ALLOW(entity_uri_from_raw): render-spec build_live_block(block_id:&str) node value
+                    .watch_ui(&holon_api::EntityUri::from_raw(&bid))
+                    .await?;
+                loop {
+                    let event = watch.recv().await.ok_or_else(|| {
+                        anyhow::anyhow!("watch_ui stream closed before Structure event")
+                    })?;
+                    if let holon_api::UiEvent::Structure { render_expr, .. } = event {
+                        return Ok::<RenderExpr, anyhow::Error>(render_expr);
+                    }
+                }
+            })
+        })
+        .join()
+        .unwrap()
     });
 
     match result {
-        Ok((render_expr, _stream)) => {
+        Ok(render_expr) => {
             let child_ctx = deeper.with_data_rows(vec![]);
             interpret(&render_expr, &child_ctx)
         }

@@ -37,33 +37,25 @@ use validated::Validated;
 
 // The seven T0 transitions — same structs and same _cap fns the wide
 // PBT uses (`crate::pbt::transitions::*`).
+// `_weighted_generator` free fns are no longer imported: generation now
+// routes through the generic `TransitionFactory<EditorPureRef>` trait
+// impls via `holon_pbt_core::weighted_arm` (the shared aggregation path).
+// The `_apply_to_ref` fns are still called directly by `apply`.
 use holon_integration_tests::pbt::transitions::delete_backward::{
-    DeleteBackward, delete_backward_apply_to_ref, delete_backward_weighted_generator,
+    DeleteBackward, delete_backward_apply_to_ref,
 };
-use holon_integration_tests::pbt::transitions::indent::{
-    Indent, indent_apply_to_ref, indent_weighted_generator,
-};
-use holon_integration_tests::pbt::transitions::join_block::{
-    JoinBlock, join_block_apply_to_ref, join_block_weighted_generator,
-};
+use holon_integration_tests::pbt::transitions::indent::{Indent, indent_apply_to_ref};
+use holon_integration_tests::pbt::transitions::join_block::{JoinBlock, join_block_apply_to_ref};
 use holon_integration_tests::pbt::transitions::move_cursor::{
-    MoveCursor, move_cursor_apply_to_ref, move_cursor_weighted_generator,
+    MoveCursor, move_cursor_apply_to_ref,
 };
-use holon_integration_tests::pbt::transitions::move_down::{
-    MoveDown, move_down_apply_to_ref, move_down_weighted_generator,
-};
-use holon_integration_tests::pbt::transitions::move_up::{
-    MoveUp, move_up_apply_to_ref, move_up_weighted_generator,
-};
-use holon_integration_tests::pbt::transitions::outdent::{
-    Outdent, outdent_apply_to_ref, outdent_weighted_generator,
-};
+use holon_integration_tests::pbt::transitions::move_down::{MoveDown, move_down_apply_to_ref};
+use holon_integration_tests::pbt::transitions::move_up::{MoveUp, move_up_apply_to_ref};
+use holon_integration_tests::pbt::transitions::outdent::{Outdent, outdent_apply_to_ref};
 use holon_integration_tests::pbt::transitions::split_block::{
-    SplitBlock, split_block_apply_to_ref, split_block_weighted_generator,
+    SplitBlock, split_block_apply_to_ref,
 };
-use holon_integration_tests::pbt::transitions::type_chars::{
-    TypeChars, type_chars_apply_to_ref, type_chars_weighted_generator,
-};
+use holon_integration_tests::pbt::transitions::type_chars::{TypeChars, type_chars_apply_to_ref};
 
 // ─────────────────────────────────────────────────────────────────
 // EditorPureRef: in-memory backing for the pure slice
@@ -361,6 +353,12 @@ impl RefEditorMirrorMut for EditorPureRef {
 }
 
 impl RefFocus for EditorPureRef {
+    fn expected_focus_root_rows(&self) -> Vec<(String, Vec<String>)> {
+        Vec::new() // editor-pure slice has no focus roots
+    }
+    fn navigation_focus_rows(&self) -> Vec<(String, Option<String>)> {
+        Vec::new() // editor-pure slice has no navigation history
+    }
     fn current_focus(&self, _: CapRegion) -> Option<EntityUri> {
         self.focus_main.clone()
     }
@@ -441,36 +439,32 @@ impl PureTransition {
 }
 
 fn aggregate(state: &EditorPureRef) -> BoxedStrategy<PureTransition> {
+    use holon_pbt_core::weighted_arm;
     use proptest::strategy::Union;
     let mut arms: Vec<(u32, BoxedStrategy<PureTransition>)> = vec![];
 
-    if let Validated::Good((w, s)) = type_chars_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::TypeChars).boxed()));
+    // One arm per variant via the shared `holon_pbt_core::weighted_arm`
+    // helper, calling the SAME generic `TransitionFactory<EditorPureRef>`
+    // impls the wide PBT uses (no per-variant weight tuning → multiplier
+    // `1`; rejections discarded — the pure slice has no rejection log).
+    macro_rules! arm {
+        ($ty:ty, $variant:path) => {
+            if let Validated::Good(Some(a)) =
+                weighted_arm::<_, $ty, PureTransition>(state, 1, $variant)
+            {
+                arms.push(a);
+            }
+        };
     }
-    if let Validated::Good((w, s)) = delete_backward_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::DeleteBackward).boxed()));
-    }
-    if let Validated::Good((w, s)) = move_cursor_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::MoveCursor).boxed()));
-    }
-    if let Validated::Good((w, s)) = move_up_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::MoveUp).boxed()));
-    }
-    if let Validated::Good((w, s)) = move_down_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::MoveDown).boxed()));
-    }
-    if let Validated::Good((w, s)) = split_block_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::SplitBlock).boxed()));
-    }
-    if let Validated::Good((w, s)) = join_block_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::JoinBlock).boxed()));
-    }
-    if let Validated::Good((w, s)) = indent_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::Indent).boxed()));
-    }
-    if let Validated::Good((w, s)) = outdent_weighted_generator(state) {
-        arms.push((w, s.prop_map(PureTransition::Outdent).boxed()));
-    }
+    arm!(TypeChars, PureTransition::TypeChars);
+    arm!(DeleteBackward, PureTransition::DeleteBackward);
+    arm!(MoveCursor, PureTransition::MoveCursor);
+    arm!(MoveUp, PureTransition::MoveUp);
+    arm!(MoveDown, PureTransition::MoveDown);
+    arm!(SplitBlock, PureTransition::SplitBlock);
+    arm!(JoinBlock, PureTransition::JoinBlock);
+    arm!(Indent, PureTransition::Indent);
+    arm!(Outdent, PureTransition::Outdent);
 
     assert!(!arms.is_empty(), "no transitions applicable");
     Union::new_weighted(arms).boxed()
@@ -652,4 +646,32 @@ fn h4_microbenchmark_shared() {
     println!("Total wall:           {:?}", elapsed);
     println!("Per transition:       {:.1} µs", per_transition_us);
     println!("=============================================================");
+}
+
+// ── Phase 2 cross-medium proof: generic transition factories ──────────
+//
+// `EditorPureRef` is NOT the E2E `ReferenceState`; it implements only the
+// `Ref*` capability traits. These assertions compile only because the wide-PBT
+// transition `TransitionFactory`/`TransitionRef` impls are now generic over the
+// reference type (`impl<R: RefBlockTree + ...>`) rather than bound to the
+// concrete `ReferenceState`. If any reverts to `TransitionFactory<ReferenceState>`,
+// this stops compiling.
+
+fn assert_factory_ref_generic<R, T>()
+where
+    T: holon_pbt_core::TransitionFactory<R> + holon_pbt_core::TransitionRef<R>,
+{
+}
+
+#[test]
+fn wide_transition_factories_run_on_non_e2e_ref() {
+    assert_factory_ref_generic::<EditorPureRef, Indent>();
+    assert_factory_ref_generic::<EditorPureRef, Outdent>();
+    assert_factory_ref_generic::<EditorPureRef, SplitBlock>();
+    assert_factory_ref_generic::<EditorPureRef, JoinBlock>();
+    assert_factory_ref_generic::<EditorPureRef, MoveUp>();
+    assert_factory_ref_generic::<EditorPureRef, MoveDown>();
+    assert_factory_ref_generic::<EditorPureRef, TypeChars>();
+    assert_factory_ref_generic::<EditorPureRef, DeleteBackward>();
+    assert_factory_ref_generic::<EditorPureRef, MoveCursor>();
 }

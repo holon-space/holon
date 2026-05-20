@@ -62,7 +62,7 @@ fn turso_ivm_index_points_to_nonexistent_row() {
     rt.block_on(async {
         let env = TestEnvironmentBuilder::new()
             .without_loro()
-            .with_todoist_fake()
+            .with_fake_mcp()
             .with_org_file(
                 "index.org",
                 concat!(
@@ -145,7 +145,7 @@ fn turso_ivm_index_bug_stress() {
             rt.block_on(async {
                 let env = TestEnvironmentBuilder::new()
                     .without_loro()
-                    .with_todoist_fake()
+                    .with_fake_mcp()
                     .with_org_file(
                         "index.org",
                         format!(

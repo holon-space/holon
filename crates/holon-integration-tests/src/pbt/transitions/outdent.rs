@@ -8,7 +8,8 @@
 
 use holon_api::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapRegion, RefBlockTree, RefBlockTreeMut, RefLifecycle, SutBlockTreeWrite,
+    CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirrorMut, RefFocus, RefFocusMut,
+    RefLifecycle, SutBlockTreeWrite,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
@@ -38,6 +39,14 @@ pub fn outdent_preconditions<R: RefBlockTree + RefLifecycle>(
     let mut checks: Vec<Validated<(), Reason>> = vec![
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
+        // Block-interaction transitions need the block to render as an
+        // interactive widget (ops/draggable) reactively over the navigated
+        // focus. Only the default layout does; custom `index.org` query
+        // layouts don't (see RefLifecycle::renders_block_interactively).
+        check(
+            state.renders_block_interactively(block_id),
+            Reason::BlocksNotInteractiveUnderLayout,
+        ),
     ];
     checks.push(check(
         state.block_content(block_id).is_some(),
@@ -78,28 +87,37 @@ pub fn outdent_weighted_generator<R: RefBlockTree + RefLifecycle>(
     })
 }
 
-pub fn outdent_apply_to_ref<R: RefBlockTreeMut>(block_id: &EntityUri, state: &mut R) {
+pub fn outdent_apply_to_ref<
+    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut,
+>(
+    block_id: &EntityUri,
+    state: &mut R,
+) {
+    // Model the chord-dispatch click (see mod.rs::model_chord_click_focus).
+    super::model_chord_click_focus(block_id, state);
     state.push_undo_snapshot();
     state.outdent(block_id);
 }
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl TransitionFactory<ReferenceState> for Outdent {
+impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for Outdent {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         outdent_weighted_generator(state)
     }
 }
 
-impl TransitionRef<ReferenceState> for Outdent {
+impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut + RefLifecycle>
+    TransitionRef<R> for Outdent
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         outdent_preconditions(&self.block_id, state)
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         outdent_apply_to_ref(&self.block_id, state);
     }
 }
@@ -116,9 +134,9 @@ impl crate::pbt::transition_budgets::SqlBudget for Outdent {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.active_watches.len(),
-            state.block_state.blocks.len(),
-            state.documents.len(),
+            state.mcp.active_watches.len(),
+            state.domain.block_state.blocks.len(),
+            state.files.documents.len(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

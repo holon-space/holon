@@ -13,8 +13,8 @@ use std::sync::Arc;
 use fluxdi::{Injector, Module, ModuleLifecycleFuture, Shared};
 
 use holon::sync::block_cell_registry::BlockCellRegistry;
+use holon_app::FrontendInjectorExt;
 use holon_frontend::config::{HolonConfig, SessionConfig};
-use holon_frontend::frontend_module::FrontendInjectorExt;
 use holon_frontend::preferences::PrefKey;
 use holon_frontend::reactive::{
     make_interpret_fn, BuilderServices, BuilderServicesSlot, ReactiveEngine,
@@ -39,7 +39,7 @@ impl Module for TuiModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
         let db_path = self.holon_config.resolve_db_path(&self.config_dir);
 
-        holon::di::open_and_register_core(injector, db_path)
+        holon::di::open_and_register_core(injector, db_path, holon::di::StorageSelector::Turso)
             .map_err(|e| to_di_err("configure", &e))?;
 
         injector

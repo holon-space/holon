@@ -174,7 +174,7 @@ where
         let mut values = Vec::new();
 
         for field in &type_def.fields {
-            if let Some(value) = entity.fields.get(&field.name) {
+            if let Some(value) = entity.fields.get(field.name.as_str()) {
                 columns.push(field.name.clone());
                 placeholders.push("?");
                 values.push(value_to_turso(value));
@@ -244,7 +244,7 @@ where
         if let Some(entity_map) = results.into_iter().next() {
             let mut entity = DynamicEntity::new(&type_def.name);
             for (key, value) in entity_map {
-                entity.set(&key, value);
+                entity.set(key, value);
             }
             T::from_entity(entity).map(Some)
         } else {
@@ -295,9 +295,11 @@ where
 
         Ok(rows
             .into_iter()
-            .filter_map(|row| match row.get(&id_field) {
+            .filter_map(|row| match row.get(id_field.as_str()) {
+                // ALLOW(entity_uri_from_raw): id primary-key field from SQL row
                 Some(holon_api::Value::String(s)) => Some(holon_api::EntityUri::from_raw(s)),
                 Some(holon_api::Value::Integer(n)) => {
+                    // ALLOW(entity_uri_from_raw): id primary-key field from SQL row
                     Some(holon_api::EntityUri::from_raw(&n.to_string()))
                 }
                 _ => None,
@@ -744,7 +746,7 @@ where
                     for field in &schema.fields {
                         let turso_value = entity
                             .fields
-                            .get(&field.name)
+                            .get(field.name.as_str())
                             .map(value_to_turso)
                             .unwrap_or(turso::Value::Null);
                         values.push(turso_value);
@@ -777,7 +779,7 @@ where
                     for field in &schema.fields {
                         let turso_value = entity
                             .fields
-                            .get(&field.name)
+                            .get(field.name.as_str())
                             .map(value_to_turso)
                             .unwrap_or(turso::Value::Null);
                         values.push(turso_value);
@@ -874,6 +876,71 @@ where
             .map_err(|e| format!("Batch transaction failed: {}", e))?;
 
         Ok(())
+    }
+
+    /// Raw rows for an optional `WHERE` clause, every column preserved —
+    /// including columns the domain type `T` does not deserialize (e.g. the
+    /// internal `sort_key` ordering column, see ADR 0005). `where_sql` is a
+    /// trusted, code-authored fragment; bind user values through `params`.
+    /// No `ORDER BY` is applied (Turso IVM matviews ignore it); callers that
+    /// need order use [`query_ordered`](Self::query_ordered).
+    pub async fn query_raw(
+        &self,
+        where_sql: &str,
+        params: Vec<holon_api::Value>,
+    ) -> Result<Vec<StorageEntity>> {
+        let sql = if where_sql.is_empty() {
+            format!("SELECT * FROM {}", self.type_def.name)
+        } else {
+            format!("SELECT * FROM {} WHERE {}", self.type_def.name, where_sql)
+        };
+        let params: Vec<turso::Value> = params.iter().map(value_to_turso).collect();
+        self.db_handle
+            .query_positional(&sql, params)
+            .await
+            .map_err(|e| format!("query_raw failed: {}", e).into())
+    }
+
+    /// Read rows (optionally `WHERE`-filtered) and return the domain entities
+    /// in the order given by `order_cols`, comparing the raw column values
+    /// lexicographically. This is the single place the "Turso IVM cannot
+    /// `ORDER BY`" limitation is absorbed (ADR 0005, Phase 8): we sort
+    /// wrapper-side on the raw rows — which still carry the internal ordering
+    /// columns — before converting to `T`, so the domain entity never has to
+    /// carry an ordering encoding and downstream readers can trust the order.
+    pub async fn query_ordered(
+        &self,
+        where_sql: &str,
+        params: Vec<holon_api::Value>,
+        order_cols: &[&str],
+    ) -> Result<Vec<T>> {
+        let mut rows = self.query_raw(where_sql, params).await?;
+        rows.sort_by(|a, b| {
+            for col in order_cols {
+                let av = a.get(*col).and_then(|v| v.as_string()).unwrap_or("");
+                let bv = b.get(*col).and_then(|v| v.as_string()).unwrap_or("");
+                match av.cmp(bv) {
+                    std::cmp::Ordering::Equal => continue,
+                    ord => return ord,
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        let mut results = Vec::with_capacity(rows.len());
+        for storage_entity in rows {
+            let entity = DynamicEntity {
+                type_name: self.type_def.name.clone(),
+                fields: storage_entity,
+            };
+            let item = T::from_entity(entity).map_err(|e| {
+                format!(
+                    "[QueryableCache::query_ordered] from_entity failed for type {}: {}",
+                    self.type_def.name, e
+                )
+            })?;
+            results.push(item);
+        }
+        Ok(results)
     }
 }
 

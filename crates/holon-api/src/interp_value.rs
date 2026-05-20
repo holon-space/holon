@@ -16,6 +16,7 @@ use std::sync::Arc;
 use futures_signals::signal_vec::SignalVec;
 
 use crate::widget_spec::DataRow;
+use crate::EntityUri;
 use crate::Value;
 
 /// A value produced during render-expression interpretation.
@@ -62,7 +63,7 @@ pub trait ReactiveRowProvider: Send + Sync {
     /// code that needs to track per-row identity for `VecDiff::RemoveAt`.
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (String, Arc<DataRow>)> + Send>>;
+    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>>;
 
     /// Stable identity for caching and widget-identity keys. Must be
     /// stable for the lifetime of the provider; equal providers should
@@ -92,7 +93,7 @@ pub trait ReactiveRowProvider: Send + Sync {
     /// also no `.set()`, just no upstream to fire.
     fn row_mutable(
         &self,
-        _: &str,
+        _: &EntityUri,
     ) -> Option<futures_signals::signal::ReadOnlyMutable<Arc<DataRow>>> {
         None
     }

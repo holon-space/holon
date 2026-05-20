@@ -4,7 +4,7 @@
 //! are spawned internally via `start()` and cleaned up on `Drop`.
 //!
 //! ```text
-//! ReactiveQueryResults → ReactiveView (owns driver) → MutableVec<Arc<ReactiveViewModel>>
+//! ReactiveRenderedRows → ReactiveView (owns driver) → MutableVec<Arc<ReactiveViewModel>>
 //!                                                       ↓
 //!                                               Frontend shell subscribes
 //! ```
@@ -110,7 +110,7 @@ impl std::fmt::Debug for TrailingSlot {
 #[derive(Clone, Debug)]
 pub struct VirtualChildSlot {
     pub defaults: std::collections::HashMap<String, holon_api::Value>,
-    pub parent_id: String,
+    pub parent_id: holon_api::EntityUri,
 }
 
 /// Wraps a `ReactiveRowProvider` and appends a virtual DataRow at the end.
@@ -122,19 +122,19 @@ pub struct VirtualChildSlot {
 struct VirtualChildRowProvider {
     inner: Arc<dyn ReactiveRowProvider>,
     virtual_row: Arc<holon_api::widget_spec::DataRow>,
-    virtual_key: String,
+    virtual_key: holon_api::EntityUri,
 }
 
 impl VirtualChildRowProvider {
     fn new(inner: Arc<dyn ReactiveRowProvider>, slot: &VirtualChildSlot) -> Self {
         use holon_api::Value;
 
-        let virtual_key = format!("virtual:{}", slot.parent_id);
+        let virtual_id = format!("virtual:{}", slot.parent_id.as_str());
         let mut row = std::collections::HashMap::new();
-        row.insert("id".to_string(), Value::String(virtual_key.clone()));
+        row.insert("id".to_string(), Value::String(virtual_id));
         row.insert(
             "parent_id".to_string(),
-            Value::String(slot.parent_id.clone()),
+            Value::String(slot.parent_id.as_str().to_string()),
         );
         // sort_key MAX so it appears last in trees
         row.insert("sort_key".to_string(), Value::Float(f64::MAX));
@@ -142,6 +142,8 @@ impl VirtualChildRowProvider {
             row.insert(k.clone(), v.clone());
         }
 
+        let virtual_key =
+            holon_api::data_row_entity_uri(&row).expect("virtual child row carries an 'id' column");
         Self {
             inner,
             virtual_row: Arc::new(row),
@@ -175,7 +177,7 @@ impl ReactiveRowProvider for VirtualChildRowProvider {
     ) -> std::pin::Pin<
         Box<
             dyn futures_signals::signal_vec::SignalVec<
-                    Item = (String, Arc<holon_api::widget_spec::DataRow>),
+                    Item = (holon_api::EntityUri, Arc<holon_api::widget_spec::DataRow>),
                 > + Send,
         >,
     > {
@@ -574,7 +576,7 @@ impl ReactiveView {
     ///
     /// When a block's interpreted tree is structurally rebuilt, a brand-new
     /// `Arc<ReactiveView>` is created but it wraps the same underlying
-    /// `Arc<ReactiveQueryResults>` (the block's data source) and the same
+    /// `Arc<ReactiveRenderedRows>` (the block's data source) and the same
     /// item template. We derive the cache key from those — so a downstream
     /// consumer (`frontends/gpui/src/render/builders/mod.rs`) can reuse the
     /// same GPUI entity across rebuilds and preserve its `ListState`
@@ -607,7 +609,7 @@ impl ReactiveView {
                 ..
             } => {
                 // `cache_identity()` — trait method. Stable for the
-                // provider's lifetime; a concrete `ReactiveQueryResults`
+                // provider's lifetime; a concrete `ReactiveRenderedRows`
                 // hashes its inner `ReactiveRowSet`, so two QRs wrapping
                 // the same row set share identity (synthetic providers
                 // define their own identity policy).
@@ -778,7 +780,10 @@ impl ReactiveView {
         space: &Mutable<Option<AvailableSpace>>,
         services: Arc<dyn crate::reactive::BuilderServices>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        use crate::mutable_tree::{extract_parent_id, extract_sort_key, MutableTree};
+        use crate::mutable_tree::MutableTree;
+        use holon_api::widget_spec::{
+            data_row_parent_id as extract_parent_id, data_row_sort_key as extract_sort_key,
+        };
 
         // `tree` and `key_index` need to be reachable from both the data
         // driver and the focus driver (added below); wrap in Arc<Mutex<_>> so
@@ -786,8 +791,8 @@ impl ReactiveView {
         // currently in the tree so the focus driver can re-interpret affected
         // rows without going back to the backend.
         let tree = Arc::new(Mutex::new(MutableTree::new(self.items.clone())));
-        let key_index: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let row_map: Arc<Mutex<HashMap<String, Arc<holon_api::widget_spec::DataRow>>>> =
+        let key_index: Arc<Mutex<Vec<EntityUri>>> = Arc::new(Mutex::new(Vec::new()));
+        let row_map: Arc<Mutex<HashMap<EntityUri, Arc<holon_api::widget_spec::DataRow>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         // Capture the focus signal before `services` is moved into the
         // interpret closures below.
@@ -827,10 +832,8 @@ impl ReactiveView {
                         parent_space,
                     );
                 }
-                let handle = data
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .and_then(|id| ds.row_mutable(id));
+                let handle =
+                    holon_api::data_row_entity_uri(data).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(data.clone(), handle, svc.as_ref(), parent_space);
                 let fresh = svc.interpret(expr, &ctx);
                 fresh.props.get_cloned()
@@ -847,10 +850,8 @@ impl ReactiveView {
             let rules = config_rules;
             Arc::new(move |row: Arc<holon_api::widget_spec::DataRow>| {
                 let parent_space = space.get_cloned();
-                let handle = row
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .and_then(|id| ds.row_mutable(id));
+                let handle =
+                    holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
                 // FU-6: apply `rules:` per-row. Streaming has no count/is_last,
                 // so positional is empty — predicates can still match on row
@@ -981,14 +982,15 @@ impl ReactiveView {
                             // Collect ids whose `is_focused` predicate
                             // flipped: the previously focused block (now
                             // false) and the newly focused block (now
-                            // true). Row keys are bare ids (no `block:`
-                            // scheme); `EntityUri::id()` returns that.
-                            let mut affected: Vec<String> = Vec::new();
+                            // true). `last_focus`/`new_focus` are already
+                            // canonical `EntityUri`s and the row_map is keyed
+                            // by the same canonical id, so a bare-vs-schemed
+                            // mismatch can't drop the lookup.
+                            let mut affected: Vec<EntityUri> = Vec::new();
                             for opt in [last_focus.as_ref(), new_focus.as_ref()] {
                                 if let Some(uri) = opt {
-                                    let bare = uri.id().to_string();
-                                    if !affected.contains(&bare) {
-                                        affected.push(bare);
+                                    if !affected.contains(uri) {
+                                        affected.push(uri.clone());
                                     }
                                 }
                             }
@@ -999,20 +1001,20 @@ impl ReactiveView {
                             // row_map; we take row_map then tree, but the
                             // row_map lock is released first).
                             let updates: Vec<(
-                                String,
-                                Option<String>,
+                                EntityUri,
+                                Option<EntityUri>,
                                 String,
                                 Arc<ReactiveViewModel>,
                             )> = {
                                 let rm = row_map.lock().unwrap();
                                 affected
                                     .iter()
-                                    .filter_map(|id| {
-                                        rm.get(id).cloned().map(|row| {
+                                    .filter_map(|uri| {
+                                        rm.get(uri).cloned().map(|row| {
                                             let parent = extract_parent_id(&row);
                                             let sk = get_sort_key(&row);
                                             let w = interpret_row(row);
-                                            (id.clone(), parent, sk, w)
+                                            (uri.clone(), parent, sk, w)
                                         })
                                     })
                                     .collect()
@@ -1070,7 +1072,7 @@ impl ReactiveView {
         let space_handle = space.clone();
 
         // Shared entries for the two concurrent drivers.
-        let entries: Arc<Mutex<Vec<(String, Arc<holon_api::widget_spec::DataRow>)>>> =
+        let entries: Arc<Mutex<Vec<(EntityUri, Arc<holon_api::widget_spec::DataRow>)>>> =
             Arc::new(Mutex::new(Vec::new()));
 
         // Self-interpretation closure: captures services + space, recomputes
@@ -1102,10 +1104,8 @@ impl ReactiveView {
                         parent_space,
                     );
                 }
-                let handle = data
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .and_then(|id| ds.row_mutable(id));
+                let handle =
+                    holon_api::data_row_entity_uri(data).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(data.clone(), handle, svc.as_ref(), parent_space);
                 let fresh = svc.interpret(expr, &ctx);
                 fresh.props.get_cloned()
@@ -1127,10 +1127,8 @@ impl ReactiveView {
                   row: Arc<holon_api::widget_spec::DataRow>,
                   child_space: Option<AvailableSpace>|
                   -> Arc<ReactiveViewModel> {
-                let handle = row
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .and_then(|id| ds.row_mutable(id));
+                let handle =
+                    holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(row.clone(), handle, svc.as_ref(), child_space);
                 // FU-6: rules: per-row. Streaming has no count/is_last so the
                 // positional context is empty (column-only predicates fire).
@@ -1411,7 +1409,7 @@ impl ReactiveView {
 
         // Per-row entry tracking. Mirrors flat_driver's `entries` shape so
         // we can rebuild lanes deterministically on every event.
-        let entries: Arc<Mutex<Vec<(String, Arc<holon_api::widget_spec::DataRow>)>>> =
+        let entries: Arc<Mutex<Vec<(EntityUri, Arc<holon_api::widget_spec::DataRow>)>>> =
             Arc::new(Mutex::new(Vec::new()));
 
         let lane_field_for_partition = lane_field.clone();
@@ -1493,10 +1491,8 @@ impl ReactiveView {
                     let cards: Vec<Arc<ReactiveViewModel>> = rows
                         .into_iter()
                         .map(|row| {
-                            let handle = row
-                                .get("id")
-                                .and_then(|v| v.as_string())
-                                .and_then(|id| ds.row_mutable(id));
+                            let handle = holon_api::data_row_entity_uri(&row)
+                                .and_then(|uri| ds.row_mutable(&uri));
                             let ctx =
                                 row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
                             // FU-6: per-card rules: apply. Lane-position

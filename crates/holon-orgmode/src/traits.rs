@@ -22,7 +22,7 @@ pub trait BlockReader: Send + Sync {
     async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>>;
 
     /// Load `(file_id, content_hash)` pairs from the `file` table. Used by
-    /// `OrgSyncController` at startup to populate the projection-hash cache
+    /// `FileSyncController` at startup to populate the projection-hash cache
     /// (`last_projection_hash`) before CDC has replayed file events into
     /// the in-process cache — so we can short-circuit on-disk-unchanged
     /// re-ingests without doing a single block-table SQL op.
@@ -47,15 +47,20 @@ pub trait BlockReader: Send + Sync {
         Ok(())
     }
 
-    /// Phase 4: wait until the in-process block cache has applied every
-    /// event with `created_at <= target_ts`. Returns immediately if the
-    /// cache's ack watermark is already ahead of `target_ts`.
-    /// Bounded by `timeout_ms` so a stuck consumer surfaces as a loud
-    /// error rather than a deadlock — `Ok(false)` on timeout, `Ok(true)`
-    /// when the watermark caught up. Default impl returns `Ok(true)`
-    /// immediately for backends without an ack pipeline.
-    async fn wait_for_cache_caught_up(&self, _: i64, _: u64) -> Result<bool> {
-        Ok(true)
+    /// Phase 5 keystone: wait until the convergent block feed
+    /// (`LiveData<Block>`, the `block` matview CDC stream) contains every id in
+    /// `block_ids`. Returns `true` if all are present before `timeout_ms`,
+    /// `false` on timeout.
+    ///
+    /// This replaced the `event_acks` watermark wait (`wait_for_cache_caught_up`):
+    /// that wait was only a *timestamp proxy* for "the projection that produced
+    /// these blocks has landed", whereas this is a *positional* predicate over
+    /// the actual rows — it cannot return before the rows are visible, so it
+    /// closes the load-bearing stale-cache re-render race (R1) without the
+    /// watermark machinery. Default impl returns `true` for backends without a
+    /// feed (in-memory tests).
+    async fn wait_for_blocks_in_feed(&self, _: &[String], _: u64) -> bool {
+        true
     }
 
     /// Check if any of the given block IDs already exist under a DIFFERENT document.

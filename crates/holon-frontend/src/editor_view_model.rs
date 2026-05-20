@@ -51,6 +51,16 @@ pub enum EditorAction {
     /// Dispatch an operation (slash command selected, text synced on blur, etc.).
     Execute(OperationIntent),
 
+    /// Dispatch an operation AND strip the typed slash-command text first.
+    /// `strip_prefix_start` is the line-relative column of the "/" trigger;
+    /// the frontend must remove `line_start + strip_prefix_start .. cursor`
+    /// from the editor text BEFORE dispatching, otherwise "/delete" remains
+    /// in the block content and gets committed at the next commit point.
+    ExecuteAndStripCommand {
+        intent: OperationIntent,
+        strip_prefix_start: usize,
+    },
+
     /// Insert text at a position (wiki-link selected).
     /// `prefix_start` is the column where the trigger prefix started (e.g., `[[`).
     /// Frontend should replace text from `line_start + prefix_start` to `cursor` with `replacement`.
@@ -72,6 +82,14 @@ impl std::fmt::Debug for EditorAction {
             Self::PopupActivated { .. } => write!(f, "PopupActivated {{ signal: ... }}"),
             Self::PopupDismissed => write!(f, "PopupDismissed"),
             Self::Execute(intent) => write!(f, "Execute({:?})", intent),
+            Self::ExecuteAndStripCommand {
+                intent,
+                strip_prefix_start,
+            } => write!(
+                f,
+                "ExecuteAndStripCommand({:?}, strip_prefix_start={})",
+                intent, strip_prefix_start
+            ),
             Self::InsertText {
                 replacement,
                 prefix_start,
@@ -121,6 +139,11 @@ impl EditorViewModel {
     /// — CRDT pass-throughs return `None` / `Err` in that case.
     pub fn attach_cell(&mut self, cell: Cell<String>) {
         self.cell = Some(cell);
+        // A Loro `Cell` is now the per-keystroke content writer, so the
+        // handler must drop the redundant on-blur `set_field("content")` to
+        // avoid racing the Loro projection. Without a cell the flag stays
+        // `false` and the on-blur write remains the sole content writer.
+        self.handler.set_loro_content_writer(true);
     }
 
     /// Whether a [`Cell<String>`] is attached. Frontends should check
@@ -221,9 +244,10 @@ impl EditorViewModel {
     /// Called when the text content changes (every keystroke).
     ///
     /// `current_line` is the line the cursor is on.
-    /// `cursor_column` is the cursor's column within that line.
-    pub fn on_text_changed(&mut self, current_line: &str, cursor_column: usize) -> EditorAction {
-        let view_event = input_trigger::check_triggers(&self.triggers, current_line, cursor_column);
+    /// `cursor_byte` is the cursor BYTE offset within that line (GPUI callers
+    /// convert their character column first — see `check_triggers`).
+    pub fn on_text_changed(&mut self, current_line: &str, cursor_byte: usize) -> EditorAction {
+        let view_event = input_trigger::check_triggers(&self.triggers, current_line, cursor_byte);
 
         let result = if let Some(event) = view_event {
             self.handler.handle(event)
@@ -246,6 +270,29 @@ impl EditorViewModel {
         self.handle_result_to_action(result)
     }
 
+    /// Pending-text commit for a structural op ("structural ops are commit
+    /// points", docs/Architecture/UI.md). Same decision as `on_blur`'s
+    /// TextSync path — `Some(intent)` iff the live text diverged from the
+    /// authority's view AND this editor is the content writer (SqlOnly);
+    /// `None` when unchanged or when Loro's per-keystroke pipeline already
+    /// writes through. Like a blur, this re-baselines the change tracking:
+    /// the returned intent MUST be dispatched, ordered BEFORE the structural
+    /// op (`dispatch_intent_chain`), or the pending text is lost.
+    pub fn pending_commit_intent(&mut self, live_text: &str) -> Option<OperationIntent> {
+        let result = self.handler.handle(ViewEvent::TextSync {
+            value: live_text.to_string(),
+        });
+        match result {
+            HandleResult::PopupResult(PopupResult::Execute {
+                entity_name,
+                op_name,
+                params,
+                ..
+            }) => Some(OperationIntent::new(entity_name, op_name, params)),
+            _ => None,
+        }
+    }
+
     /// Called when a navigation key is pressed (Up/Down/Enter/Escape).
     ///
     /// If the popup is active, the key is routed to the popup.
@@ -257,6 +304,12 @@ impl EditorViewModel {
                 EditorKey::Enter => EditorAction::None, // let Input handle newline
                 EditorKey::Escape => EditorAction::Propagate,
                 EditorKey::Up | EditorKey::Down => EditorAction::Propagate,
+                // Structural keys are routed through `structural_block_action`
+                // by the frontend, not the popup controller — propagate so the
+                // medium's own handler runs.
+                EditorKey::Backspace | EditorKey::Tab | EditorKey::BackTab => {
+                    EditorAction::Propagate
+                }
             };
         }
 
@@ -265,6 +318,11 @@ impl EditorViewModel {
             EditorKey::Down => MenuKey::Down,
             EditorKey::Enter => MenuKey::Enter,
             EditorKey::Escape => MenuKey::Escape,
+            // Not popup-navigation keys; let the frontend's structural/char
+            // handling run instead of consuming them in the menu.
+            EditorKey::Backspace | EditorKey::Tab | EditorKey::BackTab => {
+                return EditorAction::Propagate;
+            }
         };
 
         let result = self.handler.on_key(menu_key);
@@ -346,7 +404,17 @@ impl EditorViewModel {
                 entity_name,
                 op_name,
                 params,
-            } => EditorAction::Execute(OperationIntent::new(entity_name, op_name, params)),
+                strip_prefix_start,
+            } => {
+                let intent = OperationIntent::new(entity_name, op_name, params);
+                match strip_prefix_start {
+                    Some(strip_prefix_start) => EditorAction::ExecuteAndStripCommand {
+                        intent,
+                        strip_prefix_start,
+                    },
+                    None => EditorAction::Execute(intent),
+                }
+            }
             PopupResult::InsertText {
                 replacement,
                 prefix_start,
@@ -367,6 +435,49 @@ pub enum EditorKey {
     Down,
     Enter,
     Escape,
+    /// Backspace. Structural only at caret 0 (join with previous block);
+    /// elsewhere it's a per-medium char delete (see [`structural_block_action`]).
+    Backspace,
+    /// Tab → indent.
+    Tab,
+    /// Shift+Tab → outdent.
+    BackTab,
+}
+
+/// The structural block operation a key triggers when no popup/completion is
+/// active, given the caret byte offset. This is the single source of truth for
+/// the Enter→split / Backspace-at-0→join / Tab→indent / Shift+Tab→outdent
+/// decision, shared by every frontend so the real UI (GPUI `editor_view`
+/// capture handlers) and the test harness (`HeadlessEditorMirror`) can't drift.
+///
+/// Returns `None` for keys that don't map to a structural op at this caret
+/// (plain char input, cursor moves, mid-line backspace) — the caller applies
+/// those in its own medium: GPUI lets `InputState` consume them, the headless
+/// mirror mutates its `MutableText` + cursor model directly.
+///
+/// `target_id` is the block the op acts on (the focused leaf, which a GPUI
+/// Page-level editor resolves via `services.focused_block()`); `cursor_byte`
+/// is the caret offset used to position a split.
+pub fn structural_block_action(
+    key: EditorKey,
+    target_id: &str,
+    cursor_byte: usize,
+) -> Option<OperationIntent> {
+    let intent = |op: &str, position: Option<i64>| {
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(target_id.to_string()));
+        if let Some(p) = position {
+            params.insert("position".to_string(), Value::Integer(p));
+        }
+        OperationIntent::new(EntityName::new("block"), op.to_string(), params)
+    };
+    match key {
+        EditorKey::Enter => Some(intent("split_block", Some(cursor_byte as i64))),
+        EditorKey::Backspace if cursor_byte == 0 => Some(intent("join_block", Some(0))),
+        EditorKey::Tab => Some(intent("indent", None)),
+        EditorKey::BackTab => Some(intent("outdent", None)),
+        EditorKey::Backspace | EditorKey::Up | EditorKey::Down | EditorKey::Escape => None,
+    }
 }
 
 /// Marks that fully cover `[range.start, range.end)`.
@@ -541,6 +652,30 @@ mod tests {
         let mut ctrl = test_controller();
         let action = ctrl.on_blur("original");
         assert!(matches!(action, EditorAction::None));
+    }
+
+    #[test]
+    fn blur_with_changed_text_drops_content_when_loro_cell_attached() {
+        // When a Loro content writer (`Cell`) is attached, the per-keystroke
+        // pipeline owns content persistence; the on-blur `set_field("content")`
+        // must be dropped to avoid racing the Loro projection. Without a cell
+        // (SqlOnly mode) it MUST fire — that case is covered by
+        // `blur_with_changed_text_executes`.
+        use holon_core::cell::{CellBacking, LwwTextCellBacking};
+        let mut ctrl = test_controller();
+        let backing = std::sync::Arc::new(LwwTextCellBacking::new(
+            std::sync::Arc::new(|| "original".to_string()),
+            std::sync::Arc::new(|_| Box::pin(async { Ok(()) })),
+            std::sync::Arc::new(|| Box::pin(futures::stream::empty())),
+        ));
+        ctrl.attach_cell(Cell::from_backing(
+            backing as std::sync::Arc<dyn CellBacking<String>>,
+        ));
+        let action = ctrl.on_blur("new text");
+        assert!(
+            matches!(action, EditorAction::None),
+            "content set_field must be dropped when a Loro cell is the writer, got {action:?}"
+        );
     }
 
     #[test]

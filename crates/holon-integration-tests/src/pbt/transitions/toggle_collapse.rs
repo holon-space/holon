@@ -45,7 +45,7 @@ impl TransitionRef<ReferenceState> for ToggleCollapse {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        if !state.app_started {
+        if !state.action.app_started {
             return Validated::fail(Reason::AppNotStarted);
         }
         let ref_view = LayoutRef::new(state);
@@ -63,7 +63,7 @@ impl TransitionRef<ReferenceState> for ToggleCollapse {
         // ref state must reflect that so subsequent preconditions stay
         // accurate.
         let uri = parse_target(&self.target_id);
-        state.expanded_toggles.remove(&uri);
+        state.ui.tab.expanded_toggles.remove(&uri);
     }
 }
 

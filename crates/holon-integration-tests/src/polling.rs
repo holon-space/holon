@@ -75,8 +75,14 @@ pub async fn wait_for_block(ctx: &E2ETestContext, block_id: &str, timeout: Durat
     .await
 }
 
-/// Wait until file content matches a condition.
-pub async fn wait_for_file_condition<F>(file_path: &Path, condition: F, timeout: Duration) -> bool
+/// Wait until file content matches a condition (reads through the
+/// `FileSystem` port — ADR 0011).
+pub async fn wait_for_file_condition<F>(
+    fs: &dyn holon_filesystem::FileSystem,
+    file_path: &Path,
+    condition: F,
+    timeout: Duration,
+) -> bool
 where
     F: Fn(&str) -> bool,
 {
@@ -84,7 +90,7 @@ where
     let start = Instant::now();
 
     while start.elapsed() < timeout {
-        if let Ok(content) = tokio::fs::read_to_string(file_path).await
+        if let Ok(content) = fs.read_to_string(file_path).await
             && condition(&content)
         {
             return true;

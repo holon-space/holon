@@ -52,7 +52,7 @@ pub trait FixtureAssertable {
 /// The inner `E2ESut` carries the capability impls, so it evaluates assertions
 /// directly. The `declare_pbt_slice!` wrapper SUT delegates here. The real-GPUI
 /// replay drives `E2ESut<Full>` as `S` directly, so it uses this impl too.
-impl<V: crate::pbt::VariantMarker> FixtureAssertable for crate::pbt::E2ESut<V> {
+impl FixtureAssertable for crate::pbt::E2ESut {
     fn evaluate_assert(
         &self,
         assertion: &Assertion,
@@ -67,7 +67,40 @@ impl<V: crate::pbt::VariantMarker> FixtureAssertable for crate::pbt::E2ESut<V> {
 pub struct NamedFixture {
     pub name: String,
     pub description: String,
+    /// Wiring the sequence was recorded under (`Fixture.environment.wiring`).
+    /// `None` for hand-authored sources (Gherkin, pre-header captures) —
+    /// replayers fall back to `Wiring::full()`.
+    pub wiring: Option<holon_pbt_core::Wiring>,
+    /// Editor-shape env flags recorded at capture time
+    /// (`Fixture.environment.env_flags`, keys from
+    /// `holon_pbt_core::fixture::CAPTURE_ENV_FLAGS`). Replaying under
+    /// different flags changes the transition alphabet — preconditions
+    /// like `LoroRequiredForAtomicEditor` consult them — so out-of-process
+    /// replayers (the windowed minimizer) must apply these before stepping.
+    /// Empty for hand-authored sources.
+    pub env_flags: std::collections::BTreeMap<String, String>,
     pub steps: Vec<FixtureStep>,
+}
+
+impl NamedFixture {
+    /// Apply the recorded editor-shape flags to the process env so replay
+    /// preconditions see the same transition alphabet the capture was
+    /// generated under. Recognized flags absent from the capture are
+    /// REMOVED (recorded-as-unset). Only for out-of-process replayers
+    /// (windowed minimizer, capture replay) — in-process shrinkers already
+    /// run under the generating env, and Gherkin fixtures record no flags.
+    pub fn apply_recorded_env_flags(&self) {
+        for key in holon_pbt_core::fixture::CAPTURE_ENV_FLAGS {
+            match self.env_flags.get(*key) {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        eprintln!(
+            "[fixture {}] applied recorded env flags: {:?}",
+            self.name, self.env_flags
+        );
+    }
 }
 
 /// A provider of [`NamedFixture`]s (JSON files, Gherkin scenarios, …).
@@ -83,26 +116,30 @@ pub trait FixtureSource {
 /// Replay every fixture from every source through the SUT machine with strict
 /// semantics. A missing source dir yields zero fixtures (no-op) — a slice may
 /// declare a fixtures dir before any fixtures exist.
-pub fn run_fixtures<M, S, V>(sources: &[Box<dyn FixtureSource>])
+pub fn run_fixtures<M, S>(sources: &[Box<dyn FixtureSource>])
 where
-    V: crate::pbt::VariantMarker,
-    M: ReferenceStateMachine<State = crate::pbt::VariantRef<V>, Transition = E2ETransition>,
+    M: ReferenceStateMachine<State = crate::pbt::ReferenceState, Transition = E2ETransition>,
     S: StateMachineTest<SystemUnderTest = S, Reference = M> + FixtureAssertable,
 {
+    // Pin the primary's Loro peer id below the SUT's peer ids (peer_idx+100)
+    // so concurrent same-position inserts tie-break the same way as the
+    // reference's `loro_merge_text` oracle (primary=1 < peer=2). With a
+    // random primary id the merge interleaving flips per run — the axis-3
+    // conflict fixture caught exactly that.
+    crate::pbt::set_loro_peer_id_if_unset("1");
     for source in sources {
         let kind = source.kind();
         for fixture in source.load() {
-            replay_one::<M, S, V>(kind, &fixture);
+            replay_one::<M, S>(kind, &fixture);
         }
     }
 }
 
 /// Replay a single feature file (used by the Phase-1 proof-point tests).
 /// Asserts the file yields at least one scenario.
-pub fn run_feature_strict<M, S, V>(path: impl AsRef<Path>)
+pub fn run_feature_strict<M, S>(path: impl AsRef<Path>)
 where
-    V: crate::pbt::VariantMarker,
-    M: ReferenceStateMachine<State = crate::pbt::VariantRef<V>, Transition = E2ETransition>,
+    M: ReferenceStateMachine<State = crate::pbt::ReferenceState, Transition = E2ETransition>,
     S: StateMachineTest<SystemUnderTest = S, Reference = M> + FixtureAssertable,
 {
     let path = path.as_ref();
@@ -113,14 +150,13 @@ where
         path.display()
     );
     for fixture in &fixtures {
-        replay_one::<M, S, V>("gherkin", fixture);
+        replay_one::<M, S>("gherkin", fixture);
     }
 }
 
-fn replay_one<M, S, V>(kind: &str, fixture: &NamedFixture)
+fn replay_one<M, S>(kind: &str, fixture: &NamedFixture)
 where
-    V: crate::pbt::VariantMarker,
-    M: ReferenceStateMachine<State = crate::pbt::VariantRef<V>, Transition = E2ETransition>,
+    M: ReferenceStateMachine<State = crate::pbt::ReferenceState, Transition = E2ETransition>,
     S: StateMachineTest<SystemUnderTest = S, Reference = M> + FixtureAssertable,
 {
     eprintln!(
@@ -139,7 +175,7 @@ where
     let label = format!("fixtures:{kind} {:?}", fixture.name);
     // Headless replay needs no post-StartApp setup; the GPUI path passes a
     // hook here to launch a window + swap in a real driver.
-    let _sut = replay_steps::<M, S, V>(&label, &fixture.steps, ref_state, sut, |_| {});
+    let _sut = replay_steps::<M, S>(&label, &fixture.steps, ref_state, sut, |_| {}, None);
 
     eprintln!("[fixtures:{kind}] {:?} OK", fixture.name);
 }
@@ -153,18 +189,19 @@ where
 ///
 /// `after_start_app` fires once, immediately after the StartApp transition's
 /// invariants pass (the point at which the `ReactiveEngine` exists).
-pub fn replay_steps<M, S, V>(
+pub fn replay_steps<M, S>(
     label: &str,
     steps: &[FixtureStep],
     mut ref_state: M::State,
     mut sut: S,
     mut after_start_app: impl FnMut(&mut S),
+    seen_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 ) -> S
 where
-    V: crate::pbt::VariantMarker,
-    M: ReferenceStateMachine<State = crate::pbt::VariantRef<V>, Transition = E2ETransition>,
+    M: ReferenceStateMachine<State = crate::pbt::ReferenceState, Transition = E2ETransition>,
     S: StateMachineTest<SystemUnderTest = S, Reference = M> + FixtureAssertable,
 {
+    let mut timing = crate::pbt::stepper::StepTimingAgg::default();
     for (i, step) in steps.iter().enumerate() {
         match step {
             FixtureStep::Action(t) => {
@@ -174,12 +211,52 @@ where
                      — the fixture encodes a stale assumption",
                     t.variant_name()
                 );
+                // Mark this transition seen BEFORE applying it (matching
+                // proptest-state-machine's `test_sequential`): the proptest
+                // shrinker's first step deletes never-seen trailing transitions,
+                // so the *failing* transition must be counted before it panics or
+                // the shrinker drops the very transition that reproduces. `None`
+                // outside the windowed proptest path (the library leaves it
+                // `None` during shrink runs too).
+                if let Some(counter) = seen_counter.as_ref() {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let is_start_app = t.variant_name() == "StartApp";
                 ref_state = M::apply(ref_state, t);
+                let t_apply = std::time::Instant::now();
                 sut = S::apply(sut, &ref_state, t.clone());
+                let apply_ms = t_apply.elapsed().as_millis();
+                let t_check = std::time::Instant::now();
                 S::check_invariants(&sut, &ref_state);
+                let check_ms = t_check.elapsed().as_millis();
+                timing.record(t.variant_name(), apply_ms, check_ms);
+                if crate::pbt::stepper::step_timing_enabled() {
+                    eprintln!(
+                        "[step_timing] step={} {} apply_ms={apply_ms} check_ms={check_ms}",
+                        i + 1,
+                        t.variant_name(),
+                    );
+                }
                 if is_start_app {
                     after_start_app(&mut sut);
+                }
+                // Fault injection (mirrors the incremental generator's hook in
+                // `phased::run_driver_step`): a deterministic forced failure after
+                // the 1-based step `HOLON_PBT_FORCE_FAIL_AT_STEP`, so the windowed
+                // proptest shrinker + capture pipeline can be exercised without a
+                // flaky real seed. The message carries the `format_layer_report`
+                // marker so the shrinker's default signature recognizes it; the
+                // shrinker reduces the sequence down to this step. No effect unless
+                // the env var is set.
+                if let Ok(n) = std::env::var("HOLON_PBT_FORCE_FAIL_AT_STEP") {
+                    if n.parse::<usize>().ok() == Some(i + 1) {
+                        panic!(
+                            "HOLON_PBT_FORCE_FAIL_AT_STEP={n}: forced failure after step {} \
+                             ({}) — trouble begins at: forced-fault",
+                            i + 1,
+                            t.variant_name()
+                        );
+                    }
                 }
             }
             FixtureStep::Assert(assertion) => {
@@ -196,5 +273,6 @@ where
             }
         }
     }
+    timing.finish(label);
     sut
 }

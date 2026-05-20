@@ -1,6 +1,5 @@
-//! Phase 7 — `inv-frontend-no-error-widgets`.
+//! `inv-frontend-no-error-widgets`.
 //!
-//! Body derived from `sut.rs:6049–6064` (inv-frontend-engine sub-check 14b).
 //! Asserts no Error widgets exist in the rendered frontend ViewModel tree.
 //!
 //! 2-subsystem invariant — ViewModel + FrontendBounds. The BoundsRegistry
@@ -8,7 +7,7 @@
 //! back to the ViewModel tree when no geometry provider is installed.
 
 use holon_pbt_core::capabilities::{SutLayout, SutViewModel};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvFrontendNoErrorWidgets;
 
@@ -23,10 +22,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

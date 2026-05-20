@@ -1,7 +1,7 @@
-//! `StubSut` — an in-process `LoroSyncController` running against in-memory
-//! stubs for `OperationProvider` and `EventBus`.
+//! `StubSut` — an in-process `LoroSyncController` running against an in-memory
+//! stub `OperationProvider`.
 //!
-//! The stub implementations live inside this module so the Layer 3 PBT
+//! The stub implementation lives inside this module so the Layer 3 PBT
 //! (`tests/loro_sync_controller_pbt.rs`) can wire up a complete controller
 //! without pulling in Turso, the command bus, or any DI machinery.
 
@@ -14,11 +14,8 @@ use async_trait::async_trait;
 use holon::core::datasource::{
     OperationDescriptor, OperationProvider, OperationResult, Result as DatasourceResult,
 };
-use holon::storage::types::Result as StorageResult;
 use holon::storage::types::StorageEntity;
-use holon::sync::event_bus::{
-    CommandId, Consumer, Event, EventBus, EventFilter, EventId, EventOrigin, EventStream,
-};
+use holon::sync::event_bus::EventOrigin;
 use holon::sync::multi_peer::{GroupState, GroupTransition, sync_docs_direct};
 use holon::sync::{LoroDocumentStore, LoroSyncController, LoroSyncControllerHandle};
 use holon_api::EntityName;
@@ -39,7 +36,6 @@ pub struct StubSut {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     controller_handle: Option<LoroSyncControllerHandle>,
     stub_ops: Arc<StubOperationProvider>,
-    event_bus: Arc<StubEventBus>,
 }
 
 impl std::fmt::Debug for StubSut {
@@ -68,7 +64,6 @@ impl StubSut {
         }
 
         let stub_ops = Arc::new(StubOperationProvider::new());
-        let event_bus = Arc::new(StubEventBus::new());
 
         let mut sut = Self {
             _tempdir: tempdir,
@@ -76,7 +71,6 @@ impl StubSut {
             doc_store,
             controller_handle: None,
             stub_ops,
-            event_bus,
         };
         sut.start_controller().await?;
         Ok(sut)
@@ -269,13 +263,13 @@ impl LoroSyncSut for StubSut {
         let blocks = holon::api::snapshot_blocks_from_doc(doc);
         blocks
             .into_iter()
-            .map(|(id, block)| {
+            .map(|(id, snap)| {
                 (
                     id.clone(),
                     BlockSnapshot {
                         id,
-                        parent_id: block.parent_id.to_string(),
-                        content: block.content,
+                        parent_id: snap.block.parent_id.to_string(),
+                        content: snap.block.content,
                     },
                 )
             })
@@ -351,12 +345,17 @@ impl StubOperationProvider {
 impl holon::sync::SinkReader for StubOperationProvider {
     async fn read_blocks(
         &self,
-    ) -> Result<std::collections::HashMap<String, holon_api::block::Block>> {
+    ) -> Result<std::collections::HashMap<String, holon::api::SnapshotBlock>> {
         let blocks = self.blocks.lock().await;
         let mut out = std::collections::HashMap::with_capacity(blocks.len());
         for (id, params) in blocks.iter() {
+            let sort_key = params
+                .get("sort_key")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "A0".to_string());
             let block = holon_api::block::Block::try_from(params.clone())?;
-            out.insert(id.clone(), block);
+            out.insert(id.clone(), holon::api::SnapshotBlock { block, sort_key });
         }
         Ok(out)
     }
@@ -424,67 +423,5 @@ impl OperationProvider for StubOperationProvider {
             OperationResult::irreversible(Vec::new());
             operations.len()
         ])
-    }
-}
-
-// -- Stub EventBus --------------------------------------------------------
-
-/// A minimal no-op `EventBus`. The bridge PBT does not inject inbound
-/// events in v1 — it only exercises the outbound (Loro → command bus)
-/// direction via Loro doc mutations. This stub satisfies the trait so
-/// `LoroSyncController::start` can call `subscribe` without plumbing a
-/// real event bus.
-pub struct StubEventBus {
-    /// The sender end of the subscription channel is held here so the
-    /// stub can optionally inject events into the controller's inbound
-    /// branch. v1 doesn't exercise that — the channel exists but is never
-    /// sent into from outside.
-    tx: Mutex<Option<tokio::sync::mpsc::Sender<Event>>>,
-}
-
-impl Default for StubEventBus {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StubEventBus {
-    pub fn new() -> Self {
-        Self {
-            tx: Mutex::new(None),
-        }
-    }
-}
-
-#[async_trait]
-impl EventBus for StubEventBus {
-    async fn publish(&self, _: Event, _: Option<CommandId>) -> StorageResult<EventId> {
-        // The controller only ever publishes via `execute_batch_with_origin`,
-        // which goes through the stub `OperationProvider`. A real EventBus
-        // publish is never called in the stub path.
-        Ok("stub".to_string())
-    }
-
-    async fn subscribe(&self, _: EventFilter, _: Consumer) -> StorageResult<EventStream> {
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
-        *self.tx.lock().await = Some(tx);
-        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
-    }
-
-    async fn mark_processed(&self, _: &EventId, _: Consumer) -> StorageResult<()> {
-        Ok(())
-    }
-
-    async fn update_status(
-        &self,
-        _: &EventId,
-        _: holon::sync::event_bus::EventStatus,
-        _: Option<String>,
-    ) -> StorageResult<()> {
-        Ok(())
-    }
-
-    async fn link_speculative(&self, _: &EventId, _: &EventId) -> StorageResult<()> {
-        Ok(())
     }
 }

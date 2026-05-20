@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -6,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
+use holon_api::EntityUri;
 use holon_api::reactive::ReactiveStreamExt;
 use holon_api::render_types::{Arg, RenderExpr};
 use holon_api::streaming::{
@@ -13,7 +13,6 @@ use holon_api::streaming::{
     WatcherCommand,
 };
 use holon_api::widget_spec::EnrichedRow;
-use holon_api::{EntityUri, Value};
 
 use super::backend_engine::BackendEngine;
 use crate::entity_profile::ProfileResolving;
@@ -80,6 +79,16 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
     aborts.push(watcher_handle.abort_handle());
 
     Ok(WatchHandle::with_aborts(output_rx, command_tx, aborts))
+}
+
+pub use holon_api::ui_watcher::UiWatcher;
+
+#[async_trait::async_trait]
+impl UiWatcher for BackendEngine {
+    async fn watch_ui(self: Arc<Self>, block_id: EntityUri) -> Result<WatchHandle> {
+        // Call the free function (path resolution → not the trait method).
+        self::watch_ui(self, block_id).await
+    }
 }
 
 /// Merge structural CDC events, WatcherCommands, and profile cache changes
@@ -343,25 +352,19 @@ pub fn enrich_batch(
 
 /// Enrich a raw storage row into an `EnrichedRow`.
 ///
-/// Delegates to `EnrichedRow::from_raw` — the only constructor.
+/// Delegates to `EnrichedRow::from_storage` — the enrichment constructor.
 pub fn enrich_row(
-    data: HashMap<String, Value>,
+    data: holon_api::StorageEntity,
     resolver: &Arc<dyn ProfileResolving>,
 ) -> EnrichedRow {
     let resolver = resolver.clone();
-    EnrichedRow::from_raw(data, |row| {
+    EnrichedRow::from_storage(data, |row| {
         let (_profile, computed) = ProfileResolving::resolve_with_computed(resolver.as_ref(), row);
         computed
     })
 }
 
-/// Batched enriched change stream — the output of `enrich_stream`.
-pub type EnrichedChangeStream = tokio_stream::wrappers::ReceiverStream<
-    holon_api::streaming::WithMetadata<
-        holon_api::streaming::Batch<holon_api::streaming::EnrichedChange>,
-        holon_api::streaming::BatchMetadata,
-    >,
->;
+use holon_api::EnrichedChangeStream;
 
 /// Wrap a raw `RowChangeStream` with enrichment (flatten_properties + computed fields).
 ///

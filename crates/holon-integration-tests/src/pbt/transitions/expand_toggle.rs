@@ -41,10 +41,12 @@ impl TransitionFactory<ReferenceState> for ExpandToggle {
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let candidates: Vec<EntityUri> = state
+            .domain
             .render_expressions
             .iter()
             .filter(|(uri, expr)| {
-                rhai_mentions(expr, "expand_toggle") && !state.expanded_toggles.contains(*uri)
+                rhai_mentions(expr, "expand_toggle")
+                    && !state.ui.tab.expanded_toggles.contains(*uri)
             })
             .map(|(uri, _)| uri.clone())
             .collect();
@@ -65,20 +67,20 @@ impl TransitionRef<ReferenceState> for ExpandToggle {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
-                state.render_expressions.contains_key(&self.block_id),
+                state.domain.render_expressions.contains_key(&self.block_id),
                 Reason::FocusedBlockMissing,
             ),
         ];
-        if let Some(expr) = state.render_expressions.get(&self.block_id) {
+        if let Some(expr) = state.domain.render_expressions.get(&self.block_id) {
             checks.push(check(
                 rhai_mentions(expr, "expand_toggle"),
                 Reason::PreconditionFailed,
             ));
         }
         checks.push(check(
-            !state.expanded_toggles.contains(&self.block_id),
+            !state.ui.tab.expanded_toggles.contains(&self.block_id),
             Reason::ToggleAlreadyExpanded,
         ));
         checks
@@ -88,7 +90,7 @@ impl TransitionRef<ReferenceState> for ExpandToggle {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.expanded_toggles.insert(self.block_id.clone());
+        state.ui.tab.expanded_toggles.insert(self.block_id.clone());
     }
 }
 

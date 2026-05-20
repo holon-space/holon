@@ -314,6 +314,7 @@ mod backend {
         );
 
         let (reactive, runtime) = reactive_and_rt("watch_view")?;
+        // ALLOW(entity_uri_from_raw): NAPI/FFI block_id String from JS worker caller
         let block_uri = holon_api::EntityUri::from_raw(&block_id);
 
         // Allocate handle BEFORE spawning so the task can self-remove on
@@ -399,6 +400,7 @@ mod backend {
     /// B4: switch the active render variant for a watched block.
     pub(super) fn set_variant(block_id: String, variant: String) -> napi::Result<()> {
         let (reactive, runtime) = reactive_and_rt("set_variant")?;
+        // ALLOW(entity_uri_from_raw): NAPI/FFI block_id String from JS worker caller
         let block_uri = holon_api::EntityUri::from_raw(&block_id);
         runtime
             .block_on(async { reactive.set_variant(&block_uri, variant).await })
@@ -411,6 +413,7 @@ mod backend {
     /// current `ViewModel` snapshot as a JSON string. Up to 5 s timeout.
     pub(super) fn snapshot_view(block_id: String) -> napi::Result<String> {
         let (reactive, runtime) = reactive_and_rt("snapshot_view")?;
+        // ALLOW(entity_uri_from_raw): NAPI/FFI block_id String from JS worker caller
         let block_uri = EntityUri::from_raw(&block_id);
         runtime.block_on(async {
             let _ = tokio::time::timeout(
@@ -695,6 +698,7 @@ mod backend {
                     .and_then(|v| v.as_str())
                     .unwrap_or("text")
                     .to_string();
+                // ALLOW(entity_uri_from_raw): block_id from MCP args JSON
                 let block_uri = EntityUri::from_raw(&block_id);
                 runtime.block_on(async {
                     let _ = tokio::time::timeout(

@@ -281,7 +281,7 @@ fn render_unsupported(name: &str, _: &GpuiRenderContext) -> Div {
     div().child(format!("[unsupported: {name}]"))
 }
 
-/// Stable key for a live query, used to look up Entity<LiveQueryView> in the registry.
+/// Stable key for a live query, used to look up its Entity<ReactiveShell> in the registry.
 pub(crate) fn live_query_key(sql: &str, context_id: Option<&str>) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

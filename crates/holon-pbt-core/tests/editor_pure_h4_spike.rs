@@ -328,6 +328,12 @@ impl RefEditorMirrorMut for EditorPureRef {
 }
 
 impl RefFocus for EditorPureRef {
+    fn expected_focus_root_rows(&self) -> Vec<(String, Vec<String>)> {
+        Vec::new()
+    }
+    fn navigation_focus_rows(&self) -> Vec<(String, Option<String>)> {
+        Vec::new()
+    }
     fn current_focus(&self, _: CapRegion) -> Option<EntityUri> {
         self.focus_main.clone()
     }

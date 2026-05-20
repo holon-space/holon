@@ -87,13 +87,31 @@ impl SpanCollector {
                 .build();
             global::set_tracer_provider(provider);
 
-            let otel_layer =
-                tracing_opentelemetry::OpenTelemetryLayer::new(global::tracer("holon-pbt"));
-
             use tracing_subscriber::EnvFilter;
             use tracing_subscriber::Layer as _;
             use tracing_subscriber::layer::SubscriberExt;
             use tracing_subscriber::util::SubscriberInitExt;
+
+            // PERF (2026-06-10): the OTel layer used to record EVERY span at
+            // EVERY level (no filter). The render interpreter's recursive
+            // DEBUG-level `interpret` span is emitted 100k+ times per run
+            // (~93% of all spans) and is consumed by no invariant or budget —
+            // recording it via the synchronous in-memory exporter dominated
+            // wall time (filtering it cut per-transition `apply` 34–69% and
+            // even sped up unrelated SQL 6× by relieving CPU/mutex pressure).
+            //
+            // Default `info` keeps every span the invariants/budgets read
+            // (SQL `query`/`execute`/`execute_ddl`, `pbt.*`, `queryable_cache.*`
+            // are all INFO) and drops the DEBUG render-tree noise. Override
+            // with `HOLON_OTEL_FILTER` (any `EnvFilter` syntax) to record the
+            // hot-path spans back, e.g. `HOLON_OTEL_FILTER=trace` for a full
+            // chrome-trace render investigation.
+            let otel_filter = EnvFilter::new(
+                std::env::var("HOLON_OTEL_FILTER").unwrap_or_else(|_| "info".into()),
+            );
+            let otel_layer =
+                tracing_opentelemetry::OpenTelemetryLayer::new(global::tracer("holon-pbt"))
+                    .with_filter(otel_filter);
 
             let registry = tracing_subscriber::registry().with(otel_layer).with(
                 tracing_subscriber::fmt::layer()
@@ -101,6 +119,20 @@ impl SpanCollector {
                     .with_filter(
                         EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
                     ),
+            );
+
+            // tokio-console async-wait profiler. `spawn()` starts the gRPC
+            // aggregator on its own background thread+runtime (no ambient
+            // runtime required) so the `tokio-console` TUI can attach. Only
+            // collects task busy/idle data when the binary is built with
+            // `RUSTFLAGS="--cfg tokio_unstable"` (and tokio's `tracing`
+            // feature, pulled in by the `tokio-console` cargo feature).
+            // Bind address overridable via `TOKIO_CONSOLE_BIND`.
+            #[cfg(feature = "tokio-console")]
+            let registry = registry.with(
+                console_subscriber::ConsoleLayer::builder()
+                    .with_default_env()
+                    .spawn(),
             );
 
             #[cfg(feature = "chrome-trace")]
@@ -272,7 +304,6 @@ impl SpanCollector {
         };
         let inv10_watch_drain = sum_span("pbt.inv10_watch_drain");
         let wait_files_stable = sum_span("pbt.wait_for_org_files_stable");
-        let wait_file_sync = sum_span("pbt.wait_for_org_file_sync");
         let mark_processed_total = sum_span("events.mark_processed");
         let mark_processed_count = spans
             .iter()
@@ -280,8 +311,12 @@ impl SpanCollector {
             .count();
         let apply_transition_total = sum_span("pbt.apply_transition");
         let check_invariants_total = sum_span("pbt.check_invariants");
+        let settle_total = sum_span("pbt.settle");
         let drain_cdc_total =
             sum_span("pbt.drain_cdc_events") + sum_span("pbt.drain_region_cdc_events");
+        let pre_inv16_settle_total = sum_span("pbt.pre_inv16_settle");
+        let live_mirrors_total = sum_span("pbt.wait_for_live_data_mirrors");
+        let assert_quiescent_total = sum_span("pbt.assert_cdc_quiescent");
 
         TransitionMetrics {
             sql_read_count,
@@ -299,12 +334,15 @@ impl SpanCollector {
             cdc_emission_count,
             inv10_watch_drain,
             wait_files_stable,
-            wait_file_sync,
             mark_processed_total,
             mark_processed_count,
             apply_transition_total,
             check_invariants_total,
+            settle_total,
             drain_cdc_total,
+            pre_inv16_settle_total,
+            live_mirrors_total,
+            assert_quiescent_total,
         }
     }
 }
@@ -328,17 +366,45 @@ fn sql_attr(span: &SpanData) -> Option<String> {
     span_attr(span, "sql")
 }
 
-/// Find SQL texts that appear more than once (potential N+1 pattern).
-/// Returns (sql_text, count) pairs sorted by count descending.
-fn find_duplicate_sql<'a>(sql_spans: impl Iterator<Item = &'a SpanData>) -> Vec<(String, usize)> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
+/// One SQL text fired more than once in a transition window.
+///
+/// `distinct_bindings` (from the `params_fp` span attribute) separates the
+/// two very different smells that share a SQL text:
+/// - `distinct_bindings == 1`: the same statement + bindings ran twice —
+///   definitely redundant work.
+/// - `distinct_bindings > 1`: a parameterized statement fanned out over
+///   different bindings (e.g. one render per sidebar) — possibly a real
+///   N+1, possibly legitimate; judge by the count.
+#[derive(Debug, Clone)]
+pub struct DuplicateSql {
+    pub sql: String,
+    pub count: usize,
+    pub distinct_bindings: usize,
+}
+
+/// Find SQL texts that appear more than once (potential N+1 pattern),
+/// sorted by count descending.
+fn find_duplicate_sql<'a>(sql_spans: impl Iterator<Item = &'a SpanData>) -> Vec<DuplicateSql> {
+    let mut counts: HashMap<String, (usize, std::collections::HashSet<String>)> = HashMap::new();
     for span in sql_spans {
         if let Some(sql) = sql_attr(span) {
-            *counts.entry(sql).or_default() += 1;
+            let entry = counts.entry(sql).or_default();
+            entry.0 += 1;
+            // DDL spans don't carry params_fp; treat them as one binding.
+            let fp = span_attr(span, "params_fp").unwrap_or_else(|| "-".into());
+            entry.1.insert(fp);
         }
     }
-    let mut duplicates: Vec<_> = counts.into_iter().filter(|(_, count)| *count > 1).collect();
-    duplicates.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut duplicates: Vec<DuplicateSql> = counts
+        .into_iter()
+        .filter(|(_, (count, _))| *count > 1)
+        .map(|(sql, (count, fps))| DuplicateSql {
+            sql,
+            count,
+            distinct_bindings: fps.len(),
+        })
+        .collect();
+    duplicates.sort_by(|a, b| b.count.cmp(&a.count));
     duplicates
 }
 
@@ -357,8 +423,10 @@ pub struct TransitionMetrics {
     pub total_query_duration: Duration,
     /// Total OTel spans emitted (all types)
     pub total_span_count: usize,
-    /// SQL texts fired more than once: (sql_text, count). Potential N+1 patterns.
-    pub duplicate_sql: Vec<(String, usize)>,
+    /// SQL texts fired more than once. Potential N+1 patterns — see
+    /// [`DuplicateSql`] for how `distinct_bindings` separates redundant
+    /// re-execution from parameterized fan-out.
+    pub duplicate_sql: Vec<DuplicateSql>,
 
     // ── Render metrics (from "frontend.render" spans) ────────────
     /// Total frontend render spans
@@ -381,18 +449,27 @@ pub struct TransitionMetrics {
     pub inv10_watch_drain: Duration,
     /// Time spent inside `wait_for_org_files_stable` (called from both apply and check).
     pub wait_files_stable: Duration,
-    /// Time spent inside `wait_for_org_file_sync` (apply path only — hits 5s timeouts).
-    pub wait_file_sync: Duration,
     /// Cumulative time inside `events.mark_processed` (the suspected N+1 update).
     pub mark_processed_total: Duration,
     /// Number of `events.mark_processed` calls in this transition.
     pub mark_processed_count: usize,
     /// Total time inside `apply_transition_async` (the SUT-side of a transition).
     pub apply_transition_total: Duration,
-    /// Total time inside `check_invariants_async` (post-transition assertions).
+    /// Total time inside `run_invariant_registry` (post-transition assertions).
     pub check_invariants_total: Duration,
+    /// Time inside `settle_before_invariants` — the Loro→SQL convergence poll
+    /// (`pbt.settle` span). Budgeted as the `settle_ms` NFR metric.
+    pub settle_total: Duration,
     /// Total time inside `drain_cdc_events` + `drain_region_cdc_events` (1s/200ms timeouts).
     pub drain_cdc_total: Duration,
+    /// Time inside the `pbt.pre_inv16_settle` block in `apply_transition_async`
+    /// (loro/cdc quiescence + mirror drain). The bulk of `apply` for non-file txns.
+    pub pre_inv16_settle_total: Duration,
+    /// Time inside `wait_for_live_data_mirrors` (drains the SUT block+focus
+    /// mirrors; child of `pre_inv16_settle`). Two mirrors at 50ms quiet each.
+    pub live_mirrors_total: Duration,
+    /// Time inside `assert_cdc_quiescent` (post-settle no-churn guard).
+    pub assert_quiescent_total: Duration,
 }
 
 impl TransitionMetrics {

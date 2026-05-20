@@ -44,7 +44,7 @@ impl TransitionRef<ReferenceState> for SwitchViewMode {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        if !state.app_started {
+        if !state.action.app_started {
             return Validated::fail(Reason::AppNotStarted);
         }
         let ref_view = LayoutRef::new(state);

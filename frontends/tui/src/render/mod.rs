@@ -101,7 +101,7 @@ fn find_editable_target(
         let from_entity = node.entity_id();
         let block_id = from_row
             .clone()
-            .or_else(|| from_entity.clone())
+            .or_else(|| from_entity.as_ref().map(|u| u.to_string()))
             .or_else(|| row_block_id.map(|s| s.to_string()))?;
         tracing::trace!(
             "[find_editable_target] row_id={from_row:?} entity_id={from_entity:?} \
@@ -371,7 +371,7 @@ fn render_live_block(
         );
         return render_plain(node, ops, start_row, start_col, "Recursive block");
     }
-    let uri = EntityUri::parse(&block_id_str).unwrap_or_else(|_| EntityUri::block(&block_id_str));
+    let uri = EntityUri::parse(&block_id_str).expect("live_block: invalid entity URI");
     let inner = ctx.engine.snapshot_reactive(&uri);
     let inner_name = inner.widget_name().unwrap_or_default();
     if inner_name == "empty" || inner_name == "loading" {
@@ -411,7 +411,7 @@ fn render_selectable(
     };
     let entity_id = node
         .row_id()
-        .or_else(|| node.entity_id())
+        .or_else(|| node.entity_id().map(|u| u.to_string()))
         .unwrap_or_default();
 
     let idx = ctx.registry.selectables.len();
@@ -473,7 +473,9 @@ fn render_editable_text(
     start_col: usize,
     max_width: usize,
 ) -> usize {
-    let row_id = node.row_id().or_else(|| node.entity_id());
+    let row_id = node
+        .row_id()
+        .or_else(|| node.entity_id().map(|u| u.to_string()));
     let edit = ctx
         .edit
         .as_ref()
@@ -1087,7 +1089,7 @@ fn render_collection_vertical(
                     .map(|e| e.current_content.clone())
                     .or_else(|| item.prop_str("content"));
                 ctx.registry.selectables.push(SelectableRegion {
-                    entity_id: row_id,
+                    entity_id: row_id.to_string(),
                     intent: None,
                     kind: SelectableKind::Block,
                     region,
@@ -1268,7 +1270,7 @@ fn estimate_width(node: &ReactiveViewModel) -> usize {
 /// Used by `render_collection_vertical` to extract a stable id for tree/table
 /// rows whose top-level wrapper (a `column`) has no `data` of its own — the
 /// id lives on a descendant `selectable` / `editable_text` / `live_block`.
-fn descendant_entity_id(node: &ReactiveViewModel) -> Option<String> {
+fn descendant_entity_id(node: &ReactiveViewModel) -> Option<holon_api::EntityUri> {
     if let Some(id) = holon_frontend::focus_path::resolve_entity_id(node) {
         return Some(id);
     }

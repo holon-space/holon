@@ -19,7 +19,7 @@ use crate::util::{expr_references, topo_sort_kahn};
 
 /// A compiled computed field: name + pre-compiled Rhai AST.
 /// Stored in topological order (dependencies before dependents).
-pub type CompiledComputedField = (String, CompiledExpr);
+pub use holon_api::entity_profile::CompiledComputedField;
 
 /// Runtime registry of all entity type definitions.
 ///
@@ -553,13 +553,13 @@ mod tests {
         let td = registry.get("person").unwrap();
 
         let mut row = holon_api::StorageEntity::new();
-        row.insert("id".to_string(), holon_api::Value::String("p1".to_string()));
+        row.insert("id".into(), holon_api::Value::String("p1".to_string()));
         row.insert(
-            "email".to_string(),
+            "email".into(),
             holon_api::Value::String("alice@example.com".to_string()),
         );
         row.insert(
-            "role".to_string(),
+            "role".into(),
             holon_api::Value::String("Engineer".to_string()),
         );
 
@@ -580,9 +580,9 @@ mod tests {
         let td = registry.get("person").unwrap();
 
         let mut row = holon_api::StorageEntity::new();
-        row.insert("id".to_string(), holon_api::Value::String("p2".to_string()));
+        row.insert("id".into(), holon_api::Value::String("p2".to_string()));
         row.insert(
-            "email".to_string(),
+            "email".into(),
             holon_api::Value::String("bob@example.com".to_string()),
         );
         // role is NOT set — the expression should take the else branch

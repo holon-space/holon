@@ -48,13 +48,16 @@ pub(crate) enum ViewEvent {
 /// Returns a `ViewEvent::TriggerFired` for the first matching trigger, or None.
 ///
 /// `current_line` is the line the cursor is on.
-/// `cursor_column` is the cursor's column position within that line.
+/// `cursor_byte` is the cursor's BYTE offset within that line (callers with a
+/// character column — GPUI's `cursor_position().character` — must convert
+/// first; this function slices `current_line` at this offset and panics on a
+/// non-char-boundary, fail-loud by design).
 ///
 /// Called on every keystroke — must be extremely cheap.
 pub(crate) fn check_triggers(
     triggers: &[InputTrigger],
     current_line: &str,
-    cursor_column: usize,
+    cursor_byte: usize,
 ) -> Option<ViewEvent> {
     for trigger in triggers {
         match trigger {
@@ -64,7 +67,7 @@ pub(crate) fn check_triggers(
                 at_line_start,
             } => {
                 if *at_line_start {
-                    if current_line.starts_with(prefix.as_str()) && cursor_column >= prefix.len() {
+                    if current_line.starts_with(prefix.as_str()) && cursor_byte >= prefix.len() {
                         return Some(ViewEvent::TriggerFired {
                             action: action.clone(),
                             filter_text: current_line[prefix.len()..].to_string(),
@@ -73,7 +76,7 @@ pub(crate) fn check_triggers(
                         });
                     }
                 } else {
-                    let end = cursor_column.min(current_line.len());
+                    let end = cursor_byte.min(current_line.len());
                     let text_before_cursor = &current_line[..end];
                     if let Some(pos) = text_before_cursor.rfind(prefix.as_str()) {
                         let after_prefix = pos + prefix.len();
@@ -100,6 +103,11 @@ pub(crate) fn check_triggers(
 ///
 /// Slash commands (`/`) require operations to be present.
 /// Link triggers (`[[`) are always included — they work independently of operations.
+///
+/// The `/` menu fires **mid-line** (`at_line_start: false`), matching LogSeq:
+/// typing `/cmd` anywhere in a block opens the command menu, with the text
+/// between the last `/` and the cursor as the filter. (Previously line-start-only,
+/// which silently dropped slash commands appended to existing block content.)
 pub(crate) fn default_triggers_for_operations(
     operations: &[holon_api::render_types::OperationWiring],
 ) -> Vec<InputTrigger> {
@@ -108,7 +116,7 @@ pub(crate) fn default_triggers_for_operations(
         triggers.push(InputTrigger::TextPrefix {
             prefix: "/".to_string(),
             action: "command_menu".to_string(),
-            at_line_start: true,
+            at_line_start: false,
         });
     }
     triggers
@@ -166,6 +174,19 @@ mod tests {
                 assert_eq!(filter_text, "embed");
                 assert_eq!(prefix_start, 0);
             }
+            _ => panic!("expected TriggerFired"),
+        }
+    }
+
+    #[test]
+    fn multibyte_line_with_byte_offset() {
+        let triggers = vec![link_trigger()];
+        // 'ß' is 2 bytes — cursor after "[[ß" is byte 4. The GPUI caller
+        // converts its character column to this byte offset; passing a char
+        // count (3) would land inside 'ß' and panic (fail-loud contract).
+        let event = check_triggers(&triggers, "[[ß", 4).unwrap();
+        match event {
+            ViewEvent::TriggerFired { filter_text, .. } => assert_eq!(filter_text, "ß"),
             _ => panic!("expected TriggerFired"),
         }
     }

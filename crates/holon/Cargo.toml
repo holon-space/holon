@@ -37,6 +37,7 @@ thiserror.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
+holon-turso.workspace = true
 similar.workspace = true
 prqlc.workspace = true
 prqlc-parser.workspace = true
@@ -104,4 +105,8 @@ required-features = ["test-helpers"]
 
 [[test]]
 name = "json_aggregation_e2e_test"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "turso_block_query_source_round_trip_pbt"
 required-features = ["test-helpers"]

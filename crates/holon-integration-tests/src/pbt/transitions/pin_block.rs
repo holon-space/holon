@@ -36,6 +36,13 @@ pub struct PinBlock {
 
 impl TransitionFactory<ReferenceState> for PinBlock {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: pin/unpin dispatch `navigation` ops backed by the
+        // Turso-only `NavigationProvider` (registration.rs:267); there is no
+        // Loro-native navigation source (see loro_block_query_source.rs:77).
+        // Gate it out of {Loro} slices.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Candidate set: Main's editable descendants. Per-precondition
         // filter narrows to pinnable subset.
@@ -70,9 +77,9 @@ impl TransitionRef<ReferenceState> for PinBlock {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let block = state.block_state.blocks.get(&self.block_id);
+        let block = state.domain.block_state.blocks.get(&self.block_id);
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(block.is_some(), Reason::FocusedBlockMissing),
         ];
         if let Some(b) = block {
@@ -83,11 +90,11 @@ impl TransitionRef<ReferenceState> for PinBlock {
             checks.push(check(!b.is_page(), Reason::PreconditionFailed));
         }
         checks.push(check(
-            !state.layout_blocks.contains(&self.block_id),
+            !state.domain.layout_blocks.contains(&self.block_id),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
-            state.layout_blocks.is_focusable(&self.block_id),
+            state.domain.layout_blocks.is_focusable(&self.block_id),
             Reason::FocusedNotFocusable,
         ));
 
@@ -102,19 +109,21 @@ impl TransitionRef<ReferenceState> for PinBlock {
         // SELECT existing open `(region, block_id)`; UPDATE timestamp if
         // found, else INSERT. Bumping `next_pin_ts` (not `next_history_id`)
         // matches the no-INSERT path of `update_pin_timestamp.sql`.
-        let added_ts_logical = state.next_pin_ts;
-        state.next_pin_ts += 1;
+        let added_ts_logical = state.ui.user.next_pin_ts;
+        state.ui.user.next_pin_ts += 1;
 
-        let pins = state.open_pins.entry(self.region).or_default();
+        let pins = state.ui.user.open_pins.entry(self.region).or_default();
         if let Some(existing) = pins
             .iter_mut()
             .find(|p| p.block_id.as_ref() == Some(&self.block_id))
         {
             existing.added_ts_logical = added_ts_logical;
         } else {
-            let history_id = state.next_history_id;
-            state.next_history_id += 1;
+            let history_id = state.ui.tab.next_history_id;
+            state.ui.tab.next_history_id += 1;
             state
+                .ui
+                .user
                 .open_pins
                 .entry(self.region)
                 .or_default()

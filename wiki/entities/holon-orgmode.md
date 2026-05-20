@@ -111,7 +111,7 @@ DI adapters in `crates/holon-orgmode/src/di.rs` implement these traits using `Ca
 
 ## Org File Conventions
 
-From `docs/ORG_SYNTAX.md`:
+From `docs/Reference/ORG_SYNTAX.md`:
 - IDs stored **without** `block:` / `doc:` scheme prefixes
 - Source blocks get `EntityUri::block()` prefix at parse time
 - Renderer strips scheme: writes `block.id.id()` not `block.id.as_str()`

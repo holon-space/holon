@@ -211,15 +211,18 @@ fn escape_sql_string(s: &str) -> String {
 }
 
 fn inline_named_params(sql: &str, params_str: &str) -> String {
-    let named_re =
-        Regex::new(r#"(\w+)=(?:String\("([^"]*)"\)|Integer\((\d+)\)|Real\(([\d.]+)\)|Null)"#)
-            .unwrap();
+    // String values are Rust-Debug-escaped in the log (`\"` for quotes), so
+    // the capture must allow escape pairs — mirroring inline_positional_params.
+    let named_re = Regex::new(
+        r#"(\w+)=(?:String\("((?:[^"\\]|\\.)*)"\)|Integer\((-?\d+)\)|Real\(([\d.eE+-]+)\)|Null)"#,
+    )
+    .unwrap();
 
     let mut params = std::collections::HashMap::new();
     for cap in named_re.captures_iter(params_str) {
         let key = cap.get(1).unwrap().as_str();
         let value = if let Some(m) = cap.get(2) {
-            escape_sql_string(m.as_str())
+            escape_sql_string(&m.as_str().replace("\\\"", "\""))
         } else if let Some(m) = cap.get(3) {
             m.as_str().to_string()
         } else if let Some(m) = cap.get(4) {
@@ -336,7 +339,7 @@ struct ExtractedTrace {
 fn extract_from_log(args: &ExtractArgs) -> anyhow::Result<ExtractedTrace> {
     let ansi_re = Regex::new(r"\x1b\[[0-9;]*m").unwrap();
     let trace_re = Regex::new(
-        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z\s+(?:TRACE|DEBUG|INFO)\s+holon::storage::turso:\s+\[TursoBackend\]\s+([\w]+):\s+(.*)",
+        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z\s+(?:TRACE|DEBUG|INFO)\s+(?:holon::storage::turso|holon_turso::turso):\s+\[TursoBackend\]\s+([\w]+):\s+(.*)",
     ).unwrap();
     let any_log_line_re =
         Regex::new(r#"^(?:\d{4}-\d{2}-\d{2}T|flutter:|The relevant|\[|thread ')"#).unwrap();
@@ -643,7 +646,11 @@ fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
             continue;
         }
 
-        if !in_literal && (line.starts_with("--") || line.is_empty()) {
+        // Indented `--` comment lines are still comments — without the
+        // trim a comment line ending in `;` (e.g. inside a CREATE TABLE
+        // body) would be appended to the SQL and its `;` would terminate
+        // the statement mid-body ("incomplete input").
+        if !in_literal && (line.trim_start().starts_with("--") || line.trim().is_empty()) {
             continue;
         }
 
@@ -1272,17 +1279,15 @@ enum StmtKind {
 }
 
 fn statement_kind(sql: &str) -> StmtKind {
-    let upper = sql.trim().to_uppercase();
-    if upper.starts_with("INSERT ")
-        || upper.starts_with("UPDATE ")
-        || upper.starts_with("DELETE ")
-        || upper.starts_with("REPLACE ")
-    {
-        StmtKind::Dml
-    } else if upper.starts_with("SELECT ") || upper.starts_with("WITH ") {
-        StmtKind::Query
-    } else {
-        StmtKind::Other
+    // Match on the first token, not a "KEYWORD " prefix — multi-line SQL can
+    // have a newline right after the keyword (`SELECT\n    b.id, ...`), which
+    // a trailing-space prefix check misclassifies as Other → execute path →
+    // "unexpected row during execution".
+    let first = sql.split_whitespace().next().unwrap_or("").to_uppercase();
+    match first.as_str() {
+        "INSERT" | "UPDATE" | "DELETE" | "REPLACE" => StmtKind::Dml,
+        "SELECT" | "WITH" => StmtKind::Query,
+        _ => StmtKind::Other,
     }
 }
 
@@ -1424,7 +1429,10 @@ async fn replay_sql_directive(
         );
     }
 
-    let result = if is_query {
+    // DML with RETURNING yields rows; `conn.execute` rejects them with
+    // "unexpected row during execution", so drain via the query path.
+    let has_returning = is_dml && sql.to_uppercase().contains("RETURNING");
+    let result = if is_query || has_returning {
         match conn.query(sql, ()).await {
             Ok(mut rows) => {
                 while let Ok(Some(_)) = rows.next().await {}

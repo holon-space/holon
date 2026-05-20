@@ -59,16 +59,16 @@
 
 #![cfg(feature = "pbt")]
 
-use holon_integration_tests::declare_pbt_slice;
+use holon_integration_tests::component_pbt;
 use holon_integration_tests::pbt::invariants::bodies::block_content_matches_ref::InvBlockContentMatchesRef;
 use holon_integration_tests::pbt::transitions::{NavigateFocus, SplitBlock};
 
-declare_pbt_slice! {
+component_pbt! {
     test_fn: split_block_content_pbt,
-    variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
-    inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
+    set: holon_pbt_core::ComponentSet::sql_only(),
     transitions: [
         preset lifecycle,
+        preset org_writes,
         NavigateFocus,
         SplitBlock,
     ],
@@ -79,12 +79,12 @@ declare_pbt_slice! {
     fixtures_dir: "tests/fixtures/split_block_content_pbt",
 }
 
-declare_pbt_slice! {
+component_pbt! {
     test_fn: split_block_content_pbt_full,
-    variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::Full>,
-    inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::Full>,
+    set: holon_pbt_core::ComponentSet::full_headless(),
     transitions: [
         preset lifecycle,
+        preset org_writes,
         NavigateFocus,
         SplitBlock,
     ],
@@ -104,7 +104,6 @@ fn split_block_content_pbt_gherkin() {
     holon_integration_tests::pbt::fixtures::run_feature_strict::<
         SplitBlockContentPbtMachine,
         SplitBlockContentPbtSut,
-        holon_integration_tests::pbt::SqlOnly,
     >(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/split_block_content_pbt/split_routes_prefix_suffix.feature"
@@ -119,7 +118,6 @@ fn split_block_content_pbt_gherkin_asserts() {
     holon_integration_tests::pbt::fixtures::run_feature_strict::<
         SplitBlockContentPbtMachine,
         SplitBlockContentPbtSut,
-        holon_integration_tests::pbt::SqlOnly,
     >(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/_gherkin_assert/widget_and_focus.feature"
@@ -134,7 +132,6 @@ fn split_block_content_pbt_gherkin_split_addressing() {
     holon_integration_tests::pbt::fixtures::run_feature_strict::<
         SplitBlockContentPbtMachine,
         SplitBlockContentPbtSut,
-        holon_integration_tests::pbt::SqlOnly,
     >(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/_gherkin_assert/split_then_address_new_block.feature"
@@ -149,7 +146,6 @@ fn split_block_content_pbt_gherkin_assert_before_startup_panics() {
     holon_integration_tests::pbt::fixtures::run_feature_strict::<
         SplitBlockContentPbtMachine,
         SplitBlockContentPbtSut,
-        holon_integration_tests::pbt::SqlOnly,
     >(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/_gherkin_negative/then_before_startup.feature"
@@ -186,7 +182,6 @@ fn split_block_content_pbt_gherkin_corrupt_id_panics() {
     holon_integration_tests::pbt::fixtures::run_feature_strict::<
         SplitBlockContentPbtMachine,
         SplitBlockContentPbtSut,
-        holon_integration_tests::pbt::SqlOnly,
     >(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/_gherkin_negative/split_corrupt_id.feature"

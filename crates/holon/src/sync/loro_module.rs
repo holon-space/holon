@@ -20,16 +20,13 @@ use tracing::{error, info};
 
 use crate::core::SqlOperationProvider;
 use crate::core::datasource::OperationProvider;
-use crate::core::queryable_cache::QueryableCache;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
 use crate::storage::schema_modules::BlockSchemaModule;
-use crate::sync::event_bus::EventBus;
 use crate::sync::{
     LoroBlockOperations, LoroBlocksDataSource, LoroDocumentStore, LoroSyncController,
-    LoroSyncControllerHandle, TursoEventBus,
+    LoroSyncControllerHandle,
 };
-use holon_api::block::Block;
 
 /// Configuration for standalone Loro CRDT support
 #[derive(Clone, Debug)]
@@ -73,11 +70,9 @@ impl Module for LoroModule {
         // Register LoroBlockOperations
         injector.provide::<LoroBlockOperations>(Provider::root(|resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
-            let cache = resolver.resolve::<QueryableCache<Block>>();
-            Shared::new(LoroBlockOperations::new(
-                Arc::new(RwLock::new((*doc_store).clone())),
-                cache,
-            ))
+            Shared::new(LoroBlockOperations::new(Arc::new(RwLock::new(
+                (*doc_store).clone(),
+            ))))
         }));
 
         // Register a Loro-aware `BlockCellRegistry`. `SqlBlockOperations`
@@ -99,10 +94,16 @@ impl Module for LoroModule {
             }),
         );
 
-        // NOTE: LoroBlockOperations is NOT registered as an OperationProvider.
-        // All block CRUD operations go through SqlOperationProvider → Turso (source of truth).
-        // Loro is populated via EventBus subscriptions (reverse sync), not through the command path.
-        // This ensures read/write consistency: CacheBlockReader reads from QueryableCache (backed by SQL), SqlOperationProvider writes to SQL.
+        // Loro is the source of truth for block CRUD. `LoroBlockOperations`
+        // (registered above as a concrete type) is wired into the UI command
+        // path by `OrgModeModule` (`holon-orgmode/src/di.rs`): when Loro is
+        // enabled it becomes the block CRUD `OperationProvider`, so set_field /
+        // create / update / delete land in the Loro doc. `LoroSyncController`
+        // then projects each Loro change to the SQL `block_raw` table (a pure
+        // projection — there is no SQL→Loro mirror). `CacheBlockReader` reads
+        // the resulting `QueryableCache`, which stays consistent because it is
+        // fed from that same projection. In SqlOnly mode (no LoroModule) the
+        // generic `SqlOperationProvider` owns block CRUD and SQL is authority.
 
         // Wire up `LoroSyncController` — the bidirectional bridge between
         // the Loro doc and the abstract command/event bus. Registered as a
@@ -124,21 +125,18 @@ impl Module for LoroModule {
             Provider::root_async(|resolver| async move {
                 let config = resolver.resolve::<LoroConfig>();
                 let doc_store = resolver.resolve::<LoroDocumentStore>();
-                let event_bus = resolver.resolve::<TursoEventBus>();
-                let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
                 let db_handle_provider = resolver.resolve::<dyn crate::di::DbHandleProvider>();
                 let db_handle = db_handle_provider.handle();
-                let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
+                let sql_ops = Arc::new(SqlOperationProvider::with_edge_fields(
                     db_handle.clone(),
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
-                    event_bus_arc,
                     BlockSchemaModule.edge_fields(),
                 ));
                 let command_bus: Arc<dyn OperationProvider> = sql_ops;
                 let sink_reader: Arc<dyn crate::sync::SinkReader> =
-                    Arc::new(crate::sync::TursoSinkReader::new(db_handle));
+                    Arc::new(crate::storage::TursoSinkReader::new(db_handle));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
                 Shared::new(
                     crate::sync::loro_sync_controller::LoroProjection::from_storage(
@@ -253,38 +251,16 @@ impl Module for LoroModule {
 
             let controller = LoroSyncController::new(doc_store_arc, projection);
 
-            // Phase 4: build the shared block feed and hand it to the
-            // controller, which spawns the block mirror. The feed yields typed
-            // `Block`s — the SQL row→`Block` translation lives HERE, in the
-            // wiring layer, so the controller stays storage-agnostic. The
-            // mirror reflects every block (incl. org-ingested / seeded) into
-            // Loro via the initial snapshot + CDC, independent of `event_acks`.
-            let matview_manager = resolver.resolve::<crate::sync::MatviewManager>();
-            let block_live = {
-                use crate::sync::live_data::LiveData;
-                let watch = matview_manager
-                    .watch("SELECT * FROM block")
-                    .await
-                    .expect("[LoroModule] watch block matview for block mirror");
-                let live = LiveData::new(
-                    watch.initial_rows,
-                    |row: &crate::storage::types::StorageEntity| {
-                        row.get("id")
-                            .and_then(|v| v.as_string())
-                            .map(|s| s.to_string())
-                            .ok_or_else(|| anyhow::anyhow!("block matview row missing id"))
-                    },
-                    // The row→`Block` codec is the storage/domain boundary's
-                    // job: `TryFrom<HashMap<String, Value>> for Block` in
-                    // holon-api (the same path `CacheBlockReader` uses). The
-                    // feed only delegates — no row-shape logic lives here.
-                    |row: &crate::storage::types::StorageEntity| {
-                        holon_api::block::Block::try_from(row.clone())
-                    },
-                );
-                live.subscribe("block", watch.stream);
-                live
-            };
+            // Phase 4: resolve the shared convergent block feed (built once in
+            // `EventInfraModule` as `BlockFeed`, available in both modes) and
+            // hand it to the controller, which holds it to keep the CDC actor
+            // alive. The same feed drives `block_link` via the link indexer —
+            // one feed, many sinks (Phase 4b).
+            let block_live = resolver
+                .resolve_async::<crate::sync::event_infra_module::BlockFeed>()
+                .await
+                .0
+                .clone();
 
             match controller.start(block_live).await {
                 Ok(handle) => Shared::new(handle),
@@ -373,20 +349,14 @@ fn register_subtree_share(injector: &Injector) {
         // Wire up the `block` SQL provider so mount-node projection into
         // the SQL `block` table works. Mirrors the construction in
         // `LoroModule::configure` — separate instance, but points at the
-        // same `DbHandle` and `TursoEventBus`, so the events flow through
-        // a single bus into `CacheEventSubscriber`. `TursoEventBus` is
-        // registered via `Provider::root_async`, so the factory must also
-        // be async to resolve it. Writes go to `block_raw`; `block` is
-        // a matview and Turso rejects DML against it.
+        // same `DbHandle`. Writes go to `block_raw`; `block` is a matview
+        // and Turso rejects DML against it.
         let db_handle_provider = resolver.resolve::<dyn crate::di::DbHandleProvider>();
-        let event_bus = resolver.resolve_async::<TursoEventBus>().await;
-        let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
-        let sql_ops = Arc::new(SqlOperationProvider::with_event_bus(
+        let sql_ops = Arc::new(SqlOperationProvider::new(
             db_handle_provider.handle(),
             BLOCK_WRITE_TABLE.to_string(),
             "block".to_string(),
             "block".to_string(),
-            event_bus_arc,
         ));
 
         // `LoroShareBackend::new_with_sql` returns `Arc<Self>` because its

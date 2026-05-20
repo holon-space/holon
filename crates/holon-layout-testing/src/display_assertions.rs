@@ -571,7 +571,10 @@ pub fn collect_error_node_summaries(node: &ViewModel) -> Vec<String> {
 
 fn walk_error_nodes(node: &ViewModel, out: &mut Vec<String>) {
     if node.widget_name() == Some("error") {
-        let entity_id = node.entity_id().unwrap_or("<no entity_id>");
+        let entity_id = node
+            .entity_id()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "<no entity_id>".to_string());
         // The error message lives in `kind: ViewKind::Error { message }`,
         // not in `entity` — `ViewModel::error()` discards the entity row.
         let message = match &node.kind {

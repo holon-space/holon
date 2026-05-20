@@ -39,7 +39,7 @@ fetch_timestamp: 2026-04-23
 - Uses real Turso (SQLite) — not mocked
 - `TestEnvironment` wraps `BackendEngine` + `TestServices`
 - `TestServices::new_quiescent()` returns current_thread runtime; driver spawns queue but never runs, avoiding GPUI TestScheduler off-thread panic
-- `vm_shared_collection` uses shadow interpret + ReactiveQueryResults with pre-populated rows + TreeItem wrapping
+- `vm_shared_collection` uses shadow interpret + ReactiveRenderedRows with pre-populated rows + TreeItem wrapping
 - `setup_watch()` takes a `language` parameter (prql/sql/gql)
 - `tee` output to `/tmp/` before filtering — always
 

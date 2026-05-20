@@ -33,6 +33,57 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::Path;
 
+/// Editor-shape env flags that change the PBT transition alphabet and
+/// reference semantics but live outside the `ComponentSet` lattice
+/// (ADR 0009 §4 follow-up: captures must record them or replay is unfaithful).
+pub const CAPTURE_ENV_FLAGS: &[&str] =
+    &["PBT_ATOMIC_EDITOR", "PBT_MUTABLE_TEXT", "PBT_REAL_EDITOR"];
+
+/// Execution environment a capture/fixture was recorded under.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct CaptureEnvironment {
+    /// Wiring manifest of the generating run (`None` for hand-authored or
+    /// pre-header fixtures).
+    #[serde(default)]
+    pub wiring: Option<crate::wiring::Wiring>,
+    /// Values of [`CAPTURE_ENV_FLAGS`] at record time (unset flags omitted).
+    #[serde(default)]
+    pub env_flags: std::collections::BTreeMap<String, String>,
+}
+
+impl CaptureEnvironment {
+    /// Snapshot the recognized env flags from the current process env.
+    pub fn current_env_flags() -> std::collections::BTreeMap<String, String> {
+        CAPTURE_ENV_FLAGS
+            .iter()
+            // ALLOW(filter_map_ok): VarError::NotPresent means "flag unset" —
+            // omitting it is the documented contract, not a swallowed error.
+            .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+            .collect()
+    }
+
+    /// Human-readable mismatch report vs the current process env (and an
+    /// optional replay wiring). `None` when everything matches.
+    pub fn mismatch_report(&self, replay_wiring: Option<&crate::wiring::Wiring>) -> Option<String> {
+        let mut lines = Vec::new();
+        let current = Self::current_env_flags();
+        if self.env_flags != current {
+            lines.push(format!(
+                "env flags differ: capture={:?} current={:?}",
+                self.env_flags, current
+            ));
+        }
+        if let (Some(captured), Some(replay)) = (self.wiring.as_ref(), replay_wiring) {
+            if captured != replay {
+                lines.push(format!(
+                    "wiring differs: capture={captured:?} replay={replay:?}"
+                ));
+            }
+        }
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+}
+
 /// A replayable sequence of transitions and the invariants to check
 /// after every step. Slice-local — instantiate with the slice's
 /// concrete transition + (optional) init-state types.
@@ -50,6 +101,12 @@ pub struct Fixture<T, I = ()> {
     /// Optional description of what bug the fixture pins.
     #[serde(default)]
     pub description: String,
+    /// The environment the capture was recorded under. A capture replayed
+    /// under a different wiring or editor-shape env silently changes meaning
+    /// (the transition alphabet and ref semantics differ), so record it and
+    /// let replayers compare. `#[serde(default)]` keeps old files loading.
+    #[serde(default)]
+    pub environment: CaptureEnvironment,
     /// Init-state payload, applied to the freshly-constructed ref state
     /// before the transition sequence runs. `#[serde(default)]` so old
     /// fixture files (no `initial_state` field) deserialize cleanly.

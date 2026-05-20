@@ -1,20 +1,26 @@
-//! Phase 7 — `inv-viewmodel-entity-ids-subset-of-data` (FUNCTIONAL).
+//! `inv-viewmodel-entity-ids-subset-of-data`.
 //!
-//! Inline body originally at `sut.rs:5064–5114` (sub-check 10e).
 //!
-//! Asserts that every entity ID present in the widget tree snapshot is also
-//! present in the root layout's data rows. The check is gated on:
+//! Catches *phantom* entities in the rendered ViewModel tree: every entity ID
+//! the user sees must correspond either to a row of the root layout's query
+//! data OR to a real block the reference model already knows exists. The layout
+//! containers (`default-left-sidebar`, `default-main-panel`,
+//! `default-right-sidebar`, …) are real seeded blocks the GPUI app renders for
+//! the 3-column layout once layout-query blocks arrive; they come from the
+//! layout, not the root's query data, so subtracting the ref-known block set
+//! makes the check layout-agnostic instead of hard-coding those IDs.
+//!
+//! A rendered entity that is *neither* query data nor a real ref block is a
+//! genuine phantom-entity violation and still `Fail`s.
+//!
+//! The check is gated on:
 //! - The ref model tracking a render expression (i.e. `has_root_render_expr()`)
 //! - Both the tree-id set and the data-id set being non-empty
 //!
-//! When profile-variant YAML hard-codes `live_block("block:default-*")` IDs
-//! outside the query data, `has_root_render_expr()` returns false and the
-//! assertion is intentionally skipped.
-//!
 //! Status: functional.
 
-use holon_pbt_core::capabilities::{RefRender, SutRenderer};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::capabilities::{RefLayout, RefRender, SutRenderer};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelEntityIdsSubsetOfData;
 
@@ -25,15 +31,11 @@ impl InvViewmodelEntityIdsSubsetOfData {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvViewmodelEntityIdsSubsetOfData
 where
-    R: RefRender,
+    R: RefRender + RefLayout,
     S: SutRenderer,
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
@@ -43,8 +45,8 @@ where
 
         let root = sut.widget_tree_snapshot().await;
         let tree_ids = root.collect_entity_ids();
-        // `data_ids` are `EntityUri`; widget-tree `entity_id`s are raw
-        // strings — compare on the string surface.
+        // `data_ids`/`ref_known` are `EntityUri`; widget-tree `entity_id`s are
+        // raw strings — compare on the string surface.
         let data_ids: std::collections::BTreeSet<String> = sut
             .root_data_row_ids()
             .await
@@ -56,21 +58,33 @@ where
             return InvariantResult::Ok;
         }
 
+        // Every block the reference model knows exists (incl. seed/source and
+        // the default layout containers), already resolved into SUT ID space by
+        // the runner's `with_resolved_doc_uris` view.
+        let ref_known: std::collections::BTreeSet<String> = ref_
+            .all_block_ids()
+            .iter()
+            .map(|u| u.as_str().to_string())
+            .collect();
+
+        // missing = tree_ids − data_row_ids − ref_known_block_ids
         let missing: Vec<&String> = tree_ids
             .iter()
-            .filter(|id| !data_ids.contains(*id))
+            .filter(|id| !data_ids.contains(*id) && !ref_known.contains(*id))
             .collect();
 
         if missing.is_empty() {
             InvariantResult::Ok
         } else {
             InvariantResult::Fail(format!(
-                "[inv-viewmodel-entity-ids-subset-of-data] ViewModel has entity IDs not in \
-                 query data. Missing: {missing:?}\n\
+                "[inv-viewmodel-entity-ids-subset-of-data] ViewModel has phantom entity IDs \
+                 that are neither query data nor known reference blocks. Missing: {missing:?}\n\
                  Tree IDs ({}):\n  {tree_ids:?}\n\
-                 Data IDs ({}):\n  {data_ids:?}",
+                 Data IDs ({}):\n  {data_ids:?}\n\
+                 Ref-known block IDs ({}):\n  {ref_known:?}",
                 tree_ids.len(),
                 data_ids.len(),
+                ref_known.len(),
             ))
         }
     }

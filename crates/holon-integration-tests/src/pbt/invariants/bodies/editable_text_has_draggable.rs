@@ -1,7 +1,6 @@
-//! Phase 7 — `inv-editable-text-has-draggable` (FUNCTIONAL).
+//! `inv-editable-text-has-draggable`.
 //!
-//! Body originally inline at `sut.rs:6549-6707`. Migrated to walk
-//! `WidgetSnapshot` trees per-block using `SutRenderer::widget_tree_for`,
+//! Walks `WidgetSnapshot` trees per-block using `SutRenderer::widget_tree_for`,
 //! BFS-discovered from `live_block` references.
 //!
 //! Asserts: in any per-block-subtree whose rendering contains ≥1
@@ -19,7 +18,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use holon_pbt_core::capabilities::{EntityUri, RefLayout, SutRenderer};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvEditableTextHasDraggable;
 
@@ -37,15 +36,11 @@ where
         Self::ID
     }
 
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
-    }
-
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         // Test-environment alternate block profile renders bare
         // row(editable_text(...)) without draggable wrappers — that's
         // intentional and would produce false positives. Inline check
-        // gates the same way at sut.rs:6577.
+        // gates the same way.
         if ref_.has_blocks_profile() {
             return InvariantResult::Skipped(
                 "test environment has registered an alternate block profile".into(),

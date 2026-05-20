@@ -23,9 +23,9 @@ use std::collections::BTreeSet;
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirror, RefEditorMirrorMut,
-    RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout, RefLifecycle, RefPeers,
-    RefPeersMut, RefRender, RefTaskState, RefWatches,
+    CapCursor, CapRegion, RefBackend, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
+    RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
+    RefLifecycle, RefPeers, RefPeersMut, RefRender, RefTaskState, RefWatches, WatchRow,
 };
 
 use super::peer_ops::PeerBlock;
@@ -72,16 +72,20 @@ fn from_cap_region(r: CapRegion) -> Region {
 
 impl RefLifecycle for ReferenceState {
     fn app_started(&self) -> bool {
-        self.app_started
+        self.action.app_started
     }
     fn is_properly_setup(&self) -> bool {
         self.is_properly_setup()
     }
     fn enable_loro(&self) -> bool {
-        self.variant.enable_loro
+        self.wiring
+            .has_storage(holon_pbt_core::StorageAdapter::Loro)
+    }
+    fn renders_block_interactively(&self, block_id: &EntityUri) -> bool {
+        ReferenceState::renders_block_interactively(self, block_id)
     }
     fn last_transition_kind(&self) -> Option<&'static str> {
-        self.last_transition_kind
+        self.action.last_transition_kind
     }
     fn atomic_editor_enabled() -> bool {
         ReferenceState::atomic_editor_enabled()
@@ -93,7 +97,8 @@ impl RefLifecycle for ReferenceState {
 impl RefBlockTree for ReferenceState {
     fn block_content(&self, id: &EntityUri) -> Option<&str> {
         let uri = parse_id(id)?;
-        self.block_state
+        self.domain
+            .block_state
             .blocks
             .get(&uri)
             .map(|b| b.content.as_str())
@@ -103,7 +108,8 @@ impl RefBlockTree for ReferenceState {
         let Some(uri) = parse_id(id) else {
             return false;
         };
-        self.block_state
+        self.domain
+            .block_state
             .blocks
             .get(&uri)
             .is_some_and(|b| b.content_type == holon_api::ContentType::Text)
@@ -136,7 +142,7 @@ impl RefBlockTree for ReferenceState {
 
     fn parent_of(&self, id: &EntityUri) -> Option<EntityUri> {
         let uri = parse_id(id)?;
-        let b = self.block_state.blocks.get(&uri)?;
+        let b = self.domain.block_state.blocks.get(&uri)?;
         if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
             None
         } else {
@@ -171,41 +177,56 @@ impl RefBlockTree for ReferenceState {
         let Some(uri) = parse_id(id) else {
             return false;
         };
-        self.layout_blocks.contains(&uri)
+        self.domain.layout_blocks.contains(&uri)
     }
 
     fn is_focusable(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
-        self.layout_blocks.is_focusable(&uri)
+        self.domain.layout_blocks.is_focusable(&uri)
     }
 
     fn is_no_content_update(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
-        self.layout_blocks.render_source_ids.contains(&uri)
-            || self.layout_blocks.query_source_ids.contains(&uri)
-            || self.profile_block_ids.contains(&uri)
+        self.domain.layout_blocks.render_source_ids.contains(&uri)
+            || self.domain.layout_blocks.query_source_ids.contains(&uri)
+            || self.domain.profile_block_ids.contains(&uri)
+    }
+
+    fn is_order_exempt_sibling(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.domain.block_state.blocks.get(&uri).is_some_and(|b| {
+            matches!(
+                b.content_type,
+                holon_api::ContentType::Source | holon_api::ContentType::Image
+            )
+        })
     }
 
     fn is_page_block(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;
         };
-        self.block_state
+        self.domain
+            .block_state
             .blocks
             .get(&uri)
             .is_some_and(|b| b.is_page())
     }
 
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri> {
-        self.block_state
+        self.domain
+            .block_state
             .blocks
             .keys()
             .filter(|uri| {
                 let is_seed = self
+                    .domain
                     .block_state
                     .block_documents
                     .get(uri)
@@ -226,8 +247,13 @@ impl RefBlockTreeMut for ReferenceState {
 
     fn set_block_content(&mut self, id: &EntityUri, text: &str) {
         let uri = parse_id_must(id);
-        if let Some(b) = self.block_state.blocks.get_mut(&uri) {
-            b.content = text.to_string();
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&uri) {
+            // Editor-commit write path: normalize exactly like prod's
+            // `SqlOperationProvider::trimmed_content`, mirroring the
+            // inherent `commit_active_editor_if_changed`. The generic
+            // pbt-core commit helper writes through here, so both commit
+            // paths now share one normalization.
+            b.content = super::types::normalize_content_for_org_roundtrip(text, b.content_type);
         }
     }
 
@@ -279,17 +305,27 @@ impl RefBlockTreeMut for ReferenceState {
 
 impl RefEditorMirror for ReferenceState {
     fn active_editor_block(&self) -> Option<EntityUri> {
-        self.active_editor.as_ref().map(|e| cap_id(&e.block_id))
+        self.ui
+            .tab
+            .active_editor
+            .as_ref()
+            .map(|e| cap_id(&e.block_id))
     }
 
     fn active_editor_text(&self) -> Option<&str> {
-        self.active_editor
+        self.ui
+            .tab
+            .active_editor
             .as_ref()
             .map(|e| e.in_memory_content.as_str())
     }
 
     fn active_editor_cursor(&self) -> Option<usize> {
-        self.active_editor.as_ref().map(|e| e.cursor_byte)
+        self.ui.tab.active_editor.as_ref().map(|e| e.cursor_byte)
+    }
+
+    fn active_editor_dirty(&self) -> bool {
+        self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty)
     }
 }
 
@@ -297,20 +333,26 @@ impl RefEditorMirror for ReferenceState {
 
 impl RefEditorMirrorMut for ReferenceState {
     fn type_chars(&mut self, text: &str) {
-        if let Some(editor) = self.active_editor.as_mut() {
+        if let Some(editor) = self.ui.tab.active_editor.as_mut() {
             editor.type_chars(text);
         }
     }
 
     fn delete_backward(&mut self, count: usize) {
-        if let Some(editor) = self.active_editor.as_mut() {
+        if let Some(editor) = self.ui.tab.active_editor.as_mut() {
             editor.delete_backward(count);
         }
     }
 
     fn move_cursor(&mut self, byte_position: usize) {
-        if let Some(editor) = self.active_editor.as_mut() {
+        if let Some(editor) = self.ui.tab.active_editor.as_mut() {
             editor.move_cursor(byte_position);
+        }
+    }
+
+    fn mark_active_editor_committed(&mut self) {
+        if let Some(editor) = self.ui.tab.active_editor.as_mut() {
+            editor.dirty = false;
         }
     }
 }
@@ -318,6 +360,34 @@ impl RefEditorMirrorMut for ReferenceState {
 // ─── RefFocus ─────────────────────────────────────────────────────────
 
 impl RefFocus for ReferenceState {
+    fn expected_focus_root_rows(&self) -> Vec<(String, Vec<String>)> {
+        Region::ALL
+            .iter()
+            .map(|region| {
+                let roots = self
+                    .expected_focus_root_ids(*region)
+                    .into_iter()
+                    .map(|u| u.as_str().to_string())
+                    .collect();
+                (region.as_str().to_string(), roots)
+            })
+            .collect()
+    }
+
+    fn navigation_focus_rows(&self) -> Vec<(String, Option<String>)> {
+        self.ui
+            .tab
+            .navigation_history
+            .iter()
+            .map(|(region, hist)| {
+                (
+                    region.as_str().to_string(),
+                    hist.current_focus().map(|u| u.as_str().to_string()),
+                )
+            })
+            .collect()
+    }
+
     fn current_focus(&self, region: CapRegion) -> Option<EntityUri> {
         ReferenceState::current_focus(self, from_cap_region(region))
             .as_ref()
@@ -326,7 +396,7 @@ impl RefFocus for ReferenceState {
 
     fn focused_cursor(&self, region: CapRegion) -> Option<CapCursor> {
         let r = from_cap_region(region);
-        self.focused_cursor.get(&r).map(|cp| CapCursor {
+        self.ui.tab.focused_cursor.get(&r).map(|cp| CapCursor {
             line: cp.line,
             column: cp.column,
         })
@@ -339,8 +409,8 @@ impl RefFocusMut for ReferenceState {
     fn set_focus(&mut self, region: CapRegion, id: EntityUri, cursor: CapCursor) {
         let uri = parse_id_must(&id);
         let r = from_cap_region(region);
-        self.focused_entity_id.insert(r, uri.clone());
-        self.focused_cursor.insert(
+        self.ui.tab.focused_entity_id.insert(r, uri.clone());
+        self.ui.tab.focused_cursor.insert(
             r,
             CursorPosition {
                 line: cursor.line,
@@ -348,13 +418,26 @@ impl RefFocusMut for ReferenceState {
             },
         );
         if r == Region::Main {
-            self.focused_block = Some(uri);
+            self.ui.tab.focused_block = Some(uri);
         }
     }
 
     fn clear_focus_if_deleted(&mut self, id: &EntityUri) {
         let uri = parse_id_must(id);
         ReferenceState::clear_focus_if_deleted(self, &uri);
+    }
+
+    fn open_active_editor(&mut self, id: EntityUri, content: String, cursor_byte: usize) {
+        self.ui.tab.active_editor = Some(super::reference_state::ActiveEditor {
+            block_id: id,
+            in_memory_content: content,
+            cursor_byte,
+            dirty: false,
+        });
+    }
+
+    fn close_active_editor(&mut self) {
+        self.ui.tab.active_editor = None;
     }
 }
 
@@ -388,23 +471,18 @@ impl RefPeers for ReferenceState {
 }
 
 // ─── Phase 6a — RefPeersMut (write side) ─────────────────────────────
-//
-// AddPeer is fully migrated. The remaining 5 Loro transitions
-// (PeerEdit{Create,Update,Delete}, PeerCharEdit, SyncWithPeer,
-// MergeFromPeer) panic with `unimplemented!` — wide PBT keeps using
-// their original `apply_to_ref` path until a slice consumer drives
-// the migration. This mirrors the Phase 6 "trait surface first,
-// blanket impls on demand" stance.
 
 impl RefPeersMut for ReferenceState {
     fn add_peer_from_primary_snapshot(&mut self) -> u64 {
         let peer_id = (self.peers.len() as u64) + 100;
         let peer_blocks: std::collections::HashMap<String, PeerBlock> = self
+            .domain
             .block_state
             .blocks
             .values()
             .filter(|b| {
                 let is_seed = self
+                    .domain
                     .block_state
                     .block_documents
                     .get(&b.id)
@@ -460,10 +538,14 @@ impl RefPeersMut for ReferenceState {
 
     fn peer_apply_update(&mut self, peer_idx: usize, stable_id: &str, content: &str) {
         let peer = &mut self.peers[peer_idx];
-        if let Some(block) = peer.blocks.get_mut(stable_id) {
-            block.content = content.to_string();
-            peer.modified_stable_ids.insert(stable_id.to_string());
-        }
+        let block = peer.blocks.get_mut(stable_id).unwrap_or_else(|| {
+            panic!(
+                "peer_apply_update: stable_id {stable_id} not in peer {peer_idx} — \
+                 generator/precondition bug (a silent no-op here desyncs ref vs SUT)"
+            )
+        });
+        block.content = content.to_string();
+        peer.modified_stable_ids.insert(stable_id.to_string());
     }
 
     fn peer_apply_delete(&mut self, peer_idx: usize, stable_id: &str) {
@@ -491,7 +573,7 @@ impl RefPeersMut for ReferenceState {
         self.peers[peer_idx].created_stable_ids.clear();
         let peer_blocks: Vec<_> = self.peers[peer_idx].blocks.values().cloned().collect();
         merge_peer_blocks_into_primary(
-            &mut self.block_state,
+            &mut self.domain.block_state,
             &peer_blocks,
             &modified,
             &created,
@@ -503,11 +585,13 @@ impl RefPeersMut for ReferenceState {
         // primary blocks into the peer (overwrite content so the peer
         // sees post-merge truth).
         let primary_as_peer: Vec<PeerBlock> = self
+            .domain
             .block_state
             .blocks
             .values()
             .filter(|b| {
                 let is_seed = self
+                    .domain
                     .block_state
                     .block_documents
                     .get(&b.id)
@@ -542,7 +626,7 @@ impl RefPeersMut for ReferenceState {
         self.peers[peer_idx].created_stable_ids.clear();
         let peer_blocks: Vec<_> = self.peers[peer_idx].blocks.values().cloned().collect();
         merge_peer_blocks_into_primary(
-            &mut self.block_state,
+            &mut self.domain.block_state,
             &peer_blocks,
             &modified,
             &created,
@@ -565,53 +649,224 @@ impl RefFocusRoots for ReferenceState {
 impl RefLayout for ReferenceState {
     fn layout_block_ids(&self) -> BTreeSet<EntityUri> {
         let ids: BTreeSet<&holon_api::entity_uri::EntityUri> = self
+            .domain
             .layout_blocks
             .headline_ids
             .iter()
-            .chain(self.layout_blocks.query_source_ids.iter())
-            .chain(self.layout_blocks.render_source_ids.iter())
+            .chain(self.domain.layout_blocks.query_source_ids.iter())
+            .chain(self.domain.layout_blocks.render_source_ids.iter())
             .collect();
         ids.into_iter().map(cap_id).collect()
     }
 
     fn profile_block_ids(&self) -> BTreeSet<EntityUri> {
-        self.profile_block_ids.iter().map(cap_id).collect()
+        self.domain.profile_block_ids.iter().map(cap_id).collect()
     }
 
     fn has_blocks_profile(&self) -> bool {
         self.has_blocks_profile()
     }
+
+    fn all_block_ids(&self) -> BTreeSet<EntityUri> {
+        self.domain.block_state.blocks.keys().map(cap_id).collect()
+    }
+
+    fn expected_visible_content_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
+        let focus_roots = self.expected_focus_root_ids(from_cap_region(region));
+        self.domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| {
+                b.content_type != holon_api::ContentType::Source
+                    && self.is_descendant_of_any(&b.id, &focus_roots)
+            })
+            .map(|b| cap_id(&b.id))
+            .collect()
+    }
+
+    fn has_user_documents(&self) -> bool {
+        !self.files.documents.is_empty()
+    }
+
+    fn region_entity_focused(&self, region: CapRegion) -> bool {
+        self.ui
+            .tab
+            .focused_entity_id
+            .contains_key(&from_cap_region(region))
+    }
+}
+
+// ─── RefBackend ───────────────────────────────────────────────────────
+
+impl RefBackend for ReferenceState {
+    /// Every reference block whose document is NOT a seed document. The runner
+    /// has already remapped `id`/`parent_id` into SUT ID space via
+    /// `with_resolved_doc_uris`, so these clone directly into the comparison.
+    fn non_seed_blocks(&self) -> Vec<holon_api::Block> {
+        self.domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| {
+                let is_seed = self
+                    .domain
+                    .block_state
+                    .block_documents
+                    .get(&b.id)
+                    .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
+                !is_seed
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Resolved `block_documents` keys whose document is a seed document.
+    fn seed_block_ids(&self) -> BTreeSet<EntityUri> {
+        self.domain
+            .block_state
+            .block_documents
+            .iter()
+            .filter(|(_, doc)| doc.is_no_parent() || doc.is_sentinel())
+            .map(|(id, _)| cap_id(id))
+            .collect()
+    }
+
+    /// Reference blocks as they should appear on disk in org files. The runner
+    /// already remapped `id`/`parent_id` into SUT ID space via
+    /// `with_resolved_doc_uris` (so `#+ID:`-resolved doc parents are
+    /// `block:<uuid>` and split-N placeholders are real UUIDs). The remaining
+    /// org-specific step: a
+    /// document parent the controller hasn't resolved yet is still a synthetic
+    /// doc URI — a key in `self.documents` — and the org parser writes it on
+    /// disk as `file:<filename>`. Remap those so the comparison matches.
+    fn org_blocks(&self) -> Vec<holon_api::Block> {
+        // Blocks always carry a `block:` parent — a top-level org block's
+        // parent is its document block (`block:<doc-id>`), which is exactly
+        // what `parse_org_file_blocks` reconstructs from the file's `:ID:`
+        // drawer. (`EntityUri::file` parents are a future concern, not used
+        // for block parentage today.)
+        let seed = self.seed_block_ids();
+        self.domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| !seed.contains(&b.id))
+            .filter(|b| !b.is_page())
+            .cloned()
+            .map(|mut b| {
+                // On disk the first content line is the headline title, so a
+                // trailing `:tag:` group re-parses as org TAGS (the in-memory
+                // stores keep the raw content — e.g. after an editor split
+                // that lands exactly before a tag group). The disk view must
+                // look through that lens.
+                crate::pbt::types::apply_org_headline_tag_split(&mut b);
+                b
+            })
+            .collect()
+    }
 }
 
 impl RefRender for ReferenceState {
+    fn current_view(&self) -> String {
+        ReferenceState::current_view(self)
+    }
+
     fn active_render_expr_name(&self, region: CapRegion) -> Option<String> {
         let api_region = from_cap_region(region);
         self.active_render_expr_name(api_region)
     }
 
+    fn root_render_expr_name(&self) -> Option<String> {
+        // Faithful to inline 10d: read the ROOT render expr (NOT
+        // main-panel-preferring) and extract the FunctionCall name.
+        // Returns None when there's no root render expr OR when it isn't
+        // a FunctionCall; callers disambiguate via has_root_render_expr().
+        match self.root_render_expr()? {
+            holon_api::render_types::RenderExpr::FunctionCall { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
     fn has_root_render_expr(&self) -> bool {
         self.root_render_expr().is_some()
+    }
+
+    fn root_visible_columns(&self) -> Vec<String> {
+        // Faithful to inline 10f: `expected_expr.visible_columns()` on the
+        // ROOT render expr. Empty when there's no root render expr.
+        self.root_render_expr()
+            .map(|e| e.visible_columns())
+            .unwrap_or_default()
+    }
+
+    fn main_panel_block_id(&self) -> Option<EntityUri> {
+        self.main_panel_block_id().as_ref().map(cap_id)
+    }
+
+    fn main_panel_render_expr_name(&self) -> Option<String> {
+        // The content the main panel should render: its own render expr,
+        // falling back to the root render expr (mirrors
+        // active_render_expr_name(Main)). Only FunctionCall names are returned.
+        match self.main_panel_render_expr().or(self.root_render_expr())? {
+            holon_api::render_types::RenderExpr::FunctionCall { name, .. } => Some(name.clone()),
+            _ => None,
+        }
     }
 }
 
 impl RefWatches for ReferenceState {
     fn active_watch_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.active_watches.keys().cloned().collect();
+        let mut ids: Vec<String> = self.mcp.active_watches.keys().cloned().collect();
         ids.sort();
         ids
+    }
+
+    /// Evaluate the watch query against the (already SUT-ID-space-resolved)
+    /// block state and stringify each `Value` into the `WatchRow` shape.
+    /// NULL/non-string values become `None`, exactly as `Value::as_string()`
+    /// returns `None`.
+    fn expected_watch_rows(&self, query_id: &str) -> Vec<WatchRow> {
+        let Some(watch_spec) = self.mcp.active_watches.get(query_id) else {
+            return Vec::new();
+        };
+        self.query_results(watch_spec)
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|(k, v)| (k, v.as_string().map(str::to_string)))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn watch_query_columns(&self, query_id: &str) -> Vec<String> {
+        self.mcp
+            .active_watches
+            .get(query_id)
+            .map(|ws| ws.query.columns.clone())
+            .unwrap_or_default()
+    }
+
+    fn watch_block_raw_sql(&self, query_id: &str) -> String {
+        self.mcp
+            .active_watches
+            .get(query_id)
+            .map(|ws| ws.query.to_block_raw_sql())
+            .unwrap_or_default()
     }
 }
 
 impl RefGlobalFocus for ReferenceState {
     fn global_focused_block(&self) -> Option<EntityUri> {
-        self.focused_block.as_ref().map(cap_id)
+        self.ui.tab.focused_block.as_ref().map(cap_id)
     }
 }
 
 impl RefTaskState for ReferenceState {
     fn task_state_of(&self, id: &EntityUri) -> Option<String> {
         let uri = parse_id(id)?;
-        let block = self.block_state.blocks.get(&uri)?;
+        let block = self.domain.block_state.blocks.get(&uri)?;
         block
             .properties
             .get("task_state")

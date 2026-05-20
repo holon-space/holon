@@ -27,23 +27,27 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 #[derive(Debug, Clone, PartialEq)]
 pub struct DynamicEntity {
     pub type_name: String,
-    pub fields: HashMap<String, Value>,
+    pub fields: StorageEntity,
 }
 
 impl DynamicEntity {
     pub fn new(type_name: impl Into<String>) -> Self {
         Self {
             type_name: type_name.into(),
-            fields: HashMap::new(),
+            fields: StorageEntity::new(),
         }
     }
 
-    pub fn with_field(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn with_field(
+        mut self,
+        name: impl Into<std::sync::Arc<str>>,
+        value: impl Into<Value>,
+    ) -> Self {
         self.fields.insert(name.into(), value.into());
         self
     }
 
-    pub fn set(&mut self, name: impl Into<String>, value: impl Into<Value>) {
+    pub fn set(&mut self, name: impl Into<std::sync::Arc<str>>, value: impl Into<Value>) {
         self.fields.insert(name.into(), value.into());
     }
 
@@ -109,7 +113,7 @@ pub enum FieldLifetime {
     #[default]
     Persistent,
     Computed {
-        expr: holon_engine::guard::CompiledExpr,
+        expr: holon_expr::CompiledExpr,
     },
     Transient,
     Historical,
@@ -245,7 +249,7 @@ pub struct ProfileVariant {
     /// Rhai condition expression. Compiled at deserialization time.
     /// None = unconditional (always matches).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition: Option<holon_engine::guard::CompiledExpr>,
+    pub condition: Option<holon_expr::CompiledExpr>,
     /// Render DSL expression string (parsed by render_dsl at resolution time).
     pub render: String,
 }
@@ -403,7 +407,7 @@ impl TypeDefinition {
     }
 
     /// Fields with `Computed` lifetime, returned as `(name, CompiledExpr)` pairs.
-    pub fn computed_fields(&self) -> Vec<(&str, &holon_engine::guard::CompiledExpr)> {
+    pub fn computed_fields(&self) -> Vec<(&str, &holon_expr::CompiledExpr)> {
         self.fields
             .iter()
             .filter_map(|f| match &f.lifetime {
@@ -442,16 +446,16 @@ impl TypeDefinition {
         for (key, value) in &row {
             match value {
                 Value::String(s) => {
-                    scope.push(key.clone(), s.clone());
+                    scope.push(key.as_ref(), s.clone());
                 }
                 Value::Integer(i) => {
-                    scope.push(key.clone(), *i);
+                    scope.push(key.as_ref(), *i);
                 }
                 Value::Float(f) => {
-                    scope.push(key.clone(), *f);
+                    scope.push(key.as_ref(), *f);
                 }
                 Value::Boolean(b) => {
-                    scope.push(key.clone(), *b);
+                    scope.push(key.as_ref(), *b);
                 }
                 _ => {}
             }
@@ -465,7 +469,7 @@ impl TypeDefinition {
                 Ok(result) => {
                     let value = dynamic_to_value(result.clone());
                     scope.push(field.name.clone(), result);
-                    row.insert(field.name.clone(), value);
+                    row.insert(field.name.as_str().into(), value);
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -473,7 +477,7 @@ impl TypeDefinition {
                         field.name,
                         self.name
                     );
-                    row.insert(field.name.clone(), Value::Null);
+                    row.insert(field.name.as_str().into(), Value::Null);
                 }
             }
         }
@@ -534,8 +538,10 @@ impl TryFromEntity for DynamicEntity {
 // StorageEntity type alias
 // =============================================================================
 
-/// Type alias for entity storage as HashMap
-pub type StorageEntity = HashMap<String, Value>;
+/// Type alias for entity storage as HashMap.
+/// Keys are `Arc<str>` so identical column names are shared across rows
+/// instead of allocating a fresh String per cell.
+pub type StorageEntity = HashMap<std::sync::Arc<str>, Value>;
 
 // =============================================================================
 // Graph schema intermediate types

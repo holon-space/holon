@@ -13,7 +13,6 @@ use futures_signals::signal_map::{MutableBTreeMap, MutableBTreeMapLockRef, Mutab
 use holon_api::{Change, Value};
 use tokio::sync::Notify;
 
-use crate::storage::turso::RowChange;
 use crate::storage::types::StorageEntity;
 
 /// Pull `_rowid` (set by `process_cdc_event`) out of a row's data, if present.
@@ -41,7 +40,7 @@ type IdFn = Box<dyn Fn(&StorageEntity) -> Result<String> + Send + Sync>;
 type ParseFn<T> = Box<dyn Fn(&StorageEntity) -> Result<T> + Send + Sync>;
 
 pub struct LiveData<T: Clone + Send + Sync + 'static> {
-    items: MutableBTreeMap<String, T>,
+    items: MutableBTreeMap<String, Arc<T>>,
     id_fn: IdFn,
     parse_fn: ParseFn<T>,
     /// Highest `BatchMetadata.seq` this mirror has applied via `subscribe`'s
@@ -52,6 +51,12 @@ pub struct LiveData<T: Clone + Send + Sync + 'static> {
     /// Signalled after every `last_consumed_seq` advance so `wait_for_seq`
     /// can wake immediately instead of polling on a 1ms timer.
     seq_advanced: Arc<Notify>,
+    /// Signalled after *any* mutation of `items` — CDC `apply_changes`,
+    /// the `subscribe` actor, and the optimistic `insert` bypass alike.
+    /// `wait_until` waits on this so it wakes regardless of how the awaited
+    /// rows arrived (unlike `seq_advanced`, which fires only for seq-tagged
+    /// CDC batches).
+    items_changed: Arc<Notify>,
     /// Maps Turso's internal `rowid` (strings, populated from `_rowid` in
     /// CDC `data`) to the user-defined key produced by `id_fn`.
     ///
@@ -86,7 +91,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             if let Some(rowid) = extract_rowid(&row) {
                 rowid_to_key.insert(rowid, id.clone());
             }
-            items.insert(id, parsed);
+            items.insert(id, Arc::new(parsed));
         }
 
         Arc::new(Self {
@@ -95,6 +100,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             parse_fn: Box::new(parse_fn),
             last_consumed_seq: Arc::new(AtomicU64::new(0)),
             seq_advanced: Arc::new(Notify::new()),
+            items_changed: Arc::new(Notify::new()),
             rowid_to_key: Mutex::new(rowid_to_key),
         })
     }
@@ -170,11 +176,58 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         }
     }
 
+    /// Wait until `predicate` holds over the current item snapshot, or until
+    /// `timeout` elapses. Returns `true` if the predicate was satisfied,
+    /// `false` on timeout.
+    ///
+    /// This is the **positional** catch-up primitive: unlike
+    /// [`wait_for_quiescent`](Self::wait_for_quiescent), which returns once the
+    /// CDC stream has merely gone *quiet*, `wait_until` returns only once the
+    /// caller's condition is observed in the data. That distinction is
+    /// load-bearing for the block-sync cache wait it replaces
+    /// (`wait_for_cache_caught_up`): a quiescence-only wait can return *before*
+    /// the projection that produces the awaited rows has even begun (a
+    /// momentary lull), reintroducing the stale-cache re-render race. A
+    /// predicate over block presence/count cannot return early.
+    ///
+    /// The notification is armed BEFORE the snapshot so a CDC batch landing
+    /// between the predicate check and the await still wakes us (no lost
+    /// wakeup), mirroring `wait_for_quiescent`.
+    pub async fn wait_until<F>(&self, mut predicate: F, timeout: std::time::Duration) -> bool
+    where
+        F: FnMut(&BTreeMap<String, Arc<T>>) -> bool,
+    {
+        let overall = tokio::time::sleep(timeout);
+        tokio::pin!(overall);
+        loop {
+            // Arm the notification BEFORE reading so a mutation applied between
+            // the read and the await is not missed.
+            let notified = self.items_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if predicate(&self.items.lock_ref()) {
+                return true;
+            }
+
+            tokio::select! {
+                _ = &mut notified => {
+                    // A new batch landed; re-check the predicate.
+                }
+                _ = &mut overall => {
+                    // Final check in case the predicate became true exactly as
+                    // the deadline fired.
+                    return predicate(&self.items.lock_ref());
+                }
+            }
+        }
+    }
+
     /// Read the current snapshot. Returns a guard — hold briefly.
     ///
-    /// The guard `Deref`s to `BTreeMap<String, T>`, so callers can use
+    /// The guard `Deref`s to `BTreeMap<String, Arc<T>>`, so callers can use
     /// `.get(&key)`, `.values()`, `.len()`, etc. directly.
-    pub fn read(&self) -> MutableBTreeMapLockRef<'_, String, T> {
+    pub fn read(&self) -> MutableBTreeMapLockRef<'_, String, Arc<T>> {
         self.items.lock_ref()
     }
 
@@ -186,7 +239,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     ///
     /// Use [`SignalMapExt::for_each`] (or [`SignalMapExt::key_cloned`]) to react
     /// to changes in a background task.
-    pub fn signal_map(&self) -> MutableSignalMap<String, T> {
+    pub fn signal_map(&self) -> MutableSignalMap<String, Arc<T>> {
         self.items.signal_map_cloned()
     }
 
@@ -195,26 +248,28 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     /// Use this for optimistic cache updates after a write to ensure
     /// the LiveData is immediately consistent, without waiting for the
     /// CDC roundtrip through matview → stream → apply_changes.
-    pub fn insert(&self, key: String, value: T) {
+    pub fn insert(&self, key: String, value: Arc<T>) {
         self.items.lock_mut().insert_cloned(key, value);
+        self.items_changed.notify_waiters();
     }
 
     /// Apply a batch of CDC changes incrementally.
-    pub fn apply_changes(&self, changes: Vec<RowChange>) {
+    pub fn apply_changes(&self, changes: Vec<Change<StorageEntity>>) {
+        let applied_any = !changes.is_empty();
         let mut lock = self.items.lock_mut();
         let mut rowid_map = self
             .rowid_to_key
             .lock()
             .expect("rowid_to_key mutex poisoned");
-        for rc in changes {
-            match rc.change {
+        for change in changes {
+            match change {
                 Change::Created { data, .. } | Change::Updated { data, .. } => {
                     let id = (self.id_fn)(&data).expect("id_fn failed on CDC row");
                     let parsed = (self.parse_fn)(&data).expect("parse_fn failed on CDC row");
                     if let Some(rowid) = extract_rowid(&data) {
                         rowid_map.insert(rowid, id.clone());
                     }
-                    lock.insert_cloned(id, parsed);
+                    lock.insert_cloned(id, Arc::new(parsed));
                 }
                 Change::Deleted { id, .. } => {
                     // For matviews without an `id` column, `process_cdc_event`
@@ -235,6 +290,11 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 }
             }
         }
+        drop(rowid_map);
+        drop(lock);
+        if applied_any {
+            self.items_changed.notify_waiters();
+        }
     }
 
     /// Spawn a background task that listens to the CDC stream and applies changes.
@@ -245,11 +305,11 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     ///
     /// `source_name` should identify the underlying table/matview (e.g. "block",
     /// "focus_roots") so traces can tell mirrors apart when one stops draining.
-    pub fn subscribe(
-        self: &Arc<Self>,
-        source_name: &'static str,
-        mut stream: crate::storage::turso::RowChangeStream,
-    ) {
+    pub fn subscribe<C, S>(self: &Arc<Self>, source_name: &'static str, mut stream: S)
+    where
+        C: Into<Change<StorageEntity>> + Send + 'static,
+        S: tokio_stream::Stream<Item = holon_api::BatchWithMetadata<C>> + Send + Unpin + 'static,
+    {
         let live = Arc::clone(self);
         crate::util::spawn_actor(async move {
             use tokio_stream::StreamExt;
@@ -275,7 +335,8 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 };
                 batches_seen += 1;
                 let seq = batch.metadata.seq;
-                let changes: Vec<RowChange> = batch.inner.items.into_iter().collect();
+                let changes: Vec<Change<StorageEntity>> =
+                    batch.inner.items.into_iter().map(Into::into).collect();
                 let change_count = changes.len();
                 live.apply_changes(changes);
                 if seq > 0 {
@@ -296,16 +357,15 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::task::{Context, Poll};
 
     use futures_signals::signal_map::{MapDiff, SignalMapExt};
     use holon_api::Value;
 
     fn make_row(id: &str, content: &str) -> StorageEntity {
-        let mut row = HashMap::new();
-        row.insert("id".to_string(), Value::String(id.to_string()));
-        row.insert("content".to_string(), Value::String(content.to_string()));
+        let mut row: StorageEntity = holon_api::StorageEntity::new();
+        row.insert("id".into(), Value::String(id.to_string()));
+        row.insert("content".into(), Value::String(content.to_string()));
         row
     }
 
@@ -320,8 +380,8 @@ mod tests {
 
         let items = live.read();
         assert_eq!(items.len(), 2);
-        assert_eq!(items.get("a").unwrap(), "hello");
-        assert_eq!(items.get("b").unwrap(), "world");
+        assert_eq!(**items.get("a").unwrap(), "hello");
+        assert_eq!(**items.get("b").unwrap(), "world");
     }
 
     #[test]
@@ -332,20 +392,17 @@ mod tests {
             |row| Ok(row.get("content").unwrap().as_string().unwrap().to_string()),
         );
 
-        let created = RowChange {
-            relation_name: "test".to_string(),
-            change: Change::Created {
-                data: make_row("c", "new"),
-                origin: holon_api::ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+        let created = Change::Created {
+            data: make_row("c", "new"),
+            origin: holon_api::ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
             },
         };
         live.apply_changes(vec![created]);
 
         let items = live.read();
-        assert_eq!(items.get("c").unwrap(), "new");
+        assert_eq!(**items.get("c").unwrap(), "new");
     }
 
     #[test]
@@ -358,14 +415,11 @@ mod tests {
 
         assert_eq!(live.read().len(), 1);
 
-        let deleted = RowChange {
-            relation_name: "test".to_string(),
-            change: Change::Deleted {
-                id: "x".to_string(),
-                origin: holon_api::ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+        let deleted = Change::Deleted {
+            id: "x".to_string(),
+            origin: holon_api::ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
             },
         };
         live.apply_changes(vec![deleted]);
@@ -394,25 +448,16 @@ mod tests {
         // Simulate a CDC Created event the matview emits for a new focus_roots
         // row. process_cdc_event injects `_rowid` into the data — this is what
         // our fix uses to remember the rowid → user-key mapping.
-        let mut row = HashMap::new();
-        row.insert(
-            "region".to_string(),
-            Value::String("right_sidebar".to_string()),
-        );
-        row.insert(
-            "root_id".to_string(),
-            Value::String("block:abc".to_string()),
-        );
-        row.insert("_rowid".to_string(), Value::String("42".to_string()));
+        let mut row: StorageEntity = holon_api::StorageEntity::new();
+        row.insert("region".into(), Value::String("right_sidebar".to_string()));
+        row.insert("root_id".into(), Value::String("block:abc".to_string()));
+        row.insert("_rowid".into(), Value::String("42".to_string()));
 
-        live.apply_changes(vec![RowChange {
-            relation_name: "focus_roots".to_string(),
-            change: Change::Created {
-                data: row,
-                origin: holon_api::ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+        live.apply_changes(vec![Change::Created {
+            data: row,
+            origin: holon_api::ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
             },
         }]);
 
@@ -420,14 +465,11 @@ mod tests {
 
         // CDC Delete for the same matview row. `process_cdc_event` falls back
         // to `change.id.to_string()` (rowid) because data has no `id` column.
-        live.apply_changes(vec![RowChange {
-            relation_name: "focus_roots".to_string(),
-            change: Change::Deleted {
-                id: "42".to_string(),
-                origin: holon_api::ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+        live.apply_changes(vec![Change::Deleted {
+            id: "42".to_string(),
+            origin: holon_api::ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
             },
         }]);
 
@@ -455,20 +497,17 @@ mod tests {
             Poll::Ready(Some(MapDiff::Replace { entries })) => {
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].0, "pre");
-                assert_eq!(entries[0].1, "seeded");
+                assert_eq!(*entries[0].1, "seeded");
             }
             other => panic!("Expected Ready(Some(Replace)), got {:?}", other),
         }
 
         // Apply a CDC change
-        live.apply_changes(vec![RowChange {
-            relation_name: "test".to_string(),
-            change: Change::Created {
-                data: make_row("a", "new-item"),
-                origin: holon_api::ChangeOrigin::Local {
-                    operation_id: None,
-                    trace_id: None,
-                },
+        live.apply_changes(vec![Change::Created {
+            data: make_row("a", "new-item"),
+            origin: holon_api::ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
             },
         }]);
 
@@ -476,7 +515,7 @@ mod tests {
         match signal.poll_map_change_unpin(&mut cx) {
             Poll::Ready(Some(MapDiff::Insert { key, value })) => {
                 assert_eq!(key, "a");
-                assert_eq!(value, "new-item");
+                assert_eq!(*value, "new-item");
             }
             other => panic!("Expected Ready(Some(Insert)), got {:?}", other),
         }

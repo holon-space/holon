@@ -29,7 +29,9 @@ GQL also operates on ordinary tables with foreign key relations — not only the
 
 Render specifications are resolved **at runtime per-row** via the EntityProfile system.
 
-**Location**: `crates/holon/src/entity_profile.rs`
+**Location**: data model + `ProfileResolving` trait in
+`crates/holon-api/src/entity_profile.rs` (storage de-leak Stage 10);
+`ProfileResolver` and profile parsing stay in `crates/holon/src/entity_profile.rs`.
 
 #### Overview
 
@@ -78,53 +80,83 @@ Query results flow into `ReactiveView` (a self-managing reactive collection back
 #### Core Types
 
 ```rust
-// Location: crates/holon/src/entity_profile.rs
+// Location: crates/holon-api/src/entity_profile.rs
 pub struct EntityProfile {
-    pub entity_name: String,               // "blocks", "todoist_tasks"
-    pub default: Arc<RowProfile>,          // Default rendering
-    pub variants: Vec<RowVariant>,         // Conditional overrides (Rhai)
-    pub computed_fields: Vec<ComputedField>,
+    pub entity_name: EntityName,            // "block", "todoist-task"
+    /// All variants, INCLUDING the conditionless "default". Sorted by
+    /// priority descending at parse time — highest priority checked first.
+    pub variants: Vec<StoredVariant>,
+    /// Pre-compiled computed fields, topologically sorted.
+    pub computed_fields: Vec<CompiledComputedField>,  // (name, CompiledExpr)
+    /// Editable placeholder appended to collections of this entity type.
+    pub virtual_child: Option<VirtualChildConfig>,
 }
 
-pub struct RowVariant {
+pub struct StoredVariant {                  // alias: RowVariant
     pub name: String,
-    pub condition_source: String,          // Rhai expression, e.g. "task_state == \"DONE\""
-    pub profile: Arc<RowProfile>,
-    pub specificity: usize,                // Higher = tried first
+    pub priority: i32,                      // Higher = checked first (seeded defaults: -1)
+    pub condition_source: String,           // Full Rhai condition (empty = always matches)
+    pub data_condition: Option<String>,     // Data-only part (Rhai, backend-evaluated)
+    pub ui_condition: Predicate,            // UI-state part (frontend-evaluated, no round-trip)
+    pub profile: Arc<StoredProfile>,
 }
 
-pub struct RowProfile {
+pub struct StoredProfile {                  // stored spec: render only, no operations
     pub name: String,
-    pub render: RenderExpr,                // e.g. tree(...), list(...), row(...)
+    pub render: RenderExpr,                 // e.g. tree(...), list(...), row(...)
+}
+
+// Location: crates/holon-api/src/render_types.rs — the RESOLVED output.
+// Operations are injected at resolve time from the entity's registered
+// operations, never stored in profile YAML.
+pub struct RenderProfile {                  // deprecated alias: RowProfile
+    pub name: String,
+    pub render: RenderExpr,
     pub operations: Vec<OperationDescriptor>,
+    pub variants: Vec<RenderVariant>,       // all matching candidates (multi-variant mode)
 }
 ```
 
-**Resolution algorithm** (`EntityProfile::resolve`):
-1. If `ProfileContext.preferred_variant` is set, try that variant first
-2. Evaluate variants in specificity order (descending)
-3. First variant whose Rhai condition evaluates to `true` wins
-4. Fall back to `default` profile if no variant matches
-5. If no EntityProfile exists for this entity_name, return "fallback" (no profile attached)
+**Resolution algorithm**: conditions are split at parse time into a *data*
+part (Rhai, evaluated against row + computed fields) and a *UI* part
+(`Predicate` over `is_focused`/`view_mode`/viewport variables, evaluated
+frontend-side with no backend round-trip).
+
+1. Look the entity's profile up in the `ProfileCache` by URI scheme; if none
+   is registered, return a default empty `RenderProfile` ("no profile attached")
+2. Single-variant path (`EntityProfile::resolve`): walk variants in priority
+   order (descending); first variant whose full `condition_source` is empty
+   or Rhai-evaluates to `true` wins
+3. Multi-variant path (`resolve_candidates`, used by
+   `ProfileResolving::resolve_with_variants`): collect ALL variants whose
+   `data_condition` matches; each carries its `ui_condition` so the frontend
+   picks the active one from local UI state and can switch instantly
+4. Computed fields are evaluated once per resolution, in topological order,
+   with `properties` flattened into the Rhai scope
 
 #### ProfileResolving Trait
 
 ```rust
-// Location: crates/holon/src/entity_profile.rs
+// Location: crates/holon-api/src/entity_profile.rs
 pub trait ProfileResolving: Send + Sync {
-    fn resolve(&self, row: &HashMap<String, Value>, context: &ProfileContext) -> Arc<RowProfile>;
-    fn resolve_with_computed(&self, row, context) -> (Arc<RowProfile>, HashMap<String, Value>);
-    fn resolve_batch(&self, rows: &[HashMap<String, Value>], context: &ProfileContext) -> Vec<Arc<RowProfile>>;
-    fn subscribe_version(&self) -> watch::Receiver<u64>;  // push-based change notification
-}
-
-pub struct ProfileContext {
-    pub preferred_variant: Option<String>,  // Hint from caller
-    pub view_width: Option<f64>,            // Responsive breakpoints (future)
+    fn resolve(&self, row: &HashMap<String, Value>) -> Arc<RenderProfile>;
+    fn resolve_with_computed(&self, row) -> (Arc<RenderProfile>, HashMap<String, Value>);
+    fn resolve_batch(&self, rows: &[HashMap<String, Value>]) -> Vec<Arc<RenderProfile>>;
+    // Defaulted methods:
+    fn resolve_with_variants(&self, row) -> (Arc<RenderProfile>, HashMap<String, Value>);
+    fn virtual_child_config(&self, entity_name: &str) -> Option<VirtualChildConfig>;
+    fn operations_for(&self, entity_name: &str) -> Vec<OperationDescriptor>;
+    fn resolve_collection_variants(&self) -> Vec<RenderVariant>;  // tree/table/board view modes
+    fn profile_signal(&self) -> Mutable<Arc<ProfileCache>>;       // push-based change signal
 }
 ```
 
-`ProfileResolver` loads profiles from org blocks with `entity_profile_for` property. Profiles are backed by CDC-driven `LiveData<EntityProfile>` — edits to profile blocks take effect immediately via `tokio::sync::watch` push notification (no polling).
+`ProfileResolver` (`crates/holon/src/entity_profile.rs`) loads profiles from
+org blocks with the `entity_profile_for` property, layered over type-defined
+profiles from the `TypeRegistry`. Profiles are backed by CDC-driven
+`LiveData<EntityProfile>` — edits to profile blocks rebuild the cache in a
+background task and swap a fresh `Arc<ProfileCache>` into `profile_signal()`,
+so consumers `.signal_cloned()` it and react immediately (no polling).
 
 #### MVVM Pattern: ReactiveViewModel Tree
 
@@ -222,7 +254,8 @@ pub enum InputTrigger {
 | `crates/holon-frontend/src/reactive_view_model.rs` | `ReactiveViewModel`, `ReactiveSlot` — persistent reactive ViewModel nodes |
 | `crates/holon-frontend/src/reactive_view.rs` | `ReactiveView` — self-managing reactive collection (MutableVec + driver) |
 | `crates/holon-frontend/src/reactive.rs` | `ReactiveEngine`, shadow builders, render interpretation |
-| `crates/holon/src/entity_profile.rs` | `EntityProfile`, `RowProfile`, `RowVariant`, `ProfileResolver` |
+| `crates/holon-api/src/entity_profile.rs` | `EntityProfile`, `ProfileCache`, `StoredProfile`/`StoredVariant`, `ProfileResolving` trait |
+| `crates/holon/src/entity_profile.rs` | `ProfileResolver` (LiveData-backed), profile parsing |
 | `crates/holon-api/src/widget_spec.rs` | `DataRow` type alias, `DataRowAccumulator` |
 | `crates/holon-api/src/render_types.rs` | `RenderExpr`, `OperationDescriptor`, `OperationWiring` |
 | `crates/holon/src/api/backend_engine.rs` | `get_root_block_id()`, `render_entity()`, `attach_row_profiles()` |

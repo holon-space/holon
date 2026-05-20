@@ -24,12 +24,12 @@ use holon_frontend::reactive::BuilderServices;
 
 use support::TestServices;
 
-/// Build a DataRow with the shape LinkProvider expects (`id` + `label`).
-fn row(id: &str, label: &str) -> HashMap<String, Value> {
-    let mut m = HashMap::new();
-    m.insert("id".into(), Value::String(id.into()));
-    m.insert("label".into(), Value::String(label.into()));
-    m
+/// Build a LinkCandidate with the shape LinkProvider expects.
+fn row(id: &str, label: &str) -> holon_api::LinkCandidate {
+    holon_api::LinkCandidate {
+        id: holon_api::EntityUri::parse(id).expect("test fixture id must be a valid EntityUri"),
+        label: label.to_string(),
+    }
 }
 
 fn doc_link_controller() -> EditorViewModel {

@@ -322,7 +322,7 @@ fn snapshot_data_rows_path_partitions() {
     let services = StubBuilderServices::new();
     let ctx = RenderContext {
         available_space: Some(space(800.0)),
-        data_rows: rows,
+        data_rows: rows.into(),
         ..Default::default()
     };
     let vm = services.interpret(&expr, &ctx);

@@ -18,6 +18,7 @@
 //! - Async-first: All operations return Futures for flexibility
 
 pub mod action_watcher;
+pub(crate) mod event_ring;
 pub mod loro_backend;
 pub mod memory_backend;
 // pbt_infrastructure pulls in proptest which is native-only.
@@ -29,7 +30,10 @@ pub mod types;
 pub mod backend_engine;
 pub mod block_domain;
 pub mod holon_service;
+pub mod loro_ui_watcher;
 pub mod operation_dispatcher;
+pub mod operation_engine;
+pub mod query_engine;
 pub mod ui_watcher;
 
 #[cfg(test)]
@@ -41,7 +45,9 @@ mod loro_backend_pbt;
 mod sync_pbt;
 
 // Re-export commonly used types
-pub use loro_backend::{LoroBackend, snapshot_blocks_from_doc};
+pub use loro_backend::{
+    LoroBackend, SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled,
+};
 pub use memory_backend::MemoryBackend;
 pub use repository::{CoreOperations, DocumentRepository, Lifecycle, P2POperations};
 // Re-export streaming types from holon-api (moved from streaming module)
@@ -56,7 +62,9 @@ pub use backend_engine::BackendEngine;
 pub use block_domain::BlockDomain;
 pub use holon_service::HolonService;
 pub use operation_dispatcher::OperationDispatcher;
-pub use ui_watcher::watch_ui;
+pub use operation_engine::{DispatchingOperationEngine, OperationEngine};
+pub use query_engine::{QueryEngine, SqlQueryEngine};
+pub use ui_watcher::{UiWatcher, watch_ui};
 
 // Re-export OperationDescriptor and OperationParam for FRB type generation
 pub use holon_api::{OperationDescriptor, OperationParam};

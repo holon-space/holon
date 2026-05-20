@@ -58,6 +58,7 @@ impl std::fmt::Debug for AuthMode {
 }
 
 /// Configuration for a generic MCP integration.
+#[derive(Debug)]
 pub struct McpIntegrationConfig {
     pub provider_name: String,
     pub transport: McpTransport,
@@ -608,7 +609,7 @@ impl EntityFieldReader for DynamicEntityFieldReader {
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = holon_core::traits::Result<Option<HashMap<String, holon_api::Value>>>,
+                    Output = holon_core::traits::Result<Option<holon_api::StorageEntity>>,
                 > + Send
                 + '_,
         >,
@@ -619,7 +620,7 @@ impl EntityFieldReader for DynamicEntityFieldReader {
         let id = id.to_string();
         Box::pin(async move {
             let entity: Option<DynamicEntity> = self.0.get_by_id(&id).await?;
-            Ok(entity.map(|e| e.to_entity().fields))
+            Ok(entity.map(|e| e.to_entity().fields.into_iter().collect()))
         })
     }
 }

@@ -10,7 +10,7 @@
 //! compile-only.
 
 use holon_pbt_core::capabilities::SutLoroLog;
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 /// Mirror of the production `InvLoroNoErrors` body in
 /// `crates/holon-integration-tests/src/pbt/invariants/bodies/loro_no_errors.rs`.
@@ -23,9 +23,6 @@ where
 {
     fn id(&self) -> InvariantId {
         InvariantId("inv-loro-no-errors")
-    }
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {
         if sut.loro_had_errors().await {
@@ -47,6 +44,9 @@ impl SutLoroLog for ToySut {
     async fn loro_children_of(&self, _: &str) -> Option<Vec<String>> {
         None
     }
+    async fn loro_block_snapshot(&self) -> Option<Vec<holon_api::block::Block>> {
+        None
+    }
 }
 
 /// Type-level smoke: this compiling means the where-clause filter works.
@@ -62,7 +62,5 @@ fn assert_invariant_resolves() {
 fn invariant_metadata_is_addressable() {
     // Disambiguate via UFCS — same R, S as the assert_resolves fn above.
     let id = <InvLoroNoErrors as Invariant<ToyRef, ToySut>>::id(&InvLoroNoErrors);
-    let mode = <InvLoroNoErrors as Invariant<ToyRef, ToySut>>::mode(&InvLoroNoErrors);
     assert_eq!(id, InvariantId("inv-loro-no-errors"));
-    assert_eq!(mode, RunMode::Strict);
 }

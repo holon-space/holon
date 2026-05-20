@@ -80,9 +80,11 @@ archlint/
 │   ├── no-jsonb-as-string.yml                  # `.as_string()` on jsonb cols
 │   └── no-underscore-params.yml                # `fn f(_x: T)` masking unused
 ├── smells/                   # ripgrep regex smells (TOML)
-│   ├── words.toml            # fallback / compatibility / global_registry / raw_sql
-│   ├── imports.toml          # loro / turso / platform / frontend-provider-dep
-│   └── focus.toml            # direct_focus_mutation / navigation_execute_op
+│   ├── words.toml            # fallback / compatibility / global_registry / raw_sql / routing_payload_key / sort_key_writer / deleted_cell_symbol
+│   ├── imports.toml          # loro / turso / platform / frontend-provider-dep / frontend-storage-backend / orgmode-raw-sql
+│   ├── focus.toml            # direct_focus_mutation / navigation_execute_op / focus-no-from-raw
+│   ├── entity_uri.toml       # entity_uri_from_raw / entity_uri_parse_default
+│   └── pbt_transitions.toml  # pbt-transition-helper-concrete-ref / pbt-slice-invariant-foreign-module / pbt-transition-apply-intent / pbt-sut-handle-frontend-simulation
 ├── dylint/                   # type-aware Rust lints (cdylib via dylint 5.0)
 │   ├── README.md
 │   ├── result_to_none/                       # `match r { Ok(x) => Some(x), Err(_) => None }`
@@ -209,11 +211,24 @@ fastest path.
 | `platform` | smell | `platform` | `holon-frontend` must be platform-agnostic |
 | `raw_sql_in_frontend` | smell | `sql` | Frontends must not contain raw SQL (mcp exempt) |
 | `frontend-provider-dep` | smell | `frontend-provider-dep` | Frontend Cargo.toml must not depend on provider crates |
+| `frontend-storage-backend` | smell | `frontend-storage-backend` | `holon-frontend` must not import Loro/Turso/RowChangeStream |
+| `frontend-raw-sql` | smell | `frontend-raw-sql` | No raw SQL in `holon-frontend` (storage-agnostic ViewModel layer) |
+| `orgmode-raw-sql` | smell | `orgmode-raw-sql` | No raw SQL in `holon-orgmode` outside `di.rs` |
 | `global_registry` | smell | `global_registry` | No `Arc<RwLock<HashMap<String, Entity<…>>>>` registries |
 | `fallback` | smell | `fallback` | The word "fallback" usually means a hidden failure mode |
 | `compatibility` | smell | `compatibility` | "Compatibility" usually means a backwards-compat shim to delete |
 | `direct_focus_mutation` | smell | `direct_focus_mutation` | `ui_state.set_focus(...)` outside the canonical setter |
 | `navigation_execute_op` | smell | `navigation_execute_op` | `execute_op("navigation", ...)` outside the provider |
+| `focus-no-from-raw` | smell | `focus-no-from-raw` | `EntityUri::from_raw` in the focus/navigation routing layer |
+| `entity_uri_from_raw` | smell | `entity_uri_from_raw` | `EntityUri::from_raw` outside true parse boundaries |
+| `entity_uri_parse_default` | smell | `entity_uri_parse_default` | `EntityUri::parse(..).unwrap_or[_else](..)` silently substituting a default |
+| `routing_payload_key` | smell | `routing_payload_key` | `"_routing_*"` string literals — typed `Event` fields should be used instead |
+| `sort_key_writer` | smell | `sort_key_writer` | Producer-side `sort_key` write in `holon-orgmode` — emit `after_block_id` instead |
+| `deleted_cell_symbol` | smell | `deleted_cell_symbol` | Pre-Phase-2 symbols reappearing (`BlockContentResolver`, `live_content`, watermark fields) |
+| `pbt-transition-helper-concrete-ref` | smell | `pbt-transition-helper-concrete-ref` | PBT transition helpers binding to concrete `ReferenceState` instead of capability traits |
+| `pbt-slice-invariant-foreign-module` | smell | `pbt-slice-invariant-foreign-module` | Slice test importing `Inv*` from outside `invariants::bodies::` |
+| `pbt-transition-apply-intent` | smell | `pbt-transition-apply-intent` | PBT transition bodies calling `.apply_intent(...)` (bypasses user-input pipeline) |
+| `pbt-sut-handle-frontend-simulation` | smell | `pbt-sut-handle-frontend-simulation` | `interpret_pure` / `HeadlessBuilderServices::new` / `EditorViewModel::from_view_model` in SUT handle |
 | `no-handoff-md-at-repo-root` | hardcoded | — | `HANDOFF_*.md` at the repo root is forbidden (AC-7) |
 | `catch_unwind_debug` | hardcoded | `catch_unwind_debug` | `catch_unwind` + `debug!()` swallowing panics |
 | `no-scattered-match-as-str` | aggregate (--all only) | — | Same string set in `match s.as_str()` across 3+ files → use enum |
@@ -227,16 +242,14 @@ fastest path.
 
 These gates lock in the Cells architecture (see [Storage](Storage.md), [Sync](Sync.md), [Operations](Operations.md)). They land per phase and tighten as fields move to cells.
 
-| Rule id | Phase | Tag | What it catches |
-|---------|-------|-----|-----------------|
-| `no-block-content-resolver` | Phase 1 | `no_block_content_resolver` | Re-introducing any `*ContentResolver` trait or struct for blocks |
-| `no-deleted-symbols-resurface` | Phase 1+ | — | `BlockContentResolver` / `live_content` / `set_live_content` / `EditableTextProvider` / `_expected_*` / `with_content_resolver` reappearing in source |
-| `cells-only-constructed-in-registry-layer` | Phase 1 | `cells_construct` | `Cell::new` and cell backing constructors callable only from cell-registry code + tests |
-| `no-raw-mutable-for-cell-fields` | Phase 2 | `cell_field_mutable` | Source files outside cell-registry crates declaring `Mutable<T>` where `T` is an entity field type listed in any registered `cell_fields()` schema (deny-list grows per migrated field) |
-| `cells-are-sole-block-writer` | Phase 2 | `block_write_via_cells` | Direct `INSERT INTO block` / `UPDATE block SET` outside `SqlBlockProjector` and the LoroSyncController startup-seed code |
-| `no-inbound-loro-sync-runtime` | Phase 2 | `loro_inbound_runtime` | Re-introducing the runtime SQL→Loro inbound subscription path; only startup seeding is allowed |
-
-`cell-field-mutable` and `cells-are-sole-block-writer` start as ast-grep CST rules with allow-lists; the deny-lists grow as more fields migrate. See `archlint/rules/no-block-content-resolver.yml` (and siblings) for the canonical rule definitions.
+| Rule id | Status | Layer | Tag | What it catches |
+|---------|--------|-------|-----|-----------------|
+| `deleted_cell_symbol` | **Implemented** (smells/words.toml) | smell | `deleted_cell_symbol` | `BlockContentResolver` / `live_content` / `set_live_content` / `EditableTextProvider` / `with_content_resolver` / `_expected_*` watermark fields reappearing in source |
+| `sole_block_writer` | **Implemented** (smells/ — added by sibling archlint task) | smell | `sole_block_writer` | Direct `INSERT INTO block` / `UPDATE block SET` outside `BlockConsolidator` and the startup-seed path |
+| `no-block-content-resolver` | Planned | ast-grep | `no_block_content_resolver` | Re-introducing any `*ContentResolver` trait or struct for blocks |
+| `cells-only-constructed-in-registry-layer` | Planned | ast-grep | `cells_construct` | `Cell::new` and cell backing constructors callable only from cell-registry code + tests |
+| `no-raw-mutable-for-cell-fields` | Planned | ast-grep | `cell_field_mutable` | `Mutable<T>` for entity field types outside cell-registry crates (deny-list grows per migrated field) |
+| `no-inbound-loro-sync-runtime` | Planned | smell | `loro_inbound_runtime` | Re-introducing the runtime SQL→Loro inbound subscription path; only startup seeding is allowed |
 
 ## Related
 

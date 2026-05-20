@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use holon_pbt_core::capabilities::{
-    CapRegion, EntityUri, RefFocus, SutDriver, SutRenderer, WidgetSnapshot,
+    CapRegion, EngineFocus, EntityUri, RefFocus, SutDriver, SutRenderer, WidgetSnapshot,
 };
 
 #[derive(Debug, Clone)]
@@ -155,17 +155,25 @@ async fn focus_on<R: RefFocus, S: SutDriver>(
     let expected = sut.resolve_ref_block_id(&block_id_uri);
 
     // Prefer the reactive/frontend engine's focus; fall back to the SQL
-    // `current_focus` matview (the only focus source in SqlOnly mode).
+    // `current_focus` matview only when no engine is installed (SqlOnly
+    // mode). An installed-but-unfocused engine is a real lost-focus state
+    // and must NOT be papered over by the SQL fallback.
     let sut_focus = match sut.engine_focused_block().await {
-        Some(focus) => Some(focus),
-        None => sut.driver_current_focus().await,
+        EngineFocus::Focused(focus) => focus,
+        EngineFocus::Unfocused => {
+            return Err(format!(
+                "[focus-on] engine has no focused block (lost focus). Expected focus on \
+                 {block_id:?} (SQL current_focus = {:?})",
+                sut.driver_current_focus().await
+            ));
+        }
+        EngineFocus::NoEngine => sut.driver_current_focus().await.ok_or_else(|| {
+            format!(
+                "[focus-on] no SUT focus available (no frontend engine and SQL current_focus \
+                 empty). Expected focus on {block_id:?}"
+            )
+        })?,
     };
-    let sut_focus = sut_focus.ok_or_else(|| {
-        format!(
-            "[focus-on] no SUT focus available (engine focus absent and SQL current_focus \
-             empty). Expected focus on {block_id:?}"
-        )
-    })?;
 
     if sut_focus == expected || sut_focus.as_str() == block_id {
         return Ok(());

@@ -30,7 +30,7 @@ UI <- futures-signals ← CDC Stream ← QueryableCache ← Sync Provider
 
 #### Streaming-first render state
 
-`ReactiveQueryResults` stores a non-optional `Mutable<RenderExpr>` initialized to `loading()` — a regular `FunctionCall { name: "loading" }`. When the first `Structure` event arrives from `watch_ui`, the real render expression replaces it. Consumers (GPUI signals, MCP snapshots) never see `Option<RenderExpr>` — `loading()` flows through the same interpret → build → render pipeline as any other widget. The `loading` builder (in `shadow_builders/loading.rs`) produces an `Empty` reactive view model, so frontends render nothing until real data arrives.
+`ReactiveRenderedRows` stores a non-optional `Mutable<RenderExpr>` initialized to `loading()` — a regular `FunctionCall { name: "loading" }`. When the first `Structure` event arrives from `watch_ui`, the real render expression replaces it. Consumers (GPUI signals, MCP snapshots) never see `Option<RenderExpr>` — `loading()` flows through the same interpret → build → render pipeline as any other widget. The `loading` builder (in `shadow_builders/loading.rs`) produces an `Empty` reactive view model, so frontends render nothing until real data arrives.
 
 ### Multi-Language Query Support
 
@@ -69,42 +69,58 @@ The structure is irreplaceable; the model is not. When evaluating new features, 
 
 ```
 crates/
-├── holon/                # Main orchestration crate
-├── holon-api/            # Shared types for all frontends
-├── holon-core/           # Core trait definitions
-├── holon-engine/         # Standalone Petri-net engine CLI (YAML nets, WSJF ranking)
-├── holon-frontend/       # Platform-agnostic ViewModel layer (MVVM)
-├── holon-macros/         # Procedural macros for code generation
-├── holon-macros-test/    # Macro expansion tests
-├── holon-mcp-client/     # Reusable MCP client → OperationProvider bridge
-├── holon-todoist/        # Todoist API integration
-├── holon-orgmode/        # Org-mode file integration
-├── holon-filesystem/     # File system directory integration
-└── holon-integration-tests/ # Cross-crate integration & PBT tests
+├── holon/                       # Main orchestration crate: sync, storage, API, DI wiring
+├── holon-api/                   # Shared value types, CDC types, entity derives
+├── holon-app/                   # DI assembly crate (composition root — names concrete backends)
+├── holon-core/                  # Core traits, Cell<T>, block ordering, file-format seam
+├── holon-engine/                # Standalone Petri-net engine CLI (YAML nets, WSJF ranking)
+├── holon-frontend/              # Platform-agnostic ViewModel layer (MVVM)
+├── holon-turso/                 # Turso (SQLite-IVM) storage adapter
+├── holon-macros/                # Procedural macros for code generation
+├── holon-macros-test/           # Macro expansion tests
+├── holon-mcp-client/            # Reusable MCP client → OperationProvider bridge
+├── holon-orgmode/               # Org-mode file watching, DI wiring, sync controller
+├── holon-org-format/            # Pure org-mode parsing, rendering, diffing (no disk I/O)
+├── holon-markdown/              # Obsidian-style Markdown parsing + FileFormatAdapter
+├── holon-filesystem/            # FileSystem + FileChangeSource ports and adapters
+├── holon-pbt-core/              # Cross-PBT transition traits shared between PBT crates
+├── holon-layout-testing/        # Shared layout-testing primitives for UI PBTs
+├── holon-block-roundtrip-testing/ # Block round-trip generators + NormalizedDocument comparison
+├── holon-architecture-tests/    # `cargo test` wrapper that shells out to archlint
+└── holon-integration-tests/     # Cross-crate integration & PBT tests
 
 frontends/
-├── gpui/            # GPUI frontend (primary, runs on Android via Dioxus)
-├── flutter/         # Flutter frontend with FFI bridge
-├── blinc/           # Native Rust GUI frontend (blinc-app)
-├── mcp/             # MCP server frontend (stdio + HTTP)
-├── dioxus/          # Dioxus frontend
-├── ply/             # Ply frontend
-├── tui/             # Terminal UI frontend
-└── waterui/         # WaterUI frontend
+├── gpui/        # GPUI frontend (primary — desktop; mobile via gpui-mobile feature)
+├── mcp/         # MCP server frontend (stdio + HTTP)
+├── tui/         # Terminal UI frontend
+├── dioxus/      # Dioxus frontend (prototype)
+├── dioxus-web/  # Dioxus web frontend (prototype)
+├── holon-worker/ # Web worker support
+├── ply/         # Ply frontend (excluded from workspace — upstream compatibility issues)
+└── waterui/     # WaterUI frontend (excluded from workspace — upstream compatibility issues)
 ```
 
 ### Crate Responsibilities
 
 | Crate | Purpose |
 |-------|---------|
+| `holon` | Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, DI modules |
 | `holon-api` | Value types, Operation descriptors, Change/CDC types, `TypeDefinition`, `IntoEntity`/`TryFromEntity` traits. No frontend-specific deps. |
-| `holon-core` | Core traits: DataSource, CrudOperations, BlockOperations, OperationRegistry. Also provides default implementations for BlockOperations (indent, outdent, move, split) |
+| `holon-app` | DI assembly (composition root). Owns every wiring that names concrete backends: registers Loro/OrgMode/Turso modules, MCP integrations, `FrontendSession`. See `src/wiring.rs` (`FrontendInjectorExt::add_frontend`) and `src/no_turso.rs`. |
+| `holon-core` | Core traits (DataSource, CrudOperations, BlockOperations, OperationRegistry), `Cell<T>` + cell-registry seam, block ordering, file-format adapter trait. |
 | `holon-engine` | Standalone Petri-net engine CLI. YAML-defined nets with Rhai guards, WSJF-based ranking, what-if analysis. No dependency on `holon` crate. |
-| `holon-frontend` | Platform-agnostic MVVM layer: `ReactiveViewModel`, `ReactiveView`, `ReactiveEngine`, shadow builders, input triggers. Shared by all frontends. |
+| `holon-frontend` | Platform-agnostic MVVM layer: `ReactiveViewModel`, `ReactiveView`, `ReactiveEngine`, shadow builders, input triggers. Shared by all frontends. No Loro/Turso imports. |
+| `holon-turso` | Turso (SQLite-IVM) storage adapter: `TursoBackend`, `DbHandle`, materialized-view manager, SQL/GQL transform layer, `SchemaModule` lifecycle. |
 | `holon-macros` | `#[operations_trait]`, `#[affects(...)]`, entity derives |
-| `holon-mcp-client` | Reusable MCP client: connects to any MCP server, converts tool schemas to `OperationDescriptor`s, executes tools via `OperationProvider`. YAML sidecar for UI annotations. |
-| `holon-todoist` | Todoist sync provider, operation provider, API client |
-| `holon-orgmode` | Org file parsing, DataSource, sync via file watching |
+| `holon-mcp-client` | Reusable MCP client: connects to any MCP server, converts tool schemas to `OperationDescriptor`s, executes tools via `OperationProvider`. YAML sidecar for UI annotations. `McpSyncEngine` for cache sync; `McpForeignDataWrapper` for query-time FDW. |
+| `holon-orgmode` | Org-mode file watching, `FileSyncController` (formerly `OrgSyncController`; it serves all `FileFormatAdapter` formats), DI wiring. Depends on `holon-org-format` for parsing/rendering. |
+| `holon-org-format` | Pure org-mode parsing, rendering, and block diffing. No disk I/O, no DI. |
+| `holon-markdown` | Obsidian-style Markdown parsing + `MarkdownFormatAdapter` impl of `holon-core::FileFormatAdapter`. |
+| `holon-filesystem` | `FileSystem` + `FileChangeSource` ports (ADR 0011): `RealFileSystem`, `InMemoryFileSystem`, `NotifyWatcher`. |
+| `holon-pbt-core` | `TransitionFactory<Ref>` + `TransitionImpl<Ref, Sut>` traits shared across PBT crates. |
+| `holon-layout-testing` | Shared layout-testing primitives: `BoundsSnapshot`, layout invariants, `BlockTreeRegistry`, `UiInteraction`, proptest strategies. |
+| `holon-block-roundtrip-testing` | Block round-trip generators + `NormalizedDocument` comparison shape, reused by org/markdown/turso round-trip PBTs. |
+| `holon-architecture-tests` | `cargo test` wrapper that shells out to `archlint --all` (no Rust deps, ~2 s full-repo sweep). |
 | `holon-integration-tests` | Cross-crate integration tests and property-based tests (PBTs) |
 | `gql-parser` (external) | GQL (ISO/IEC 39075) parsing to AST |
 | `gql-transform` (external) | GQL AST → SQL compilation via EAV schema |
@@ -188,7 +204,7 @@ Operations return `OperationResult` which includes `Vec<FieldDelta>` for CDC-lev
 
 ## Architecture Details
 
-Detailed documentation lives in `docs/arch/`:
+Detailed documentation lives in `docs/Architecture/`:
 
 | File | Covers |
 |------|--------|
@@ -198,7 +214,7 @@ Detailed documentation lives in `docs/arch/`:
 | [integrations.md](docs/Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
 | [schema.md](docs/Architecture/Schema.md) | SchemaModule System, Entity Type System, FieldLifetime, Value Types |
 | [engine.md](docs/Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
-| [sync.md](docs/Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, EventBus, P2P, Consistency Model |
+| [sync.md](docs/Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
 | [replication.md](docs/Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
 | [archlint.md](docs/Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
 
@@ -217,22 +233,27 @@ See also [wiki/overview.md](wiki/overview.md) for the navigational layer and [wi
 | `crates/holon-api/src/reactive.rs` | Reactive stream operators (scan_state, switch_map, combine_latest, coalesce), MapDiff, CdcAccumulator |
 | `crates/holon/src/sync/live_data.rs` | CDC-driven collection with watch-based version notification |
 | `crates/holon/src/api/ui_watcher.rs` | watch_ui: merge_triggers → switch_map → UiEvent stream |
-| `crates/holon/src/storage/turso.rs` | Turso backend + CDC |
-| `crates/holon/src/sync/collaborative_doc.rs` | Loro CRDT + Iroh P2P sync |
+| `crates/holon-turso/src/turso.rs` | Turso backend + CDC |
 | `crates/holon/src/sync/loro_module.rs` | Standalone Loro DI module (independent of OrgMode) |
+| `crates/holon/src/sync/iroh_sync_adapter.rs` | Iroh P2P sync adapter (transport only) |
+| `crates/holon/src/sync/loro_share_backend.rs` | Loro document sharing (P2P) |
+| `crates/holon/src/sync/multi_peer.rs` | Multi-peer sync coordination |
 | `crates/holon/src/sync/loro_block_operations.rs` | OperationProvider routing writes through Loro CRDT |
-| `crates/holon/src/sync/loro_event_adapter.rs` | Bridges Loro changes → EventBus |
+| `crates/holon/src/sync/loro_sync_controller.rs` | LoroProjection: single writer projecting Loro → SQL block_raw |
+| `crates/holon/src/sync/live_data.rs` | LiveData<Block> (BlockFeed): CDC mirror of the block matview for reactive consumers |
 | `crates/holon/src/core/sql_operation_provider.rs` | Direct SQL block operations (fallback when Loro disabled) |
 | `crates/holon/src/api/loro_backend.rs` | LoroBackend: CoreOperations implementation for block documents |
 | `crates/holon/src/api/repository.rs` | Repository trait definitions (CoreOperations, Lifecycle, P2POperations) |
 | `crates/holon/src/petri.rs` | Petri-net materialization from blocks for WSJF ranking |
 | `crates/holon-engine/src/` | Standalone Petri-net engine: `engine.rs` (firing/ranking), `guard.rs` (Rhai evaluation), `yaml/` (YAML net/state/history) |
-| `crates/holon/src/storage/dynamic_schema_module.rs` | Runtime-generated SchemaModule from TypeDefinition |
+| `crates/holon-turso/src/dynamic_schema_module.rs` | Runtime-generated SchemaModule from TypeDefinition |
 | `crates/holon-mcp-client/src/mcp_provider.rs` | MCP connection + McpOperationProvider (OperationProvider impl) |
-| `crates/holon-mcp-client/src/mcp_sidecar.rs` | YAML sidecar types, RhaiPrecondition (parse-don't-validate) |
+| `crates/holon-mcp-client/src/mcp_sidecar.rs` | YAML sidecar types (McpSidecar, SyncConfig, ToolConfig, RhaiPrecondition) |
 | `crates/holon-mcp-client/src/mcp_schema_mapping.rs` | JSON Schema → TypeHint/OperationParam conversion |
-| `crates/holon-todoist/todoist_mcp_operations.yaml` | Todoist MCP sidecar (entity mappings + tool annotations) |
-| `crates/holon-todoist/src/` | Todoist integration |
+| `crates/holon-mcp-client/src/mcp_sync_engine.rs` | McpSyncEngine: bulk + incremental cache sync, resource-notification re-sync |
+| `crates/holon-mcp-client/src/integration_config.rs` | IntegrationFileConfig: top-level YAML schema, ${VAR} expansion |
+| `crates/holon-app/src/mcp_integrations.rs` | McpIntegrationsModule + McpIntegrationRegistry + RegistryOperationProxy |
+| `docs/integrations/todoist.yaml` | Todoist integration config (transport, auth, entities, tools, sync, undo) |
 | `frontends/gpui/src/` | GPUI frontend (primary) |
 | `frontends/flutter/rust/src/` | Flutter FFI bridge |
 | `frontends/mcp/src/tools.rs` | MCP tool implementations (unified `execute_query` for PRQL/GQL/SQL) |

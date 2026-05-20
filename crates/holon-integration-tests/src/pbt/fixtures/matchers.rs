@@ -29,7 +29,7 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
         let enable_loro = text.to_lowercase().contains("with loro");
         return Ok(StartApp {
             wait_for_ready: true,
-            enable_todoist: true,
+            enable_fake_mcp: true,
             enable_loro,
         }
         .into());
@@ -42,7 +42,9 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
         let content = step.docstring.clone().ok_or_else(|| {
             format!("org-file step requires a docstring with org content: {text:?}")
         })?;
-        return Ok(WriteOrgFile { filename, content }.into());
+        return Ok(WriteOrgFile::from_org_text(filename, &content)
+            .map_err(|e| format!("failed to parse org-file step content: {e}"))?
+            .into());
     }
 
     // `I focus block "<id>" in region "<region>"`
@@ -50,6 +52,7 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
         Regex::new(r#"(?i)^I focus block\s+"(?P<id>[^"]+)"\s+in region\s+"(?P<region>[^"]+)"$"#)
             .unwrap();
     if let Some(caps) = re_focus.captures(text) {
+        // ALLOW(entity_uri_from_raw): id from regex over Gherkin step text (test DSL boundary)
         let block_id = EntityUri::from_raw(&caps["id"]);
         let region = parse_region(&caps["region"])?;
         return Ok(NavigateFocus { region, block_id }.into());
@@ -60,6 +63,7 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
         Regex::new(r#"(?i)^I split block\s+"(?P<id>[^"]+)"\s+at position\s+(?P<pos>\d+)$"#)
             .unwrap();
     if let Some(caps) = re_split.captures(text) {
+        // ALLOW(entity_uri_from_raw): id from regex over Gherkin step text (test DSL boundary)
         let block_id = EntityUri::from_raw(&caps["id"]);
         let position: usize = caps["pos"]
             .parse()
@@ -73,6 +77,7 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
     )
     .unwrap();
     if let Some(caps) = re_click.captures(text) {
+        // ALLOW(entity_uri_from_raw): id from regex over Gherkin step text (test DSL boundary)
         let block_id = EntityUri::from_raw(&caps["id"]);
         let region = match caps.name("region") {
             Some(m) => parse_region(m.as_str())?,
@@ -86,6 +91,7 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
         Regex::new(r#"(?i)^I focus the editor of block\s+"(?P<id>[^"]+)"$"#).unwrap();
     if let Some(caps) = re_focus_editor.captures(text) {
         return Ok(FocusEditableText {
+            // ALLOW(entity_uri_from_raw): id from regex over Gherkin step text (test DSL boundary)
             block_id: EntityUri::from_raw(&caps["id"]),
         }
         .into());
@@ -104,6 +110,7 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
     let re_indent = Regex::new(r#"(?i)^I indent block\s+"(?P<id>[^"]+)"$"#).unwrap();
     if let Some(caps) = re_indent.captures(text) {
         return Ok(Indent {
+            // ALLOW(entity_uri_from_raw): id from regex over Gherkin step text (test DSL boundary)
             block_id: EntityUri::from_raw(&caps["id"]),
         }
         .into());
@@ -113,6 +120,7 @@ pub fn match_action(step: &Step) -> Result<E2ETransition, String> {
     let re_outdent = Regex::new(r#"(?i)^I outdent block\s+"(?P<id>[^"]+)"$"#).unwrap();
     if let Some(caps) = re_outdent.captures(text) {
         return Ok(Outdent {
+            // ALLOW(entity_uri_from_raw): id from regex over Gherkin step text (test DSL boundary)
             block_id: EntityUri::from_raw(&caps["id"]),
         }
         .into());

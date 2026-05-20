@@ -38,11 +38,16 @@ fn main() {
         fixture.name,
         fixture.steps.len()
     );
+    // Hand-authored features carry no recorded wiring — they are written
+    // against the Full (Loro) configuration.
+    let wiring = fixture.wiring.unwrap_or_else(holon_pbt_core::Wiring::full);
     let steps = fixture.steps;
 
     pbt_harness::run_in_gpui_window(
         "Holon Gherkin Replay",
         "gpui_gherkin",
-        move |_driver, on_ready| replay_fixture_with_driver_sync_callback(steps, on_ready),
+        move |_driver, on_ready| {
+            replay_fixture_with_driver_sync_callback(wiring, steps, on_ready, None)
+        },
     );
 }

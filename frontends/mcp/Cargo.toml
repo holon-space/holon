@@ -22,7 +22,9 @@ chrono = { workspace = true }
 holon = { workspace = true }
 holon-api = { workspace = true }
 holon-frontend = { workspace = true }
+holon-app.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
+holon-filesystem = { workspace = true }
 fluxdi.workspace = true
 uuid = { workspace = true }
 tracing = { workspace = true }

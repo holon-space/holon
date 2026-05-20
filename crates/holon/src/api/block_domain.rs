@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 
-use super::backend_engine::{BackendEngine, QueryContext};
+use super::backend_engine::BackendEngine;
+use holon_api::QueryContext;
 use holon_api::{EntityUri, QueryLanguage, RenderExpr, Value, uri_from_row};
 
 use crate::storage::turso::RowChangeStream;
@@ -152,7 +153,7 @@ impl<'a> BlockDomain<'a> {
         let result_expr = if has_render_source {
             Self::parse_render_source(&block_info)
         } else {
-            self.collection_render_from_profile(block_id)
+            Self::collection_render_from_profile(self.engine.profile_resolver().as_ref(), block_id)
         };
 
         let render_expr = Self::wrap_in_query_source_switcher(
@@ -170,8 +171,11 @@ impl<'a> BlockDomain<'a> {
     /// When no explicit `#+BEGIN_SRC render` block exists, the entity profile's
     /// `collection` section provides the default + variant render expressions.
     /// Wraps them in a `view_mode_switcher` widget so frontends can switch layouts.
-    fn collection_render_from_profile(&self, entity_uri: &holon_api::EntityUri) -> RenderExpr {
-        let variants = self.engine.profile_resolver().resolve_collection_variants();
+    pub(crate) fn collection_render_from_profile(
+        resolver: &dyn crate::entity_profile::ProfileResolving,
+        entity_uri: &holon_api::EntityUri,
+    ) -> RenderExpr {
+        let variants = resolver.resolve_collection_variants();
 
         tracing::info!(
             "[collection_render_from_profile] entity_uri={entity_uri}, variants_count={}, variant_names={:?}",
@@ -200,15 +204,19 @@ impl<'a> BlockDomain<'a> {
     /// single per-block view-mode state. Otherwise (single-variant collection,
     /// or explicit render source), a 2-mode (result + source) switcher wraps
     /// the expression.
-    fn wrap_in_query_source_switcher(
-        block_id: &holon_api::EntityUri,
-        result_expr: RenderExpr,
+    /// Build the `source_editor(language, content)` render expression that backs
+    /// the `source` view mode — the raw query text, rendered read-only.
+    ///
+    /// This is the one view mode that needs **no query engine** (it just displays
+    /// the stored source), so it doubles as the no-Turso degradation: a query
+    /// block in a session without a query engine renders this bare, with no
+    /// switcher chrome (ADR 0004 Phase 9 — capabilities contribute view modes).
+    pub(crate) fn source_editor_expr(
         query_source: &str,
         query_language: QueryLanguage,
     ) -> RenderExpr {
         use holon_api::render_types::Arg;
-
-        let mode_source_expr = RenderExpr::FunctionCall {
+        RenderExpr::FunctionCall {
             name: "source_editor".to_string(),
             args: vec![
                 Arg {
@@ -224,7 +232,18 @@ impl<'a> BlockDomain<'a> {
                     },
                 },
             ],
-        };
+        }
+    }
+
+    pub(crate) fn wrap_in_query_source_switcher(
+        block_id: &holon_api::EntityUri,
+        result_expr: RenderExpr,
+        query_source: &str,
+        query_language: QueryLanguage,
+    ) -> RenderExpr {
+        use holon_api::render_types::Arg;
+
+        let mode_source_expr = Self::source_editor_expr(query_source, query_language);
 
         // Merge path: if result_expr is already a view_mode_switcher, append
         // `source` to its modes + add a `mode_source` template arg.
@@ -264,7 +283,7 @@ impl<'a> BlockDomain<'a> {
     /// Fallback for when the inner expression isn't a `view_mode_switcher`:
     /// wrap with a 2-mode (result, source) switcher. The `#qsrc` URI fragment
     /// keeps the wrap's state separate from any inner per-entity state.
-    fn wrap_with_outer_switcher(
+    pub(crate) fn wrap_with_outer_switcher(
         block_id: &holon_api::EntityUri,
         result_expr: RenderExpr,
         mode_source_expr: RenderExpr,
@@ -334,7 +353,7 @@ impl<'a> BlockDomain<'a> {
     async fn load_block_with_query_source(
         &self,
         block_id: &EntityUri,
-    ) -> Result<HashMap<String, Value>> {
+    ) -> Result<holon_api::StorageEntity> {
         let query_langs = QueryLanguage::sql_in_list();
         let sql = BLOCK_WITH_QUERY_SOURCE_SQL.replace("{query_langs}", &query_langs);
 
@@ -355,21 +374,36 @@ impl<'a> BlockDomain<'a> {
 
     /// Parse a render_source into a RenderExpr.
     fn parse_render_source(
-        block_info: &HashMap<String, Value>,
+        block_info: &holon_api::StorageEntity,
     ) -> holon_api::render_types::RenderExpr {
-        if let Some(Value::String(source)) = block_info.get("render_source") {
-            match crate::render_dsl::parse_render_dsl(source) {
-                Ok(expr) => return expr,
-                Err(e) => {
-                    tracing::warn!("Failed to parse render_source, defaulting to table(): {e}");
-                }
+        match block_info.get("render_source") {
+            Some(Value::String(source)) => Self::parse_render_source_content(source),
+            _ => default_table_expr(),
+        }
+    }
+
+    /// Parse a render-source block's `content` into a `RenderExpr`, falling back
+    /// to `table()` on a parse error. Shared by the Turso path (which reads the
+    /// content from a SQL row) and the Loro path (which reads it straight from
+    /// the render-source child block).
+    pub(crate) fn parse_render_source_content(source: &str) -> holon_api::render_types::RenderExpr {
+        match holon_api::render_dsl::parse_render_dsl(source) {
+            Ok(expr) => expr,
+            Err(e) => {
+                tracing::warn!("Failed to parse render_source, defaulting to table(): {e}");
+                default_table_expr()
             }
         }
+    }
+}
 
-        holon_api::render_types::RenderExpr::FunctionCall {
-            name: "table".to_string(),
-            args: Vec::new(),
-        }
+/// The default render expression — a bare `table()` — used when a render
+/// source fails to parse (disclosed via a `warn!`) or a collection has no
+/// profile variants.
+pub(crate) fn default_table_expr() -> holon_api::render_types::RenderExpr {
+    holon_api::render_types::RenderExpr::FunctionCall {
+        name: "table".to_string(),
+        args: Vec::new(),
     }
 }
 
@@ -544,6 +578,7 @@ mod view_mode_switcher_from_variants_tests {
     /// outline should default" symptom.
     #[test]
     fn default_mode_points_at_unconditional_variant_not_first_in_priority_order() {
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let uri = EntityUri::from_raw("block:collection-1");
         let variants = vec![
             variant(
@@ -588,6 +623,7 @@ mod view_mode_switcher_from_variants_tests {
 
     #[test]
     fn single_variant_unwraps_to_inner_expr_no_switcher() {
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let uri = EntityUri::from_raw("block:collection-2");
         let variants = vec![variant("tree_view", Predicate::Always)];
         let expr = view_mode_switcher_from_variants(&uri, &variants);
@@ -599,6 +635,7 @@ mod view_mode_switcher_from_variants_tests {
 
     #[test]
     fn no_unconditional_variant_omits_default_mode_arg() {
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let uri = EntityUri::from_raw("block:collection-3");
         let variants = vec![
             variant(

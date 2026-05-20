@@ -40,6 +40,7 @@ impl TransitionFactory<ReferenceState> for DragDropBlock {
         let source = drag_source.unwrap();
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let candidates: Vec<EntityUri> = state
+            .domain
             .block_state
             .blocks
             .values()
@@ -47,7 +48,7 @@ impl TransitionFactory<ReferenceState> for DragDropBlock {
                 b.content_type == ContentType::Text
                     && !b.is_page()
                     && b.id != source
-                    && !state.layout_blocks.contains(&b.id)
+                    && !state.domain.layout_blocks.contains(&b.id)
                     && state.is_descendant_of_any(&b.id, &focus_roots)
             })
             .map(|b| b.id.clone())
@@ -80,9 +81,33 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
             check(DRAG_DROP_ENABLED, Reason::DragDropDisabled),
+            // Drag needs the source to be a rendered `draggable(...)` in the
+            // main panel — the SUT's `drop_entity` grabs that node. Two
+            // independent things must hold, both verified here:
+            //
+            // 1. The active item template must *render* a draggable for the
+            //    source's row. Render it through the shadow interpreter and walk
+            //    the tree (the default `render_entity()` → block profile does;
+            //    a custom render like `row(text(...))` does not).
+            check(
+                state.block_renders_draggable(&self.source),
+                Reason::SourceNotRendered,
+            ),
+            // 2. The source must actually be in the active layout's query
+            //    rendered set — evaluated faithfully via `TestQuery::evaluate`
+            //    (the default `focus_root` query, or the recovered `QuerySource`
+            //    of a user `index.org`). A `from children` layout surfaces only
+            //    the layout block's direct children; an all-blocks layout
+            //    surfaces everything. Combined with the draggable-template check
+            //    above, this dissolves the old "block in tree but not rendered"
+            //    divergence without a blanket custom-layout exclusion.
+            check(
+                state.main_rendered_block_ids().contains(&self.source),
+                Reason::SourceNotRendered,
+            ),
         ];
 
         let focused_in_main = state.focused_entity(holon_api::Region::Main);
@@ -94,6 +119,7 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
 
         checks.push(check(
             state
+                .domain
                 .block_state
                 .blocks
                 .get(&self.source)
@@ -102,6 +128,7 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
         ));
         checks.push(check(
             state
+                .domain
                 .block_state
                 .blocks
                 .get(&self.target)
@@ -109,11 +136,11 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
             Reason::FocusedNotText,
         ));
         checks.push(check(
-            !state.layout_blocks.contains(&self.source),
+            !state.domain.layout_blocks.contains(&self.source),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
-            !state.layout_blocks.contains(&self.target),
+            !state.domain.layout_blocks.contains(&self.target),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
@@ -128,6 +155,7 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
         // No-op: target is already source's parent.
         checks.push(check(
             state
+                .domain
                 .block_state
                 .blocks
                 .get(&self.source)
@@ -139,7 +167,7 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
         let mut current = self.target.clone();
         let mut is_cycle = false;
         for _ in 0..50 {
-            let Some(b) = state.block_state.blocks.get(&current) else {
+            let Some(b) = state.domain.block_state.blocks.get(&current) else {
                 break;
             };
             if b.parent_id == self.source {
@@ -180,9 +208,9 @@ impl crate::pbt::transition_budgets::SqlBudget for DragDropBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.active_watches.len(),
-            state.block_state.blocks.len(),
-            state.documents.len(),
+            state.mcp.active_watches.len(),
+            state.domain.block_state.blocks.len(),
+            state.files.documents.len(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

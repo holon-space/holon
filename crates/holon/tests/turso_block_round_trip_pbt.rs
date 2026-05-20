@@ -108,7 +108,10 @@ proptest! {
             }
 
             for b in &blocks {
-                let params = block_to_params(b);
+                let params = block_to_params(&holon::api::SnapshotBlock {
+                    block: b.clone(),
+                    sort_key: "A0".to_string(),
+                });
                 provider
                     .execute_operation(&entity, "create", params)
                     .await
@@ -174,7 +177,10 @@ proptest! {
             // Production write path with edge resolver fans tags into
             // `block_tags` and requires into `block_requires`.
             for b in &blocks {
-                let params = block_to_params(b);
+                let params = block_to_params(&holon::api::SnapshotBlock {
+                    block: b.clone(),
+                    sort_key: "A0".to_string(),
+                });
                 provider
                     .execute_operation(&entity, "create", params)
                     .await

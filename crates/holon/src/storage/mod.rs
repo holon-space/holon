@@ -1,16 +1,25 @@
+// Shared storage abstractions now live in `holon-core` (re-export shims).
 pub mod backend;
-pub mod block_table_names;
-pub mod dynamic_schema_module;
-pub mod graph_schema;
 pub mod resource;
-pub mod schema_module;
-pub mod schema_modules;
-pub mod sql_parser;
-pub mod sql_utils;
-pub mod sync_token_store;
-pub mod turso;
-pub mod turso_actor_stats;
 pub mod types;
+
+// The Turso adapter now lives in the `holon-turso` crate. These re-exports
+// keep the historical `crate::storage::*` paths resolving while making the
+// dependency on `holon-turso` explicit (ADR 0004 Phase 9).
+pub use holon_turso::block_table_names;
+pub use holon_turso::dynamic_schema_module;
+pub use holon_turso::graph_schema;
+pub use holon_turso::schema_module;
+pub use holon_turso::sql_parser;
+pub use holon_turso::sql_utils;
+pub use holon_turso::turso;
+pub use holon_turso::turso_actor_stats;
+
+// Concrete schema DDL (owns the bundled `sql/` files) stays in `holon`.
+pub mod schema_modules;
+pub mod sync_token_store;
+pub mod turso_block_link_indexer;
+pub mod turso_sink_reader;
 
 #[cfg(test)]
 pub mod test_helpers;
@@ -35,6 +44,21 @@ mod turso_matview_first_open_test;
 
 #[cfg(test)]
 mod cdc_base_vs_matview_repro;
+
+// Engine test suites for the Turso adapter (now in `holon-turso`). They live
+// here because they pull in holon-side proptest fixtures; they exercise the
+// engine through the `crate::storage::turso` re-export.
+#[cfg(test)]
+mod turso_tests;
+
+#[cfg(test)]
+mod turso_pbt_tests;
+
+#[cfg(test)]
+mod turso_matview_test;
+
+#[cfg(test)]
+mod turso_ivm_join_test;
 
 /// Split a semicolon-delimited SQL file into individual statements.
 ///
@@ -89,4 +113,6 @@ pub use sql_parser::{
 };
 pub use sync_token_store::*;
 pub use turso::{DatabasePhase, DbCommand, DbHandle, priority};
+pub use turso_block_link_indexer::TursoBlockLinkIndexer;
+pub use turso_sink_reader::TursoSinkReader;
 pub use types::*;

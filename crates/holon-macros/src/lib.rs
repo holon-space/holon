@@ -152,6 +152,7 @@ fn infer_type_string(type_str: &str) -> String {
         "bool" => "bool".to_string(),
         "f64" => "f64".to_string(),
         "f32" => "f32".to_string(),
+        s if s.contains("StorageEntity") => "HashMap".to_string(),
         s if s.contains("HashMap") => "HashMap".to_string(),
         s if s.contains("Vec") => "Vec".to_string(),
         s if s.contains("DateTime") => "DateTime".to_string(),

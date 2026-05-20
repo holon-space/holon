@@ -184,7 +184,7 @@ fn find_bottom_dock(node: &ReactiveViewModel) -> Option<&ReactiveViewModel> {
 
 fn parse(dsl: &str) -> RenderExpr {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
-    holon::render_dsl::parse_render_dsl(dsl).expect("root_layout DSL parses")
+    holon_api::render_dsl::parse_render_dsl(dsl).expect("root_layout DSL parses")
 }
 
 /// Verification #2 (shadow/snapshot, bar present on mobile only).

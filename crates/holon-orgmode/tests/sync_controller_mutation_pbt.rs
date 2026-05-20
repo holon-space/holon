@@ -1,10 +1,10 @@
-//! Phase 2: OrgSyncController-level mutation PBTs.
+//! Phase 2: FileSyncController-level mutation PBTs.
 //!
 //! Two property-based tests that exercise the full sync loop:
 //! - `test_sync_block_change_to_file`: in-memory mutation → on_block_changed → file → parse → assert
 //! - `test_sync_file_change_to_blocks`: org text mutation → on_file_changed → store → assert
 //!
-//! Requires the `di` feature (org_sync_controller is only compiled with it).
+//! Requires the `di` feature (file_sync_controller is only compiled with it).
 
 #![cfg(feature = "di")]
 //!
@@ -18,11 +18,11 @@ use holon_api::types::{ContentType, Priority, Tags, TaskState, Timestamp};
 use holon_api::Value;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
+use holon_orgmode::file_sync_controller::FileSyncController;
 use holon_orgmode::models::{
     OrgBlockExt, OrgDocumentExt, DEFAULT_ACTIVE_KEYWORDS, DEFAULT_DONE_KEYWORDS,
 };
 use holon_orgmode::org_renderer::OrgRenderer;
-use holon_orgmode::org_sync_controller::OrgSyncController;
 use holon_orgmode::parser::parse_org_file;
 use holon_orgmode::traits::{BlockReader, DocumentManager};
 use proptest::prelude::*;
@@ -135,7 +135,7 @@ impl BlockReader for InMemoryBlockStore {
     // find_foreign_blocks: uses default implementation from BlockReader trait
 }
 
-fn block_from_params(params: &HashMap<String, Value>) -> Block {
+fn block_from_params(params: &holon_api::StorageEntity) -> Block {
     let get_str = |key: &str| -> String {
         params
             .get(key)
@@ -231,9 +231,9 @@ fn block_from_params(params: &HashMap<String, Value>) -> Block {
         "ID",
     ];
     for (k, v) in params {
-        if !STANDARD_KEYS.contains(&k.as_str()) {
+        if !STANDARD_KEYS.contains(&k.as_ref()) {
             if let Some(s) = v.as_string() {
-                block.set_property(k, Value::String(s.to_string()));
+                block.set_property(k.as_ref(), Value::String(s.to_string()));
             }
         }
     }
@@ -312,7 +312,10 @@ impl DocumentManager for MockDocumentManager {
 /// JSON blob; on read, `Block::try_from` only sees those keys via
 /// `block.properties`. This is the exact serialization seam where the
 /// `inv-org-render-fixed-point` flake's missing `todo_keywords` lives.
-fn simulate_sql_round_trip(doc: &Block, params: HashMap<String, Value>) -> HashMap<String, Value> {
+fn simulate_sql_round_trip(
+    doc: &Block,
+    params: holon_api::StorageEntity,
+) -> holon_api::StorageEntity {
     // Matches BLOCKS_KNOWN_COLUMNS in crates/holon/src/core/sql_operation_provider.rs.
     // Kept in sync by convention; if the production list changes, this list must
     // change too — the PBT is the canary.
@@ -336,7 +339,7 @@ fn simulate_sql_round_trip(doc: &Block, params: HashMap<String, Value>) -> HashM
     ];
     const EDGE_FIELDS: &[&str] = &["tags", "requires"];
 
-    let mut row: HashMap<String, Value> = HashMap::new();
+    let mut row = holon_api::StorageEntity::new();
     let mut extras: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     // Seed extras with the doc's existing properties (mirrors the
     // existing-properties merge in prepare_update). Without this, a single
@@ -346,28 +349,28 @@ fn simulate_sql_round_trip(doc: &Block, params: HashMap<String, Value>) -> HashM
     }
 
     for (key, value) in params.into_iter() {
-        if key == "properties" {
+        if key.as_ref() == "properties" {
             // Real provider merges; here we just take the param JSON as the
             // existing-properties seed (params rarely contain a properties key).
             continue;
         }
-        if key == POSITION_AFTER_BLOCK_ID_PARAM
+        if key.as_ref() == POSITION_AFTER_BLOCK_ID_PARAM
             || key.starts_with("_routing_")
             || key.starts_with("_expected_")
         {
             continue;
         }
-        if BLOCKS_KNOWN_COLUMNS.contains(&key.as_str()) || EDGE_FIELDS.contains(&key.as_str()) {
+        if BLOCKS_KNOWN_COLUMNS.contains(&key.as_ref()) || EDGE_FIELDS.contains(&key.as_ref()) {
             row.insert(key, value);
         } else {
-            extras.insert(key, value_to_serde_json(&value));
+            extras.insert(key.to_string(), value_to_serde_json(&value));
         }
     }
 
     // Emit the merged properties JSON as a string Value — Block::try_from
     // accepts both Value::String and Value::Json for the properties column.
     let props_json = serde_json::to_string(&extras).expect("properties must serialize");
-    row.insert("properties".to_string(), Value::String(props_json));
+    row.insert("properties".into(), Value::String(props_json));
     row
 }
 
@@ -422,52 +425,56 @@ impl BlockOrdering for StubBlockOrdering {
     async fn place(
         &self,
         uri: &EntityUri,
-        parent_id: &str,
-        after_id: Option<&str>,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
     ) -> BlockOrderingResult<()> {
         self.calls.lock().unwrap().push((
             uri.clone(),
-            parent_id.to_string(),
-            after_id.map(str::to_string),
+            parent_id.as_str().to_string(),
+            after_id.map(|u| u.as_str().to_string()),
         ));
         Ok(())
     }
 
-    async fn new_child_anchor(&self, _: &str, _: Option<&str>) -> BlockOrderingResult<String> {
+    async fn new_child_anchor(
+        &self,
+        _: &EntityUri,
+        _: Option<&EntityUri>,
+    ) -> BlockOrderingResult<String> {
         unimplemented!("stub BlockOrdering: only place() is exercised by this test")
     }
 
-    async fn prev_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+    async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
         // Return None so the misalignment check in on_file_changed treats every
         // block as first-child — safe for tests that don't assert order.
         Ok(None)
     }
 
-    async fn next_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+    async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
         unimplemented!("stub BlockOrdering: only place() is exercised by this test")
     }
 
-    async fn first_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+    async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
         unimplemented!("stub BlockOrdering: only place() is exercised by this test")
     }
 
-    async fn last_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+    async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
         unimplemented!("stub BlockOrdering: only place() is exercised by this test")
     }
 
-    async fn children(&self, _: &str) -> BlockOrderingResult<Vec<String>> {
+    async fn children(&self, _: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
         // Return empty so the misalignment check treats all blocks as misaligned
         // (they'll call place() once each). Tests that assert place() call count
         // should reflect this.
         Ok(vec![])
     }
 
-    async fn update_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+    async fn update_in_tree(&self, params: holon_api::StorageEntity) -> BlockOrderingResult<()> {
         self.store.apply_upsert(block_from_params(&params));
         Ok(())
     }
 
-    async fn delete_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+    async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> BlockOrderingResult<()> {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
@@ -572,7 +579,7 @@ fn assert_blocks_equivalent(expected: &[Block], actual: &[Block], context: &str)
 
 struct TestFixture {
     store: Arc<InMemoryBlockStore>,
-    controller: OrgSyncController,
+    controller: FileSyncController,
     root_dir: PathBuf,
     doc_id: EntityUri,
     /// Path segments from `root_dir` to the file (excluding the `.org` extension).
@@ -603,17 +610,18 @@ impl TestFixture {
         let store = Arc::new(InMemoryBlockStore::new());
         let doc_manager = Arc::new(MockDocumentManager::new());
 
-        // Canonicalize so fixture-built paths match what OrgSyncController
+        // Canonicalize so fixture-built paths match what FileSyncController
         // stores internally (macOS: /var → /private/var symlink resolution).
         let root_dir = temp_dir
             .canonicalize()
             .unwrap_or_else(|_| temp_dir.to_path_buf());
         let ordering = Arc::new(StubBlockOrdering::new(store.clone()));
-        let controller = OrgSyncController::new(
+        let controller = FileSyncController::new(
             store.clone(),
             doc_manager.clone(),
             root_dir.clone(),
             ordering,
+            Arc::new(holon_filesystem::RealFileSystem),
         );
 
         let doc_id = EntityUri::block_random();
@@ -1730,7 +1738,7 @@ mod find_foreign_blocks_tests {
 }
 
 // ============================================================================
-// Test 7: OrgSyncController::on_file_changed ordering replay
+// Test 7: FileSyncController::on_file_changed ordering replay
 // ============================================================================
 
 #[cfg(test)]
@@ -1766,47 +1774,61 @@ mod ordering_replay_tests {
         async fn place(
             &self,
             uri: &EntityUri,
-            parent_id: &str,
-            after_id: Option<&str>,
+            parent_id: &EntityUri,
+            after_id: Option<&EntityUri>,
         ) -> BlockOrderingResult<()> {
             self.calls.lock().unwrap().push((
                 uri.clone(),
-                parent_id.to_string(),
-                after_id.map(str::to_string),
+                parent_id.as_str().to_string(),
+                after_id.map(|u| u.as_str().to_string()),
             ));
             Ok(())
         }
 
-        async fn new_child_anchor(&self, _: &str, _: Option<&str>) -> BlockOrderingResult<String> {
+        async fn new_child_anchor(
+            &self,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
+        ) -> BlockOrderingResult<String> {
             unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
         }
 
-        async fn prev_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
             Ok(None)
         }
 
-        async fn next_sibling(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
             unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
         }
 
-        async fn first_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
             unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
         }
 
-        async fn last_child(&self, _: &str) -> BlockOrderingResult<Option<String>> {
+        async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
             unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
         }
 
-        async fn children(&self, parent_id: &str) -> BlockOrderingResult<Vec<String>> {
-            Ok(self.live_order.get(parent_id).cloned().unwrap_or_default())
+        async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+            Ok(self
+                .live_order
+                .get(parent_id.as_str())
+                .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
+                .unwrap_or_default())
         }
 
-        async fn update_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+        async fn update_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
             self.store.apply_upsert(block_from_params(&params));
             Ok(())
         }
 
-        async fn delete_in_tree(&self, params: HashMap<String, Value>) -> BlockOrderingResult<()> {
+        async fn delete_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
             let id = params
                 .get("id")
                 .and_then(|v| v.as_string())
@@ -1822,7 +1844,7 @@ mod ordering_replay_tests {
     ) -> (
         Arc<InMemoryBlockStore>,
         Arc<MockDocumentManager>,
-        OrgSyncController,
+        FileSyncController,
         Arc<ConfigurableOrderingStub>,
         EntityUri,
         PathBuf,
@@ -1837,7 +1859,7 @@ mod ordering_replay_tests {
     ) -> (
         Arc<InMemoryBlockStore>,
         Arc<MockDocumentManager>,
-        OrgSyncController,
+        FileSyncController,
         Arc<ConfigurableOrderingStub>,
         EntityUri,
         PathBuf,
@@ -1851,11 +1873,12 @@ mod ordering_replay_tests {
         let ordering = Arc::new(ConfigurableOrderingStub::new(live_order, store.clone()));
 
         let root_dir = temp_dir.to_path_buf();
-        let controller = OrgSyncController::new(
+        let controller = FileSyncController::new(
             store.clone(),
             doc_manager.clone(),
             root_dir.clone(),
             ordering.clone(),
+            Arc::new(holon_filesystem::RealFileSystem),
         );
 
         let doc_name = "order-test".to_string();

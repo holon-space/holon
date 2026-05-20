@@ -22,9 +22,6 @@ use premortem::value::ConfigValue;
 use premortem::{Config, ConfigEnv, ConfigErrors};
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(target_arch = "wasm32"))]
-use holon_todoist::di::TodoistConfig;
-
 use crate::preferences::PrefKey;
 
 // ---------------------------------------------------------------------------
@@ -34,7 +31,7 @@ use crate::preferences::PrefKey;
 /// Top-level configuration. Derives both `clap::Args` (CLI) and
 /// `serde::Deserialize` (TOML / premortem). Adding a field here automatically
 /// gives it CLI + env + file support.
-/// On wasm32 targets, the clap derive and todoist field are omitted.
+/// On wasm32 targets, the clap derive is omitted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(clap::Parser))]
 #[cfg_attr(
@@ -61,11 +58,13 @@ pub struct HolonConfig {
     #[serde(default)]
     pub loro: LoroPreferences,
 
-    /// Todoist integration config. Native-only (requires network stack not available on wasm32).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Storage substrate the DI container is assembled with (ADR 0004 Phase 9).
+    /// `turso` (default) is the full substrate; `loro_memory` assembles a
+    /// Turso-free container (no SQL/GQL/PRQL). Set programmatically or in
+    /// holon.toml; not a CLI flag.
     #[cfg_attr(not(target_arch = "wasm32"), arg(skip))]
     #[serde(default)]
-    pub todoist: TodoistConfig,
+    pub storage: holon_api::capability::StorageSelector,
 
     #[cfg_attr(not(target_arch = "wasm32"), command(flatten))]
     #[serde(default)]
@@ -202,9 +201,6 @@ pub struct SessionConfig {
     /// Wait for file watcher readiness before returning from `FrontendSession::new`.
     /// Mostly used by tests that assert on final state.
     pub wait_for_ready: bool,
-    /// Use fake Todoist client (testing only). Registers the same DI path
-    /// as production but with an in-memory fake instead of real API calls.
-    pub todoist_fake: bool,
 }
 
 impl SessionConfig {
@@ -212,17 +208,11 @@ impl SessionConfig {
         Self {
             ui_info,
             wait_for_ready: true,
-            todoist_fake: false,
         }
     }
 
     pub fn without_wait(mut self) -> Self {
         self.wait_for_ready = false;
-        self
-    }
-
-    pub fn with_todoist_fake(mut self) -> Self {
-        self.todoist_fake = true;
         self
     }
 }
@@ -246,7 +236,7 @@ impl Source for ClapSource {
         "cli"
     }
 
-    fn load(&self, _env: &dyn ConfigEnv) -> std::result::Result<ConfigValues, ConfigErrors> {
+    fn load(&self, _: &dyn ConfigEnv) -> std::result::Result<ConfigValues, ConfigErrors> {
         let table = toml::Value::try_from(&self.0).map_err(|e| {
             ConfigErrors::from(premortem::error::ConfigError::SourceError {
                 source_name: "cli".into(),
@@ -520,7 +510,7 @@ impl HolonConfig {
         self.preferences.get(key)
     }
 
-    /// Set a preference value and sync to typed fields for backward compatibility.
+    /// Set a preference value and mirror it into the matching typed field.
     pub fn set_preference(&mut self, key: &PrefKey, value: toml::Value) {
         match key.as_str() {
             "ui.theme" => {
@@ -531,13 +521,6 @@ impl HolonConfig {
             }
             "ui.glass_background" => {
                 self.ui.glass_background = Some(matches!(&value, toml::Value::Boolean(true)));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            "todoist.api_key" => {
-                self.todoist.api_key = match &value {
-                    toml::Value::String(s) if !s.is_empty() => Some(s.clone()),
-                    _ => None,
-                };
             }
             _ => {}
         }

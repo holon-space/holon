@@ -9,18 +9,21 @@
 //! CRDT, and is used as the SQL primary key — ensuring all peers share the
 //! same block identity.
 
+use super::event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
 use super::repository::{CoreOperations, Lifecycle, P2POperations};
 use super::types::NewBlock;
 use crate::sync::LoroDocument;
 use crate::sync::shared_tree::{SharedTreeStore, is_mount_node, read_mount_info};
 use async_trait::async_trait;
 use holon_api::EntityUri;
+use holon_api::block_mutation::{BlockMutation, BlockTreeView};
 use holon_api::streaming::{ChangeNotifications, ChangeSubscribers};
 use holon_api::{
     ApiError, Block, BlockContent, Change, ChangeOrigin, ContentType, SourceBlock, StreamPosition,
     Tags, Value,
 };
-use std::collections::HashMap;
+use holon_core::fractional_index::default_sort_key;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -88,6 +91,7 @@ pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_
                         _ => None,
                     })?;
                     EntityRef::Internal {
+                        // ALLOW(entity_uri_from_raw): internal-link target id from Loro mark map field
                         id: EntityUri::from_raw(&id_str),
                     }
                 }
@@ -259,6 +263,7 @@ fn uri_to_tree_id(uri: &EntityUri) -> Option<loro::TreeID> {
 }
 
 fn str_to_tree_id(s: &str) -> Option<loro::TreeID> {
+    // ALLOW(entity_uri_from_raw): str_to_tree_id(&str) backend string-id resolve surface
     let uri = EntityUri::from_raw(s);
     uri_to_tree_id(&uri)
 }
@@ -409,11 +414,6 @@ fn read_block_from_tree(
 
     let tags = read_tags_from_meta(&meta);
     let requires = read_requires_from_meta(&meta);
-    // Phase 3.4: sort_key comes from Loro's internal fractional index
-    // (`tree.fractional_index`), not a shadow meta key. Loro's hex format
-    // matches `loro_fractional_index::FractionalIndex::to_string()` exactly
-    // — the same format chord ops produce via `gen_key_between`.
-    let sort_key = tree.fractional_index(node);
 
     let mut block = Block::from_block_content(id, parent_id, content);
     block.set_properties_map(properties);
@@ -421,10 +421,19 @@ fn read_block_from_tree(
     block.requires = requires;
     block.created_at = created_at;
     block.updated_at = updated_at;
-    if let Some(sk) = sort_key {
-        block.sort_key = sk;
-    }
     block
+}
+
+/// A block snapshotted from a Loro doc, paired with its **internal fractional
+/// index** — the ordering encoding the Loro adapter keeps inside the tree
+/// (`tree.fractional_index`, hex format matching
+/// `loro_fractional_index::FractionalIndex::to_string()`). The domain `Block`
+/// no longer carries `sort_key` (ADR 0005); the projector reads `sort_key`
+/// here to write the SQL ordering column and `block` for everything else.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotBlock {
+    pub block: Block,
+    pub sort_key: String,
 }
 
 /// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty
@@ -445,75 +454,16 @@ fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Phase 3.4 sibling-scan helper. Given a `sort_key_hint` (a fractional-index
-/// hex string a chord op or CDC event produced via `gen_key_between`), find
-/// the predecessor sibling whose `tree.fractional_index` is the greatest one
-/// strictly less than the hint. Returns `(parent_id_str, predecessor_id_str)`
-/// suitable for [`LoroBackend::update_block_position`]. `target_bare_id` is
-/// the STABLE_ID (no `block:` prefix).
-pub(crate) fn find_position_for_sort_key_hint(
-    tree: &loro::LoroTree,
-    target_bare_id: &str,
-    sort_key_hint: &str,
-) -> Option<(String, Option<String>)> {
-    let alive: Vec<loro::TreeNode> = tree
-        .get_nodes(false)
-        .into_iter()
-        .filter(|n| {
-            !matches!(
-                n.parent,
-                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-            )
-        })
-        .collect();
-
-    let stable_id_of = |id: loro::TreeID| -> Option<String> {
-        let meta = tree.get_meta(id).ok()?; // ALLOW(ok): missing node returns None — caller treats it as skip.
-        match meta.get(STABLE_ID) {
-            Some(loro::ValueOrContainer::Value(v)) => v.as_string().map(|s| s.to_string()),
-            _ => None,
-        }
-    };
-
-    let target_node = alive
-        .iter()
-        .find(|n| stable_id_of(n.id).is_some_and(|sid| sid == target_bare_id))?;
-
-    let parent_id_str = match target_node.parent {
-        loro::TreeParentId::Node(p) => match stable_id_of(p) {
-            Some(sid) => EntityUri::block(&sid).to_string(),
-            None => EntityUri::no_parent().to_string(),
-        },
-        _ => EntityUri::no_parent().to_string(),
-    };
-
-    let mut siblings: Vec<(String, String)> = alive
-        .iter()
-        .filter(|n| n.parent == target_node.parent && n.id != target_node.id)
-        .filter_map(|n| {
-            let fi = tree.fractional_index(n.id)?;
-            let sid = stable_id_of(n.id)?;
-            Some((sid, fi))
-        })
-        .collect();
-    siblings.sort_by(|a, b| a.1.cmp(&b.1));
-
-    let predecessor_uri = siblings
-        .iter()
-        .rfind(|(_, fi)| fi.as_str() < sort_key_hint)
-        .map(|(sid, _)| EntityUri::block(sid).to_string());
-
-    Some((parent_id_str, predecessor_uri))
-}
-
-/// Check if two blocks differ in content, structure, or properties.
-fn diff_blocks_changed(a: &Block, b: &Block) -> bool {
-    a.content != b.content
-        || a.parent_id != b.parent_id
-        || a.content_type != b.content_type
-        || a.source_language != b.source_language
+/// Check if two snapshotted blocks differ in content, structure, ordering, or
+/// properties. Ordering is compared via the adapter-internal `sort_key`
+/// (fractional index) on [`SnapshotBlock`], not the domain `Block`.
+fn diff_blocks_changed(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
+    a.block.content != b.block.content
+        || a.block.parent_id != b.block.parent_id
+        || a.block.content_type != b.block.content_type
+        || a.block.source_language != b.block.source_language
         || a.sort_key != b.sort_key
-        || a.properties_map() != b.properties_map()
+        || a.block.properties_map() != b.block.properties_map()
 }
 
 // -- Writing block data to tree node metadata --
@@ -642,15 +592,89 @@ fn get_node_parent(tree: &loro::LoroTree, node: loro::TreeID) -> Option<loro::Tr
     }
 }
 
+/// A [`BlockTreeView`] over a Loro tree, built by scanning live nodes once.
+/// Lets the domain run the ADR-0005 move preconditions
+/// ([`BlockMutation::validate`]) *before* `tree.mov` dispatches, so cycle /
+/// structure detection is the domain's primary guard; Loro's native `mov`
+/// cycle check then acts as defense-in-depth.
+struct LoroTreeView {
+    /// child URI → parent URI (root-parented nodes have no entry).
+    parents: HashMap<EntityUri, EntityUri>,
+    existing: HashSet<EntityUri>,
+}
+
+impl LoroTreeView {
+    fn build(tree: &loro::LoroTree) -> Self {
+        let mut parents = HashMap::new();
+        let mut existing = HashSet::new();
+        for node in tree.get_nodes(false) {
+            if matches!(
+                node.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            ) {
+                continue;
+            }
+            let Ok(meta) = tree.get_meta(node.id) else {
+                continue;
+            };
+            let uri = block_uri_from_meta(&meta, node.id);
+            existing.insert(uri.clone());
+            if let Some(ptid) = get_node_parent(tree, node.id)
+                && let Ok(pmeta) = tree.get_meta(ptid)
+            {
+                parents.insert(uri, block_uri_from_meta(&pmeta, ptid));
+            }
+        }
+        Self { parents, existing }
+    }
+}
+
+impl BlockTreeView for LoroTreeView {
+    fn block_exists(&self, id: &EntityUri) -> bool {
+        self.existing.contains(id)
+    }
+    fn parent_of(&self, id: &EntityUri) -> Option<EntityUri> {
+        self.parents.get(id).cloned()
+    }
+    fn children_of(&self, parent: &EntityUri) -> Vec<EntityUri> {
+        self.parents
+            .iter()
+            .filter(|(_, p)| *p == parent)
+            .map(|(c, _)| c.clone())
+            .collect()
+    }
+}
+
 /// Snapshot all alive blocks in a raw `LoroDoc`, keyed by stable ID.
 ///
 /// This is the same logic `LoroBackend::snapshot_blocks` uses, but on a raw
 /// `&LoroDoc` rather than a `CollabDoc`. It exists so `LoroSyncController`
 /// can snapshot both the forked (old) state and the current state of the
 /// doc during reconciliation without wrapping them in `LoroDocument`.
-pub fn snapshot_blocks_from_doc(doc: &loro::LoroDoc) -> HashMap<String, Block> {
+pub fn snapshot_blocks_from_doc(doc: &loro::LoroDoc) -> HashMap<String, SnapshotBlock> {
+    snapshot_blocks_from_doc_settled(doc).0
+}
+
+/// Like [`snapshot_blocks_from_doc`], but also reports whether the snapshot is
+/// **settled**: `true` when every *live* (non-deleted) tree node was
+/// projectable, `false` when at least one live node was skipped because its
+/// meta / `STABLE_ID` was transiently missing (an in-flight create/move commits
+/// the node and its meta in separate doc-state steps within one `with_write`,
+/// so a concurrent reader can observe a node before its meta lands).
+///
+/// Why callers need this: an unsettled snapshot under-reports the live set. A
+/// caller that diffs it for **deletes** must withhold them — the missing block
+/// still exists in the tree; treating it as absent would spuriously delete its
+/// sink row, which the next settled snapshot re-creates (an add/remove CDC churn
+/// cycle — `inv-editable-text-has-draggable`). A genuinely deleted node parents
+/// to `Deleted`/`Unexist` (the first `continue` below) and does **not** flip
+/// `settled`, so real deletes still flow.
+pub fn snapshot_blocks_from_doc_settled(
+    doc: &loro::LoroDoc,
+) -> (HashMap<String, SnapshotBlock>, bool) {
     let tree = doc.get_tree(TREE_NAME);
-    let mut blocks = HashMap::new();
+    let mut blocks: HashMap<String, SnapshotBlock> = HashMap::new();
+    let mut settled = true;
     for node in tree.get_nodes(false) {
         if matches!(
             node.parent,
@@ -658,24 +682,38 @@ pub fn snapshot_blocks_from_doc(doc: &loro::LoroDoc) -> HashMap<String, Block> {
         ) {
             continue;
         }
-        // Skip nodes without a STABLE_ID. A snapshot is an eventually-consistent
-        // read of the convergent feed; when it runs concurrently with an
-        // in-flight mutation sequence (or reads a `fork_at` of a watermark whose
-        // tree linkage is transient — loro logs "Missing in parent's children"),
-        // a node can momentarily lack its meta. It is not a valid block to
-        // project; the next settled snapshot picks it up. Panicking here
-        // (`block_uri_from_meta`) would kill the projection task entirely.
+        // A live node without readable meta / `STABLE_ID` is transiently
+        // incomplete (mid-mutation), not absent: skip it for projection but
+        // mark the snapshot unsettled so the caller withholds deletes. Panicking
+        // here (`block_uri_from_meta`) would kill the projection task entirely.
         let Ok(meta) = tree.get_meta(node.id) else {
+            settled = false;
             continue;
         };
         if read_stable_id(&meta).is_none() {
+            settled = false;
             continue;
         }
         let parent_tid = get_node_parent(&tree, node.id);
         let block = read_block_from_tree(&tree, node.id, parent_tid);
-        blocks.insert(block.id.to_string(), block);
+        // The fractional index is the Loro adapter's internal ordering encoding
+        // (ADR 0005): captured here for the SQL projection, never on the block.
+        let sort_key = tree
+            .fractional_index(node.id)
+            .unwrap_or_else(default_sort_key);
+        if std::env::var("HOLON_LORO_DUP_DEBUG").is_ok()
+            && let Some(prev) = blocks.get(&block.id.to_string())
+        {
+            tracing::warn!(
+                "[LORO_DUP] duplicate stable id {} in tree: prev content {:?} vs {:?}",
+                block.id,
+                prev.block.content,
+                block.content
+            );
+        }
+        blocks.insert(block.id.to_string(), SnapshotBlock { block, sort_key });
     }
-    blocks
+    (blocks, settled)
 }
 
 /// Check if a node is alive (not deleted) in the tree.
@@ -743,7 +781,7 @@ fn collect_shared_tree_blocks(
 pub struct LoroBackend {
     collab_doc: Arc<LoroDocument>,
     subscribers: ChangeSubscribers<Block>,
-    event_log: Arc<Mutex<Vec<Change<Block>>>>,
+    event_log: Arc<Mutex<EventRing<Change<Block>>>>,
     shared_trees: Option<Arc<dyn SharedTreeStore>>,
     /// Cache: stable_id (UUID string) → TreeID. Populated eagerly on create,
     /// lazily on lookup, invalidated on delete.
@@ -767,7 +805,7 @@ impl LoroBackend {
         Self {
             collab_doc,
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            event_log: Arc::new(Mutex::new(Vec::new())),
+            event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -804,7 +842,7 @@ impl LoroBackend {
         let subscribers = self.subscribers.clone();
         tokio::spawn(async move {
             let mut subscribers = subscribers.lock().await;
-            subscribers.retain(|sender| sender.try_send(Ok(batch.clone())).is_ok());
+            deliver_to_subscribers(&mut subscribers, batch).await;
         });
     }
 
@@ -1354,6 +1392,46 @@ impl LoroBackend {
         Ok(())
     }
 
+    /// Write `properties` as the block's EXACT property set — keys absent from
+    /// the map are removed. `update_block_properties` merges and therefore can
+    /// never clear a stale key (e.g. `todo_keywords` after the `#+TODO:` header
+    /// was deleted from the org file); callers holding the authoritative full
+    /// set use this instead.
+    pub async fn replace_block_properties(
+        &self,
+        id: &str,
+        properties: &HashMap<String, Value>,
+    ) -> Result<(), ApiError> {
+        let tree_id = self.require_tree_id(id).await?;
+
+        self.collab_doc
+            .with_write(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let meta = tree.get_meta(tree_id)?;
+                // Bypass `write_properties_to_meta` — its empty-map fast path
+                // would silently keep the old blob when the new set is empty.
+                let json = serde_json::to_string(properties)?;
+                meta.insert(PROPERTIES, loro::LoroValue::from(json.as_str()))?;
+                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                doc.commit();
+                Ok(())
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("Failed to replace block properties: {}", e),
+            })?;
+
+        let block = self.get_block(id).await?;
+        self.emit_change(Change::Updated {
+            id: id.to_string(),
+            data: block,
+            origin: ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
+            },
+        });
+        Ok(())
+    }
+
     pub async fn update_block_fields(
         &self,
         id: &str,
@@ -1397,6 +1475,7 @@ impl LoroBackend {
     pub async fn update_parent_id(&self, id: &str, new_parent_id: String) -> Result<(), ApiError> {
         // In the LoroTree model, changing parent_id means moving the node.
         let tree_id = self.require_tree_id(id).await?;
+        // ALLOW(entity_uri_from_raw): new_parent_id String from cell-registry field write Value
         let new_parent_uri = EntityUri::from_raw(&new_parent_id);
         let id_cache = self.id_cache.clone();
 
@@ -1404,6 +1483,16 @@ impl LoroBackend {
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let new_parent = resolve_parent_tree_id(&tree, &id_cache, &new_parent_uri)?;
+                // No-op when the parent is unchanged: `tree.mov` APPENDS the
+                // node to the END of the new parent's children, so an
+                // unchanged-parent "move" (e.g. an org re-ingest update op
+                // that carries parent_id verbatim) silently re-keys the
+                // node's fractional index and reorders siblings. Sibling
+                // order is owned by `place()`/`mov_after`; a same-parent
+                // field write must not touch it.
+                if get_node_parent(&tree, tree_id) == new_parent {
+                    return Ok(());
+                }
                 tree.mov(tree_id, new_parent)?;
                 let meta = tree.get_meta(tree_id)?;
                 meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
@@ -1434,6 +1523,7 @@ impl LoroBackend {
         predecessor_id: Option<&str>,
     ) -> Result<(), ApiError> {
         let target = self.require_tree_id(target_id).await?;
+        // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
         let new_parent_uri = EntityUri::from_raw(new_parent_id);
         let predecessor = match predecessor_id {
             Some(p) => Some(self.require_tree_id(p).await?),
@@ -1523,31 +1613,6 @@ impl LoroBackend {
         Ok(())
     }
 
-    /// Phase 3.4 convenience: apply a `sort_key` hint (a fractional-index
-    /// hex string from `gen_key_between`) by scanning the target's siblings
-    /// and dispatching `update_block_position` with the right predecessor.
-    /// Used by the inbound `apply_*` paths (org-parser seed) and any caller
-    /// that has a hint string but not a typed predecessor ID. Returns
-    /// `Ok(())` (no-op) if the target isn't in the tree yet.
-    pub async fn apply_sort_key_hint(&self, target_id: &str, hint: &str) -> Result<(), ApiError> {
-        let bare = target_id.strip_prefix("block:").unwrap_or(target_id);
-        let position = self
-            .collab_doc
-            .with_read(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                Ok(find_position_for_sort_key_hint(&tree, bare, hint))
-            })
-            .map_err(|e| ApiError::InternalError {
-                message: format!("apply_sort_key_hint scan: {}", e),
-            })?;
-
-        let Some((parent_id, predecessor_id)) = position else {
-            return Ok(());
-        };
-        self.update_block_position(target_id, &parent_id, predecessor_id.as_deref())
-            .await
-    }
-
     // -- Tags (page marker + user tags) --
 
     /// Replace the `tags` list on a tree node. The literal `"Page"` tag in
@@ -1602,6 +1667,26 @@ impl LoroBackend {
         })
     }
 
+    /// Set the `source_language` meta field on a source block's Loro node.
+    /// Needed by the org re-ingest update path: an `index.org` swap can change
+    /// a `#+BEGIN_SRC` block's language (e.g. `holon_prql` → `holon_gql`);
+    /// routing that write SQL-direct in Loro mode silently forks the
+    /// authority (the projector overwrites it back on the next snapshot).
+    pub async fn set_source_language(&self, tree_id_str: &str, lang: &str) -> anyhow::Result<()> {
+        let tree_id = self.resolve_to_tree_id(tree_id_str).await.ok_or_else(|| {
+            anyhow::anyhow!("set_source_language: block not found: {}", tree_id_str)
+        })?;
+
+        self.collab_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(tree_id)?;
+            meta.insert(SOURCE_LANGUAGE, loro::LoroValue::from(lang))?;
+            meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+            doc.commit();
+            Ok(())
+        })
+    }
+
     // -- Stable ID (block business identity) --
 
     /// Resolve a stable ID (UUID) to a TreeID, using the cache.
@@ -1651,10 +1736,25 @@ impl LoroBackend {
     // -- Diff-based CDC after remote sync --
 
     /// Snapshot all alive blocks keyed by stable ID. Call before `doc.import(delta)`.
-    pub async fn snapshot_blocks(&self) -> HashMap<String, Block> {
+    pub async fn snapshot_blocks(&self) -> HashMap<String, SnapshotBlock> {
         self.collab_doc
             .with_read(|doc| Ok(snapshot_blocks_from_doc(doc)))
             .unwrap_or_default()
+    }
+
+    /// The Loro tree's fractional index for `id` — the adapter's internal
+    /// ordering encoding the projector writes to SQL `sort_key` (ADR 0005).
+    /// `None` when the node carries no index yet.
+    pub async fn block_sort_key(&self, id: &str) -> Result<Option<String>, ApiError> {
+        let tree_id = self.require_tree_id(id).await?;
+        self.collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                Ok(tree.fractional_index(tree_id))
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("block_sort_key({id}): {e}"),
+            })
     }
 
     /// Compare current state against a pre-import snapshot, emit CDC events
@@ -1664,7 +1764,7 @@ impl LoroBackend {
     /// Call after `doc.import(delta)` with the snapshot from `snapshot_blocks()`.
     pub async fn diff_and_emit_after_import(
         &self,
-        before: HashMap<String, Block>,
+        before: HashMap<String, SnapshotBlock>,
     ) -> Vec<Change<Block>> {
         let after = self.snapshot_blocks().await;
         self.warm_stable_id_cache().await;
@@ -1689,20 +1789,20 @@ impl LoroBackend {
         }
 
         // Created or Updated
-        for (id, block) in &after {
+        for (id, snap) in &after {
             match before.get(id) {
                 None => {
                     let change = Change::Created {
-                        data: block.clone(),
+                        data: snap.block.clone(),
                         origin: remote_origin.clone(),
                     };
                     self.emit_change(change.clone());
                     changes.push(change);
                 }
-                Some(old) if diff_blocks_changed(old, block) => {
+                Some(old) if diff_blocks_changed(old, snap) => {
                     let change = Change::Updated {
                         id: id.clone(),
-                        data: block.clone(),
+                        data: snap.block.clone(),
                         origin: remote_origin.clone(),
                     };
                     self.emit_change(change.clone());
@@ -1765,6 +1865,7 @@ impl LoroBackend {
             return Some(tid);
         }
         // Slow path: resolve via stable ID
+        // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
         let uri = EntityUri::from_raw(id_str);
         if uri.is_block() || uri.is_sentinel() {
             return self.find_tree_id_by_stable_id(uri.id()).await;
@@ -1888,7 +1989,7 @@ impl Lifecycle for LoroBackend {
         Ok(Self {
             collab_doc,
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            event_log: Arc::new(Mutex::new(Vec::new())),
+            event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -1915,6 +2016,26 @@ impl ChangeNotifications<Block> for LoroBackend {
         position: StreamPosition,
     ) -> Pin<Box<dyn Stream<Item = std::result::Result<Vec<Change<Block>>, ApiError>> + Send>> {
         let mut replay_items = Vec::new();
+
+        if let StreamPosition::Version(ref watermark) = position {
+            // Watermark replay from the bounded ring (see `event_ring`):
+            // exactly the changes with seq >= watermark. A watermark that has
+            // been evicted fails loud — the subscriber must re-sync from
+            // `Beginning` — instead of silently replaying partial history.
+            let watermark = u64::from_le_bytes(watermark.as_slice().try_into().unwrap_or([0; 8]));
+            match self.event_log.lock().unwrap().replay_since(watermark) {
+                Ok(events) => replay_items.extend(events),
+                Err(expired) => {
+                    tracing::error!("[LoroBackend] watch_changes_since: {expired}");
+                    let error_stream = tokio_stream::iter(vec![Err(ApiError::InternalError {
+                        message: expired.to_string(),
+                    })]);
+                    let (_tx, rx) =
+                        mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
+                    return Box::pin(error_stream.chain(ReceiverStream::new(rx)));
+                }
+            }
+        }
 
         if matches!(position, StreamPosition::Beginning) {
             match self
@@ -1962,9 +2083,6 @@ impl ChangeNotifications<Block> for LoroBackend {
             }
         }
 
-        let backlog = self.event_log.lock().unwrap().clone();
-        replay_items.extend(backlog);
-
         let (tx, rx) = mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
         {
             let mut subscribers = self.subscribers.lock().await;
@@ -1982,11 +2100,16 @@ impl ChangeNotifications<Block> for LoroBackend {
     }
 
     async fn get_current_version(&self) -> std::result::Result<Vec<u8>, ApiError> {
-        self.collab_doc
-            .with_read(|doc| Ok(doc.export(loro::ExportMode::Snapshot)?))
-            .map_err(|e| ApiError::InternalError {
-                message: format!("Failed to get current version: {}", e),
-            })
+        // Watermark into the change ring (was: a full-history Loro snapshot
+        // export per call — document-sized and semantically unused). Mirrors
+        // `MemoryBackend::get_current_version`.
+        Ok(self
+            .event_log
+            .lock()
+            .unwrap()
+            .next_seq()
+            .to_le_bytes()
+            .to_vec())
     }
 }
 
@@ -2113,6 +2236,7 @@ impl CoreOperations for LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
 
+                // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
                 let parent_uri = EntityUri::from_raw(parent_id);
                 let children_tids = if parent_uri.is_no_parent() || parent_uri.is_sentinel() {
                     tree.roots()
@@ -2204,51 +2328,88 @@ impl CoreOperations for LoroBackend {
         Ok(())
     }
 
+    /// Delete a block from the Loro tree. Idempotent: already-deleted and
+    /// never-seeded blocks are a no-op success (no `Change::Deleted` emitted —
+    /// the concurrent deleter or prior operation already handled it).
     async fn delete_block(&self, id: &str) -> Result<(), ApiError> {
-        let tree_id = self.require_tree_id(id).await?;
+        let Some(tree_id) = self.resolve_to_tree_id(id).await else {
+            // Block not in Loro tree (never seeded or concurrently deleted).
+            // No emit — the other deleter already did (R-2).
+            return Ok(());
+        };
 
+        let mut did_delete = false;
         self.collab_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                tree.delete(tree_id)?;
-                doc.commit();
-                Ok(())
+                match tree.delete(tree_id) {
+                    Ok(()) => {
+                        doc.commit();
+                        did_delete = true;
+                        Ok(())
+                    }
+                    Err(loro::LoroError::TreeError(
+                        loro::LoroTreeError::TreeNodeNotExist(_)
+                        | loro::LoroTreeError::TreeNodeDeletedOrNotExist(_),
+                    )) => Ok(()),
+                    Err(e) => Err(e.into()),
+                }
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to delete block: {}", e),
             })?;
 
-        let uri = EntityUri::from_raw(id);
-        if uri.is_block() {
-            self.uncache_stable_id(uri.id());
+        if did_delete {
+            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
+            let uri = EntityUri::from_raw(id);
+            if uri.is_block() {
+                self.uncache_stable_id(uri.id());
+            }
+            self.emit_change(Change::Deleted {
+                id: id.to_string(),
+                origin: ChangeOrigin::Local {
+                    operation_id: None,
+                    trace_id: None,
+                },
+            });
         }
-
-        self.emit_change(Change::Deleted {
-            id: id.to_string(),
-            origin: ChangeOrigin::Local {
-                operation_id: None,
-                trace_id: None,
-            },
-        });
         Ok(())
     }
 
     async fn move_block(
         &self,
-        id: &str,
+        id: &EntityUri,
         new_parent: EntityUri,
         after: Option<EntityUri>,
     ) -> Result<(), ApiError> {
-        let tree_id = self.require_tree_id(id).await?;
-        let block_before = self.get_block(id).await?;
+        let tree_id = self.require_tree_id(id.as_str()).await?;
+        let block_before = self.get_block(id.as_str()).await?;
         let id_cache = self.id_cache.clone();
+
+        // Domain-level precondition (ADR 0005): the primary cycle / structure
+        // guard, run before adapter dispatch. `tree.mov` below re-checks cycles
+        // natively as defense-in-depth.
+        self.collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                Ok(BlockMutation::Move {
+                    id: id.clone(),
+                    new_parent: new_parent.clone(),
+                    after: after.clone(),
+                }
+                .validate(&LoroTreeView::build(&tree)))
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("move_block precondition read failed: {e}"),
+            })?
+            .map_err(ApiError::from)?;
 
         self.collab_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let new_parent_tree_id = resolve_parent_tree_id(&tree, &id_cache, &new_parent)?;
 
-                // LoroTree.mov handles cycle detection natively
+                // LoroTree.mov re-checks cycles natively (defense-in-depth).
                 tree.mov(tree_id, new_parent_tree_id)?;
 
                 // Handle `after` positioning via mov_after
@@ -2411,6 +2572,7 @@ impl CoreOperations for LoroBackend {
             })?;
 
         for id in &unique_ids {
+            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
             let uri = EntityUri::from_raw(id);
             if uri.is_block() {
                 self.uncache_stable_id(uri.id());
@@ -2499,7 +2661,11 @@ mod tests {
         // index; the read path returns exactly that string.
         let backend = create_test_backend().await;
         let block = create_text_block(&backend, "x").await;
-        let fetched = backend.get_block(block.id.as_str()).await.unwrap();
+        let fetched_key = backend
+            .block_sort_key(block.id.as_str())
+            .await
+            .unwrap()
+            .expect("freshly-created block has a fractional index");
         let tree_index = backend
             .collab_doc
             .with_read(|doc| {
@@ -2509,51 +2675,139 @@ mod tests {
             })
             .unwrap()
             .expect("freshly-created block has a fractional index");
-        assert_eq!(fetched.sort_key, tree_index);
+        assert_eq!(fetched_key, tree_index);
     }
 
     #[tokio::test]
-    async fn apply_sort_key_hint_repositions() {
-        // Phase 3.4: `apply_sort_key_hint` is the inbound CDC entry point —
-        // it scans siblings to find the predecessor whose fractional_index
-        // is closest below the hint and dispatches update_block_position.
+    async fn legacy_snapshot_orders_from_fractional_index_not_domain_sort_key() {
+        // ADR 0008: a legacy Loro snapshot may still carry a stale domain
+        // `sort_key` string in a node's metadata. The read path must IGNORE it
+        // and recover sibling order from the tree's fractional index (the
+        // adapter's real authority) — so old bytes load with correct order and
+        // the dropped domain field cannot drift.
         let backend = create_test_backend().await;
-        let first = create_text_block(&backend, "a").await;
-        let second = create_text_block(&backend, "b").await;
-        let third = create_text_block(&backend, "c").await;
-        let first_fi = backend.get_block(first.id.as_str()).await.unwrap().sort_key;
-        let second_fi = backend
-            .get_block(second.id.as_str())
+        let a = create_text_block(&backend, "a").await;
+        let b = create_text_block(&backend, "b").await; // created after a → fi(a) < fi(b)
+
+        // Simulate a legacy snapshot: inject a misleading `sort_key` meta key on
+        // `a` whose value, if it were ever read, would sort `a` AFTER `b`.
+        backend
+            .collab_doc
+            .with_write(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let a_id = resolve_to_tree_id_sync(doc, a.id.as_str());
+                let meta = tree.get_meta(a_id)?;
+                meta.insert("sort_key", loro::LoroValue::from("zzzzzzzz"))?;
+                Ok(())
+            })
+            .unwrap();
+
+        // block_sort_key returns the real fractional index, not the stale string.
+        let key_a = backend
+            .block_sort_key(a.id.as_str())
             .await
             .unwrap()
-            .sort_key;
-        // Pick a hint strictly between first and second — `third` should
-        // land between them.
-        let between = crate::api::loro_backend::find_position_for_sort_key_hint;
-        // Build the hint via gen_key_between so it's guaranteed valid.
-        let hint = holon_core::fractional_index::gen_key_between(Some(&first_fi), Some(&second_fi))
-            .expect("gen_key_between");
+            .unwrap();
+        let key_b = backend
+            .block_sort_key(b.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(key_a, "zzzzzzzz", "legacy domain sort_key must be ignored");
+        assert!(
+            key_a < key_b,
+            "fractional-index order preserved: {key_a} < {key_b}"
+        );
+
+        // Snapshot order also comes from the fractional index, not the meta.
+        let snap = backend
+            .collab_doc
+            .with_read(|doc| Ok(snapshot_blocks_from_doc(doc)))
+            .unwrap();
+        let sa = &snap[&a.id.to_string()];
+        let sb = &snap[&b.id.to_string()];
+        assert_ne!(sa.sort_key, "zzzzzzzz");
+        assert!(
+            sa.sort_key < sb.sort_key,
+            "snapshot fractional-index order: {} < {}",
+            sa.sort_key,
+            sb.sort_key
+        );
+    }
+
+    #[tokio::test]
+    async fn update_parent_id_same_parent_preserves_sibling_order() {
+        // Regression (2026-06-10 layout-override slice): an org re-ingest
+        // update op carries `parent_id` verbatim; `update_parent_id` routed it
+        // through `tree.mov`, which APPENDS the node to the end of the (same)
+        // parent's children — silently re-keying the fractional index and
+        // flipping sibling order (Loro [render, src] vs SQL [src, render]).
+        // A same-parent write must be a positional no-op.
+        let backend = create_test_backend().await;
+        let a = create_text_block(&backend, "a").await;
+        let b = create_text_block(&backend, "b").await;
+
         backend
-            .apply_sort_key_hint(third.id.as_str(), &hint)
+            .update_parent_id(a.id.as_str(), a.parent_id.to_string())
+            .await
+            .expect("same-parent update_parent_id must succeed");
+
+        let kids = backend
+            .list_children(EntityUri::no_parent().as_str())
+            .await
+            .expect("list_children");
+        assert_eq!(
+            kids,
+            vec![a.id.to_string(), b.id.to_string()],
+            "same-parent parent_id write must not reorder siblings"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_positions_new_block_after_a_middle_sibling() {
+        // Reproduce the split-of-a-non-last-child positioning: a fresh node,
+        // created (appended at end), must land immediately AFTER the source
+        // sibling — not at the end of the children. Mirrors `create_entity`'s
+        // sequence: create_block_with_properties (append) → update_block_position.
+        let backend = create_test_backend().await;
+        let a = create_text_block(&backend, "a").await;
+        let b = create_text_block(&backend, "b").await;
+        let c = create_text_block(&backend, "c").await;
+        // New block from a split of `b` — created fresh, appended at the end.
+        let d = backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::Text { raw: "d".into() },
+                None,
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+            )
             .await
             .unwrap();
-        // Silence the unused-import lint when this test binary is built
-        // without the registry feature.
-        let _ = between;
-        let s_first = backend.get_block(first.id.as_str()).await.unwrap();
-        let s_third = backend.get_block(third.id.as_str()).await.unwrap();
-        let s_second = backend.get_block(second.id.as_str()).await.unwrap();
-        assert!(
-            s_first.sort_key < s_third.sort_key,
-            "{} < {}",
-            s_first.sort_key,
-            s_third.sort_key
-        );
-        assert!(
-            s_third.sort_key < s_second.sort_key,
-            "{} < {}",
-            s_third.sort_key,
-            s_second.sort_key
+        // Position it right after `b` (the source), as split does.
+        backend
+            .update_block_position(
+                d.id.as_str(),
+                EntityUri::no_parent().as_str(),
+                Some(b.id.as_str()),
+            )
+            .await
+            .unwrap();
+        let order = backend
+            .list_children(EntityUri::no_parent().as_str())
+            .await
+            .unwrap();
+        let pos = |id: &str| order.iter().position(|s| s == id).unwrap();
+        assert_eq!(
+            (
+                pos(a.id.as_str()),
+                pos(b.id.as_str()),
+                pos(d.id.as_str()),
+                pos(c.id.as_str())
+            ),
+            (0, 1, 2, 3),
+            "expected [a, b, d, c], got {order:?}"
         );
     }
 
@@ -2577,21 +2831,18 @@ mod tests {
             )
             .await
             .unwrap();
-        let s_first = backend.get_block(first.id.as_str()).await.unwrap();
-        let s_second = backend.get_block(second.id.as_str()).await.unwrap();
-        let s_third = backend.get_block(third.id.as_str()).await.unwrap();
-        assert!(
-            s_first.sort_key < s_second.sort_key,
-            "{} < {}",
-            s_first.sort_key,
-            s_second.sort_key
-        );
-        assert!(
-            s_second.sort_key < s_third.sort_key,
-            "{} < {}",
-            s_second.sort_key,
-            s_third.sort_key
-        );
+        let k = async |id: &str| {
+            backend
+                .block_sort_key(id)
+                .await
+                .unwrap()
+                .expect("block has a fractional index")
+        };
+        let k_first = k(first.id.as_str()).await;
+        let k_second = k(second.id.as_str()).await;
+        let k_third = k(third.id.as_str()).await;
+        assert!(k_first < k_second, "{k_first} < {k_second}");
+        assert!(k_second < k_third, "{k_second} < {k_third}");
     }
 
     /// Test 5: `update_block_position` is idempotent — calling it twice with the
@@ -3244,8 +3495,14 @@ mod tests {
             .await
             .unwrap();
 
-        let result = backend.move_block(a.id.as_str(), b.id.clone(), None).await;
-        assert!(result.is_err(), "Moving parent under child should fail");
+        let result = backend.move_block(&a.id, b.id.clone(), None).await;
+        // The domain precondition (BlockMutation::validate) is the primary guard
+        // now, so the cycle surfaces as the typed CyclicMove — not a generic
+        // InternalError wrapping Loro's native `mov` rejection.
+        assert!(
+            matches!(result, Err(ApiError::CyclicMove { .. })),
+            "Moving parent under child should fail with CyclicMove, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -3254,10 +3511,7 @@ mod tests {
         let a = create_text_block(&backend, "A").await;
         let b = create_text_block(&backend, "B").await;
 
-        backend
-            .move_block(b.id.as_str(), a.id.clone(), None)
-            .await
-            .unwrap();
+        backend.move_block(&b.id, a.id.clone(), None).await.unwrap();
         let children = backend.list_children(a.id.as_str()).await.unwrap();
         assert_eq!(children.len(), 1);
     }
@@ -3604,5 +3858,55 @@ mod tests {
             let result = backend.get_block("block:999:999").await;
             assert!(result.is_err());
         }
+    }
+
+    /// `replace_block_properties` writes the EXACT set: removed keys disappear
+    /// (a merge could never clear `todo_keywords` after the `#+TODO:` header
+    /// was deleted from the org file), and an empty set clears everything.
+    #[tokio::test]
+    async fn replace_block_properties_removes_absent_keys() {
+        let backend = create_test_backend().await;
+        let block = create_text_block(&backend, "doc").await;
+
+        let mut props = HashMap::new();
+        props.insert(
+            "todo_keywords".to_string(),
+            Value::String("[\"WIP\"]".into()),
+        );
+        props.insert("keep".to_string(), Value::String("v".into()));
+        backend
+            .update_block_properties(block.id.as_str(), &props)
+            .await
+            .unwrap();
+
+        let mut replacement = HashMap::new();
+        replacement.insert("keep".to_string(), Value::String("v".into()));
+        backend
+            .replace_block_properties(block.id.as_str(), &replacement)
+            .await
+            .unwrap();
+
+        let fetched = backend.get_block(block.id.as_str()).await.unwrap();
+        assert!(
+            !fetched.properties.contains_key("todo_keywords"),
+            "replaced-away key must be gone, got: {:?}",
+            fetched.properties
+        );
+        assert_eq!(
+            fetched.properties.get("keep").and_then(|v| v.as_string()),
+            Some("v"),
+            "kept key must survive the replace"
+        );
+
+        backend
+            .replace_block_properties(block.id.as_str(), &HashMap::new())
+            .await
+            .unwrap();
+        let fetched = backend.get_block(block.id.as_str()).await.unwrap();
+        assert!(
+            fetched.properties.is_empty(),
+            "empty replacement must clear ALL properties, got: {:?}",
+            fetched.properties
+        );
     }
 }

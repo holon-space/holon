@@ -68,9 +68,11 @@ pub struct ReactiveShell {
     /// detect length changes between renders and call `list_state.reset(...)`
     /// only when needed (preserving scroll position otherwise).
     visible_indices: Rc<Vec<usize>>,
-    /// Per-item props watchers. Each task listens to a single item's
-    /// `props` Mutable signal and calls `cx.notify()` on changes.
-    props_watchers: Vec<Task<()>>,
+    /// Per-item `[props, data]` watcher task pairs, index-aligned with
+    /// `items` so removal diffs drop the matching pair (Task is RAII —
+    /// dropping cancels). Each task listens to one item's Mutable signal
+    /// and calls `cx.notify()` on changes.
+    props_watchers: Vec<[Task<()>; 2]>,
     /// One subscriber per nested `Reactive { view }` in `current_tree` that
     /// fires `cx.notify()` on this shell whenever the nested
     /// `MutableVec` emits a diff. Required so that streaming collections
@@ -81,6 +83,10 @@ pub struct ReactiveShell {
     /// nested live_blocks remain at their initial (zero-height) layout.
     /// Cancelled and rebuilt on every structural rebuild.
     collection_subs: Vec<Task<()>>,
+    /// Last item count printed by the `HOLON_GPUI_RENDER_PROBE` diagnostic
+    /// (usize::MAX = nothing printed yet). Lets the probe log only count
+    /// *changes* instead of every 100ms-pumped render pass.
+    render_probe_last: std::cell::Cell<usize>,
     /// Ancestor `live_block` ids leading down to this shell, captured at
     /// creation time. Re-emitted into the per-frame `GpuiRenderContext` so
     /// the `live_block` builder can refuse to construct a child whose id
@@ -196,6 +202,7 @@ impl ReactiveShell {
             visible_indices: Rc::new(Vec::new()),
             props_watchers: Vec::new(),
             collection_subs: Vec::new(),
+            render_probe_last: std::cell::Cell::new(usize::MAX),
             live_block_ancestors,
         };
         view.subscribe_inner_collections(cx);
@@ -253,12 +260,33 @@ impl ReactiveShell {
             visible_indices: Rc::new((0..item_count).collect()),
             props_watchers: Vec::new(),
             collection_subs: Vec::new(),
+            render_probe_last: std::cell::Cell::new(usize::MAX),
             live_block_ancestors,
         }
     }
 
     pub fn block_id(&self) -> Option<&str> {
         self.block_id.as_deref()
+    }
+
+    /// Row index of the item bound to `uri` in this collection-mode shell,
+    /// in the GPUI `list`'s row coordinate space (`visible_indices`
+    /// position) — what `ListState::scroll_to_reveal_item` expects, NOT the
+    /// raw `items` index (the two diverge under tree-collapse filtering).
+    /// Falls back to the raw index when `visible_indices` hasn't been
+    /// recomputed since the item arrived (next render reconciles).
+    /// `None` for block-mode shells (empty `items`) or absent entities.
+    pub fn visible_index_of(&self, uri: &holon_api::EntityUri) -> Option<usize> {
+        let raw = self
+            .items
+            .iter()
+            .position(|i| i.entity_id().as_ref() == Some(uri))?;
+        Some(
+            self.visible_indices
+                .iter()
+                .position(|&i| i == raw)
+                .unwrap_or(raw),
+        )
     }
 
     /// Resolve this shell's reactive tree into a static ViewModel.
@@ -350,7 +378,7 @@ impl ReactiveShell {
                 // marks the new items as unmeasured without clearing scroll.
                 let old_len = self.items.len();
                 self.items = values;
-                eprintln!(
+                tracing::trace!(
                     "[apply_diff::Replace] old={old_len} new={} scroll_top={:?}",
                     self.items.len(),
                     self.list_state.logical_scroll_top()
@@ -365,11 +393,16 @@ impl ReactiveShell {
             VecDiff::InsertAt { index, value } => {
                 self.items.insert(index, value.clone());
                 self.list_state.splice(index..index, 1);
-                self.subscribe_single_props_signal(&value, cx);
+                let pair = self.watch_item_signals(&value, cx);
+                self.props_watchers.insert(index, pair);
                 cx.notify();
             }
             VecDiff::RemoveAt { index } => {
                 self.items.remove(index);
+                // Drop the row's watcher pair with it — a dead watcher
+                // task pins the removed row's signal (and its data Arc)
+                // until the next Replace otherwise.
+                self.props_watchers.remove(index);
                 self.list_state.splice(index..index + 1, 0);
                 self.prune_render_entity_cache();
                 cx.notify();
@@ -380,6 +413,8 @@ impl ReactiveShell {
             } => {
                 let item = self.items.remove(old_index);
                 self.items.insert(new_index, item);
+                let pair = self.props_watchers.remove(old_index);
+                self.props_watchers.insert(new_index, pair);
                 // No splice helper for "move"; remeasure both endpoints by
                 // re-inserting them. Cheaper than a full reset for large lists.
                 self.list_state.splice(old_index..old_index + 1, 0);
@@ -390,13 +425,15 @@ impl ReactiveShell {
                 let index = self.items.len();
                 self.items.push(value.clone());
                 self.list_state.splice(index..index, 1);
-                self.subscribe_single_props_signal(&value, cx);
+                let pair = self.watch_item_signals(&value, cx);
+                self.props_watchers.push(pair);
                 cx.notify();
             }
             VecDiff::Pop {} => {
                 if !self.items.is_empty() {
                     let last = self.items.len() - 1;
                     self.items.pop();
+                    self.props_watchers.pop();
                     self.list_state.splice(last..last + 1, 0);
                 }
                 self.prune_render_entity_cache();
@@ -405,6 +442,7 @@ impl ReactiveShell {
             VecDiff::Clear {} => {
                 let old_len = self.items.len();
                 self.items.clear();
+                self.props_watchers.clear();
                 // Use splice instead of reset — see the comment on
                 // `VecDiff::Replace` above.
                 self.list_state.splice(0..old_len, 0);
@@ -487,7 +525,11 @@ impl ReactiveShell {
     ///
     /// One subscription per row, not per nested widget — a recursive walk
     /// over every node was tried and caused hangs from runtime contention.
-    fn watch_item_signals(&mut self, item: &Arc<ReactiveViewModel>, cx: &mut Context<Self>) {
+    fn watch_item_signals(
+        &mut self,
+        item: &Arc<ReactiveViewModel>,
+        cx: &mut Context<Self>,
+    ) -> [Task<()>; 2] {
         let props_signal = item.props.signal_cloned();
         let props_task = cx.spawn(async move |this, cx| {
             use futures::StreamExt;
@@ -501,7 +543,6 @@ impl ReactiveShell {
                 }
             }
         });
-        self.props_watchers.push(props_task);
 
         let data_signal = item.data.signal_cloned();
         let data_task = cx.spawn(async move |this, cx| {
@@ -516,26 +557,19 @@ impl ReactiveShell {
                 }
             }
         });
-        self.props_watchers.push(data_task);
-    }
-
-    /// Subscribe to a single item's signals (props + data). Used by
-    /// `InsertAt` / `Push` diffs to add per-item watchers without
-    /// re-subscribing the whole collection.
-    fn subscribe_single_props_signal(
-        &mut self,
-        item: &Arc<ReactiveViewModel>,
-        cx: &mut Context<Self>,
-    ) {
-        self.watch_item_signals(item, cx);
+        [props_task, data_task]
     }
 
     /// Subscribe to every collection item's `props` + `data` signals.
+    /// `props_watchers` stays index-aligned with `self.items` (one
+    /// `[props, data]` task pair per row) so removal diffs can drop the
+    /// matching pair — `Task` is RAII, dropping cancels the watcher.
     fn subscribe_props_signals(&mut self, cx: &mut Context<Self>) {
         self.props_watchers.clear();
         let items = self.items.clone();
         for item in &items {
-            self.watch_item_signals(item, cx);
+            let pair = self.watch_item_signals(item, cx);
+            self.props_watchers.push(pair);
         }
     }
 
@@ -612,13 +646,29 @@ impl Render for ReactiveShell {
                 cx,
             )
             .with_live_block_ancestors(frame_ancestors.clone());
-            // Render collection items inline but inside a scrollable div.
-            // `size_full` anchors the scroll viewport to the panel's
-            // definite height (from `columns::panel_wrap`'s absolute
-            // positioning). `overflow_y_scroll` enables wheel/trackpad
-            // scrolling when items exceed the viewport.
-            if let Some(ref view) = tree.collection {
+            // Eager (non-virtualized) collection rendering: every row is
+            // built every frame regardless of viewport. Kept behind
+            // `HOLON_EAGER_PANEL_RENDER=1` as a one-release rollback for the
+            // virtualized fallthrough below (`builders::render`'s collection
+            // arm → `ReactiveShell` + `gpui::list`), which only materializes
+            // viewport-visible rows.
+            if let Some(ref view) = tree.collection.as_ref().filter(|_| eager_panel_render()) {
                 let items: Vec<Arc<ReactiveViewModel>> = view.children_snapshot();
+                if std::env::var_os("HOLON_GPUI_RENDER_PROBE").is_some()
+                    && self.render_probe_last.get() != items.len()
+                {
+                    self.render_probe_last.set(items.len());
+                    let ids: Vec<String> = items
+                        .iter()
+                        .filter_map(|i| i.entity_id().as_ref().map(|u| u.to_string()))
+                        .collect();
+                    eprintln!(
+                        "[render-probe] {:?} inline-collection items={} view_ptr={:p} ids={ids:?}",
+                        self.block_id,
+                        items.len(),
+                        std::sync::Arc::as_ptr(view),
+                    );
+                }
                 let gap_px = match view
                     .layout()
                     .as_ref()
@@ -706,14 +756,33 @@ impl Render for ReactiveShell {
             .as_ref()
             .expect("collection-mode render path requires reactive_view")
             .layout();
+        // Same floor as the (rollback-gated) eager branch above so the main
+        // panel renders identically through either path.
         let row_gap_px: Pixels = match variant
             .as_ref()
             .filter(|l| l.name() == "list")
             .map(|l| l.gap)
         {
-            Some(g) => px(g.max(4.0)),
+            Some(g) => px(g.max(2.0)),
             None => px(2.0),
         };
+
+        if std::env::var_os("HOLON_GPUI_RENDER_PROBE").is_some()
+            && self.render_probe_last.get() != self.items.len()
+        {
+            self.render_probe_last.set(self.items.len());
+            let ids: Vec<String> = self
+                .items
+                .iter()
+                .filter_map(|i| i.entity_id().as_ref().map(|u| u.to_string()))
+                .collect();
+            eprintln!(
+                "[render-probe] {:?} list-mode items={} visible={} ids={ids:?}",
+                self.block_id,
+                self.items.len(),
+                self.visible_indices.len(),
+            );
+        }
 
         let items = self.items.clone();
         let visible_indices = self.visible_indices.clone();
@@ -782,6 +851,7 @@ impl Render for ReactiveShell {
 impl Drop for ReactiveShell {
     fn drop(&mut self) {
         if let Some(ref block_id) = self.block_id {
+            // ALLOW(entity_uri_from_raw): render-spec ReactiveShell.block_id (parsed in Drop to unwatch)
             let uri = EntityUri::from_raw(block_id);
             tracing::debug!("[ReactiveShell] Dropping shell for '{block_id}', unwatching");
             self.services.unwatch(&uri);
@@ -790,6 +860,15 @@ impl Drop for ReactiveShell {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// `HOLON_EAGER_PANEL_RENDER=1` restores the pre-virtualization eager
+/// collection branch in block-mode `render` (every row built every frame).
+/// One-release rollback flag for main-panel virtualization; remove after a
+/// soak.
+fn eager_panel_render() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("HOLON_EAGER_PANEL_RENDER").as_deref() == Ok("1"))
+}
 
 fn render_entity_row_id(node: &ReactiveViewModel) -> Option<String> {
     if node.widget_name().as_deref() != Some("render_entity") {
@@ -886,9 +965,12 @@ fn collect_referenced_cache_keys(node: &ReactiveViewModel, out: &mut HashSet<Cac
             }
         }
         Some("live_query") => {
-            if let Some(sql) = node.prop_str("compiled_sql") {
+            if let Some(query) = node.prop_str("query") {
                 let ctx_id = node.prop_str("query_context_id");
-                out.insert(CacheKey::LiveQuery(live_query_key(&sql, ctx_id.as_deref())));
+                out.insert(CacheKey::LiveQuery(live_query_key(
+                    &query,
+                    ctx_id.as_deref(),
+                )));
             }
         }
         Some("render_entity") => {

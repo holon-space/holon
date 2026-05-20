@@ -47,7 +47,7 @@ pub struct TuiState {
     pub status_message: String,
     pub current_model: Arc<Mutex<Arc<ReactiveViewModel>>>,
     pub watch_started: Arc<AtomicBool>,
-    pub last_registry: Arc<Mutex<RenderRegistry>>,
+    pub last_registry: crate::geometry::TuiGeometry,
     pub focus_index: Arc<AtomicUsize>,
     /// Stable (entity_id, kind) of the focused region. Used to keep focus
     /// on the same row when the registry's index order shifts between
@@ -181,19 +181,29 @@ impl App for AppMain {
             }) = input_event
             {
                 if mask.ctrl_key_state == r3bl_tui::KeyState::Pressed {
-                    let engine = global_data.state.session.engine().clone();
-                    tracing::info!("[TUI] Sync triggered (Ctrl+r)");
-                    tokio::spawn(async move {
-                        let params = std::collections::HashMap::new();
-                        match engine
-                            .execute_operation(&EntityName::new("*"), "sync", params)
-                            .await
-                        {
-                            Ok(_) => tracing::info!("[TUI] Sync completed"),
-                            Err(e) => tracing::error!("[TUI] Sync failed: {}", e),
+                    match global_data.state.session.operation_engine() {
+                        Some(operation_engine) => {
+                            tracing::info!("[TUI] Sync triggered (Ctrl+r)");
+                            tokio::spawn(async move {
+                                let params = std::collections::HashMap::new();
+                                match operation_engine
+                                    .execute_operation(&EntityName::new("*"), "sync", params)
+                                    .await
+                                {
+                                    Ok(_) => tracing::info!("[TUI] Sync completed"),
+                                    Err(e) => tracing::error!("[TUI] Sync failed: {}", e),
+                                }
+                            });
+                            global_data.state.status_message = "Syncing...".to_string();
                         }
-                    });
-                    global_data.state.status_message = "Syncing...".to_string();
+                        None => {
+                            tracing::warn!(
+                                "[TUI] Sync unavailable: no operation engine wired (no-Turso session)"
+                            );
+                            global_data.state.status_message =
+                                "Sync unavailable (no-Turso session)".to_string();
+                        }
+                    }
                     return Ok(EventPropagation::ConsumedRender);
                 }
             }
@@ -440,7 +450,7 @@ impl App for AppMain {
                     // reorder). Initialise focus on the first selectable
                     // discovered if there isn't one yet.
                     reconcile_focus(state, &registry);
-                    *state.last_registry.lock().unwrap() = registry;
+                    state.last_registry.install(registry);
                 }
 
                 it.surface_end()?;
@@ -518,7 +528,7 @@ fn ensure_watch_task_started(global_data: &mut GlobalData<TuiState, AppSignal>) 
 /// No-op when the registry is empty. When no selectable is focused yet, picks
 /// the first selectable in the lowest region.
 fn advance_focus(state: &TuiState, delta: i32) {
-    let registry = state.last_registry.lock().unwrap();
+    let registry = state.last_registry.lock();
     if registry.selectables.is_empty() {
         return;
     }
@@ -565,7 +575,7 @@ fn advance_focus(state: &TuiState, delta: i32) {
 /// (sidebar → main → drawer → wraps). Bound to Tab / Shift-Tab. No-op when
 /// the registry has only one region's worth of selectables.
 fn switch_region(state: &TuiState, delta: i32) {
-    let registry = state.last_registry.lock().unwrap();
+    let registry = state.last_registry.lock();
     if registry.selectables.is_empty() {
         return;
     }
@@ -726,7 +736,7 @@ fn dispatch_navigation_op(state: &mut TuiState, op_name: &str, label: &str) {
 fn dispatch_block_op_on_focused(state: &TuiState, op_name: &str) -> bool {
     use crate::render::SelectableKind;
 
-    let registry = state.last_registry.lock().unwrap();
+    let registry = state.last_registry.lock();
     let idx = state.focus_index.load(Ordering::Acquire);
     if idx == NO_FOCUS {
         if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
@@ -880,19 +890,6 @@ fn decide_enter_action(registry: &RenderRegistry, idx: usize) -> EnterDecision {
     }
 }
 
-/// Build the `navigation.editor_focus` intent that mirrors GPUI's
-/// `render_entity` click handler. Extracted so unit tests can verify the
-/// intent's entity/op/params shape without booting the engine.
-fn editor_focus_intent_for(block_id: &str) -> OperationIntent {
-    let mut params = std::collections::HashMap::new();
-    params.insert("block_id".to_string(), Value::String(block_id.to_string()));
-    OperationIntent::new(
-        EntityName::Named("navigation".to_string()),
-        "editor_focus".to_string(),
-        params,
-    )
-}
-
 /// Called when the user presses Enter outside edit mode. Three branches:
 ///
 /// 1. Focused region is a `Selectable` (sidebar entry): dispatch its click
@@ -905,7 +902,7 @@ fn editor_focus_intent_for(block_id: &str) -> OperationIntent {
 /// 3. Nothing focused or focused Block has no editable target: no-op.
 fn enter_pressed(state: &mut TuiState) -> EnterAction {
     let decision = {
-        let registry = state.last_registry.lock().unwrap();
+        let registry = state.last_registry.lock();
         let idx = state.focus_index.load(Ordering::Acquire);
         decide_enter_action(&registry, idx)
     };
@@ -919,16 +916,15 @@ fn enter_pressed(state: &mut TuiState) -> EnterAction {
         EnterDecision::EnterEdit(target) => target,
     };
 
-    // Mirror the GPUI render_entity click handler: dispatch
-    // `navigation.editor_focus` so the engine's `focused_block`
-    // tracks the block being edited. Without this, chord-resolution
-    // (`bubble_input_oneshot`) and any consumer of `ui_state.focused_block`
-    // see stale focus, breaking keybindings on the freshly-opened editor.
-    state
-        .engine
-        .dispatch_intent(editor_focus_intent_for(&target.block_id));
-
-    let cell = match state.engine.editable_text(&target.block_id, &target.field) {
+    // Focus the block being edited by setting the in-memory authority
+    // directly (ADR 0010) — no `editor_cursor` write. Without this,
+    // chord-resolution (`bubble_input_oneshot`) and any consumer of
+    // `ui_state.focused_block` see stale focus, breaking keybindings on the
+    // freshly-opened editor.
+    // ALLOW(entity_uri_from_raw): boundary — `target.block_id` is the focused row id (a `String`); parse once here before handing a typed URI to the cell registry.
+    let target_uri = holon_api::EntityUri::from_raw(&target.block_id);
+    state.engine.set_focus(Some(target_uri.clone()));
+    let cell = match state.engine.editable_text(&target_uri, &target.field) {
         Ok(c) => c,
         Err(e) => {
             state.status_message = format!("editable text unavailable: {e}");
@@ -1238,25 +1234,6 @@ mod tests {
     }
 
     #[test]
-    fn editor_focus_intent_has_navigation_entity_and_block_id_param() {
-        let intent = editor_focus_intent_for("block:abc-123");
-        assert!(matches!(
-            intent.entity_name,
-            EntityName::Named(ref n) if n == "navigation"
-        ));
-        assert_eq!(intent.op_name, "editor_focus");
-        match intent.params.get("block_id") {
-            Some(Value::String(s)) => assert_eq!(s, "block:abc-123"),
-            other => panic!("expected block_id String param, got {other:?}"),
-        }
-        assert_eq!(
-            intent.params.len(),
-            1,
-            "intent must carry exactly one param (block_id) — extras would silently shadow upstream params"
-        );
-    }
-
-    #[test]
     fn decide_enter_action_no_focus_returns_nothing() {
         let registry = RenderRegistry::default();
         assert!(matches!(
@@ -1330,15 +1307,14 @@ mod tests {
         ));
     }
 
-    /// Regression for the `enter_pressed` editor_focus dispatch contract:
-    /// when entering edit mode on a Block region, an
-    /// `editor_focus_intent_for(target.block_id)` must be produced. Without
-    /// this, the engine's `focused_block` stays stale → chord-resolution
-    /// (`bubble_input_oneshot`) and any consumer of `ui_state.focused_block`
-    /// see the wrong block, breaking keybindings on the freshly-opened editor.
-    /// (See enter_pressed comment block.)
+    /// Regression for the `enter_pressed` focus contract: entering edit mode
+    /// on a Block region must carry that block's id, so `enter_pressed` can
+    /// `set_focus` the in-memory authority (ADR 0010). Without the right id,
+    /// `focused_block` stays stale → chord-resolution (`bubble_input_oneshot`)
+    /// and any `ui_state.focused_block` consumer see the wrong block, breaking
+    /// keybindings on the freshly-opened editor.
     #[test]
-    fn enter_edit_decision_carries_block_id_for_editor_focus_dispatch() {
+    fn enter_edit_decision_carries_block_id_for_focus() {
         let mut registry = RenderRegistry::default();
         registry.selectables.push(region_block(
             "block:editor-focus-target",
@@ -1349,12 +1325,6 @@ mod tests {
             EnterDecision::EnterEdit(t) => t,
             other => panic!("expected EnterEdit, got {other:?}"),
         };
-        let intent = editor_focus_intent_for(&target.block_id);
-        match intent.params.get("block_id") {
-            Some(Value::String(s)) => {
-                assert_eq!(s, "block:editor-focus-target");
-            }
-            other => panic!("editor_focus intent missing block_id, got {other:?}"),
-        }
+        assert_eq!(target.block_id, "block:editor-focus-target");
     }
 }

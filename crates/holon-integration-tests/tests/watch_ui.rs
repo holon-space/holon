@@ -292,161 +292,6 @@ fn watch_ui_structural_change_triggers_new_structure_event() {
     });
 }
 
-// =============================================================================
-// Trigger Pipeline (slash command → ViewEventHandler → CommandMenu → operation)
-// =============================================================================
-
-#[cfg(any())] // Broken by command_menu → popup_menu refactoring in another session
-#[test]
-fn trigger_pipeline_slash_command_delete() {
-    let rt = runtime();
-    rt.block_on(async {
-        // Create a heading with a query + sibling blocks in same file
-        let env = TestEnvironmentBuilder::new()
-            .with_org_file(
-                "test.org",
-                concat!(
-                    "* Parent Block\n",
-                    ":PROPERTIES:\n",
-                    ":ID: parent-block\n",
-                    ":END:\n",
-                    "#+begin_src prql\n",
-                    "from block | select {id, content} | take 10\n",
-                    "#+end_src\n",
-                    "* Target Block\n",
-                    ":PROPERTIES:\n",
-                    ":ID: target-block\n",
-                    ":END:\n",
-                    "* Keep Block\n",
-                    ":PROPERTIES:\n",
-                    ":ID: keep-block\n",
-                    ":END:\n",
-                ),
-            )
-            .build(rt.clone())
-            .await
-            .expect("Failed to build environment");
-
-        assert!(
-            env.wait_for_block("target-block", SYNC_TIMEOUT).await,
-            "target-block should sync"
-        );
-
-        // 1. Render the parent block to get a RenderExpr with operations
-        let (render_expr, _watch) = env
-            .watch_ui_first_structure(&EntityUri::block("parent-block"))
-            .await
-            .expect("watch_ui should succeed");
-
-        // 2. Shadow interpret to ViewModel (data comes from stream; use empty for shadow interpretation)
-        let engine = env.engine();
-        let engine_clone = Arc::clone(&engine);
-        let data_rows: Vec<Arc<HashMap<String, Value>>> = vec![];
-
-        let display_tree = tokio::task::spawn_blocking(move || {
-            let services = holon_frontend::reactive::HeadlessBuilderServices::new(engine_clone);
-            let ctx = holon_frontend::RenderContext::default().with_data_rows(data_rows);
-            services.interpret(&render_expr, &ctx).snapshot()
-        })
-        .await
-        .expect("spawn_blocking panicked");
-
-        // 3. Find EditableText nodes and verify triggers are present
-        let editables =
-            holon_integration_tests::display_assertions::collect_editable_text_nodes(&display_tree);
-        assert!(
-            !editables.is_empty(),
-            "ViewModel should contain EditableText nodes.\n{}",
-            display_tree.pretty_print(0)
-        );
-
-        // Find one with operations and triggers
-        let editable = editables
-            .iter()
-            .find(|n| !n.operations.is_empty() && !n.triggers.is_empty())
-            .unwrap_or_else(|| {
-                panic!(
-                    "No EditableText with operations+triggers found.\n{}",
-                    display_tree.pretty_print(0)
-                )
-            });
-
-        // 4. Simulate typing "/" at line start
-        let event = holon_frontend::input_trigger::check_triggers(&editable.triggers, "/", 1)
-            .expect("check_triggers should match '/' at line start");
-
-        // 5. Feed to ViewEventHandler
-        let context_params: HashMap<String, Value> = editable
-            .entity
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let (field, content) = match &editable.kind {
-            holon_frontend::view_model::ViewKind::EditableText { field, content } => {
-                (field.clone(), content.clone())
-            }
-            _ => unreachable!("collect_editable_text_nodes guarantees EditableText"),
-        };
-
-        let mut handler = holon_frontend::view_event_handler::ViewEventHandler::new(
-            editable.operations.clone(),
-            context_params,
-            field,
-            content,
-        );
-        let action = handler.handle(event);
-        assert!(
-            matches!(action, holon_frontend::command_menu::MenuAction::Updated),
-            "Expected MenuAction::Updated after typing '/', got {:?}",
-            action
-        );
-
-        // 6. Menu should be active with available operations
-        let menu_state = handler.command_menu.menu_state().unwrap();
-        assert!(
-            !menu_state.matches.is_empty(),
-            "Command menu should have matching operations"
-        );
-
-        // 7. Find and select "delete"
-        let delete_idx = menu_state
-            .matches
-            .iter()
-            .position(|m| m.operation_name() == "delete")
-            .expect("'delete' should be in the command menu");
-
-        for _ in 0..delete_idx {
-            handler.on_key(holon_frontend::command_menu::MenuKey::Down);
-        }
-
-        let action = handler.on_key(holon_frontend::command_menu::MenuKey::Enter);
-        match action {
-            holon_frontend::command_menu::MenuAction::Execute {
-                entity_name,
-                op_name,
-                params,
-            } => {
-                // 8. Execute the operation
-                env.execute_operation(&entity_name, &op_name, params)
-                    .await
-                    .expect("delete operation should succeed");
-            }
-            other => panic!("Expected MenuAction::Execute, got {:?}", other),
-        }
-
-        // 9. Verify the block was deleted
-        let rows = env
-            .query_sql("SELECT id FROM block WHERE id = 'block:target-block'")
-            .await
-            .expect("query should succeed");
-        assert!(
-            rows.is_empty(),
-            "target-block should be deleted after slash command"
-        );
-    });
-}
-
 #[test]
 fn trigger_presence_on_editable_text_nodes() {
     let rt = runtime();
@@ -487,7 +332,7 @@ fn trigger_presence_on_editable_text_nodes() {
         let data_rows: Vec<Arc<HashMap<String, Value>>> = vec![];
 
         let display_tree = tokio::task::spawn_blocking(move || {
-            let services = holon_frontend::reactive::HeadlessBuilderServices::new(engine_clone);
+            let services = holon_app::HeadlessBuilderServices::new(engine_clone);
             let ctx = holon_frontend::RenderContext::default().with_data_rows(data_rows);
             services.interpret(&render_expr, &ctx).snapshot()
         })
@@ -589,8 +434,11 @@ fn test_keybinding_join_on_operations() {
         let input = holon_frontend::input::WidgetInput::KeyChord {
             keys: chord.0.clone(),
         };
-        let action =
-            holon_frontend::focus_path::bubble_input_oneshot(&vm, "block:test-block", &input);
+        let action = holon_frontend::focus_path::bubble_input_oneshot(
+            &vm,
+            &holon_api::EntityUri::block("test-block"),
+            &input,
+        );
 
         match &action {
             Some(holon_frontend::input::InputAction::ExecuteOperation { operation, .. }) => {

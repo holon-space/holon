@@ -1111,9 +1111,9 @@ pub fn chat_mode_expr() -> RenderExpr {
                 "The Delta Sharing sync uses a two-phase approach:\n\n1. Capture phase — local edits are recorded as Loro operations in a CRDT document\n2. Reconciliation phase — when peers connect, they exchange operation logs and merge automatically\n\nThe key insight is that Loro's tree-move operations are commutative, so the merge order doesn't matter. Conflicts only arise at the semantic level (e.g. two users editing the same paragraph), not the structural level.",
             ),
             tool_call_entry(
-                "Read — crates/holon/src/sync/org_sync_controller.rs",
+                "Read — crates/holon/src/sync/file_sync_controller.rs",
                 "📄",
-                "Lines 1-245 of org_sync_controller.rs\n\npub struct OrgSyncController { ... }\nimpl OrgSyncController {\n    pub fn on_remote_changes(&self, ops: Vec<LoroOp>) { ... }\n}",
+                "Lines 1-245 of file_sync_controller.rs\n\npub struct FileSyncController { ... }\nimpl FileSyncController {\n    pub fn on_remote_changes(&self, ops: Vec<LoroOp>) { ... }\n}",
             ),
             tool_call_entry(
                 "Grep — Search for 'Lamport' in crates/holon — 3 matches",
@@ -1138,12 +1138,12 @@ pub fn chat_mode_expr() -> RenderExpr {
             tool_call_entry(
                 "Grep — Search for 'on_remote_changes' — 2 matches",
                 "🔍",
-                "org_sync_controller.rs:147: pub fn on_remote_changes(&self, ops: Vec<LoroOp>) {\ndi.rs:203: controller.on_remote_changes(batch);",
+                "file_sync_controller.rs:147: pub fn on_remote_changes(&self, ops: Vec<LoroOp>) {\ndi.rs:203: controller.on_remote_changes(batch);",
             ),
             chat_msg(
                 "assistant",
                 "9:17 AM",
-                "The reconciliation entry point is OrgSyncController::on_remote_changes() in org_sync_controller.rs. It:\n\n1. Receives a batch of remote Loro operations\n2. Applies them to the local Loro document\n3. Diffs the resulting block tree against the SQL cache\n4. Emits block.created / block.updated / block.deleted events\n5. The CacheEventSubscriber picks these up and updates QueryableCache\n\nThe echo suppression (last_projection) prevents file re-writes when the change originated from an org file edit on this machine.",
+                "The reconciliation entry point is FileSyncController::on_remote_changes() in file_sync_controller.rs. It:\n\n1. Receives a batch of remote Loro operations\n2. Applies them to the local Loro document\n3. Diffs the resulting block tree against the SQL cache\n4. Emits block.created / block.updated / block.deleted events\n5. The CacheEventSubscriber picks these up and updates QueryableCache\n\nThe echo suppression (last_projection) prevents file re-writes when the change originated from an org file edit on this machine.",
             ),
             chat_msg(
                 "user",
@@ -1373,6 +1373,22 @@ mod tests {
             .collect();
 
         assert_eq!(lane_titles, vec!["To Do", "In Progress", "Done"]);
+    }
+
+    /// Snapshot fidelity (#4, plan quirky-dazzling-map Part B): a board node
+    /// must snapshot as `ViewKind::Board` carrying `lane_field` — not collapse
+    /// into `ViewKind::List` like before. Children stay flat (rows, not
+    /// lanes) — that's the documented fidelity limit, not a bug.
+    #[test]
+    fn board_mode_snapshot_is_board_not_list() {
+        let expr = board_mode_expr();
+        let vm = mode_view_model(&expr);
+        match vm.snapshot().kind {
+            crate::view_model::ViewKind::Board { lane_field, .. } => {
+                assert_eq!(lane_field, "status");
+            }
+            other => panic!("board snapshot collapsed to {:?}", other.tag()),
+        }
     }
 
     #[test]
@@ -1609,7 +1625,7 @@ mod board_yaml_parse_tests {
     fn collection_profile_board_render_parses_and_interprets() {
         crate::shadow_builders::register_render_dsl_widget_names();
         let src = r#"board(#{lane_field: col("lane_field"), item_template: card(#{accent: state_accent(col("task_state"))}, text(col("content"), #{bold: true}))})"#;
-        let expr = holon::render_dsl::parse_render_dsl(src).expect("YAML render parses");
+        let expr = holon_api::render_dsl::parse_render_dsl(src).expect("YAML render parses");
         let services = reactive::StubBuilderServices::new();
         let vm = reactive::interpret_pure(&expr, &[], &services);
         assert_eq!(vm.widget_name().as_deref(), Some("board"));
@@ -1619,7 +1635,7 @@ mod board_yaml_parse_tests {
     fn board_handles_real_block_rows_without_panicking() {
         crate::shadow_builders::register_render_dsl_widget_names();
         let src = r#"board(#{lane_field: col("lane_field"), item_template: card(#{accent: state_accent(col("task_state"))}, text(col("content"), #{bold: true}))})"#;
-        let expr = holon::render_dsl::parse_render_dsl(src).expect("YAML render parses");
+        let expr = holon_api::render_dsl::parse_render_dsl(src).expect("YAML render parses");
         let services = reactive::StubBuilderServices::new();
 
         let make_row = |id: &str, task_state: Option<&str>, content: &str| -> Arc<DataRow> {
@@ -1678,7 +1694,7 @@ mod board_yaml_parse_tests {
         crate::shadow_builders::register_render_dsl_widget_names();
         let src =
             r#"board(#{lane_field: "task_state", item_template: card(text(col("content")))})"#;
-        let expr = holon::render_dsl::parse_render_dsl(src).expect("YAML render parses");
+        let expr = holon_api::render_dsl::parse_render_dsl(src).expect("YAML render parses");
 
         let make_row = |id: &str, ts: Option<&str>, content: &str| -> Arc<DataRow> {
             let mut m: HashMap<String, Value> = HashMap::new();

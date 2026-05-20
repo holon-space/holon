@@ -37,15 +37,14 @@
 //! Targets ~30 s wall for 16 cases × 1..10 steps. Reuses `E2ESut<SqlOnly>`
 //! init cost (~7-8 s/case), which is the dominant overhead.
 
-use holon_integration_tests::declare_pbt_slice;
+use holon_integration_tests::component_pbt;
 use holon_integration_tests::pbt::transitions::{
     BulkExternalAdd, JoinBlock, RemoveWatch, SetupWatch, SplitBlock, TypeChars,
 };
 
-declare_pbt_slice! {
+component_pbt! {
     test_fn: cdc_delivery_pbt,
-    variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
-    inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
+    set: holon_pbt_core::ComponentSet::sql_only(),
     transitions: [
         preset lifecycle,
         BulkExternalAdd,

@@ -1,12 +1,10 @@
 pub mod api;
-pub mod computed;
 pub mod core;
 pub mod di;
 pub mod entity_profile;
 pub mod identity;
 pub mod navigation;
 pub mod petri;
-pub mod render_dsl;
 pub mod storage;
 pub mod sync;
 // `testing` depends on proptest which is native-only (not on any wasm target).

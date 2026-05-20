@@ -1,122 +1,105 @@
 //! Link Event Subscriber
 //!
-//! Subscribes to block events from the EventBus, extracts `[[...]]` links
-//! from block content, and populates the `block_link` table.
-//! Uses deterministic hashing for link target resolution — no DB queries needed.
+//! Maintains the block-link index from the convergent downstream
+//! [`LiveData<Block>`] feed (the `block` matview's CDC stream) — NOT the
+//! EventBus (Phase 4b: sinks are fed by the ack-free convergent stream). Each
+//! block insert/update re-extracts `[[...]]` links from its content; each
+//! removal drops them. Link target resolution is deterministic (blake3 hash of
+//! the normalized path), so no DB lookups are needed.
+//!
+//! The subscriber owns link *extraction*; persistence goes through the
+//! [`BlockLinkIndexer`] seam so this layer never names a concrete sink
+//! (Phase 2.5, C6 of the architecture plan — the Turso impl lives in
+//! `storage/turso_block_link_indexer.rs`).
 
 use std::sync::Arc;
 
-use tokio_stream::StreamExt;
+use futures_signals::signal_map::{MapDiff, SignalMapExt};
 
-use crate::storage::turso::DbHandle;
 use crate::storage::types::Result;
-use crate::sync::event_bus::{
-    AggregateType, Consumer, EventBus, EventFilter, EventKind, EventStatus,
-};
-use holon_api::link_parser::extract_links;
+use crate::sync::live_data::LiveData;
+use holon_api::block::Block;
+use holon_api::link_parser::{Link, extract_links};
 
-fn text(s: &str) -> turso::Value {
-    turso::Value::Text(s.to_string())
+/// Write side of the block-link index. Replaces or drops the persisted links
+/// of one source block.
+#[async_trait::async_trait]
+pub trait BlockLinkIndexer: Send + Sync {
+    /// Atomically replace all persisted links of `block_id` with `links`.
+    async fn replace_links(&self, block_id: &str, links: &[Link]) -> Result<()>;
+    /// Drop all persisted links of `block_id`.
+    async fn delete_links(&self, block_id: &str) -> Result<()>;
 }
 
-/// Subscribes to block events to maintain the `block_link` table.
+/// Subscribes to block events to maintain the block-link index.
 ///
 /// Link target resolution is purely deterministic (blake3 hash of normalized path),
 /// so no document lookups or deferred resolution is needed.
 pub struct LinkEventSubscriber {
-    db_handle: DbHandle,
+    indexer: Arc<dyn BlockLinkIndexer>,
 }
 
 impl LinkEventSubscriber {
-    pub fn new(db_handle: DbHandle) -> Self {
-        Self { db_handle }
+    pub fn new(indexer: Arc<dyn BlockLinkIndexer>) -> Self {
+        Self { indexer }
     }
 
-    pub async fn start(&self, event_bus: Arc<dyn EventBus>) -> Result<()> {
-        let db = self.db_handle.clone();
-
-        let filter = EventFilter::new()
-            .with_status(EventStatus::Confirmed)
-            .with_aggregate_type(AggregateType::Block);
-
-        let mut event_stream = event_bus.subscribe(filter, Consumer::LINKS).await?;
-        let event_bus_for_mark = event_bus.clone();
+    /// Maintain the link index from the convergent [`LiveData<Block>`] feed.
+    /// Spawns a background task that reacts to the feed's `MapDiff` stream:
+    /// the initial `Replace` re-indexes every block's links (boot consistency),
+    /// then `Insert`/`Update` re-index a block and `Remove` drops its links.
+    /// No EventBus, no acks — nothing waits on the (removed) `Consumer::LINKS`
+    /// watermark.
+    pub fn start_from_live_data(&self, block_live: Arc<LiveData<Block>>) {
+        let indexer = self.indexer.clone();
+        let signal = block_live.signal_map();
 
         tokio::spawn(async move {
-            tracing::info!("[LinkEventSubscriber] Started listening to block events");
-
-            while let Some(event) = event_stream.next().await {
-                let block_id = &event.aggregate_id;
-                let result = match event.event_kind {
-                    EventKind::Created | EventKind::Updated | EventKind::FieldsChanged => {
-                        let content = event
-                            .payload
-                            .get("data")
-                            .and_then(|d| d.get("content"))
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("");
-                        Self::index_links(&db, block_id, content).await
+            tracing::info!("[LinkEventSubscriber] Started listening to LiveData<Block> feed");
+            signal
+                .for_each(move |diff| {
+                    let indexer = indexer.clone();
+                    async move {
+                        let result = match diff {
+                            MapDiff::Replace { entries } => {
+                                let mut last = Ok(());
+                                for (_key, block) in entries {
+                                    let r = Self::index_links(
+                                        &*indexer,
+                                        block.id.as_str(),
+                                        &block.content,
+                                    )
+                                    .await;
+                                    if r.is_err() {
+                                        last = r;
+                                    }
+                                }
+                                last
+                            }
+                            MapDiff::Insert { value, .. } | MapDiff::Update { value, .. } => {
+                                Self::index_links(&*indexer, value.id.as_str(), &value.content)
+                                    .await
+                            }
+                            MapDiff::Remove { key } => indexer.delete_links(&key).await,
+                            MapDiff::Clear {} => Ok(()),
+                        };
+                        if let Err(e) = result {
+                            tracing::error!("[LinkEventSubscriber] Failed to index links: {}", e);
+                        }
                     }
-                    EventKind::Deleted => Self::delete_links(&db, block_id).await,
-                };
-
-                if let Err(e) = result {
-                    tracing::error!(
-                        "[LinkEventSubscriber] Failed to index links for block {}: {}",
-                        block_id,
-                        e
-                    );
-                }
-
-                if let Err(e) = event_bus_for_mark
-                    .mark_processed(&event.id, Consumer::LINKS)
-                    .await
-                {
-                    tracing::warn!(
-                        "[LinkEventSubscriber] mark_processed(links, {}) failed: {}",
-                        event.id,
-                        e
-                    );
-                }
-            }
-
-            tracing::info!("[LinkEventSubscriber] Block event stream closed");
+                })
+                .await;
+            tracing::info!("[LinkEventSubscriber] LiveData<Block> feed stream closed");
         });
-
-        Ok(())
     }
 
-    async fn index_links(db: &DbHandle, block_id: &str, content: &str) -> Result<()> {
+    async fn index_links(
+        indexer: &dyn BlockLinkIndexer,
+        block_id: &str,
+        content: &str,
+    ) -> Result<()> {
         let links = extract_links(content);
-
-        db.execute(
-            "DELETE FROM block_link WHERE source_block_id = ?",
-            vec![text(block_id)],
-        )
-        .await?;
-
-        for link in &links {
-            let target_id = link.classified.entity_id().map(|uri| text(uri.as_str()));
-
-            // Use the user-provided display text only if it differs from the raw target
-            let display_text = if link.text != link.target {
-                text(&link.text)
-            } else {
-                turso::Value::Null
-            };
-
-            db.execute(
-                "INSERT INTO block_link (source_block_id, target_raw, target_id, display_text, position) VALUES (?, ?, ?, ?, ?)",
-                vec![
-                    text(block_id),
-                    text(&link.target),
-                    target_id.unwrap_or(turso::Value::Null),
-                    display_text,
-                    turso::Value::Integer(link.start as i64),
-                ],
-            )
-            .await?;
-        }
+        indexer.replace_links(block_id, &links).await?;
 
         if !links.is_empty() {
             tracing::debug!(
@@ -126,15 +109,6 @@ impl LinkEventSubscriber {
             );
         }
 
-        Ok(())
-    }
-
-    async fn delete_links(db: &DbHandle, block_id: &str) -> Result<()> {
-        db.execute(
-            "DELETE FROM block_link WHERE source_block_id = ?",
-            vec![text(block_id)],
-        )
-        .await?;
         Ok(())
     }
 }

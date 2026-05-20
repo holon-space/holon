@@ -22,15 +22,15 @@ use holon_api::ReactiveRowProvider;
 
 /// Cache key — function name + fingerprint of resolved args.
 ///
-/// The fingerprint is a `String` derived from
-/// `{positional} | {named (sorted)} | {templates (sorted)}` using
-/// `Debug` formatting. "Templates-by-debug-string" is acknowledged
-/// technical debt — good enough for v1 cache hits, to be replaced by
-/// a structural `RenderExpr` hash in a follow-up PR.
+/// The fingerprint is a structural 64-bit hash over
+/// `{positional} | {named (sorted)} | {templates (sorted)}` — no
+/// per-lookup `Debug`-string allocation. Map-valued nodes (`Value::Object`,
+/// `RenderExpr::Object`) hash their entries key-sorted so iteration order
+/// can't perturb the fingerprint; floats hash by `to_bits`.
 #[derive(PartialEq, Eq, Hash, Debug)]
 struct ProviderKey {
     name: String,
-    fingerprint: String,
+    fingerprint: u64,
 }
 
 /// Shared weak-ref cache. One per `ReactiveEngine`.
@@ -65,6 +65,10 @@ impl ProviderCache {
         }
         let arc = construct();
         entries.insert(key, Arc::downgrade(&arc));
+        // Keys embed block URIs, so over a long session the map accumulates
+        // entries for providers that died and are never requested again —
+        // sweep dead Weaks while we already hold the lock.
+        entries.retain(|_, weak| weak.strong_count() > 0);
         arc
     }
 }
@@ -75,30 +79,109 @@ impl Default for ProviderCache {
     }
 }
 
-/// Canonicalise a `ResolvedArgs` into a deterministic fingerprint
-/// string. Named / template entries are sorted by key so map
-/// iteration order does not affect the hash. `Debug` formatting
-/// normalises numeric / string variants through `Value`'s own
-/// `PartialEq`-aligned `Debug` impl.
-fn fingerprint(args: &ResolvedArgs) -> String {
-    let mut parts: Vec<String> = args.positional.iter().map(|v| format!("{v:?}")).collect();
+/// Canonicalise a `ResolvedArgs` into a deterministic 64-bit structural
+/// fingerprint. Named / template entries are hashed key-sorted so map
+/// iteration order does not affect the result.
+fn fingerprint(args: &ResolvedArgs) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+
+    args.positional.len().hash(&mut h);
+    for v in &args.positional {
+        hash_value(v, &mut h);
+    }
 
     let mut named: Vec<_> = args.named.iter().collect();
     named.sort_by(|a, b| a.0.cmp(b.0));
+    named.len().hash(&mut h);
     for (k, v) in named {
-        parts.push(format!("{k}={v:?}"));
+        k.hash(&mut h);
+        hash_value(v, &mut h);
     }
 
     let mut templates: Vec<_> = args.templates.iter().collect();
     templates.sort_by(|a, b| a.0.cmp(b.0));
-    for (k, v) in templates {
-        parts.push(format!("tmpl:{k}={v:?}"));
+    templates.len().hash(&mut h);
+    for (k, e) in templates {
+        k.hash(&mut h);
+        hash_expr(e, &mut h);
     }
 
     // Note: `args.rows` intentionally excluded — provider Arcs
     // already share identity via the cache, so including them in the
     // key would just hash trait-object pointers.
-    parts.join("|")
+    h.finish()
+}
+
+/// Structural hash of a `Value`. Discriminant-tagged; `Object` entries
+/// key-sorted; floats by `to_bits` (NaN payloads distinguish, which only
+/// splits cache entries — never aliases them).
+fn hash_value(v: &holon_api::Value, h: &mut impl std::hash::Hasher) {
+    use holon_api::Value;
+    use std::hash::Hash;
+    std::mem::discriminant(v).hash(h);
+    match v {
+        Value::String(s) | Value::DateTime(s) | Value::Json(s) => s.hash(h),
+        Value::Integer(i) => i.hash(h),
+        Value::Float(f) => f.to_bits().hash(h),
+        Value::Boolean(b) => b.hash(h),
+        Value::Array(items) => {
+            items.len().hash(h);
+            for item in items {
+                hash_value(item, h);
+            }
+        }
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            entries.len().hash(h);
+            for (k, val) in entries {
+                k.hash(h);
+                hash_value(val, h);
+            }
+        }
+        Value::Null => {}
+    }
+}
+
+/// Structural hash of a `RenderExpr` (the templates side of the key).
+fn hash_expr(e: &holon_api::render_types::RenderExpr, h: &mut impl std::hash::Hasher) {
+    use holon_api::render_types::RenderExpr;
+    use std::hash::Hash;
+    std::mem::discriminant(e).hash(h);
+    match e {
+        RenderExpr::FunctionCall { name, args } => {
+            name.hash(h);
+            args.len().hash(h);
+            for arg in args {
+                arg.name.hash(h);
+                hash_expr(&arg.value, h);
+            }
+        }
+        RenderExpr::LiveBlock { block_id } => block_id.hash(h),
+        RenderExpr::ColumnRef { name } => name.hash(h),
+        RenderExpr::Literal { value } => hash_value(value, h),
+        RenderExpr::BinaryOp { op, left, right } => {
+            std::mem::discriminant(op).hash(h);
+            hash_expr(left, h);
+            hash_expr(right, h);
+        }
+        RenderExpr::Array { items } => {
+            items.len().hash(h);
+            for item in items {
+                hash_expr(item, h);
+            }
+        }
+        RenderExpr::Object { fields } => {
+            let mut entries: Vec<_> = fields.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            entries.len().hash(h);
+            for (k, expr) in entries {
+                k.hash(h);
+                hash_expr(expr, h);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -119,8 +202,8 @@ mod tests {
         }
         fn keyed_rows_signal_vec(
             &self,
-        ) -> Pin<Box<dyn SignalVec<Item = (String, Arc<DataRow>)> + Send>> {
-            Box::pin(MutableVec::<(String, Arc<DataRow>)>::new().signal_vec_cloned())
+        ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
+            Box::pin(MutableVec::<(holon_api::EntityUri, Arc<DataRow>)>::new().signal_vec_cloned())
         }
         fn cache_identity(&self) -> u64 {
             holon_api::ptr_identity(self)

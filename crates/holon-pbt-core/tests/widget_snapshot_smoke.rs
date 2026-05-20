@@ -9,7 +9,7 @@ use holon_pbt_core::capabilities::{
     CapCursor, CapRegion, EntityUri, RefBlockTree, RefTaskState, SutLoroTaskState, SutRenderer,
     SutSqlProjection, WidgetSnapshot,
 };
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 fn make_state_toggle(entity_id: &str, current: &str, has_set_field: bool) -> WidgetSnapshot {
     let mut props = BTreeMap::new();
@@ -123,12 +123,27 @@ impl SutRenderer for ToySut {
     async fn widget_tree_for(&self, _: &EntityUri) -> Option<WidgetSnapshot> {
         None
     }
+    async fn root_content_comparison(&self, _: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+        None
+    }
+    async fn root_render_ready(&self) -> bool {
+        false
+    }
 }
 
 #[allow(async_fn_in_trait)]
 impl SutSqlProjection for ToySut {
     async fn block_row(&self, _: &EntityUri) -> Option<Vec<String>> {
         None
+    }
+    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
+        Vec::new()
+    }
+    async fn focus_roots_rows(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    async fn nav_history_open_rows(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
     async fn all_block_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
@@ -172,9 +187,6 @@ where
 {
     fn id(&self) -> InvariantId {
         InvariantId("inv-state-toggle-toy")
-    }
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         let root = sut.widget_tree_snapshot().await;

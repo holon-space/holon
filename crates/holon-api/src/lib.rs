@@ -1,25 +1,42 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod action_dsl;
 pub mod auth;
 pub mod block;
+pub mod block_mutation;
+pub mod capability;
+pub mod change_set;
+pub mod computed;
 pub mod entity;
+pub mod entity_profile;
 pub mod entity_uri;
 mod hashmap_value_conversions;
 pub mod inline_mark;
 pub mod input_types;
 /// flutter_rust_bridge:ignore
 pub mod interp_value;
+pub mod link_candidate;
 pub mod link_parser;
+pub mod operation_engine;
 pub mod predicate;
+pub mod query_context;
+pub mod query_engine;
 pub mod reactive;
 /// flutter_rust_bridge:ignore
+pub mod render_dsl;
 pub mod render_eval;
 pub mod render_types;
 pub mod streaming;
 pub mod types;
+pub mod ui_watcher;
 pub mod widget_meta;
 pub mod widget_spec;
+
+pub use entity_profile::{EntityProfile, ProfileCache, ProfileResolving, VirtualChildConfig};
+pub use operation_engine::OperationEngine;
+pub use query_engine::QueryEngine;
+pub use ui_watcher::UiWatcher;
 
 /// Fixed root layout block ID — must match `:ID:` property on the root heading in index.org.
 /// Stored with the `block:` EntityUri scheme prefix.
@@ -30,11 +47,26 @@ pub fn root_layout_block_uri() -> EntityUri {
     EntityUri::block("root-layout")
 }
 
+/// Fixed id of the `__default__` page that owns the bundled 3-column layout
+/// (root-layout + sidebars). A real block id — deliberately NOT the
+/// `sentinel:no_parent` marker (see `FrontendSession::default_doc_uri`). Stored
+/// with the `block:` scheme prefix. Single source of truth so prod and tests
+/// agree on what counts as the default document root.
+pub const DEFAULT_DOC_BLOCK_ID: &str = "block:__default__";
+
+/// Returns DEFAULT_DOC_BLOCK_ID as a typed EntityUri.
+pub fn default_doc_block_uri() -> EntityUri {
+    EntityUri::block("__default__")
+}
+
 // Re-export block types
 pub use block::{
     blocks_by_document, Block, BlockContent, BlockMetadata, BlockResult, BlockWithDepth,
     ResultOutput, SourceBlock, PAGE_TAG,
 };
+
+// Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
+pub use change_set::{agrees_with_ops, source_op_names, ChangeOp, ChangeSet, Provenance};
 
 // Re-export typed domain types
 pub use types::{
@@ -56,8 +88,8 @@ pub use entity::{
     TryFromEntity, TypeDefinition, TypeSource,
 };
 
-// Re-export CompiledExpr from holon-engine for FieldLifetime::Computed
-pub use holon_engine::guard::CompiledExpr;
+// Re-export CompiledExpr from holon-expr for FieldLifetime::Computed
+pub use holon_expr::CompiledExpr;
 
 /// flutter_rust_bridge:ignore
 pub use render_eval::{eval_binary_op, eval_to_value, is_template_arg, resolve_args, ResolvedArgs};
@@ -82,12 +114,18 @@ pub use render_types::{
 // CompletionStateInfo is defined in holon-core and re-exported here for frontend use
 // The actual definition is in holon-core/src/traits.rs
 
+// Re-export link search candidate
+pub use link_candidate::LinkCandidate;
+
+// Re-export query context
+pub use query_context::QueryContext;
+
 // Re-export streaming types
 pub use streaming::{
     Batch, BatchMapChange, BatchMapChangeWithMetadata, BatchMetadata, BatchTraceContext,
-    BatchWithMetadata, BlockChange, Change, ChangeOrigin, MapChange, StreamPosition,
-    SyncTokenUpdate, UiEvent, WatchHandle, WatcherCommand, WithMetadata, CHANGE_ORIGIN_COLUMN,
-    CURRENT_TRACE_CONTEXT,
+    BatchWithMetadata, BlockChange, Change, ChangeOrigin, EnrichedChangeStream, MapChange,
+    StreamPosition, SyncTokenUpdate, UiEvent, WatchHandle, WatcherCommand, WithMetadata,
+    CHANGE_ORIGIN_COLUMN, CURRENT_TRACE_CONTEXT,
 };
 
 // Re-export auth types
@@ -99,7 +137,9 @@ pub use auth::ProviderAuthStatus;
 pub use widget_meta::{StaticParam, WidgetCategory, WidgetMeta};
 
 // Re-export widget spec types
-pub use widget_spec::{DataRow, DataRowAccumulator, EnrichedRow};
+pub use widget_spec::{
+    data_row_entity_uri, entity_uri_from_id_str, DataRow, DataRowAccumulator, EnrichedRow,
+};
 
 // Re-export reactive types
 pub use reactive::{
@@ -519,11 +559,19 @@ impl From<Value> for serde_json::Value {
     }
 }
 
-pub fn row_id(row: &HashMap<String, Value>) -> anyhow::Result<EntityUri> {
+// Generic over the key type so both `StorageEntity` (Arc<str> keys) and
+// String-keyed DataRow/EnrichedRow maps can use the same id boundary.
+pub fn row_id<K>(row: &HashMap<K, Value>) -> anyhow::Result<EntityUri>
+where
+    K: std::borrow::Borrow<str> + std::hash::Hash + Eq + std::fmt::Debug,
+{
     uri_from_row(row, "id")
 }
 
-pub fn uri_from_row(row: &HashMap<String, Value>, field: &str) -> anyhow::Result<EntityUri> {
+pub fn uri_from_row<K>(row: &HashMap<K, Value>, field: &str) -> anyhow::Result<EntityUri>
+where
+    K: std::borrow::Borrow<str> + std::hash::Hash + Eq + std::fmt::Debug,
+{
     let uri_val = row
         .get(field)
         .ok_or_else(|| anyhow::anyhow!("No {field} found in {row:?}"))?;

@@ -53,12 +53,25 @@ pub struct FocusEditableText {
 
 impl TransitionFactory<ReferenceState> for FocusEditableText {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // ADR 0009 asymmetry #1 (same as TypeChars/PressKey): editor primitives
+        // work on any block store, so gate to AnyStorageOf({Loro, Turso}) —
+        // without this, `active_editor` is never set under Turso-only and the
+        // widened TypeChars/PressKey gates are unreachable in exactly the
+        // configuration they were widened for.
+        ::holon_pbt_core::RequiredWiring::any_storage_of([
+            ::holon_pbt_core::StorageAdapter::Loro,
+            ::holon_pbt_core::StorageAdapter::Turso,
+        ])
+    }
+
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (text blocks in main panel) and let
         // `preconditions` be the single source of truth for which ones are
         // actually focusable. Avoids duplicating the content_type / layout /
         // focusable / page checks across two sites.
         let candidates: Vec<EntityUri> = state
+            .domain
             .block_state
             .blocks
             .keys()
@@ -73,7 +86,7 @@ impl TransitionFactory<ReferenceState> for FocusEditableText {
             .collect();
 
         check(!candidates.is_empty(), Reason::NoFocusableBlocks).map(|_| {
-            let last = state.last_transition_kind;
+            let last = state.action.last_transition_kind;
             let weight = match last {
                 Some("StartApp")
                 | Some("NavigateFocus")
@@ -96,11 +109,12 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let no_content_update: std::collections::HashSet<EntityUri> = state
+            .domain
             .layout_blocks
             .render_source_ids
             .iter()
-            .chain(state.layout_blocks.query_source_ids.iter())
-            .chain(state.profile_block_ids.iter())
+            .chain(state.domain.layout_blocks.query_source_ids.iter())
+            .chain(state.domain.profile_block_ids.iter())
             .cloned()
             .collect();
 
@@ -110,22 +124,37 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
                 Reason::AtomicEditorDisabled,
             ),
             // See `press_key.rs` — atomic editor primitives need a Loro
-            // path to carry per-keystroke writes; SqlOnly has none.
+            // path to carry per-keystroke writes; SqlOnly has none — UNLESS a
+            // real editor (`InputState`) is driving, which carries keystrokes
+            // itself and persists on blur via `set_field` (see
+            // `ReferenceState::real_editor_enabled`).
             check(
-                state.variant.enable_loro,
+                state.enable_loro() || ReferenceState::real_editor_enabled(),
                 Reason::LoroRequiredForAtomicEditor,
             ),
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
+            // Block-interaction transitions need the block to render as an
+            // interactive widget (ops/draggable) reactively over the navigated
+            // focus. Only the default layout does; custom `index.org` query
+            // layouts don't (see RefLifecycle::renders_block_interactively).
+            check(
+                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
+                    state,
+                    &self.block_id,
+                ),
+                Reason::BlocksNotInteractiveUnderLayout,
+            ),
             check(
                 state.current_focus(holon_api::Region::Main).is_some(),
                 Reason::NoFocusInMain,
             ),
             // Only when no editor is active (FocusEditableText opens an editor;
             // continue using it with MoveCursor/TypeChars/... while active).
-            check(state.active_editor.is_none(), Reason::NoActiveEditor),
+            check(state.ui.tab.active_editor.is_none(), Reason::NoActiveEditor),
             check(
                 state
+                    .domain
                     .block_state
                     .blocks
                     .get(&self.block_id)
@@ -133,7 +162,7 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
                 Reason::FocusedNotText,
             ),
             check(
-                !state.layout_blocks.contains(&self.block_id),
+                !state.domain.layout_blocks.contains(&self.block_id),
                 Reason::FocusedInLayoutBlocks,
             ),
             check(
@@ -152,17 +181,23 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
+        // Clicking into another editable moves the focus authority away
+        // from any currently active editor; prod commits its user-authored
+        // pending text on that authority move (focus-binding arm).
+        holon_pbt_core::capabilities::commit_active_editor_if_dirty(state);
         let saved = state
+            .domain
             .block_state
             .blocks
             .get(&self.block_id)
             .map(|b| b.content.clone())
             .unwrap_or_default();
         let cursor_byte = saved.len();
-        state.active_editor = Some(ActiveEditor {
+        state.ui.tab.active_editor = Some(ActiveEditor {
             block_id: self.block_id.clone(),
             in_memory_content: saved,
             cursor_byte,
+            dirty: false,
         });
         // Deliberately do not update navigation focus here. While an
         // editor is active, `active_editor.block_id` is the source of

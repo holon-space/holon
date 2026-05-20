@@ -111,7 +111,7 @@ Intelligence lives in the data structure (schemas, typed relationships, material
 
 ### 4. Reactive CDC Pipeline
 
-The UI never polls. Data flows as CDC events from Turso IVM (Incremental View Maintenance) through `RowChangeStream` → `ReactiveQueryResults` → `futures-signals` reactive tree → GPUI entity updates.
+The UI never polls. Data flows as CDC events from Turso IVM (Incremental View Maintenance) through `RowChangeStream` → `ReactiveRenderedRows` → `futures-signals` reactive tree → GPUI entity updates.
 
 ### 5. Operations are Fire-and-Forget
 

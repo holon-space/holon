@@ -556,6 +556,12 @@ impl BatchTraceContext {
 /// Type alias for Batch wrapped with metadata
 pub type BatchWithMetadata<T> = WithMetadata<Batch<T>, BatchMetadata>;
 
+/// Batched enriched change stream — the output of enrichment at the storage
+/// boundary. The `EnrichedChange` element type proves enrichment happened;
+/// no trust boundaries are needed downstream.
+pub type EnrichedChangeStream =
+    tokio_stream::wrappers::ReceiverStream<BatchWithMetadata<EnrichedChange>>;
+
 /// Real-time change notification and state synchronization.
 ///
 /// This trait provides race-free state sync by streaming the current document state

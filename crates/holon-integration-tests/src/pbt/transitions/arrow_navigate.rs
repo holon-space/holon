@@ -37,7 +37,7 @@ impl TransitionFactory<ReferenceState> for ArrowNavigate {
         let mut arms: Vec<(u32, BoxedStrategy<ArrowNavigate>)> = Vec::new();
 
         for region in &regions {
-            if state.focused_entity_id.contains_key(region) {
+            if state.ui.tab.focused_entity_id.contains_key(region) {
                 // Determine available directions from navigator type
                 let render_name = state.active_render_expr_name(*region);
                 let directions: Vec<NavDirection> = match render_name.as_deref() {
@@ -83,9 +83,9 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
-                state.focused_entity_id.contains_key(&self.region),
+                state.ui.tab.focused_entity_id.contains_key(&self.region),
                 Reason::MainFocusNotSet,
             ),
         ];
@@ -96,15 +96,18 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use holon_api::entity_uri::EntityUri;
         use holon_frontend::navigation::{Boundary, CursorHint};
 
         let mut current_id = state
+            .ui
+            .tab
             .focused_entity_id
             .get(&self.region)
             .expect("ArrowNavigate requires focused entity")
             .clone();
         let mut cursor = state
+            .ui
+            .tab
             .focused_cursor
             .get(&self.region)
             .copied()
@@ -115,6 +118,7 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
         for _ in 0..self.steps {
             // Get the content of the currently focused block
             let content = state
+                .domain
                 .block_state
                 .blocks
                 .get(&current_id)
@@ -154,10 +158,11 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
                         column: cursor.column,
                         boundary,
                     };
-                    if let Some(target) = nav.navigate(current_id.as_str(), self.direction, &hint) {
-                        current_id = EntityUri::from_raw(&target.block_id);
+                    if let Some(target) = nav.navigate(&current_id, self.direction, &hint) {
+                        current_id = target.block_id.clone();
                         // Update cursor from placement
                         let target_content = state
+                            .domain
                             .block_state
                             .blocks
                             .get(&current_id)
@@ -219,9 +224,13 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
         // new target (mirroring what a click would do), so the
         // engine's `UiState.focused_block` follows the per-region
         // pointer.
-        state.focused_block = Some(current_id.clone());
-        state.focused_entity_id.insert(self.region, current_id);
-        state.focused_cursor.insert(self.region, cursor);
+        state.ui.tab.focused_block = Some(current_id.clone());
+        state
+            .ui
+            .tab
+            .focused_entity_id
+            .insert(self.region, current_id);
+        state.ui.tab.focused_cursor.insert(self.region, cursor);
     }
 }
 

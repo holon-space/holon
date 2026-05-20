@@ -140,11 +140,41 @@ impl LoroDocument {
         self.doc.clone()
     }
 
+    /// Export a history-compacted snapshot: current state plus no op history
+    /// before the current frontiers (`ExportMode::shallow_snapshot`, the same
+    /// mode `shared_tree::gc_after_extraction` uses). Safe for Holon because
+    /// undo replays the persistent inverse-command log, not Loro history.
+    /// Peers whose version vector predates the trim cannot receive an
+    /// incremental delta; `IrohSyncAdapter` detects that and ships a full
+    /// snapshot instead.
+    pub fn export_compact_snapshot(&self) -> Result<Vec<u8>> {
+        self.doc.commit();
+        let frontiers = self.doc.oplog_frontiers();
+        Ok(self
+            .doc
+            .export(loro::ExportMode::shallow_snapshot(&frontiers))?)
+    }
+
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
         let snapshot = self.export_snapshot()?;
-        std::fs::write(path, snapshot)?;
+        write_atomic(path, &snapshot)?;
         debug!("Saved LoroDoc snapshot to {}", path.display());
+        Ok(())
+    }
+
+    /// Like [`save_to_file`] but writes a history-compacted snapshot
+    /// ([`export_compact_snapshot`]).
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub fn save_compact_to_file(&self, path: &Path) -> Result<()> {
+        let snapshot = self.export_compact_snapshot()?;
+        let len = snapshot.len();
+        write_atomic(path, &snapshot)?;
+        debug!(
+            "Saved compacted LoroDoc snapshot to {} ({} bytes)",
+            path.display(),
+            len
+        );
         Ok(())
     }
 
@@ -176,6 +206,17 @@ impl LoroDocument {
             doc_id,
         })
     }
+}
+
+/// Crash-safe file write: temp file in the same directory, then rename.
+/// A crash mid-save previously truncated the snapshot (plain `fs::write`),
+/// losing the whole document store.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp-write");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -355,6 +396,46 @@ mod tests {
             seen.as_deref(),
             Some("org_reload"),
             "with_write_origin should pass through the custom origin"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compact_save_round_trips_state_and_shrinks_history() -> Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let doc = LoroDocument::new("compact-test".to_string())?;
+        // Many small edits build up op history that compaction can shed.
+        for i in 0..200 {
+            doc.insert_text("content", 0, &format!("edit-{i} "))?;
+        }
+        let expected = doc.get_text("content")?;
+
+        let full_path = dir.path().join("full.loro");
+        let compact_path = dir.path().join("compact.loro");
+        doc.save_to_file(&full_path)?;
+        doc.save_compact_to_file(&compact_path)?;
+
+        let full_size = std::fs::metadata(&full_path)?.len();
+        let compact_size = std::fs::metadata(&compact_path)?.len();
+        assert!(
+            compact_size < full_size,
+            "compacted snapshot ({compact_size}B) should be smaller than full ({full_size}B)"
+        );
+
+        // Both formats reload to identical current state.
+        let from_full = LoroDocument::load_from_file(&full_path, "from-full".to_string())?;
+        let from_compact = LoroDocument::load_from_file(&compact_path, "from-compact".to_string())?;
+        assert_eq!(from_full.get_text("content")?, expected);
+        assert_eq!(from_compact.get_text("content")?, expected);
+
+        // A doc reloaded from a compacted snapshot keeps working and saving.
+        from_compact.insert_text("content", 0, "post-reload ")?;
+        let resaved = dir.path().join("resaved.loro");
+        from_compact.save_compact_to_file(&resaved)?;
+        let reloaded = LoroDocument::load_from_file(&resaved, "reloaded".to_string())?;
+        assert_eq!(
+            reloaded.get_text("content")?,
+            format!("post-reload {expected}")
         );
         Ok(())
     }

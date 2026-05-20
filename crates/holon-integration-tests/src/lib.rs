@@ -5,6 +5,7 @@
 
 pub mod assertions;
 pub mod debug_pause;
+pub mod fake_mcp_module;
 /// `display_assertions` moved to `holon-layout-testing`. Re-exported here
 /// so call sites inside this crate can keep using `crate::display_assertions::*`.
 /// Only available with the `pbt` feature because that's the only feature

@@ -47,7 +47,7 @@ impl TransitionRef<ReferenceState> for CreateDirectory {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.app_started, Reason::AppAlreadyStarted),
+            check(!state.action.app_started, Reason::AppAlreadyStarted),
             check(
                 state.pre_startup_directories.len() < 10,
                 Reason::DirectoryLimitReached,

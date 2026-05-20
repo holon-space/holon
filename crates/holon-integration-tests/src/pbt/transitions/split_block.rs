@@ -8,8 +8,8 @@
 
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocusMut, RefLifecycle,
-    SutBlockTreeWrite, SutDriver, SutLayout,
+    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirrorMut, RefFocus, RefFocusMut,
+    RefLifecycle, SutBlockTreeWrite, SutDriver, SutLayout, commit_active_editor_if_dirty,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
@@ -45,10 +45,13 @@ use validated::Validated;
 /// parent) and post-transition assertions (block-count sync,
 /// synthetic-id mapping). Those stay in the SutHandle adapter because
 /// they read from E2ESut-internal state.
+/// `right_presses` is a KEYSTROKE count (chars before the split point), not
+/// a byte offset — callers convert `SplitBlock.position` (bytes) against the
+/// pre-transition content before calling.
 pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
     sut: &mut S,
     id: &EntityUri,
-    position: usize,
+    right_presses: usize,
 ) {
     sut.wait_for_widget_kind(
         id,
@@ -59,21 +62,62 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
     .unwrap_or_else(|e| {
         panic!("[SplitBlock] target {id} not rendered as editable_text/rendered_text: {e}")
     });
-    sut.click_entity(id, "main")
-        .await
-        .unwrap_or_else(|e| panic!("[SplitBlock] click_entity failed for {id}: {e}"));
-    sut.wait_for_engine_focus(id, Duration::from_secs(1))
+    // Click-to-focus with re-click: a legitimate async commit (pending text
+    // flushing on a previous editor's authority-leave) can re-render and
+    // shift row bounds between bounds resolution and the gpui hit-test, so a
+    // single click can land on a neighbor row. Re-resolve fresh bounds and
+    // re-click until focus lands; fail loud at the deadline.
+    let click_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        // click_entity resolution now rejects content-mask-clipped
+        // (degenerate) rects — a row scrolled just outside the viewport
+        // resolves to NO center instead of a clip-edge point on a different
+        // row. On resolution failure, re-reveal (wait_for_bounds scrolls
+        // until the rect is visible) and retry until the deadline.
+        if let Err(e) = sut.click_entity(id, "main").await {
+            if tokio::time::Instant::now() >= click_deadline {
+                panic!("[SplitBlock] click_entity failed for {id}: {e}");
+            }
+            eprintln!(
+                "[SplitBlock] click_entity could not resolve {id} (row likely \
+                 scrolled out of view); re-revealing: {e}"
+            );
+            if let Err(e2) = sut.wait_for_bounds(id, Duration::from_secs(2)).await {
+                eprintln!("[SplitBlock] re-reveal of {id} failed (will retry): {e2}");
+            }
+            continue;
+        }
+        match sut.wait_for_engine_focus(id, Duration::from_secs(1)).await {
+            Ok(()) => break,
+            Err(e) => {
+                if tokio::time::Instant::now() >= click_deadline {
+                    panic!(
+                        "[SplitBlock] click_entity did not focus {id} before Enter \
+                         (after re-click attempts) — split would have hit the \
+                         wrong block: {e}"
+                    );
+                }
+                eprintln!(
+                    "[SplitBlock] click did not land focus on {id} (re-render likely \
+                     shifted bounds mid-click); re-clicking: {e}"
+                );
+            }
+        }
+    }
+    // Engine focus is set synchronously by the click, but the editor widget
+    // mounts (and takes WINDOW focus) only on a following render pass — a
+    // keystroke dispatched before that is dropped or, worse, consumed by the
+    // previously-focused editor. Gate on the committed frame reporting this
+    // editor window-focused.
+    sut.wait_for_window_focused_editor(id, Duration::from_secs(2))
         .await
         .unwrap_or_else(|e| {
-            panic!(
-                "[SplitBlock] click_entity did not focus {id} before Enter \
-                 — split would have hit the wrong block: {e}"
-            )
+            panic!("[SplitBlock] {id} never took window focus after click-to-focus: {e}")
         });
     sut.send_raw_keystroke("home", &[])
         .await
         .unwrap_or_else(|e| panic!("[SplitBlock] home failed: {e}"));
-    for _ in 0..position {
+    for _ in 0..right_presses {
         sut.send_raw_keystroke("right", &[])
             .await
             .unwrap_or_else(|e| panic!("[SplitBlock] right failed: {e}"));
@@ -111,12 +155,29 @@ pub fn split_block_preconditions<R: RefBlockTree + RefLifecycle>(
     let mut checks: Vec<Validated<(), Reason>> = vec![
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
+        // Block-interaction transitions need the block to render as an
+        // interactive widget (ops/draggable) reactively over the navigated
+        // focus. Only the default layout does; custom `index.org` query
+        // layouts don't (see RefLifecycle::renders_block_interactively).
+        check(
+            state.renders_block_interactively(block_id),
+            Reason::BlocksNotInteractiveUnderLayout,
+        ),
     ];
     let content = state.block_content(block_id);
     checks.push(check(content.is_some(), Reason::FocusedBlockMissing));
     checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
     if let Some(text) = content {
         checks.push(check(position <= text.len(), Reason::PreconditionFailed));
+        // Positions are byte offsets that MUST sit on a char boundary: prod
+        // positions come from an editor caret (always boundary-aligned), and
+        // both ref + prod `split_block` slice `content[..position]`. A
+        // mid-codepoint byte (possible only via hand-edited captures —
+        // the generator enumerates `char_indices`) must reject, not panic.
+        checks.push(check(
+            text.is_char_boundary(position),
+            Reason::PreconditionFailed,
+        ));
     }
     checks.push(check(
         !state.is_layout_block(block_id),
@@ -138,8 +199,14 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
     let mut candidates: Vec<(EntityUri, usize)> = vec![];
     for id in state.main_editable_descendants() {
         if let Some(text) = state.block_content(&id) {
-            let content_len = text.len();
-            for position in 0..=content_len {
+            // Char boundaries only — a user caret can't sit mid-codepoint.
+            // `0..=len` over bytes generated unsliceable positions once
+            // multi-byte content existed (extended-gen axis 1).
+            for position in text
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(text.len()))
+            {
                 if split_block_preconditions(&id, position, state).is_good() {
                     candidates.push((id.clone(), position));
                 }
@@ -156,38 +223,65 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
     })
 }
 
-pub fn split_block_apply_to_ref<R: RefBlockTreeMut + RefFocusMut>(
+pub fn split_block_apply_to_ref<
+    R: RefBlockTreeMut + RefFocusMut + RefEditorMirrorMut + RefFocus,
+>(
     block_id: &EntityUri,
     position: usize,
     state: &mut R,
 ) {
+    // Structural ops are commit points (docs/Architecture/UI.md). Two prod
+    // paths collapse here: (1) splitting the focused editor flushes its
+    // pending text before the split (`dispatch_structural_as_commit_point`);
+    // (2) the SUT pipeline's click-to-focus on a DIFFERENT block blurs the
+    // previously focused editor, and SqlOnly's on_blur commits its pending
+    // text. Both are dirty-gated: only user-authored text commits — a clean
+    // mirror that merely diverged from `block.content` is stale against an
+    // external change and must NOT be committed (prod's data subscription
+    // refreshes idle editors; an unconditional commit here produced the
+    // Full/Loro divergence of 2026-06-11).
+    commit_active_editor_if_dirty(state);
     state.push_undo_snapshot();
     let new_block_id = state.split_block(block_id, position);
-    // Production issues an editor_focus follow-up that moves keyboard
-    // focus to the new block at position 0
-    // (`traits.rs::split_block` → editor_focus_op). Mirror that so
+    // Production returns the new block as the focus target (caret 0) in
+    // `split_block`'s op response; the frontend applies it in-process
+    // (`traits.rs::split_block` → `focus_response`, ADR 0010). Mirror that so
     // subsequent transitions and post-step invariants see the right
     // focused block.
-    state.set_focus(CapRegion::Main, new_block_id, CapCursor::default());
+    let new_content = state
+        .block_content(&new_block_id)
+        .unwrap_or_default()
+        .to_string();
+    state.set_focus(CapRegion::Main, new_block_id.clone(), CapCursor::default());
+    // That focus move also makes the new block the ACTIVE editor at
+    // caret 0 — not just the navigation focus. A subsequent `PressKey(Enter)`
+    // therefore splits the new block, not the block the prior
+    // `FocusEditableText` opened. Without this the ref's `active_editor` stays
+    // stale, so PressKey(Enter) re-splits the old target and its content
+    // diverges from prod (which left that block untouched) — the
+    // settled-consistent `inv-blocks-match-ref` content divergence.
+    state.open_active_editor(new_block_id, new_content, 0);
 }
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl TransitionFactory<ReferenceState> for SplitBlock {
+impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for SplitBlock {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         split_block_weighted_generator(state)
     }
 }
 
-impl TransitionRef<ReferenceState> for SplitBlock {
+impl<R: RefBlockTree + RefBlockTreeMut + RefFocusMut + RefEditorMirrorMut + RefFocus + RefLifecycle>
+    TransitionRef<R> for SplitBlock
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         split_block_preconditions(&self.block_id, self.position, state)
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         split_block_apply_to_ref(&self.block_id, self.position, state);
     }
 }
@@ -202,9 +296,9 @@ impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for SplitBlock {
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for SplitBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.active_watches.len();
-        let blocks = state.block_state.blocks.len();
-        let docs = state.documents.len();
+        let watches = state.mcp.active_watches.len();
+        let blocks = state.domain.block_state.blocks.len();
+        let docs = state.files.documents.len();
         let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         let create = expected_sql_for_kind(MutationKind::Create, watches, blocks, docs);
         ExpectedSql {

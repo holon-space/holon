@@ -39,7 +39,7 @@ pub use holon_frontend::reactive::make_interpret_fn;
 /// Reactive model backed by `ReactiveEngine`.
 ///
 /// The root layout is watched via `engine.watch(root_uri)`. Sub-blocks
-/// (LiveBlockView, LiveQueryView) each have their own independent streams.
+/// (block- and query-backed ReactiveShells) each have their own independent streams.
 /// `rebuild()` is only called for the root — sub-blocks update independently.
 struct AppModel {
     session: Arc<FrontendSession>,
@@ -128,6 +128,37 @@ impl AppModel {
         self.nav.set_root(self.root_vm.clone());
     }
 
+    /// Re-point this window's root view at a *different* SUT — a fresh
+    /// `session` + `engine` — without re-opening the GPUI window. Used by the
+    /// windowed capture-minimizer (`RebindHandle`) to reuse one live window
+    /// across many ddmin candidates instead of one process per candidate.
+    ///
+    /// Drops the per-block `ReactiveShell` entities (their `watch_live`
+    /// subscriptions are bound to the *old* engine) and rebuilds the whole root
+    /// from the new engine via [`AppModel::rebuild`], which recreates them
+    /// against `engine`'s `watch_live` and re-resolves the view model. The
+    /// caller must `apply_viewport` + `cx.notify` afterwards (it holds the
+    /// `Window`); see [`RebindHandle::rebind`].
+    fn rebind(
+        &mut self,
+        session: Arc<FrontendSession>,
+        engine: Arc<ReactiveEngine>,
+        viewport: holon_frontend::reactive::ViewportInfo,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.session = session;
+        self.engine = engine;
+        // Seed the new engine's viewport *before* the snapshot so the root
+        // `if_space(...)` picks the correct breakpoint on the first rebuilt
+        // frame — otherwise the first paint lands on the narrow (overlay)
+        // branch and the sidebar overlaps the main panel until the next fire.
+        self.engine.ui_state().set_viewport(viewport);
+        // Entities (LiveBlockView/ReactiveShell) carry subscriptions to the old
+        // engine — drop them so `rebuild` re-creates them against the new one.
+        self.root_live_blocks.clear();
+        self.rebuild(cx);
+    }
+
     /// Push a fresh viewport into `UiState` and the root ReactiveView.
     ///
     /// This is the single entry point for all viewport-change events:
@@ -150,6 +181,7 @@ impl AppModel {
 
         for block_id in &needed {
             if !self.root_live_blocks.contains_key(block_id) {
+                // ALLOW(entity_uri_from_raw): block_id string from LiveBlock nodes in root ViewModel tree
                 let uri = holon_api::EntityUri::from_raw(block_id);
                 let services: Arc<dyn BuilderServices> = self.engine.clone();
                 let live_block = services.watch_live(&uri, services.clone());
@@ -678,11 +710,10 @@ impl Render for HolonApp {
                             tracing::debug!("[on_key_down] No focused editor for keys: {keys:?}");
                             return;
                         };
-                        let focused_id = focused_uri.as_str().to_string();
                         let input = WidgetInput::KeyChord { keys: keys.clone() };
-                        let action = nav.bubble_input(&focused_id, &input);
+                        let action = nav.bubble_input(&focused_uri, &input);
                         tracing::debug!(
-                            "[on_key_down] keys={keys:?} focused={focused_id} action={action:?}"
+                            "[on_key_down] keys={keys:?} focused={focused_uri} action={action:?}"
                         );
                         if let Some(InputAction::ExecuteOperation {
                             entity_name,
@@ -691,7 +722,10 @@ impl Render for HolonApp {
                         }) = action
                         {
                             let mut params = std::collections::HashMap::new();
-                            params.insert("id".into(), holon_api::Value::String(entity_id));
+                            params.insert(
+                                "id".into(),
+                                holon_api::Value::String(entity_id.to_string()),
+                            );
                             holon_frontend::operations::dispatch_operation(
                                 &rt_handle,
                                 &session,
@@ -841,6 +875,90 @@ pub fn launch_holon_window_with_title(
     );
 }
 
+/// Shared cell holding the window's *currently bound* engine. The interaction
+/// pump reads it per command so scroll-into-view targets the rebound engine, not
+/// the one captured when the window opened. [`RebindHandle::rebind`] writes it.
+type LiveEngine = std::sync::Arc<std::sync::RwLock<Arc<ReactiveEngine>>>;
+
+/// A handle to a live Holon window whose root view can be *re-pointed* at a
+/// different SUT (`session` + `engine`) without re-opening the window. Returned
+/// by [`launch_holon_window_rebindable`]; used by the windowed capture-minimizer
+/// to reuse one window across many ddmin candidates instead of one process each.
+pub struct RebindHandle {
+    window: AnyWindowHandle,
+    app_model: Entity<AppModel>,
+    /// `HolonApp`'s persistent render cache. Its panel `ReactiveShell`s are keyed
+    /// by *static* panel ids, so the render's `or_insert_with` would keep the
+    /// previous engine's shells; rebind clears it so fresh shells are built.
+    entity_cache: entity_view_registry::EntityCache,
+    /// The live-engine cell the interaction pump reads (see [`LiveEngine`]).
+    live_engine: LiveEngine,
+}
+
+impl RebindHandle {
+    pub fn window(&self) -> AnyWindowHandle {
+        self.window
+    }
+
+    /// Re-point the window at `session` + `engine`, re-seed the viewport from the
+    /// window's current size, and request a repaint. Must run on the GPUI main
+    /// thread (holds `cx: &mut App`).
+    pub fn rebind(&self, session: Arc<FrontendSession>, engine: Arc<ReactiveEngine>, cx: &mut App) {
+        // Re-point the pump's engine and drop the stale panel shells *before* the
+        // render so scroll-into-view and the rebuilt tree both see the new engine.
+        *self.live_engine.write().unwrap() = engine.clone();
+        self.entity_cache.write().unwrap().clear();
+
+        let app_model = self.app_model.clone();
+        let window = self.window;
+        let _ = cx.update_window(window, |_, win, cx| {
+            let vp = viewport_info_from_window(win.viewport_size(), win.scale_factor());
+            app_model.update(cx, |m, cx| {
+                m.rebind(session, engine.clone(), vp, cx);
+                cx.notify();
+            });
+            // The root-layout signal pump is bound to the *old* engine's stream;
+            // re-point it at the new engine so viewport / structural changes drive
+            // the rebound window (and the `if_space` breakpoint re-evaluates).
+            spawn_root_layout_signal(app_model.clone(), engine, window, cx);
+        });
+    }
+}
+
+/// Like [`launch_holon_window_with_title`] but returns a [`RebindHandle`] so the
+/// caller can re-point the window at fresh SUTs over its lifetime. `None` if the
+/// window failed to open.
+pub fn launch_holon_window_rebindable(
+    session: Arc<FrontendSession>,
+    engine: Arc<ReactiveEngine>,
+    rt_handle: tokio::runtime::Handle,
+    nav: NavigationState,
+    bounds_registry: BoundsRegistry,
+    debug: Option<Arc<holon_mcp::server::DebugServices>>,
+    title: &str,
+    cx: &mut App,
+) -> Option<RebindHandle> {
+    launch_holon_window_impl(
+        session,
+        Some(engine),
+        debug,
+        None,
+        rt_handle,
+        nav,
+        bounds_registry,
+        Some(title.to_string()),
+        cx,
+    )
+    .map(
+        |(window, app_model, entity_cache, live_engine)| RebindHandle {
+            window,
+            app_model,
+            entity_cache,
+            live_engine,
+        },
+    )
+}
+
 pub fn launch_holon_window_with_engine_and_registry(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
@@ -883,6 +1001,51 @@ pub fn launch_holon_window_with_registry(
     );
 }
 
+/// Spawn the window's root-layout signal pump on `engine`: every fire (a
+/// structural `render_expr` change, or a `ui_generation` bump from
+/// `set_viewport`) rebuilds `root_vm`, reconciles the root live blocks, and
+/// re-renders — this is what lets the root `if_space(...)` re-pick its
+/// breakpoint (sidebar-beside-main vs overlay) when the viewport changes.
+///
+/// Factored out so [`RebindHandle::rebind`] can re-point it at a *new* engine:
+/// the loop is bound to one engine's signal stream and can't swap it, so rebind
+/// spawns a fresh loop. Stale loops (on a prior engine) self-suppress via the
+/// `Arc::ptr_eq` guard — they no-op once `app_model.engine` is a different Arc —
+/// so a late fire from an old engine can't clobber the freshly-bound window.
+fn spawn_root_layout_signal(
+    app_model: Entity<AppModel>,
+    engine: Arc<ReactiveEngine>,
+    wh: AnyWindowHandle,
+    cx: &mut App,
+) {
+    let root_uri = holon_api::root_layout_block_uri();
+    let root_signal = engine.watch_signal(&root_uri);
+    cx.spawn(async move |cx| {
+        use futures_signals::signal::SignalExt;
+        root_signal
+            .for_each(move |rvm| {
+                let _ = cx.update_window(wh, |_, _, cx| {
+                    app_model.update(cx, |m, cx| {
+                        // Only the loop bound to the currently-active engine drives
+                        // the window; stale loops (prior rebinds) no-op.
+                        if !Arc::ptr_eq(&m.engine, &engine) {
+                            return;
+                        }
+                        m.root_vm = Arc::new(rvm);
+                        m.reconcile_root_live_blocks(cx);
+                        m.view_model =
+                            resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                        m.nav.set_root(m.root_vm.clone());
+                        cx.notify();
+                    });
+                });
+                async {}
+            })
+            .await;
+    })
+    .detach();
+}
+
 /// Shared implementation for launching a Holon window.
 ///
 /// If `existing_engine` is `Some`, reuses it (shared with MCP server).
@@ -899,7 +1062,12 @@ fn launch_holon_window_impl(
     bounds_registry: BoundsRegistry,
     custom_title: Option<String>,
     cx: &mut App,
-) {
+) -> Option<(
+    AnyWindowHandle,
+    Entity<AppModel>,
+    entity_view_registry::EntityCache,
+    LiveEngine,
+)> {
     gpui_component::init(cx);
 
     #[cfg(debug_assertions)]
@@ -1057,12 +1225,13 @@ fn launch_holon_window_impl(
         // nested block's tree on demand.
         {
             let engine_for_resolver = engine.clone();
-            nav.set_block_resolver(std::sync::Arc::new(move |block_id: &str| {
-                let uri = holon_api::EntityUri::from_raw(block_id);
-                Some(std::sync::Arc::new(
-                    engine_for_resolver.snapshot_reactive(&uri),
-                ))
-            }));
+            nav.set_block_resolver(std::sync::Arc::new(
+                move |block_id: &holon_api::EntityUri| {
+                    Some(std::sync::Arc::new(
+                        engine_for_resolver.snapshot_reactive(block_id),
+                    ))
+                },
+            ));
         }
 
         let shadow_ctx = RenderContext::default();
@@ -1145,10 +1314,20 @@ fn launch_holon_window_impl(
         Ok(h) => h,
         Err(e) => {
             tracing::error!("[GPUI] cx.open_window failed: {e:?}");
-            return;
+            return None;
         }
     };
     tracing::debug!("[GPUI] Window opened, starting reactive stream...");
+
+    // HOLON_GPUI_FORCE_ACTIVE=1 — make the window key/active at startup.
+    // Background-launched test runs usually get a NON-key window; runs whose
+    // window IS key (the realistic foreground-user condition) showed a
+    // deterministic split-at-wrong-caret divergence (2026-06-11). This flag
+    // pins the activation state so that condition reproduces on demand.
+    if std::env::var("HOLON_GPUI_FORCE_ACTIVE").as_deref() == Ok("1") {
+        cx.activate(true);
+        let _ = window_handle.update(cx, |_, window, _| window.activate_window());
+    }
 
     let app_model = model_entity.get().unwrap().clone();
     let wh: AnyWindowHandle = window_handle.into();
@@ -1159,8 +1338,9 @@ fn launch_holon_window_impl(
     // depend on which block is focused. This avoids the full
     // HolonApp re-render cascade (269 EditorView renders) on every
     // arrow key press.
-    let root_uri = holon_api::root_layout_block_uri();
     let engine = app_model.read(cx).engine.clone();
+    // The live-engine cell the interaction pump reads; rebind re-points it.
+    let live_engine: LiveEngine = std::sync::Arc::new(std::sync::RwLock::new(engine.clone()));
 
     if let Some(ref debug) = debug {
         let async_cx = cx.to_async();
@@ -1169,7 +1349,7 @@ fn launch_holon_window_impl(
             window_handle.into(),
             &async_cx,
             bounds_registry_for_pump,
-            engine.clone(),
+            live_engine.clone(),
             entity_cache.clone(),
         );
     }
@@ -1214,80 +1394,12 @@ fn launch_holon_window_impl(
     // lets the root `if_space(...)` re-pick its breakpoint branch when the
     // window resizes. Focus changes do NOT bump ui_generation so they
     // don't cascade here.
-    let root_signal = engine.watch_signal(&root_uri);
+    spawn_root_layout_signal(app_model.clone(), engine, wh, cx);
 
-    cx.spawn({
-        let app_model = app_model.clone();
-        async move |cx| {
-            use futures_signals::signal::SignalExt;
-            root_signal
-                .for_each(|rvm| {
-                    tracing::debug!("[root-signal] fired");
-                    let _ = cx.update_window(wh, |_, _, cx| {
-                        app_model.update(cx, |m, cx| {
-                            m.root_vm = Arc::new(rvm);
-
-                            // Reconcile root LiveBlockView entities.
-                            // Each LiveBlockView manages its own child entities.
-                            m.reconcile_root_live_blocks(cx);
-
-                            // Resolve view_model + update input router.
-                            m.view_model =
-                                resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
-                            m.nav.set_root(m.root_vm.clone());
-
-                            cx.notify();
-                        });
-                    });
-                    async {}
-                })
-                .await;
-        }
-    })
-    .detach();
-
-    // Top-level editor_cursor → focused_block bridge.
-    //
-    // Without this, follow-up `editor_focus(new_block)` ops (fired by
-    // `split_block`, `join_block`) deadlock: render_entity_view only
-    // renders an `EditorView` when `focused_block == this block`, and
-    // `focused_block` only updates from inside an `EditorView` via
-    // `InputEvent::Focus`. So when split creates a new block and writes
-    // `editor_cursor = (new_block, 0)`, no `EditorView` for the new
-    // block exists yet to receive the `watch_editor_cursor` signal and
-    // call `window.focus`, so `focused_block` stays on the original
-    // target, so the new block never gets an editor, so the cycle
-    // closes.
-    //
-    // This bridge breaks the cycle by mirroring `editor_cursor.block_id`
-    // into `services.set_focus(...)` at the top level. The follow-up
-    // chain then becomes:
-    //   editor_cursor write → set_focus(new) → re-render →
-    //   render_entity_view(new) renders editable → EditorView mounts →
-    //   its watch_editor_cursor replay grabs `window.focus(new_input)`.
-    {
-        let services: Arc<dyn BuilderServices> = engine.clone();
-        if let Some(signal) = services.watch_editor_cursor() {
-            cx.spawn({
-                let services = services.clone();
-                async move |_cx| {
-                    use futures::StreamExt;
-                    use futures_signals::signal::SignalExt;
-                    let mut stream = signal.to_stream();
-                    while let Some(event) = stream.next().await {
-                        let Some((block_id, _cursor_offset)) = event else {
-                            continue;
-                        };
-                        let uri = holon_api::EntityUri::from_raw(&block_id);
-                        if services.focused_block().as_ref() != Some(&uri) {
-                            services.set_focus(Some(uri));
-                        }
-                    }
-                }
-            })
-            .detach();
-        }
-    }
+    // (The top-level `editor_cursor → focused_block` bridge was removed in
+    // ADR 0010. Split/join focus now flows in-process from the op response to
+    // `focused_block`; window focus follows that signal. There is no longer
+    // any `editor_cursor` CDC to bridge.)
 
     // iOS/Android keyboard height observer.
     //
@@ -1323,6 +1435,12 @@ fn launch_holon_window_impl(
     .detach();
 
     tracing::debug!("[GPUI] Reactive engine running");
+    Some((
+        window_handle.into(),
+        model_entity.get().unwrap().clone(),
+        entity_cache,
+        live_engine,
+    ))
 }
 
 /// Return the set of widget names this GPUI frontend supports.
@@ -1356,17 +1474,19 @@ pub fn setup_interaction_pump(
     window_handle: AnyWindowHandle,
     cx: &gpui::AsyncApp,
     bounds_registry: BoundsRegistry,
-    engine: Arc<ReactiveEngine>,
+    engine: LiveEngine,
     entity_cache: entity_view_registry::EntityCache,
 ) {
     let (tx, mut rx) = futures::channel::mpsc::channel::<holon_mcp::server::InteractionCommand>(16);
     debug.interaction_tx.set(tx.clone()).ok();
 
     // Install the channel-based `UserDriver` so MCP tools can dispatch
-    // UI mutations through the same pipeline as click/key/scroll.
+    // UI mutations through the same pipeline as click/key/scroll. The MCP-facing
+    // driver binds the *current* engine at install time (re-pointing it on rebind
+    // is out of scope — MCP isn't driven during minimization).
     let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> = Arc::new(bounds_registry);
     let driver: Arc<dyn holon_frontend::user_driver::UserDriver> = Arc::new(
-        user_driver::GpuiUserDriver::new(tx, geometry, engine.clone()),
+        user_driver::GpuiUserDriver::new(tx, geometry, engine.read().unwrap().clone()),
     );
     debug.user_driver.set(driver).ok();
 
@@ -1380,22 +1500,70 @@ pub fn setup_interaction_pump(
                     use holon_mcp::server::InteractionEvent;
                     match &cmd.event {
                         InteractionEvent::ScrollEntityIntoView { entity_id } => {
-                            scroll_entity_into_view(
+                            // Read the *live* engine: after a rebind the window is
+                            // bound to a new engine, and scroll-into-view must look
+                            // up the entity in it, not the one captured at install.
+                            let cur = engine_for_pump.read().unwrap().clone();
+                            let scrolled = scroll_entity_into_view(
                                 entity_id,
-                                &engine_for_pump,
+                                &cur,
                                 &entity_cache_for_pump,
                                 window,
                                 cx,
-                            )
+                            );
+                            // Same occluded-window rationale as the input
+                            // branch below: force a frame so the scroll's
+                            // effect (and any pending notify) reaches the
+                            // committed BoundsRegistry.
+                            window.refresh();
+                            scrolled.map(|s| (s, None))
                         }
-                        _ => Ok(dispatch_interaction(&cmd.event, window, cx)),
+                        _ => {
+                            // Synthetic key events route through the window's
+                            // focus tree: when this window is not the key
+                            // window (foreground user activity or another
+                            // test window de-keyed it), the focused editor is
+                            // blurred and keystrokes are silently dropped or
+                            // misrouted. Detect at dispatch time so the log
+                            // and any unconsumed-key failure self-identify as
+                            // key-focus contamination instead of masquerading
+                            // as a UI bug.
+                            let detail = if !window.is_window_active() {
+                                // NOT an input-delivery problem: dispatch_keystroke
+                                // never gates on key status (verified in gpui
+                                // source + empirically, 2026-06-11). The risk is
+                                // the deactivation BLUR: gpui re-renders with an
+                                // empty focus path, so a mid-typing blur re-seeds
+                                // the caret (displayed-text rotation face). Data
+                                // loss is prevented by commit-on-authority-move.
+                                let msg = format!(
+                                    "[interaction-pump] WINDOW-INACTIVE while \
+                                     dispatching {:?} — input IS delivered, but \
+                                     deactivation blur may have re-seeded the \
+                                     caret mid-typing (caret-position faces \
+                                     possible; data loss is not)",
+                                    cmd.event
+                                );
+                                eprintln!("{msg}");
+                                Some(msg)
+                            } else {
+                                None
+                            };
+                            let handled = dispatch_interaction(&cmd.event, window, cx);
+                            // Force a frame after every synthetic input so the
+                            // BoundsRegistry commit-notify fires even when the
+                            // window is occluded — test wait-loops pace on
+                            // committed frames, and an idle window would
+                            // otherwise degrade every wait to its timeout cap.
+                            window.refresh();
+                            Ok((handled, detail))
+                        }
                     }
                 });
                 let response = match result {
-                    Ok(Ok(handled)) => holon_mcp::server::InteractionResponse {
-                        handled,
-                        detail: None,
-                    },
+                    Ok(Ok((handled, detail))) => {
+                        holon_mcp::server::InteractionResponse { handled, detail }
+                    }
                     Ok(Err(detail)) => holon_mcp::server::InteractionResponse {
                         handled: false,
                         detail: Some(detail),
@@ -1413,25 +1581,32 @@ pub fn setup_interaction_pump(
 }
 
 /// Scroll a virtualized list shell so the named `entity_id` becomes
-/// visible. Returns `Ok(true)` when scrolled, `Ok(false)` if already
-/// visible / not in any virtualized list (caller should keep polling
-/// bounds and rely on the timeout as the authoritative failure signal),
-/// or `Err(detail)` if the lookup couldn't be performed.
+/// visible. Returns `Ok(true)` when scrolled, `Ok(false)` if not in any
+/// virtualized list (caller should keep polling bounds and rely on the
+/// timeout as the authoritative failure signal), or `Err(detail)` if the
+/// lookup couldn't be performed.
 ///
-/// Approach: for each `block:default-*` panel, snapshot its
-/// `ReactiveViewModel` and walk it to find a `collection: Some(view)`
-/// whose `children_snapshot()` contains a child with this `entity_id` at
-/// position `ix`. Then look up the list-mode `ReactiveShell` cached at
-/// `CacheKey::ReactiveShell(view.stable_cache_key())` inside the panel
-/// shell's own `entity_cache`, and call
+/// Approach: for each `block:default-*` panel, walk the panel shell's
+/// local `entity_cache` for cached list-mode `ReactiveShell`s and ask
+/// each one directly for the entity's row index
+/// ([`ReactiveShell::visible_index_of`]); on a hit, call
 /// `list_state.scroll_to_reveal_item(ix); cx.notify();`.
 ///
-/// Block-mode panels (Main) don't virtualize — every rendered entity has
-/// bounds via prepaint regardless of viewport. The only place this
-/// function moves the needle is the LeftSidebar's flat doc list.
+/// The shells are queried directly — NOT looked up via
+/// `CacheKey::ReactiveShell(view.stable_cache_key())` of a fresh
+/// `engine.snapshot_reactive` tree. A fresh snapshot builds new
+/// `ReactiveView` instances whose cache keys never match the rendered
+/// shell's, so the old lookup silently missed for the main panel and
+/// rows below the viewport stayed unreachable (2026-06-11 missing-row
+/// root cause: virtualized list + broken scroll-to-reveal lookup).
+///
+/// All collection panels virtualize (the Main panel's block-mode shell
+/// falls through to the same `ReactiveShell` + `gpui::list` path as the
+/// sidebars), so off-viewport rows have no bounds until scrolled to —
+/// this function is the only way to give them any.
 fn scroll_entity_into_view(
-    entity_id: &str,
-    engine: &Arc<ReactiveEngine>,
+    entity_id: &str,               // MCP boundary — parsed below, fail-loud
+    _engine: &Arc<ReactiveEngine>, // ALLOW(unused_param): kept for signature stability of the interaction pump
     entity_cache: &entity_view_registry::EntityCache,
     _window: &mut Window, // ALLOW(unused_param): signature parity with other scroll helpers in this module
     cx: &mut App,
@@ -1439,20 +1614,16 @@ fn scroll_entity_into_view(
     use crate::entity_view_registry::CacheKey;
     use crate::views::ReactiveShell;
 
+    let entity_uri = holon_api::EntityUri::parse(entity_id)
+        .map_err(|e| format!("scroll_entity_into_view: {entity_id:?} is not an EntityUri: {e}"))?;
     for panel_id in [
         "block:default-left-sidebar",
         "block:default-main-panel",
         "block:default-right-sidebar",
     ] {
-        let panel_uri = holon_api::EntityUri::from_raw(panel_id);
-        let root = engine.snapshot_reactive(&panel_uri);
-        let Some((view, ix)) = find_collection_for_entity(&root, entity_id) else {
-            continue;
-        };
-
-        // The list-mode `ReactiveShell` for this `view` is cached in the
-        // panel shell's local `entity_cache`, NOT the top-level cache.
-        // Walk: top-level → panel shell → its `entity_cache` → list shell.
+        // The list-mode `ReactiveShell`s live in the panel shell's local
+        // `entity_cache`, NOT the top-level cache.
+        // Walk: top-level → panel shell → its `entity_cache` → list shells.
         let panel_shell: Option<gpui::Entity<ReactiveShell>> = {
             let cache = entity_cache.read().unwrap();
             cache
@@ -1462,61 +1633,41 @@ fn scroll_entity_into_view(
         let Some(panel_shell) = panel_shell else {
             // Panel not rendered as a live_block yet. Continue scanning
             // other panels rather than reporting an error.
+            eprintln!(
+                "[scroll_entity_into_view] {panel_id}: no LiveBlock panel shell in top-level cache"
+            );
             continue;
         };
         let panel_cache = panel_shell.read(cx).entity_cache_clone();
-        let list_shell: Option<gpui::Entity<ReactiveShell>> = {
+        let list_shells: Vec<gpui::Entity<ReactiveShell>> = {
             let cache = panel_cache.read().unwrap();
             cache
-                .get(&CacheKey::ReactiveShell(view.stable_cache_key()))
-                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): downcast Err means the cached Any wasn't a ReactiveShell — treat as cache miss and fall through to the next panel
+                .values()
+                // ALLOW(filter_map_ok): downcast Err just means this cache entry isn't a ReactiveShell — skipping is the semantics, not error hiding
+                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): see filter_map_ok above
+                .collect()
         };
-        let Some(list_shell) = list_shell else {
-            // List shell not in the panel's cache. The list might use a
-            // GPUI-specific layout renderer (columns/board) rather than
-            // the default ReactiveShell path — those layouts manage their
-            // own scrolling and aren't reachable here.
-            continue;
-        };
-
-        list_shell.update(cx, |shell, cx| {
-            shell.list_state_handle().scroll_to_reveal_item(ix);
-            cx.notify();
-        });
-        return Ok(true);
+        for list_shell in list_shells {
+            let Some(ix) = list_shell.read(cx).visible_index_of(&entity_uri) else {
+                continue;
+            };
+            list_shell.update(cx, |shell, cx| {
+                let state = shell.list_state_handle();
+                let before = state.logical_scroll_top();
+                state.scroll_to_reveal_item(ix);
+                eprintln!(
+                    "[scroll-reveal] {entity_id} ix={ix} scroll_top_before={:?} \
+                     (snap-back diagnosis: compare consecutive reveals for the \
+                     same entity — a repeating `before` offset means something \
+                     resets the viewport between frames)",
+                    before
+                );
+                cx.notify();
+            });
+            return Ok(true);
+        }
     }
     Ok(false)
-}
-
-/// Walk a `ReactiveViewModel` to find a `collection: Some(view)` whose
-/// `children_snapshot()` contains `entity_id` at some index. Returns the
-/// matching view + index, or `None` if no such collection exists.
-fn find_collection_for_entity(
-    node: &holon_frontend::reactive_view_model::ReactiveViewModel,
-    entity_id: &str,
-) -> Option<(
-    std::sync::Arc<holon_frontend::reactive_view::ReactiveView>,
-    usize,
-)> {
-    if let Some(ref view) = node.collection {
-        for (ix, item) in view.children_snapshot().into_iter().enumerate() {
-            if item.entity_id().as_deref() == Some(entity_id) {
-                return Some((view.clone(), ix));
-            }
-        }
-    }
-    for child in &node.children {
-        if let Some(found) = find_collection_for_entity(child, entity_id) {
-            return Some(found);
-        }
-    }
-    if let Some(ref slot) = node.slot {
-        let guard = slot.content.lock_ref();
-        if let Some(found) = find_collection_for_entity(&guard, entity_id) {
-            return Some(found);
-        }
-    }
-    None
 }
 
 pub fn dispatch_interaction(

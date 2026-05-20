@@ -3,52 +3,81 @@
 //! Extracted from `tests/general_e2e_pbt.rs` so the state machine can be
 //! reused by other test harnesses (e.g. Flutter FFI PBT).
 
+pub mod action_actor_state;
+pub mod bisect_driver;
 pub mod fixtures;
 pub mod generators;
+pub mod invariant_runner;
 pub mod invariants;
 pub mod layout_bridge;
-pub mod loro_sut;
 pub mod loro_sync;
+pub mod mcp_server_actor_state;
+pub mod org_markdown_file_state;
 pub mod panic_diag;
 pub mod peer_ops;
 pub mod phased;
 pub mod query;
 pub mod query_ast;
 pub mod reference_capabilities;
+pub mod reference_domain_state;
 pub mod reference_state;
+pub mod retry;
 pub mod slice;
 pub mod state_machine;
+pub mod stepper;
 pub mod sut;
 pub mod sut_capabilities;
+mod sut_cdc_mirrors;
 mod sut_check_invariants;
 mod sut_handle;
 mod sut_keybindings;
-mod sut_macros;
+pub mod sut_loro;
+mod sut_metrics;
+mod sut_render;
 mod sut_row_parsing;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
 pub mod transition_dispatch;
 pub mod transitions;
 pub mod types;
+pub mod ui_actor_state;
 pub mod ui_harness;
 pub mod ui_interaction;
 pub mod validation;
 pub mod value_fn_invariants;
 
+/// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
+/// real UUID. Only split suffixes are: `reference_state.rs::split_block`
+/// mints `block::split-N` (note the double colon) and the SUT later binds it
+/// to a freshly-minted UUID. Bulk ids (`block:bulk-N-i`) are NOT synthetic —
+/// `bulk_external_add` writes them deterministically on BOTH sides, so they
+/// appear verbatim in `block_raw`/CDC. Single source of truth — substring
+/// sniffs like `contains(":split-")` false-positived on legitimately named
+/// blocks (e.g. the gherkin fixture's `block:split-target-block`).
+pub fn is_synthetic_ref_id(id: &holon_api::EntityUri) -> bool {
+    id.as_str().starts_with("block::split-")
+}
+
+pub use action_actor_state::ActionActorState;
+pub use mcp_server_actor_state::MCPServerActorState;
+pub use org_markdown_file_state::OrgMarkdownFileState;
 pub use phased::{
     PbtPhaseState, PbtReadyContext, PbtReadyResult, PbtStepResult, PbtUiOperation,
     pbt_execute_operation, pbt_setup, pbt_step, pbt_step_confirm, pbt_teardown,
-    run_pbt_with_driver_sync_callback, run_phased_pbt,
+    run_pbt_with_driver_sync_callback,
 };
 pub use query::{TestQuery, WatchSpec};
+pub use reference_domain_state::ReferenceDomainState;
 pub use reference_state::ReferenceState;
-pub use state_machine::VariantRef;
+pub use state_machine::{ReferenceMachine, fresh_reference_state, storage_selector_for_wiring};
 pub use sut::E2ESut;
 pub use transitions::E2ETransition;
 pub use types::*;
+pub use ui_actor_state::{UIActorState, UITabState, UIUserState};
 pub use ui_harness::{
-    DEFAULT_FRONTEND_MEMORY_MULTIPLIER, enable_atomic_editor_if_unset, screenshot_dir,
-    set_loro_peer_id_if_unset, set_memory_multiplier_if_unset, spawn_quit_on_pbt_finish,
+    DEFAULT_FRONTEND_MEMORY_MULTIPLIER, enable_atomic_editor_if_unset,
+    install_rejection_histogram_panic_hook, screenshot_dir, set_loro_peer_id_if_unset,
+    set_memory_multiplier_if_unset, spawn_quit_on_pbt_finish, standard_pbt_config,
     try_start_embedded_mcp, wait_for_geometry_ready,
 };
 pub use ui_interaction::UiInteraction;

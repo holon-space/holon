@@ -900,7 +900,7 @@ mod custom_properties_round_trip {
         let snap_block = snapshot
             .get(block.id.as_str())
             .expect("block missing from snapshot_blocks_from_doc");
-        let p = snap_block.properties_map();
+        let p = snap_block.block.properties_map();
         assert_eq!(
             p.get("effort"),
             Some(&Value::String("7yzXz".into())),
@@ -964,29 +964,29 @@ mod custom_properties_round_trip {
 
         // Sanity: `task_state` is in both (pre-existed).
         assert_eq!(
-            before_block.properties_map().get("task_state"),
+            before_block.block.properties_map().get("task_state"),
             Some(&Value::String("WAITING".into()))
         );
         assert_eq!(
-            after_block.properties_map().get("task_state"),
+            after_block.block.properties_map().get("task_state"),
             Some(&Value::String("WAITING".into()))
         );
 
         // Before should NOT have effort — watermark was taken first.
         assert!(
-            !before_block.properties_map().contains_key("effort"),
+            !before_block.block.properties_map().contains_key("effort"),
             "before-snapshot unexpectedly has effort — fork_at didn't rewind. Before props: {:?}",
-            before_block.properties_map()
+            before_block.block.properties_map()
         );
 
         // After MUST have effort. If it doesn't, the outbound
         // reconcile diff would find no change and emit no UPDATE —
         // or emit an UPDATE without effort, wiping SQL.
         assert_eq!(
-            after_block.properties_map().get("effort"),
+            after_block.block.properties_map().get("effort"),
             Some(&Value::String("7yzXz".into())),
             "after-snapshot missing effort after update_block_properties. Full props: {:?}",
-            after_block.properties_map()
+            after_block.block.properties_map()
         );
     }
 

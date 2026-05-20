@@ -618,13 +618,23 @@ impl ReactiveViewModel {
     }
 
     /// Entity ID — for live_block nodes, uses the block_id from props.
-    pub fn entity_id(&self) -> Option<String> {
+    ///
+    /// Typed end-to-end (focus-routing #7): `props["block_id"]` is written
+    /// schemed (Tier-1 #6), so a non-URI value here is a programming error —
+    /// fail loud. Nodes without the prop read the row id through the
+    /// centralized `entity_uri_from_id_str` boundary, same as the rest of
+    /// the row pipeline.
+    pub fn entity_id(&self) -> Option<EntityUri> {
         let props = self.props.lock_ref();
         if let Some(Value::String(block_id)) = props.get("block_id") {
-            return Some(block_id.clone());
+            return Some(
+                EntityUri::parse(block_id)
+                    .expect("live_block props[\"block_id\"] must be a schemed EntityUri"),
+            );
         }
         drop(props);
         self.row_id()
+            .map(|id| holon_api::entity_uri_from_id_str(&id))
     }
 
     /// Get a string property (owned — reads through Mutable lock).
@@ -746,7 +756,7 @@ impl ReactiveViewModel {
             RenderExpr::FunctionCall { name, .. } => name.as_str(),
             _ => return ViewKind::Empty,
         };
-
+        // TODO: Does this duplicate render_interpreter
         match name {
             // Leaf nodes
             "text" => ViewKind::Text {
@@ -829,6 +839,12 @@ impl ReactiveViewModel {
                         Some("tree") => ViewKind::Tree { children },
                         Some("outline") => ViewKind::Outline { children },
                         Some("table") => ViewKind::Table { children },
+                        Some("board") => ViewKind::Board {
+                            lane_field: self.prop_str("lane_field").expect(
+                                "board node must carry the `lane_field` prop                                  (shadow_builders/board.rs always writes it)",
+                            ),
+                            children,
+                        },
                         Some("list") => ViewKind::List {
                             gap: view.layout().as_ref().map(|v| v.gap).unwrap_or(0.0),
                             children,
@@ -838,6 +854,16 @@ impl ReactiveViewModel {
                             children,
                         },
                         _ => ViewKind::Column { gap: 0.0, children },
+                    }
+                } else if n == "board" {
+                    // Inline-rows board (Shape 1/3): children are materialized
+                    // directly, no ReactiveView collection. Still a board.
+                    ViewKind::Board {
+                        lane_field: self.prop_str("lane_field").expect(
+                            "board node must carry the `lane_field` prop \
+                             (shadow_builders/board.rs always writes it)",
+                        ),
+                        children: snap_children(),
                     }
                 } else {
                     ViewKind::Column {
@@ -943,7 +969,9 @@ impl ReactiveViewModel {
             "view_mode_switcher" => {
                 let entity_uri = self
                     .prop_str("entity_uri")
+                    // ALLOW(entity_uri_from_raw): prop_str('entity_uri') render-spec node prop value
                     .map(|s| EntityUri::from_raw(&s))
+                    // ALLOW(entity_uri_from_raw): hardcoded 'unknown' sentinel default literal
                     .unwrap_or_else(|| EntityUri::from_raw("unknown"));
                 let modes = self.prop_str("modes").unwrap_or_else(|| "[]".to_string());
                 let content = if let Some(ref slot) = self.slot {
@@ -992,8 +1020,8 @@ impl ReactiveViewModel {
             // Block boundary — deferred to slot
             "live_block" => {
                 let block_id_str = self.prop_str("block_id").unwrap_or_default();
-                let block_id = EntityUri::parse(&block_id_str)
-                    .unwrap_or_else(|_| EntityUri::block(&block_id_str));
+                let block_id =
+                    EntityUri::parse(&block_id_str).expect("live_block: invalid entity URI");
                 match resolve_block {
                     Some(resolve) => ViewKind::LiveBlock {
                         block_id: block_id.to_string(),
@@ -1017,7 +1045,8 @@ impl ReactiveViewModel {
                         })
                         .unwrap_or_default(),
                 ),
-                compiled_sql: self.prop_str("compiled_sql"),
+                query: self.prop_str("query"),
+                query_lang: self.prop_str("query_lang"),
                 query_context_id: self.prop_str("query_context_id"),
                 render_expr: None, // TODO: store in props as serialized
             },

@@ -34,6 +34,13 @@ pub enum PopupResult {
         entity_name: EntityName,
         op_name: String,
         params: HashMap<String, Value>,
+        /// Line-relative offset of the trigger char ("/") when the command
+        /// was selected from a slash popup: the frontend must strip the
+        /// command text (`strip_prefix_start..cursor`) from the editor
+        /// before dispatching, or "/delete" stays in the block content
+        /// (and gets committed at the next commit point). `None` for
+        /// non-popup Execute results (blur set_field etc.).
+        strip_prefix_start: Option<usize>,
     },
     /// Insert text replacing from prefix_start to cursor (links).
     InsertText {

@@ -24,6 +24,11 @@ pub struct ConcurrentSchemaInit;
 
 impl TransitionFactory<ReferenceState> for ConcurrentSchemaInit {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: this exercises concurrent Turso IVM schema/matview init
+        // via `ctx.engine()`; there is no engine in the no-Turso wiring.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         ConcurrentSchemaInit
             .preconditions(state)
@@ -36,12 +41,15 @@ impl TransitionRef<ReferenceState> for ConcurrentSchemaInit {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
-                !state.block_state.blocks.is_empty(),
+                !state.domain.block_state.blocks.is_empty(),
                 Reason::BlockStateEmpty,
             ),
-            check(!state.active_watches.is_empty(), Reason::NoWatchesActive),
+            check(
+                !state.mcp.active_watches.is_empty(),
+                Reason::NoWatchesActive,
+            ),
         ];
 
         checks

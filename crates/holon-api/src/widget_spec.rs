@@ -7,10 +7,56 @@
 use std::collections::HashMap;
 
 use crate::streaming::Change;
+use crate::EntityUri;
 use crate::Value;
 
 /// A single row of query result data (may or may not be enriched).
 pub type DataRow = HashMap<String, Value>;
+
+/// Parse the canonical `EntityUri` out of a matview/CDC `DataRow`'s `"id"`
+/// column. This is the single typed-id boundary for the reactive row
+/// pipeline: the row's `"id"` is the stringly-typed matview representation,
+/// and every downstream consumer must thread the resulting `EntityUri` rather
+/// than re-parsing the string. Returns `None` when the row has no `"id"`.
+pub fn data_row_entity_uri(row: &DataRow) -> Option<EntityUri> {
+    row.get("id")
+        .and_then(|v| v.as_string())
+        .map(entity_uri_from_id_str)
+}
+
+/// Typed accessor for the matview `parent_id` column of a row.
+///
+/// Boundary read — routes through the centralized [`entity_uri_from_id_str`]
+/// helper so the column name and the bare-vs-schemed canonicalisation live in
+/// one place. Empty / missing → `None`.
+pub fn data_row_parent_id(row: &DataRow) -> Option<EntityUri> {
+    row.get("parent_id")
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.is_empty())
+        .map(entity_uri_from_id_str)
+}
+
+/// Typed accessor for the sibling-ordering key of a row.
+///
+/// `sort_key` (the Loro/Turso fractional index) is the authority: it can
+/// represent an insert *between* two siblings, which the legacy integer
+/// `sequence` cannot. `split_block` gives its new block a fractional `sort_key`
+/// between the source and the next sibling but no `sequence` — preferring
+/// `sequence` here sorted that new block to the end (its absent `sequence`
+/// lost to the existing 0,1,2…). Prefer `sort_key`, falling back to `sequence`
+/// only for rows that predate the fractional index.
+pub fn data_row_sort_key(row: &DataRow) -> String {
+    let v = row.get("sort_key").or_else(|| row.get("sequence"));
+    crate::render_eval::sort_value(v)
+}
+
+/// Parse a boundary id string (matview row id column, CDC `Change` id /
+/// `entity_id`) into the canonical `EntityUri`. The single `from_raw` seam
+/// for the reactive row pipeline.
+pub fn entity_uri_from_id_str(id: &str) -> EntityUri {
+    // ALLOW(entity_uri_from_raw): matview/CDC row id column is the typed-id boundary
+    EntityUri::from_raw(id)
+}
 
 /// A row that has been through the enrichment pipeline (`flatten_properties` +
 /// computed fields from entity profile resolution).
@@ -53,6 +99,16 @@ impl EnrichedRow {
             row.insert(key, value);
         }
         Self(row)
+    }
+
+    /// Enrich a raw `StorageEntity` row (Arc<str> keys). Re-keys to the
+    /// String-keyed row shape once, at the enrichment boundary.
+    pub fn from_storage(
+        data: crate::StorageEntity,
+        computed_fields: impl FnOnce(&HashMap<String, Value>) -> HashMap<String, Value>,
+    ) -> Self {
+        let rekeyed = data.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        Self::from_raw(rekeyed, computed_fields)
     }
 
     /// Convert back to a plain `DataRow` when crossing into code that hasn't

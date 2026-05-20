@@ -24,6 +24,12 @@ pub struct Redo;
 
 impl TransitionFactory<ReferenceState> for Redo {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: redo routes through `ctx.engine().redo()` (the Turso
+        // `BackendEngine`); the no-Turso wiring has no engine and no Loro redo
+        // path is wired for a1. Gate it out of {Loro} slices.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         Redo.preconditions(state).map(|()| (2, Just(Redo).boxed()))
     }
@@ -34,8 +40,8 @@ impl TransitionRef<ReferenceState> for Redo {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
-            check(!state.redo_stack.is_empty(), Reason::NoRedoHistory),
+            check(state.action.app_started, Reason::AppNotStarted),
+            check(!state.action.redo_stack.is_empty(), Reason::NoRedoHistory),
         ];
 
         checks
@@ -46,8 +52,19 @@ impl TransitionRef<ReferenceState> for Redo {
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.pop_redo_to_undo();
-        for region in state.focused_entity_id.keys().cloned().collect::<Vec<_>>() {
-            state.focused_cursor.insert(region, CursorPosition::start());
+        for region in state
+            .ui
+            .tab
+            .focused_entity_id
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            state
+                .ui
+                .tab
+                .focused_cursor
+                .insert(region, CursorPosition::start());
         }
     }
 }
@@ -62,9 +79,9 @@ impl<S: SutHandle> TransitionImpl<ReferenceState, S> for Redo {
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for Redo {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.active_watches.len();
-        let blocks = state.block_state.blocks.len();
-        let docs = state.documents.len();
+        let watches = state.mcp.active_watches.len();
+        let blocks = state.domain.block_state.blocks.len();
+        let docs = state.files.documents.len();
         let mut sql = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         sql.tolerance += 5; // undo journal adds a few extra reads
         sql

@@ -129,15 +129,8 @@ impl SyncStrategy for ToolSync {
             anyhow::bail!("MCP tool '{}' returned error: {error_text}", self.list_tool);
         }
 
-        let json_text: String = result
-            .content
-            .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
-            .collect::<Vec<_>>()
-            .join("");
-
-        let response: serde_json::Value = serde_json::from_str(&json_text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse tool response as JSON: {e}"))?;
+        let response = crate::mcp_call_surface::extract_tool_response(&result)
+            .map_err(|e| anyhow::anyhow!("Tool '{}' response: {e}", self.list_tool))?;
 
         let records_json = response
             .get(&self.extract_path)

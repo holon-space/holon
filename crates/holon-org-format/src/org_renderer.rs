@@ -4,7 +4,6 @@
 
 use crate::models::{render_document_header, OrgBlockExt, ToOrg};
 use holon_api::block::Block;
-use holon_api::types::ContentType;
 use holon_api::EntityUri;
 use holon_api::Value;
 use std::collections::HashMap;
@@ -57,27 +56,29 @@ impl OrgRenderer {
     pub fn render_entitys(blocks: &[Block], _file_path: &Path, file_id: &EntityUri) -> String {
         let mut result = String::new();
 
-        // Build a map of block ID to block for quick lookup
-        let block_map: HashMap<&str, &Block> = blocks.iter().map(|b| (b.id.as_str(), b)).collect();
+        // Sibling order is the caller's responsibility — `blocks` arrives in
+        // authoritative order (the ordered read; ADR 0005). The renderer trusts
+        // it and never re-derives order from a per-block key. Build a
+        // parent→children index that preserves the input order.
+        let mut children_by_parent: HashMap<&str, Vec<&Block>> = HashMap::new();
+        for b in blocks {
+            children_by_parent
+                .entry(b.parent_id.as_str())
+                .or_default()
+                .push(b);
+        }
+        // The only re-ordering the renderer imposes is a content-type grouping:
+        // Source/Image children render before Text children (sub-headings) so a
+        // re-parse re-attaches the source to this heading, not the next one. The
+        // sort is stable, so input order is preserved within each group.
+        for kids in children_by_parent.values_mut() {
+            kids.sort_by_key(|b| b.content_type.sibling_order_group());
+        }
 
-        // Find content root blocks - blocks whose parent is the document block (file_id).
-        // Order by sort_key — the fractional-index source of truth that
-        // `BlockOperations::{indent,outdent,move_block,split_block}` write.
-        // `sequence` is a parser-assigned ordinal that goes stale after any
-        // structural mutation (split_block doesn't touch it, so the new block
-        // would tie at sequence=0 with its anchor and the id tie-breaker would
-        // place a UUID-named block before a literally-named one).
-        let mut root_blocks: Vec<&Block> =
-            blocks.iter().filter(|b| b.parent_id == *file_id).collect();
-        root_blocks.sort_by(|a, b| {
-            a.sort_key
-                .cmp(&b.sort_key)
-                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-        });
-
-        // Render each root block and its children recursively
-        for root_block in root_blocks {
-            Self::render_entity_tree(root_block, &block_map, &mut result, 0);
+        if let Some(roots) = children_by_parent.get(file_id.as_str()) {
+            for root_block in roots {
+                Self::render_entity_tree(root_block, &children_by_parent, &mut result, 0);
+            }
         }
 
         result
@@ -86,7 +87,7 @@ impl OrgRenderer {
     /// Render a block and its children recursively.
     fn render_entity_tree(
         block: &Block,
-        block_map: &HashMap<&str, &Block>,
+        children_by_parent: &HashMap<&str, Vec<&Block>>,
         result: &mut String,
         depth: usize,
     ) {
@@ -97,35 +98,10 @@ impl OrgRenderer {
         // Render using Block::to_org() which guarantees trailing newline
         result.push_str(&prepared_block.to_org());
 
-        // Render children (find blocks where parent_id matches this block's id)
-        // Source blocks must come BEFORE text children (sub-headings) so that
-        // when the org file is re-parsed, the source block is assigned to this
-        // parent heading, not to the first sub-heading that follows it.
-        // Within each content-type group, order by `sort_key` (the fractional
-        // index that BlockOperations writes); `sequence` is parser-assigned
-        // and goes stale after structural mutations like split_block.
-        let mut child_blocks: Vec<_> = block_map
-            .values()
-            .filter(|b| b.parent_id == block.id)
-            .collect();
-        child_blocks.sort_by(|a, b| {
-            // Source and Image blocks render before text children (sub-headings)
-            let sort_group = |ct: ContentType| -> i64 {
-                match ct {
-                    ContentType::Source => 0,
-                    ContentType::Image => 0,
-                    ContentType::Text => 1,
-                }
-            };
-            let a_type = sort_group(a.content_type);
-            let b_type = sort_group(b.content_type);
-            a_type
-                .cmp(&b_type)
-                .then_with(|| a.sort_key.cmp(&b.sort_key))
-                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-        });
-        for child_block in child_blocks {
-            Self::render_entity_tree(child_block, block_map, result, depth + 1);
+        if let Some(kids) = children_by_parent.get(block.id.as_str()) {
+            for child_block in kids {
+                Self::render_entity_tree(child_block, children_by_parent, result, depth + 1);
+            }
         }
     }
 
@@ -221,7 +197,7 @@ impl OrgRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holon_api::types::SourceLanguage;
+    use holon_api::types::{ContentType, SourceLanguage};
     use holon_api::EntityUri;
 
     fn test_doc_uri() -> EntityUri {
@@ -233,7 +209,7 @@ mod tests {
         let mut b = Block {
             id: EntityUri::block(id),
             parent_id: EntityUri::block(parent_id),
-            tags: Vec::new(),
+            tags: Vec::new().into(),
             requires: Vec::new(),
             content: content.to_string(),
             content_type: ContentType::Source,
@@ -243,7 +219,7 @@ mod tests {
             marks: None,
             created_at: 0,
             updated_at: 0,
-            sort_key: "A0".to_string(),
+            ..Default::default()
         };
         b.set_sequence(seq);
         b

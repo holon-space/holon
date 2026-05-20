@@ -1,9 +1,7 @@
-//! Phase C #7 — `inv-viewmodel-editable-text-triggers` (FUNCTIONAL).
+//! `inv-viewmodel-editable-text-triggers`.
 //!
-//! Originally inline at `sut.rs:5175–5189`; deferred during Phase 7
-//! because the IR didn't carry trigger info. Phase C #7 added
-//! `props["trigger_count"]` to the `WidgetSnapshot` translation for
-//! `EditableText`, unblocking this body.
+//! Relies on `props["trigger_count"]` in the `WidgetSnapshot` translation
+//! for `EditableText`.
 //!
 //! ## Contract
 //!
@@ -26,7 +24,7 @@
 //! rendered widget tree alone.
 
 use holon_pbt_core::capabilities::SutRenderer;
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelEditableTextTriggers;
 
@@ -41,10 +39,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

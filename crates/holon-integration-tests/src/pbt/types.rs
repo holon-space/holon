@@ -1,12 +1,21 @@
 //! Core PBT types: mutations, test variants, and marker traits.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::{ContentType, SourceLanguage, Value};
 
 use holon_orgmode::models::OrgBlockExt;
+
+/// Shared, `Send`-safe handle to the reference-stable-id → resolved-UUID map.
+///
+/// Lives in this neutral module (not `sut`) so component SUTs like
+/// [`crate::pbt::sut_loro::LoroSut`] can hold a clone without depending on the
+/// `E2ESut` facade. `std::sync::Mutex` (not `RefCell`) because the SUT is moved
+/// across threads at teardown (`phased::teardown_sut`).
+pub type DocUriMap = Arc<Mutex<HashMap<EntityUri, EntityUri>>>;
 
 /// Source of a mutation
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -17,6 +26,11 @@ pub enum MutationSource {
     External,
     /// Block created by an action watcher (trigger query → action execution)
     Action,
+    /// Mutation applied through a Loro CRDT *peer* (not the primary instance).
+    /// Diverges from the primary until a separate `SyncWithPeer`/`MergeFromPeer`
+    /// transition converges it. `peer_idx` selects which peer (from prior
+    /// `AddPeer`s) the mutation targets.
+    LoroPeer { peer_idx: usize },
 }
 
 /// A mutation to the data model
@@ -42,11 +56,12 @@ pub enum Mutation {
         id: EntityUri,
         new_parent_id: EntityUri,
     },
-    /// Simulate app restart: clears OrgSyncController's last_projection.
+    /// Simulate app restart: clears FileSyncController's last_projection.
     /// This tests that re-parsing org files doesn't create orphan blocks in Loro.
     RestartApp,
 }
 
+// TODO: Move to some sut_org.rs or similar
 /// Apply org-mode properties (task_state, priority, tags, scheduled, deadline)
 /// and custom properties from `fields` onto `block`.
 ///
@@ -94,7 +109,8 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
     {
         block.set_deadline(Some(ts));
     }
-
+    // TODO: These are probably duplicated somewhere in non-test code.
+    // Let's reuse that
     let extra_keys: &[&str] = if is_create {
         &[
             "content",
@@ -135,6 +151,7 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
     }
 }
 
+// TODO: Move to sut_org.rb
 /// Normalize content to match what an org round-trip will produce.
 ///
 /// For Text blocks the first line becomes the org headline, which the parser
@@ -145,13 +162,66 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
 /// renderer's `push_str(content); push('\n')` path doesn't reintroduce
 /// differently).
 pub fn normalize_content_for_org_roundtrip(content: &str, content_type: ContentType) -> String {
-    let trimmed_end = content.trim_end();
     if content_type == ContentType::Source {
-        return trimmed_end.to_string();
+        return content.trim_end().to_string();
     }
-    match trimmed_end.split_once('\n') {
-        Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
-        None => trimmed_end.trim_start().to_string(),
+    // One trim+mark-extraction pass is NOT idempotent (e.g. `[[ x]]` →
+    // label ` x` → next round-trip trims to `x`), and the SUT keeps
+    // round-tripping the file until it converges — so the reference must
+    // normalize to the FIXED POINT, not the first iterate. Terminates: every
+    // pass either shrinks the string or leaves it unchanged. Surfaced by
+    // extended-gen axis 1 (`[[ Hbplihw7UF]]` after promotion).
+    let mut current = content.to_string();
+    loop {
+        let trimmed_end = current.trim_end();
+        let trimmed = match trimmed_end.split_once('\n') {
+            Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
+            None => trimmed_end.trim_start().to_string(),
+        };
+        // The parser also extracts inline org markup (`[[…]]` links, `*bold*`,
+        // …) into `block.marks` and stores only the RENDERED LABEL as content
+        // (parse-don't-validate at the boundary). Content that happens to spell
+        // org markup therefore normalizes to its label after a file round-trip
+        // — identity for plain text, so the default ASCII generators are
+        // unaffected. Surfaced by extended-gen axis 1 (`[[x]]` → `x`).
+        let (rendered, _marks) = holon_orgmode::inline_marks::extract_inline_marks(&trimmed);
+        if rendered == current {
+            return rendered;
+        }
+        current = rendered;
+    }
+}
+
+/// Apply the org HEADLINE-TAG lens to a block: the first content line is the
+/// headline title on disk, so a trailing `:tag1:tag2:` group there is org TAG
+/// syntax (org has no escape for it) and re-parses into `block.tags`, not
+/// content. Mirrors the parser exactly via
+/// [`holon_orgmode::parser::split_headline_tags`]; pinned in
+/// holon-org-format/tests/properties_prefix_headline_repro.rs.
+///
+/// Use wherever the reference models a block crossing the org-FILE boundary
+/// (external file writes that the SUT parses into its stores, and the ref's
+/// on-disk org view). In-memory stores (SQL/Loro) keep the raw content — the
+/// reinterpretation happens only at the file parse. Surfaced by extended-gen
+/// axis 1 (`:PROPERTIES:` → empty title + tag `PROPERTIES`).
+pub fn apply_org_headline_tag_split(block: &mut Block) {
+    if block.content_type == ContentType::Source {
+        return;
+    }
+    let (first, rest) = match block.content.split_once('\n') {
+        Some((f, r)) => (f, Some(r.to_string())),
+        None => (block.content.as_str(), None),
+    };
+    let (title, tags) = holon_orgmode::parser::split_headline_tags(first);
+    if tags.is_empty() {
+        return;
+    }
+    block.content = match rest {
+        Some(r) => format!("{title}\n{r}"),
+        None => title,
+    };
+    for t in tags {
+        block.tags.insert(t);
     }
 }
 
@@ -363,112 +433,4 @@ impl Mutation {
 pub struct MutationEvent {
     pub source: MutationSource,
     pub mutation: Mutation,
-}
-
-/// Configuration flags controlling which components are enabled in a test run.
-#[derive(Debug, Clone)]
-pub struct TestVariant {
-    /// Enable Loro CRDT layer (false = SQL-only, matching Flutter default)
-    pub enable_loro: bool,
-}
-
-impl TestVariant {
-    pub fn full() -> Self {
-        Self { enable_loro: true }
-    }
-
-    /// SQL-only, no Loro. Matches Flutter when LORO_ENABLED is unset.
-    pub fn sql_only() -> Self {
-        Self { enable_loro: false }
-    }
-}
-
-impl Default for TestVariant {
-    fn default() -> Self {
-        Self::full()
-    }
-}
-
-#[allow(async_fn_in_trait)] // only used with static dispatch (generics)
-/// Marker trait for test variant selection via generics.
-///
-/// Variants control both the test configuration (Loro vs SQL-only) and the
-/// executor used to receive watch_ui events. The `wait_for_structure` method
-/// lets each variant define HOW events are received — on tokio (default) or
-/// on a foreign executor (to catch cross-executor waker bugs like GPUI's
-/// smol-based event loop not being woken by tokio mpsc sends).
-pub trait VariantMarker: std::fmt::Debug + Clone + 'static {
-    fn variant() -> TestVariant;
-
-    /// Wait for the first Structure event from a WatchHandle.
-    ///
-    /// Takes ownership of the handle (to allow cross-thread transfer) and
-    /// returns it alongside the RenderExpr. The caller wraps this in a timeout.
-    ///
-    /// Default implementation: polls `watch.recv()` on the current (tokio) executor.
-    async fn wait_for_structure(
-        watch: holon_api::WatchHandle,
-    ) -> (holon_api::RenderExpr, holon_api::WatchHandle) {
-        let mut watch = watch;
-        loop {
-            match watch.recv().await {
-                Some(holon_api::UiEvent::Structure { render_expr, .. }) => {
-                    return (render_expr, watch);
-                }
-                Some(_) => continue,
-                None => panic!("watch_ui stream closed before Structure event"),
-            }
-        }
-    }
-}
-
-/// All components enabled (Loro + SQL). Default for existing tests.
-#[derive(Debug, Clone)]
-pub struct Full;
-impl VariantMarker for Full {
-    fn variant() -> TestVariant {
-        TestVariant::full()
-    }
-}
-
-/// SQL-only, no Loro. Matches Flutter production default.
-#[derive(Debug, Clone)]
-pub struct SqlOnly;
-impl VariantMarker for SqlOnly {
-    fn variant() -> TestVariant {
-        TestVariant::sql_only()
-    }
-}
-
-/// Like Full, but receives watch_ui events on a non-tokio executor
-/// (futures::executor on a dedicated thread). Catches cross-executor waker
-/// bugs — e.g. GPUI's smol executor not being woken by tokio mpsc sends.
-#[derive(Debug, Clone)]
-pub struct CrossExecutor;
-impl VariantMarker for CrossExecutor {
-    fn variant() -> TestVariant {
-        TestVariant::full()
-    }
-
-    async fn wait_for_structure(
-        watch: holon_api::WatchHandle,
-    ) -> (holon_api::RenderExpr, holon_api::WatchHandle) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let result = futures::executor::block_on(async move {
-                let mut watch = watch;
-                loop {
-                    match watch.recv().await {
-                        Some(holon_api::UiEvent::Structure { render_expr, .. }) => {
-                            return (render_expr, watch);
-                        }
-                        Some(_) => continue,
-                        None => panic!("watch_ui stream closed before Structure event"),
-                    }
-                }
-            });
-            tx.send(result).ok();
-        });
-        rx.await.expect("cross-executor recv thread panicked")
-    }
 }

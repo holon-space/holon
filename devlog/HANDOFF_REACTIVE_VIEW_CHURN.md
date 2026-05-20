@@ -16,7 +16,7 @@ frequency. Each cycle allocates `Arc<ReactiveViewModel>` items that are never fr
 CDC event (e.g. cc_task sync every ~10s)
   → matview CDC fires
     → UiWatcher sends Structure event
-      → ReactiveQueryResults.apply_event() sets render_expr (reactive.rs:315)
+      → ReactiveRenderedRows.apply_event() sets render_expr (reactive.rs:315)
         → structural_signal_with_ui_gen fires (map_ref! at reactive.rs:448-455)
           → interpret_with_source creates NEW tree with NEW ReactiveView nodes
             → ReactiveShell receives tree via structural_changes stream
@@ -97,7 +97,7 @@ Instead of creating new `ReactiveView::new_collection()` nodes on every structur
 rebuild, the interpreter should look up existing ReactiveViews by data source identity
 and reuse them. The tree structure changes, but the data pipeline stays the same.
 
-1. Give each `ReactiveQueryResults` a stable ID
+1. Give each `ReactiveRenderedRows` a stable ID
 2. During `interpret_with_source`, if the render context has a data_source, look up
    an existing `ReactiveView` for that data_source ID
 3. If found, reuse it (same MutableVec, same driver, same subscribers)

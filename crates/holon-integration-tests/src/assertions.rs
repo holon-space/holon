@@ -16,11 +16,8 @@ pub fn normalize_block(block: &Block) -> Block {
     let mut normalized = block.clone();
     normalized.created_at = 0;
     normalized.updated_at = 0;
-    // sort_key is an implementation detail of fractional indexing — production
-    // assigns real fractional indices (e.g. "7E80"), the reference model only
-    // tracks `sequence`. Normalize to a fixed value so structural comparison
-    // ignores it; ordering is validated separately via `assert_block_order`.
-    normalized.sort_key = "A0".to_string();
+    // sort_key is no longer a field of the domain Block (ADR 0005) — ordering is
+    // validated separately via `assert_block_order` / `children_of`.
     // Trim overall content and normalize internal trailing whitespace per line
     // (org round-trip strips trailing whitespace from source block lines)
     normalized.content = normalized
@@ -31,7 +28,14 @@ pub fn normalize_block(block: &Block) -> Block {
         .join("\n")
         .trim()
         .to_string();
-    if normalized.parent_id.is_no_parent() || normalized.parent_id.is_sentinel() {
+    // The `__default__` page is prod's layout-owning root container (a real
+    // block, not the sentinel — see `default_doc_block_uri`). The reference
+    // model represents the document root as `__document_root__` and parents the
+    // layout straight to it, so unify the two roots here.
+    if normalized.parent_id.is_no_parent()
+        || normalized.parent_id.is_sentinel()
+        || normalized.parent_id == holon_api::default_doc_block_uri()
+    {
         normalized.parent_id = holon_api::EntityUri::block("__document_root__");
     }
     // document_id removed from Block struct; no normalization needed

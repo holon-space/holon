@@ -24,6 +24,12 @@ pub struct UndoLastMutation;
 
 impl TransitionFactory<ReferenceState> for UndoLastMutation {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: undo routes through `ctx.engine().undo()` (the Turso
+        // `BackendEngine`); the no-Turso wiring has no engine and no Loro undo
+        // path is wired for a1. Gate it out of {Loro} slices.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         UndoLastMutation
             .preconditions(state)
@@ -36,8 +42,8 @@ impl TransitionRef<ReferenceState> for UndoLastMutation {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
-            check(!state.undo_stack.is_empty(), Reason::NoUndoHistory),
+            check(state.action.app_started, Reason::AppNotStarted),
+            check(!state.action.undo_stack.is_empty(), Reason::NoUndoHistory),
         ];
 
         checks
@@ -49,8 +55,19 @@ impl TransitionRef<ReferenceState> for UndoLastMutation {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.pop_undo_to_redo();
         // Undo may restore different content — reset all cursors
-        for region in state.focused_entity_id.keys().cloned().collect::<Vec<_>>() {
-            state.focused_cursor.insert(region, CursorPosition::start());
+        for region in state
+            .ui
+            .tab
+            .focused_entity_id
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            state
+                .ui
+                .tab
+                .focused_cursor
+                .insert(region, CursorPosition::start());
         }
     }
 }
@@ -65,9 +82,9 @@ impl<S: SutHandle> TransitionImpl<ReferenceState, S> for UndoLastMutation {
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for UndoLastMutation {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.active_watches.len();
-        let blocks = state.block_state.blocks.len();
-        let docs = state.documents.len();
+        let watches = state.mcp.active_watches.len();
+        let blocks = state.domain.block_state.blocks.len();
+        let docs = state.files.documents.len();
         let mut sql = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         sql.tolerance += 5; // undo journal adds a few extra reads
         sql

@@ -100,21 +100,7 @@ async fn create_initialized_engine(
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
 
-    // Build type-defined profiles from TypeRegistry. `profile_from_type_def`
-    // can't see `virtual_child` because it's stored in a side map on the
-    // registry (TypeDefinition lives in holon-api, VirtualChildConfig in
-    // holon — keeping them split avoids a cross-crate dep flip), so we
-    // attach it here.
-    let type_profiles: Vec<_> = type_registry
-        .all()
-        .iter()
-        .filter_map(|td| {
-            crate::entity_profile::profile_from_type_def(td).map(|mut p| {
-                p.virtual_child = type_registry.virtual_child_config(&td.name);
-                p
-            })
-        })
-        .collect();
+    let type_profiles = crate::entity_profile::type_profiles_from_registry(type_registry);
 
     let ddl_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let matview_mgr = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex.clone());
@@ -176,6 +162,30 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
     OperationModule
         .configure(injector)
         .map_err(|e| anyhow::anyhow!("Failed to register OperationModule: {}", e))?;
+
+    Ok(())
+}
+
+/// Register the minimal, **Turso-free** core (ADR 0004 Phase 9).
+///
+/// This is the `StorageSelector::LoroMemory` assembly: it registers only the
+/// services that don't touch the Turso substrate — `DatabasePathConfig` and the
+/// `TypeRegistry`. No `TursoBackend` is opened, no Turso schema providers or
+/// `BackendEngine` are registered. The caller's `setup_fn` is responsible for
+/// registering the chosen storage adapter (e.g. Loro) and its
+/// `Arc<dyn holon_core::storage::BlockQuerySource>` producer.
+pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) -> Result<()> {
+    tracing::debug!(
+        "[DI] register_core_services_no_turso (Turso-free) called with db_path: {:?}",
+        db_path
+    );
+
+    injector.provide::<DatabasePathConfig>(Provider::root(move |_| {
+        Shared::new(DatabasePathConfig::new(db_path.clone()))
+    }));
+
+    let type_registry = create_default_registry().expect("Failed to create default TypeRegistry");
+    injector.provide::<TypeRegistry>(Provider::root(move |_| type_registry.clone()));
 
     Ok(())
 }

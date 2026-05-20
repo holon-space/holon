@@ -348,6 +348,7 @@ impl<'a> EvalContext<'a> {
         block
             .requires
             .iter()
+            // ALLOW(entity_uri_from_raw): block.requires Vec<String> hydrated from SQL block_requires table
             .map(|s| EntityUri::from_raw(s.as_str()))
             .collect()
     }

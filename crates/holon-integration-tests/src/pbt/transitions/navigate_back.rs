@@ -49,7 +49,7 @@ impl TransitionRef<ReferenceState> for NavigateBack {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(state.can_go_back(self.region), Reason::NoNavigationHistory),
         ];
         checks
@@ -59,16 +59,16 @@ impl TransitionRef<ReferenceState> for NavigateBack {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        if let Some(history) = state.navigation_history.get_mut(&self.region)
+        if let Some(history) = state.ui.tab.navigation_history.get_mut(&self.region)
             && history.cursor > 0
         {
             history.cursor -= 1;
         }
-        state.focused_entity_id.remove(&self.region);
-        state.focused_cursor.remove(&self.region);
+        state.ui.tab.focused_entity_id.remove(&self.region);
+        state.ui.tab.focused_cursor.remove(&self.region);
 
         // Blur on nav: see `navigate_focus.rs` for verification.
-        state.active_editor = None;
+        state.blur_active_editor();
     }
 }
 
@@ -100,21 +100,24 @@ mod tests {
     use super::*;
     use crate::pbt::reference_state::{NavigationHistory, ReferenceState};
     use crate::pbt::transitions::E2ETransition;
-    use crate::pbt::types::TestVariant;
 
     fn make_state_with_back_history() -> ReferenceState {
         let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
-        let mut state = ReferenceState::new(TestVariant::full(), interp);
-        state.app_started = true;
+        let mut state = ReferenceState::new(holon_pbt_core::Wiring::full(), interp);
+        state.action.app_started = true;
         let mut history = NavigationHistory::new();
-        history
-            .entries
-            .push(Some(EntityUri::block("block:test-target")));
+        history.entries.push(Some(EntityUri::block("test-target")));
         history.cursor = 1;
-        state.navigation_history.insert(Region::Main, history);
         state
+            .ui
+            .tab
+            .navigation_history
+            .insert(Region::Main, history);
+        state
+            .ui
+            .tab
             .focused_entity_id
-            .insert(Region::Main, EntityUri::block("block:test-target"));
+            .insert(Region::Main, EntityUri::block("test-target"));
         state
     }
 
@@ -131,12 +134,12 @@ mod tests {
         assert!(nb.preconditions(&state_a).is_good());
         nb.apply_to_ref(&mut state_a);
         assert_eq!(
-            state_a.navigation_history[&Region::Main].cursor,
+            state_a.ui.tab.navigation_history[&Region::Main].cursor,
             0,
             "cursor should decrement"
         );
         assert!(
-            !state_a.focused_entity_id.contains_key(&Region::Main),
+            !state_a.ui.tab.focused_entity_id.contains_key(&Region::Main),
             "per-region focus should be cleared"
         );
 
@@ -148,8 +151,8 @@ mod tests {
         let mut state_b = make_state_with_back_history();
         assert!(wrapped.preconditions(&state_b).is_good());
         wrapped.apply_to_ref(&mut state_b);
-        assert_eq!(state_b.navigation_history[&Region::Main].cursor, 0);
-        assert!(!state_b.focused_entity_id.contains_key(&Region::Main));
+        assert_eq!(state_b.ui.tab.navigation_history[&Region::Main].cursor, 0);
+        assert!(!state_b.ui.tab.focused_entity_id.contains_key(&Region::Main));
     }
 
     /// Pilot validation: factory returns Good when applicable, Fail
@@ -157,12 +160,12 @@ mod tests {
     #[test]
     fn navigate_back_factory_state_gating() {
         let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
-        let mut pre_start = ReferenceState::new(TestVariant::full(), interp);
+        let mut pre_start = ReferenceState::new(holon_pbt_core::Wiring::full(), interp);
         // app_started == false — must skip.
         assert!(NavigateBack::weighted_generator(&pre_start).is_fail());
 
         // Even with app_started, no nav history → still skip.
-        pre_start.app_started = true;
+        pre_start.action.app_started = true;
         assert!(NavigateBack::weighted_generator(&pre_start).is_fail());
 
         // With back-history present → factory yields a strategy.

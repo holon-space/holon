@@ -1,11 +1,11 @@
 //! Reactive middle layer using futures-signals.
 //!
 //! Replaces CdcAccumulator + BlockWatchRegistry + AppState with a single
-//! reactive cache. Each watched block or live query gets a `ReactiveQueryResults`
+//! reactive cache. Each watched block or live query gets a `ReactiveRenderedRows`
 //! that IS the cache, the accumulator, AND the signal source.
 //!
 //! ```text
-//! Turso IVM → UiEvent → ReactiveQueryResults → Signal<ViewModel> → Stream → Frontend
+//! Turso IVM → UiEvent → ReactiveRenderedRows → Signal<ViewModel> → Stream → Frontend
 //!                        (IS the cache)         (IS the join)       (IS the API)
 //! ```
 
@@ -38,6 +38,18 @@ use fluxdi::{Injector, Provider, Shared};
 /// `ReactiveEngine` implements this. Builders never see `FrontendSession`
 /// or `ReactiveEngine` directly — they call these methods through
 /// `ctx.services` (an `Arc<dyn BuilderServices>`).
+///
+/// On the "headless / stub" defaults below: the E2E PBTs do NOT use a
+/// stub. They run windowless (no GPUI surface) but drive the real
+/// `ReactiveEngine`, which overrides every method here — focus tracking,
+/// provider cache, viewport, keybindings, dispatch. The DI container
+/// resolves `ReactiveEngine` and registers it as the `BuilderServices`
+/// (see `test_environment.rs`), so PBT fidelity is intact. The
+/// stub-returning defaults exist only for the two genuinely
+/// non-interactive impls: holon-app's `HeadlessBuilderServices` (the MCP
+/// `describe_ui` path) and `StubBuilderServices` (gpui layout/gallery tests). "headless"
+/// in the per-method docs is a misnomer for "these two stub impls" — it
+/// does not mean the windowless PBT harness.
 pub trait BuilderServices: Send + Sync {
     /// Interpret `expr` against `ctx` using this services' shadow interpreter.
     ///
@@ -67,7 +79,7 @@ pub trait BuilderServices: Send + Sync {
 
     /// Resolve the entity profile for a data row. Returns `None` when no entity type
     /// could be inferred.
-    fn resolve_profile(&self, row: &DataRow) -> Option<holon::entity_profile::RowProfile>;
+    fn resolve_profile(&self, row: &DataRow) -> Option<holon_api::RenderProfile>;
 
     /// Mutable holding the current profile registry snapshot.
     ///
@@ -79,24 +91,36 @@ pub trait BuilderServices: Send + Sync {
     /// signal and trigger a full re-interpret when it fires.
     ///
     /// Default: an empty cache that never changes (for stub/headless services).
-    fn profile_signal(&self) -> Mutable<Arc<holon::entity_profile::ProfileCache>> {
-        Mutable::new(Arc::new(holon::entity_profile::ProfileCache::empty()))
+    fn profile_signal(&self) -> Mutable<Arc<holon_api::entity_profile::ProfileCache>> {
+        Mutable::new(Arc::new(holon_api::entity_profile::ProfileCache::empty()))
     }
 
     /// Get the virtual child config for an entity type, if declared in its profile.
-    fn virtual_child_config(&self, _: &str) -> Option<holon::entity_profile::VirtualChildConfig> {
+    fn virtual_child_config(
+        &self,
+        _: &str,
+    ) -> Option<holon_api::entity_profile::VirtualChildConfig> {
         None
     }
 
-    /// Compile a query string to SQL.
-    fn compile_to_sql(&self, query: &str, lang: QueryLanguage) -> Result<String>;
+    /// Entity-level operations (keyed by id scheme, e.g. `"block"`) — the same
+    /// set the renderer attaches to a row of that entity. Used by headless
+    /// input paths to build the slash-command menu without a rendered node.
+    /// Default: empty (stub/headless services without a resolver).
+    fn entity_operations(&self, _: &str) -> Vec<holon_api::render_types::OperationDescriptor> {
+        Vec::new()
+    }
 
-    /// Start a live query stream. Blocks until the stream is established.
-    fn start_query(
+    /// Compile a query (PRQL/GQL/SQL) and start a live CDC watch, returning
+    /// the enriched change stream. SQL compilation happens *behind* this
+    /// capability — builders never see SQL strings or the raw Turso stream.
+    /// Blocks until the stream is established.
+    fn watch_query(
         &self,
-        sql: String,
+        query: &str,
+        lang: QueryLanguage,
         ctx: Option<crate::QueryContext>,
-    ) -> Result<crate::RowChangeStream>;
+    ) -> Result<holon_api::EnrichedChangeStream>;
 
     /// Look up widget state by block ID.
     fn widget_state(&self, id: &str) -> WidgetState;
@@ -192,10 +216,17 @@ pub trait BuilderServices: Send + Sync {
     }
 
     /// Cloned handle to the focused-block `Mutable`, when this services
-    /// instance is backed by a `UiState`. Returns `None` for headless /
-    /// stub services (no focus tracking). Used by reactive row
-    /// providers like `focus_chain` that need a long-lived signal
-    /// source rather than a one-shot snapshot.
+    /// instance is backed by a `UiState`. Used by reactive row providers
+    /// like `focus_chain` that need a long-lived signal source rather than
+    /// a one-shot snapshot.
+    ///
+    /// `ReactiveEngine` returns `Some` — so the E2E PBTs (which use the real
+    /// engine) have full focus tracking. The outer `Option` is NOT
+    /// vestigial: it returns `None` for the two non-interactive stub impls
+    /// (holon-app's `HeadlessBuilderServices` for MCP, `StubBuilderServices` for gpui
+    /// gallery tests), where there is no UI focus to track. The three
+    /// callers (`focus_chain`, `chain_ops`, `reactive_view`) deliberately
+    /// degrade to empty/suspended on `None` rather than fabricate a focus.
     fn focused_block_mutable(&self) -> Option<Mutable<Option<EntityUri>>> {
         None
     }
@@ -212,12 +243,29 @@ pub trait BuilderServices: Send + Sync {
     /// Set the currently focused block. Pass `None` to clear focus.
     fn set_focus(&self, _: Option<EntityUri>) {}
 
+    /// Focus `block` and arm a one-shot initial caret offset for the editor
+    /// that mounts for it (split → 0, join → boundary, cross-block nav →
+    /// placement). The mounting editor reads it via [`peek_caret_seed`]. The
+    /// default delegates to `set_focus` (dropping the offset) for services
+    /// with no caret to seed.
+    fn set_focus_with_caret(&self, block: EntityUri, _: usize) {
+        self.set_focus(Some(block));
+    }
+
+    /// Read (without consuming) the one-shot initial caret offset armed for
+    /// `block` by a split/join/nav focus move. Returns the offset, or `None` —
+    /// in which case the mounting editor defaults the caret to end-of-text.
+    /// Headless/stub services have no caret to seed.
+    fn peek_caret_seed(&self, _: &EntityUri) -> Option<usize> {
+        None
+    }
+
     /// Get a [`Cell<String>`] handle for collaborative editing of a block
     /// field. Resolves through the `BlockCellRegistry` (Loro-backed when
     /// LoroModule is loaded). Returns `Err` for headless/stub services
     /// that don't have a LoroDoc, or for blocks not yet present in the
     /// Loro tree.
-    fn editable_text(&self, _: &str, _: &str) -> anyhow::Result<crate::cell::Cell<String>> {
+    fn editable_text(&self, _: &EntityUri, _: &str) -> anyhow::Result<crate::cell::Cell<String>> {
         Err(anyhow::anyhow!(
             "editable_text not supported by this BuilderServices implementation"
         ))
@@ -236,7 +284,7 @@ pub trait BuilderServices: Send + Sync {
     fn snapshot_resolved(&self, block_id: &EntityUri) -> crate::view_model::ViewModel {
         let (expr, rows) = self.get_block_data(block_id);
         let ctx = RenderContext {
-            data_rows: rows,
+            data_rows: rows.into(),
             available_space: self.viewport_snapshot(),
             ..Default::default()
         };
@@ -278,31 +326,24 @@ pub trait BuilderServices: Send + Sync {
     /// No-op by default. Implemented by ReactiveEngine.
     fn unwatch(&self, _: &EntityUri) {}
 
-    /// Get a reactive signal for a live query's UI. GPUI polls this directly.
-    fn watch_query_signal(
+    /// Watch a live query with per-row collection reactivity.
+    ///
+    /// Returns the engine's watcher key (pass it to [`Self::unwatch`] to
+    /// release the query watcher) and a `LiveBlock` whose tree has
+    /// ReactiveView nodes that self-manage their streaming pipelines.
+    /// `structural_changes` fires only on render-expression / ui-generation
+    /// changes — data-only changes update the tree in place. Takes the
+    /// source query + language; compilation happens behind the query
+    /// capability.
+    fn watch_query_live(
         &self,
         _: String,
+        _: QueryLanguage,
         _: holon_api::render_types::RenderExpr,
         _: Option<crate::QueryContext>,
-    ) -> std::pin::Pin<
-        Box<dyn futures_signals::signal::Signal<Item = crate::ReactiveViewModel> + Send>,
-    > {
-        panic!("watch_query_signal not supported by this BuilderServices implementation")
-    }
-
-    /// Reactive signal that fires when the focused editor's cursor moves
-    /// (driven by the `current_editor_focus` matview). Each `EditorView`
-    /// subscribes and acts only on emissions whose `block_id` matches its
-    /// own `row_id`. Returns `None` for sync/test services that don't run
-    /// a CDC watcher.
-    fn watch_editor_cursor(
-        &self,
-    ) -> Option<
-        std::pin::Pin<
-            Box<dyn futures_signals::signal::Signal<Item = Option<(String, i64)>> + Send>,
-        >,
-    > {
-        None
+        _: Arc<dyn BuilderServices>,
+    ) -> (EntityUri, crate::LiveBlock) {
+        panic!("watch_query_live not supported by this BuilderServices implementation")
     }
 
     /// Tokio runtime handle for spawning subscriptions (editor/popup providers,
@@ -322,14 +363,21 @@ pub trait BuilderServices: Send + Sync {
         Some(self.runtime_handle())
     }
 
-    /// Execute a SQL query for popup/autocomplete providers (doc-link,
-    /// command palette). Minimal async capability that replaces the
-    /// `Arc<FrontendSession>` plumb line through the editor. Headless/stub
-    /// impls without a backend return `Err`.
-    fn popup_query(
+    /// Search entities matching `filter` for the `[[` link-autocomplete
+    /// popup. Minimal async capability that replaces the
+    /// `Arc<FrontendSession>` plumb line through the editor. The search SQL
+    /// lives behind the query capability; headless/stub impls without a
+    /// backend return `Err`.
+    fn search_link_candidates(
         &self,
-        sql: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>;
+        filter: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<holon_api::LinkCandidate>>>
+                + Send
+                + 'static,
+        >,
+    >;
 }
 
 // ── ReactiveRowSet ──────────────────────────────────────────────────────
@@ -353,10 +401,11 @@ pub trait BuilderServices: Send + Sync {
 /// cloned `Mutable` handles. The convention "only `ReactiveRowSet` writes" is
 /// not enforced by the type system — code review keeps it.
 ///
-/// Used by `ReactiveQueryResults` (which adds a RenderExpr for interpretation)
-/// and directly by raw CDC watchers like `watch_editor_cursor`.
+/// Used by `ReactiveRenderedRows` (which adds a RenderExpr for interpretation)
+/// and directly by raw CDC watchers.
+/// TODO: Please check if `generation` is actually needed. The `MutableBTreeMap` should afaik only trigger if the data really changed. Run a small experiment if unsure.
 pub struct ReactiveRowSet {
-    data: MutableBTreeMap<String, Mutable<Arc<DataRow>>>,
+    data: MutableBTreeMap<EntityUri, Mutable<Arc<DataRow>>>,
     generation: Mutable<u64>,
 }
 
@@ -390,48 +439,77 @@ impl ReactiveRowSet {
         match change {
             holon_api::Change::Created { data, .. } => {
                 let row = Arc::new(data.into_inner());
-                let key = row
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .expect("Created event must have 'id' column")
-                    .to_string();
+                let key = holon_api::data_row_entity_uri(&row)
+                    .expect("Created event must have 'id' column");
                 let mut lock = self.data.lock_mut();
                 if let Some(existing) = lock.get(&key) {
                     // Defensive: a Created arriving for a row we already know
                     // about — treat as Updated to avoid losing the cell identity.
-                    existing.set(row);
+                    existing.set_neq(row);
                 } else {
                     lock.insert_cloned(key, Mutable::new(row));
                 }
             }
             holon_api::Change::Updated { id, data, .. } => {
                 let row = Arc::new(data.into_inner());
+                let key = holon_api::entity_uri_from_id_str(&id);
                 let mut lock = self.data.lock_mut();
-                if let Some(existing) = lock.get(&id) {
-                    existing.set(row);
+                if let Some(existing) = lock.get(&key) {
+                    // set_neq: CDC echoes of locally-applied writes arrive with
+                    // identical content — suppress them here so they don't fan
+                    // out into per-row widget re-interpretation downstream.
+                    existing.set_neq(row);
                 } else {
                     // Out-of-order: Updated before Created. Insert so we don't
                     // drop the row.
-                    lock.insert_cloned(id, Mutable::new(row));
+                    lock.insert_cloned(key, Mutable::new(row));
                 }
             }
             holon_api::Change::Deleted { id, .. } => {
-                self.data.lock_mut().remove(&id);
+                self.data
+                    .lock_mut()
+                    .remove(&holon_api::entity_uri_from_id_str(&id));
             }
             holon_api::Change::FieldsChanged {
                 entity_id, fields, ..
             } => {
+                let key = holon_api::entity_uri_from_id_str(&entity_id);
                 let lock = self.data.lock_ref();
-                if let Some(existing) = lock.get(&entity_id) {
+                if let Some(existing) = lock.get(&key) {
                     let mut patched = existing.get_cloned();
                     let map = Arc::make_mut(&mut patched);
                     for (name, _old, new) in fields {
                         map.insert(name, new);
                     }
-                    existing.set(patched);
+                    existing.set_neq(patched);
                 }
             }
         }
+    }
+
+    /// Drop every row whose key is not in `keys`. Used when a re-render's
+    /// initial snapshot batch arrives: the snapshot is authoritative for the
+    /// (possibly changed) query, so rows it doesn't contain are stale.
+    pub fn retain_keys(&self, keys: &[EntityUri]) {
+        let stale: Vec<EntityUri> = {
+            let lock = self.data.lock_ref();
+            lock.keys().filter(|k| !keys.contains(k)).cloned().collect()
+        };
+        if !stale.is_empty() {
+            let mut lock = self.data.lock_mut();
+            for key in stale {
+                lock.remove(&key);
+            }
+        }
+    }
+
+    /// Number of rows, without materializing them.
+    pub fn len(&self) -> usize {
+        self.data.lock_ref().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.lock_ref().is_empty()
     }
 
     /// Synchronous snapshot of current rows (Arc-wrapped, cheap to clone).
@@ -451,7 +529,7 @@ impl ReactiveRowSet {
     /// update via signal subscription, but the type system makes leaf-side
     /// `.set()` impossible (no method exists on `ReadOnlyMutable`).
     /// Returns `None` if the row hasn't been seen yet.
-    pub fn row_mutable(&self, id: &str) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
+    pub fn row_mutable(&self, id: &EntityUri) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
         self.data.lock_ref().get(id).map(|m| m.read_only())
     }
 
@@ -466,7 +544,7 @@ impl ReactiveRowSet {
     }
 
     /// Signal that fires the full row set whenever any row changes.
-    pub fn data_signal(&self) -> impl Signal<Item = Vec<(String, Arc<DataRow>)>> {
+    pub fn data_signal(&self) -> impl Signal<Item = Vec<(EntityUri, Arc<DataRow>)>> {
         self.data
             .entries_cloned()
             .map_signal(|(k, cell)| cell.signal_cloned().map(move |v| (k.clone(), v)))
@@ -477,7 +555,7 @@ impl ReactiveRowSet {
     ///
     /// Used by `MutableTree` to translate keyed VecDiff into tree operations.
     /// Unlike `row_signal_vec()`, preserves the entity ID for `RemoveAt` tracking.
-    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (String, Arc<DataRow>)> {
+    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (EntityUri, Arc<DataRow>)> {
         self.data
             .entries_cloned()
             .map_signal(|(k, cell)| cell.signal_cloned().map(move |v| (k.clone(), v)))
@@ -486,7 +564,7 @@ impl ReactiveRowSet {
 
 // ── ReactiveRowProvider impls ────────────────────────────────────────────
 //
-// Exposes `ReactiveRowSet` and `ReactiveQueryResults` through the trait
+// Exposes `ReactiveRowSet` and `ReactiveRenderedRows` through the trait
 // object that streaming-collection widgets consume. Synthetic providers
 // (focus_chain, ops_of, chain_ops — added in Step 8) implement the trait
 // directly without backing an engine query.
@@ -500,35 +578,44 @@ impl ReactiveRowProvider for ReactiveRowSet {
     }
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (String, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
         Box::pin(self.keyed_signal_vec())
     }
     fn cache_identity(&self) -> u64 {
         ptr_identity(self)
     }
-    fn row_mutable(&self, id: &str) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
+    fn row_mutable(&self, id: &EntityUri) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
         self.row_mutable(id)
     }
 }
 
-// ── ReactiveQueryResults ─────────────────────────────────────────────────
+// ── ReactiveRenderedRows ─────────────────────────────────────────────────
 
 /// Reactive state for one query's result set + how to render it.
 ///
 /// Composes a `ReactiveRowSet` (data accumulation) with a `RenderExpr`
 /// (how to visualize it). Signals combine both into `Signal<ReactiveViewModel>`.
-pub struct ReactiveQueryResults {
+pub struct ReactiveRenderedRows {
     render_expr: Mutable<RenderExpr>,
     rows: ReactiveRowSet,
     structure_ready: tokio::sync::Notify,
+    /// Generation whose data currently populates `rows`. Each re-render
+    /// (generation bump) starts a fresh data stream whose FIRST batch is a
+    /// full authoritative snapshot (`prepend_initial_data`) — when it
+    /// arrives we drop rows the new query no longer returns (see
+    /// `apply_event`). Without this, a structural change that alters the
+    /// underlying query (e.g. an org-file swap replacing the layout) leaves
+    /// ghost rows from the old query in the set forever.
+    data_generation: std::sync::atomic::AtomicU64,
 }
 
-impl ReactiveQueryResults {
+impl ReactiveRenderedRows {
     pub fn new() -> Self {
         Self {
             render_expr: Mutable::new(loading_expr()),
             rows: ReactiveRowSet::new(),
             structure_ready: tokio::sync::Notify::new(),
+            data_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -545,8 +632,8 @@ impl ReactiveQueryResults {
     /// True if the first Structure event hasn't arrived yet.
     pub fn is_loading(&self) -> bool {
         matches!(
-            self.render_expr.get_cloned(),
-            RenderExpr::FunctionCall { ref name, .. } if name == "loading"
+            &*self.render_expr.lock_ref(),
+            RenderExpr::FunctionCall { name, .. } if name == "loading"
         )
     }
 
@@ -576,7 +663,7 @@ impl ReactiveQueryResults {
                 generation,
             } => {
                 self.rows.set_generation(generation);
-                if self.render_expr.get_cloned() != render_expr {
+                if *self.render_expr.lock_ref() != render_expr {
                     self.render_expr.set(render_expr);
                 }
                 self.structure_ready.notify_waiters();
@@ -585,6 +672,17 @@ impl ReactiveQueryResults {
                 if generation != self.rows.generation() {
                     return;
                 }
+                // First batch of a new generation = the full authoritative
+                // snapshot of the (possibly different) query. Apply it, then
+                // retain only its keys so rows the new query no longer
+                // returns are dropped (apply-then-retain: surviving rows keep
+                // their Mutable cell identity and the set is never empty
+                // in between).
+                let is_first_batch_of_generation = self
+                    .data_generation
+                    .swap(generation, std::sync::atomic::Ordering::AcqRel)
+                    != generation;
+                let mut snapshot_keys: Vec<EntityUri> = Vec::new();
                 for change in batch.inner.items {
                     // UiEvent::Data carries Change<DataRow> (MapChange) for FFI compat,
                     // but the data was enriched by forward_data_stream → enrich_batch
@@ -596,7 +694,17 @@ impl ReactiveQueryResults {
                     let enriched = change.map(|data| {
                         EnrichedRow::from_raw(data, |_| std::collections::HashMap::new())
                     });
+                    if is_first_batch_of_generation {
+                        if let holon_api::Change::Created { data, .. } = &enriched {
+                            if let Some(key) = holon_api::data_row_entity_uri(data) {
+                                snapshot_keys.push(key);
+                            }
+                        }
+                    }
                     self.rows.apply_change(enriched, generation);
+                }
+                if is_first_batch_of_generation {
+                    self.rows.retain_keys(&snapshot_keys);
                 }
             }
         }
@@ -619,12 +727,12 @@ impl ReactiveQueryResults {
     }
 
     /// Signal that fires the full row set whenever any row changes.
-    pub fn data_signal(&self) -> impl Signal<Item = Vec<(String, Arc<DataRow>)>> {
+    pub fn data_signal(&self) -> impl Signal<Item = Vec<(EntityUri, Arc<DataRow>)>> {
         self.rows.data_signal()
     }
 
     /// Per-row keyed `SignalVec`. Delegates to the inner row set.
-    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (String, Arc<DataRow>)> {
+    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (EntityUri, Arc<DataRow>)> {
         self.rows.keyed_signal_vec()
     }
 
@@ -727,7 +835,7 @@ impl ReactiveQueryResults {
     }
 }
 
-impl ReactiveRowProvider for ReactiveQueryResults {
+impl ReactiveRowProvider for ReactiveRenderedRows {
     fn rows_snapshot(&self) -> Vec<Arc<DataRow>> {
         self.rows.snapshot_rows()
     }
@@ -736,14 +844,14 @@ impl ReactiveRowProvider for ReactiveQueryResults {
     }
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (String, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
         Box::pin(self.rows.keyed_signal_vec())
     }
-    fn row_mutable(&self, id: &str) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
+    fn row_mutable(&self, id: &EntityUri) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
         self.rows.row_mutable(id)
     }
     fn cache_identity(&self) -> u64 {
-        // Inner row-set pointer — two `ReactiveQueryResults` wrapping
+        // Inner row-set pointer — two `ReactiveRenderedRows` wrapping
         // the same rows would share identity, which is what the cache
         // wants.
         ptr_identity(&self.rows)
@@ -752,12 +860,12 @@ impl ReactiveRowProvider for ReactiveQueryResults {
 
 // ── ReactiveRegistry ─────────────────────────────────────────────────────
 
-/// Internal registry of ReactiveQueryResults, keyed by EntityUri.
+/// Internal registry of ReactiveRenderedRows, keyed by EntityUri.
 ///
 /// Thread-safe: the HashMap is behind a Mutex, but individual
-/// ReactiveQueryResults fields use futures-signals' lock-free primitives.
+/// ReactiveRenderedRows fields use futures-signals' lock-free primitives.
 struct ReactiveRegistry {
-    entries: Mutex<HashMap<EntityUri, Arc<ReactiveQueryResults>>>,
+    entries: Mutex<HashMap<EntityUri, Arc<ReactiveRenderedRows>>>,
 }
 
 impl ReactiveRegistry {
@@ -767,12 +875,12 @@ impl ReactiveRegistry {
         }
     }
 
-    fn get_or_create(&self, id: &EntityUri) -> Arc<ReactiveQueryResults> {
+    fn get_or_create(&self, id: &EntityUri) -> Arc<ReactiveRenderedRows> {
         self.entries
             .lock()
             .unwrap()
             .entry(id.clone())
-            .or_insert_with(|| Arc::new(ReactiveQueryResults::new()))
+            .or_insert_with(|| Arc::new(ReactiveRenderedRows::new()))
             .clone()
     }
 
@@ -821,7 +929,7 @@ pub struct UiState {
     /// Currently focused block (receives `is_focused = true` in predicate context).
     focused_block: Mutable<Option<EntityUri>>,
     /// Monotonically increasing counter, bumped when the viewport changes.
-    /// Included in `ReactiveQueryResults::reactive_signal` so that viewport
+    /// Included in `ReactiveRenderedRows::reactive_signal` so that viewport
     /// changes trigger re-interpretation of affected blocks (breakpoint updates).
     /// View mode and expand state are now handled by node-owned `Mutable`s
     /// (no engine-level caches).
@@ -831,6 +939,14 @@ pub struct UiState {
     /// `space` Mutable mirrors this, which starts the container-query
     /// cascade down through partitioning layout containers.
     viewport: Mutable<Option<ViewportInfo>>,
+    /// One-shot initial caret offset for the *next* editor to mount for a
+    /// given block. Set alongside `focused_block` by focus moves that need a
+    /// non-default caret position (split → 0, join → join boundary,
+    /// cross-block nav → placement offset). Consumed and cleared by the
+    /// mounting editor; if absent, the editor defaults to end-of-text. This
+    /// is how the initial caret reaches a backend-driven mount in-process,
+    /// replacing the old `editor_cursor` round-trip.
+    pending_caret_seed: Mutable<Option<(EntityUri, usize)>>,
 }
 
 impl UiState {
@@ -839,6 +955,7 @@ impl UiState {
             focused_block: Mutable::new(None),
             viewport_generation: Mutable::new(0),
             viewport: Mutable::new(None),
+            pending_caret_seed: Mutable::new(None),
         }
     }
 
@@ -854,7 +971,7 @@ impl UiState {
     /// Does NOT bump `ui_generation`. Focus is pure UI state that GPUI
     /// handles via `window.focus()` — the old editor's `on_blur` stops its
     /// blink cursor, the new editor's `on_focus` starts it. Bumping
-    /// `ui_generation` would cause LiveQueryView to replace its entire tree
+    /// `ui_generation` would cause live-query shells to replace their entire tree
     /// (re-creating editors for all 269 rows), producing multiple cursors.
     /// Mutate the focused-block signal directly. Crate-private: external
     /// callers (test code, frontend impls) MUST go through the
@@ -864,10 +981,56 @@ impl UiState {
     /// in `frontends/tui/TODO.md` items A2–A5; this visibility change
     /// (item B1) closes the door so it can't be reopened by accident.
     pub(crate) fn set_focus(&self, block_id: Option<EntityUri>) {
+        // Drop a stale caret seed unless it targets the block we're focusing
+        // (so a plain click defaults that block's caret to end-of-text, while
+        // a `set_focus_with_caret` that pre-armed the seed for this same block
+        // keeps it). The seed is read non-destructively, so this set/clear is
+        // the only thing that ages it out.
+        if let Some((ref seed_block, _)) = self.pending_caret_seed.get_cloned() {
+            if Some(seed_block) != block_id.as_ref() {
+                self.pending_caret_seed.set(None);
+            }
+        }
         if self.focused_block.get_cloned() == block_id {
             return;
         }
         self.focused_block.set(block_id);
+    }
+
+    /// Move focus to `block` and arm a one-shot initial caret offset for the
+    /// editor that mounts for it. Used by focus moves whose caret must NOT
+    /// default to end-of-text — split (offset 0), join (join boundary),
+    /// cross-block nav (placement offset). The mounting editor reads the seed
+    /// via [`peek_caret_seed`](Self::peek_caret_seed) (non-destructively, so
+    /// both the synchronous first-mount grab and the focus subscription can
+    /// apply it idempotently).
+    pub(crate) fn set_focus_with_caret(&self, block: EntityUri, offset: usize) {
+        self.pending_caret_seed.set(Some((block.clone(), offset)));
+        self.set_focus(Some(block)); // keeps the seed (same block)
+    }
+
+    /// Cloned `Mutable` handles for the focus signal + pending caret seed.
+    /// Used by the dispatch result-hook, which runs in a spawned task and
+    /// can't borrow `&self`. `Mutable` clones share state.
+    fn focus_handles(
+        &self,
+    ) -> (
+        Mutable<Option<EntityUri>>,
+        Mutable<Option<(EntityUri, usize)>>,
+    ) {
+        (self.focused_block.clone(), self.pending_caret_seed.clone())
+    }
+
+    /// Read the pending caret seed for `block` without consuming it. Returns
+    /// the armed offset, or `None` (caller defaults the caret to end-of-text).
+    /// Non-destructive so the first-mount grab and the focus subscription can
+    /// both apply it without racing; the seed is aged out by [`set_focus`]
+    /// when focus moves to a different block.
+    pub fn peek_caret_seed(&self, block: &EntityUri) -> Option<usize> {
+        match self.pending_caret_seed.get_cloned() {
+            Some((ref b, offset)) if b == block => Some(offset),
+            _ => None,
+        }
     }
 
     /// Get the currently focused block ID.
@@ -970,11 +1133,12 @@ impl UiState {
 
 // ── ReactiveEngine ───────────────────────────────────────────────────────
 
-/// The reactive middle layer. Replaces BlockWatchRegistry + AppState.
+/// The reactive middle layer.
 ///
-/// Manages per-block `ReactiveQueryResults` instances. Each block's UiEvent
-/// stream feeds its ReactiveQueryResults; the signal graph produces ViewModels
+/// Manages per-block `ReactiveRenderedRows` instances. Each block's UiEvent
+/// stream feeds its ReactiveRenderedRows; the signal graph produces ViewModels
 /// on demand. Frontends consume via `watch()` (stream) or `snapshot()` (polling).
+/// TODO: This looks like a god-class heavily violating SRP
 pub struct ReactiveEngine {
     registry: ReactiveRegistry,
     session: Arc<FrontendSession>,
@@ -993,16 +1157,11 @@ pub struct ReactiveEngine {
     /// across render passes so identical `(name, args)` calls share an
     /// Arc instead of each building a fresh provider.
     provider_cache: Arc<crate::provider_cache::ProviderCache>,
-    /// Shared editor-cursor signal source. Lazily spawned on the first
-    /// `watch_editor_cursor()` call so we have at most one CDC stream on
-    /// `current_editor_focus` regardless of how many editors subscribe.
-    editor_cursor: Mutex<Option<Mutable<Option<(String, i64)>>>>,
-    /// Optional `BlockCellRegistry`. When `Some`,
-    /// `BuilderServices::editable_text()` resolves
-    /// `live_field::<String>(EntityUri::block(id), "content")` through
-    /// it. Set by frontend DI factories that want CRDT-backed editors.
-    pub block_cell_registry:
-        Mutex<Option<Arc<holon::sync::block_cell_registry::BlockCellRegistry>>>,
+    /// Optional entity-cell registry (e.g. holon's Loro-backed
+    /// `BlockCellRegistry`). When `Some`, `BuilderServices::editable_text()`
+    /// resolves `live_field::<String>(EntityUri::block(id), "content")`
+    /// through it. Set by frontend DI factories that want CRDT-backed editors.
+    pub block_cell_registry: Mutex<Option<Arc<dyn crate::cell::EntityCellRegistry>>>,
     /// Shared slot used to recover an owned `Arc<dyn BuilderServices>` from
     /// inside `&self` methods. Populated by the owning frontend right after
     /// the engine is wrapped in an Arc; `clone_arc()` reads it.
@@ -1059,7 +1218,6 @@ impl ReactiveEngine {
             ui_state: UiState::new(),
             key_bindings,
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
-            editor_cursor: Mutex::new(None),
             block_cell_registry: Mutex::new(None),
             services_slot,
         }
@@ -1159,7 +1317,7 @@ impl ReactiveEngine {
             rows.len()
         );
         let ctx = RenderContext {
-            data_rows: rows,
+            data_rows: rows.into(),
             data_source: Some(results.clone()),
             ..Default::default()
         };
@@ -1175,7 +1333,7 @@ impl ReactiveEngine {
         let structural = results.structural_signal_with_ui_gen(
             Arc::new(move |expr: &RenderExpr, rows: &[Arc<DataRow>]| {
                 let ctx = RenderContext {
-                    data_rows: rows.to_vec(),
+                    data_rows: rows.to_vec().into(),
                     data_source: Some(results_for_signal.clone()),
                     ..Default::default()
                 };
@@ -1279,9 +1437,9 @@ impl ReactiveEngine {
         (self.interpret_fn)(&expr, &rows)
     }
 
-    /// Get the ReactiveQueryResults for a block, ensuring a watcher is running.
+    /// Get the ReactiveRenderedRows for a block, ensuring a watcher is running.
     /// Used by the interpreter's live_block builder and by tests.
-    pub fn ensure_watching(&self, block_id: &EntityUri) -> Arc<ReactiveQueryResults> {
+    pub fn ensure_watching(&self, block_id: &EntityUri) -> Arc<ReactiveRenderedRows> {
         let results = self.registry.get_or_create(block_id);
 
         let mut watchers = self.watchers.lock().unwrap();
@@ -1440,12 +1598,20 @@ impl ReactiveEngine {
                             }
                         }
                         reactive.apply_event(event);
-                        if bid.as_str() == "block:default-main-panel" {
-                            let rows_n = reactive.rows.snapshot_rows().len();
+                        if bid.as_str() == "block:default-main-panel"
+                            && tracing::enabled!(tracing::Level::TRACE)
+                        {
+                            let rows_n = reactive.rows.len();
                             tracing::trace!("[mp_event] post-apply rows.len={rows_n}");
                         }
-                        if let Ok(needle) = std::env::var("HOLON_TRACE_BLOCK_DATA") {
-                            if !needle.is_empty() && bid.as_str().contains(&needle) {
+                        static TRACE_BLOCK_DATA: std::sync::LazyLock<Option<String>> =
+                            std::sync::LazyLock::new(|| {
+                                std::env::var("HOLON_TRACE_BLOCK_DATA")
+                                    .ok()
+                                    .filter(|s| !s.is_empty())
+                            });
+                        if let Some(needle) = TRACE_BLOCK_DATA.as_ref() {
+                            if bid.as_str().contains(needle.as_str()) {
                                 let rows_n = reactive.rows.snapshot_rows().len();
                                 let ids: Vec<String> = reactive
                                     .rows
@@ -1485,54 +1651,86 @@ impl ReactiveEngine {
         results
     }
 
-    /// Watch a live query as a `Signal`. GPUI polls this directly.
-    pub fn watch_query_signal(
+    /// Watch a live query with per-row collection reactivity.
+    ///
+    /// Mirrors [`Self::watch_live`]: the tree is interpreted once with a live
+    /// `data_source`, so collections inside it stream per-row diffs through
+    /// their own `ReactiveView` pipelines. `structural_changes` fires only on
+    /// render-expression or ui-generation changes. Returns the watcher key so
+    /// the consumer can `unwatch` it on drop.
+    pub fn watch_query_live(
         &self,
-        sql: String,
+        query: String,
+        lang: QueryLanguage,
         render_expr: RenderExpr,
         query_context: Option<crate::QueryContext>,
-    ) -> Pin<Box<dyn Signal<Item = ReactiveViewModel> + Send>> {
-        let results = self.ensure_query_watching(sql, render_expr, query_context);
-        results
-            .reactive_signal_with_ui_gen(
-                self.interpret_fn.clone(),
-                self.ui_state.generation_signal(),
-            )
-            .boxed()
-    }
+        services: Arc<dyn BuilderServices>,
+    ) -> (EntityUri, LiveBlock) {
+        let (key, results) = self.ensure_query_watching(query, lang, render_expr, query_context);
 
-    /// Watch a live query as a `Stream`. For non-GPUI consumers.
-    pub fn watch_query(
-        &self,
-        sql: String,
-        render_expr: RenderExpr,
-        query_context: Option<crate::QueryContext>,
-    ) -> Pin<Box<dyn futures::Stream<Item = ReactiveViewModel> + Send>> {
-        Box::pin(
-            self.watch_query_signal(sql, render_expr, query_context)
-                .to_stream(),
+        let (expr, rows) = results.snapshot();
+        let ctx = RenderContext {
+            data_rows: rows.into(),
+            data_source: Some(results.clone()),
+            ..Default::default()
+        };
+        let tree = services.interpret(&expr, &ctx);
+        crate::reactive_view::start_reactive_views(&tree, &services, &self.runtime_handle);
+
+        let results_for_signal = results.clone();
+        let services_for_signal = services.clone();
+        let structural = results.structural_signal_with_ui_gen(
+            Arc::new(move |expr: &RenderExpr, rows: &[Arc<DataRow>]| {
+                let ctx = RenderContext {
+                    data_rows: rows.to_vec().into(),
+                    data_source: Some(results_for_signal.clone()),
+                    ..Default::default()
+                };
+                services_for_signal.interpret(expr, &ctx)
+            }),
+            self.ui_state.generation_signal(),
+        );
+        let structural_stream = Box::pin(structural.to_stream());
+
+        (
+            key,
+            LiveBlock {
+                tree,
+                structural_changes: structural_stream,
+            },
         )
     }
 
-    /// Ensure a query watcher is running and return its ReactiveQueryResults.
+    /// Ensure a query watcher is running and return its watcher key plus
+    /// ReactiveRenderedRows. Reuse bumps the watcher refcount — every caller
+    /// owes a matching [`Self::unwatch`] with the returned key.
     fn ensure_query_watching(
         &self,
-        sql: String,
+        query: String,
+        lang: QueryLanguage,
         render_expr: RenderExpr,
         query_context: Option<crate::QueryContext>,
-    ) -> Arc<ReactiveQueryResults> {
-        let key = EntityUri::from_raw(&format!("query:{}", hash_query(&sql)));
+    ) -> (EntityUri, Arc<ReactiveRenderedRows>) {
+        // ALLOW(entity_uri_from_raw): synthetic 'query:<hash>' registry cache key (no upstream EntityUri)
+        let key = EntityUri::from_raw(&format!(
+            "query:{}",
+            hash_query(&query, lang, &query_context)
+        ));
         let results = self.registry.get_or_create(&key);
         results.set_render_expr(render_expr);
         results.set_generation(1);
 
         let mut watchers = self.watchers.lock().unwrap();
-        if !watchers.contains_key(&key) {
+        if let Some(state) = watchers.get_mut(&key) {
+            state.refcount += 1;
+            return (key, results);
+        }
+        {
             let session = self.session.clone();
             let reactive = results.clone();
             let task = self.runtime_handle.spawn(async move {
                 match session
-                    .query_and_watch(sql, HashMap::new(), query_context)
+                    .watch_query(&query, lang, HashMap::new(), query_context)
                     .await
                 {
                     Ok(stream) => {
@@ -1544,7 +1742,7 @@ impl ReactiveEngine {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("query_and_watch failed: {e}");
+                        tracing::warn!("watch_query failed: {e}");
                     }
                 }
             });
@@ -1560,7 +1758,7 @@ impl ReactiveEngine {
             );
         }
 
-        results
+        (key, results)
     }
 
     /// Send a variant switch command to a block's watcher.
@@ -1574,87 +1772,6 @@ impl ReactiveEngine {
             .send(holon_api::WatcherCommand::SetVariant(variant))
             .await
             .map_err(|_| anyhow::anyhow!("Watcher channel closed"))
-    }
-
-    /// Watch the editor cursor state via CDC on `current_editor_focus`.
-    ///
-    /// Returns a Signal that fires `Some((block_id, cursor_offset))` when
-    /// an `editor_focus` operation updates the cursor (e.g., after split_block).
-    ///
-    /// Uses the raw CDC stream directly (no enrichment) because editor_cursor
-    /// rows have no `id` column — they're keyed by (region, block_id).
-    pub fn watch_editor_cursor(&self) -> Pin<Box<dyn Signal<Item = Option<(String, i64)>> + Send>> {
-        use futures::StreamExt;
-        use futures_signals::signal::SignalExt;
-        use holon_api::streaming::Change;
-
-        // Reuse the shared Mutable across all subscribers so we keep at
-        // most one CDC stream on `current_editor_focus` regardless of how
-        // many editors subscribe (one per visible row).
-        let mut guard = self.editor_cursor.lock().unwrap();
-        if let Some(ref cursor) = *guard {
-            return cursor.signal_cloned().boxed();
-        }
-        let cursor: Mutable<Option<(String, i64)>> = Mutable::new(None);
-        let writer = cursor.clone();
-
-        let engine = self.session.engine().clone();
-        self.runtime_handle.spawn(async move {
-            let sql =
-                "SELECT block_id, cursor_offset, updated_at FROM current_editor_focus WHERE region = 'main'"
-                    .to_string();
-            // Track the latest timestamp to ignore stale CDC re-emissions.
-            // When any editor_cursor row changes, the matview CDC may re-emit
-            // multiple rows — we only want the most recently updated one.
-            let mut latest_ts = String::new();
-            match engine.query_and_watch(sql, HashMap::new(), None).await {
-                Ok(stream) => {
-                    tokio::pin!(stream);
-                    while let Some(batch) = stream.next().await {
-                        let mut best: Option<(String, i64, String)> = None;
-                        for row_change in batch.inner.items {
-                            let data = match row_change.change {
-                                Change::Created { data, .. } | Change::Updated { data, .. } => data,
-                                _ => continue,
-                            };
-                            let ts = data
-                                .get("updated_at")
-                                .and_then(|v| v.as_string())
-                                .unwrap_or("")
-                                .to_string();
-                            if ts < latest_ts {
-                                continue;
-                            }
-                            let block_id = data
-                                .get("block_id")
-                                .and_then(|v| v.as_string())
-                                .map(|s| s.to_string());
-                            let offset = data
-                                .get("cursor_offset")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(0);
-                            if let Some(block_id) = block_id {
-                                if best.as_ref().map_or(true, |(_, _, t)| ts >= *t) {
-                                    best = Some((block_id, offset, ts));
-                                }
-                            }
-                        }
-                        if let Some((block_id, offset, ts)) = best {
-                            latest_ts = ts;
-                            let new_val = Some((block_id, offset));
-                            writer.set_if(new_val, |old, new| old != new);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("watch_editor_cursor: CDC setup failed: {e}");
-                }
-            }
-        });
-
-        let signal = cursor.signal_cloned().boxed();
-        *guard = Some(cursor);
-        signal
     }
 
     /// Decrement the refcount for a block's watcher. When the last consumer
@@ -1689,7 +1806,9 @@ pub fn loading_expr() -> RenderExpr {
     }
 }
 
-fn table_expr() -> RenderExpr {
+/// Default collection render expression for builder stubs that have no real
+/// block data (`HeadlessBuilderServices` in holon-app, `StubBuilderServices`).
+pub fn table_expr() -> RenderExpr {
     use holon_api::render_types::Arg;
     RenderExpr::FunctionCall {
         name: "table".to_string(),
@@ -1742,41 +1861,41 @@ impl BuilderServices for ReactiveEngine {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn resolve_profile(&self, row: &DataRow) -> Option<holon::entity_profile::RowProfile> {
+    fn resolve_profile(&self, row: &DataRow) -> Option<holon_api::RenderProfile> {
         self.session.resolve_row_profile(row)
     }
 
-    fn profile_signal(&self) -> Mutable<Arc<holon::entity_profile::ProfileCache>> {
-        self.session.engine().profile_resolver().profile_signal()
+    fn profile_signal(&self) -> Mutable<Arc<holon_api::entity_profile::ProfileCache>> {
+        self.session.profiles().profile_signal()
     }
 
     fn virtual_child_config(
         &self,
         entity_name: &str,
-    ) -> Option<holon::entity_profile::VirtualChildConfig> {
-        self.session
-            .engine()
-            .profile_resolver()
-            .virtual_child_config(entity_name)
+    ) -> Option<holon_api::entity_profile::VirtualChildConfig> {
+        self.session.profiles().virtual_child_config(entity_name)
     }
 
-    fn compile_to_sql(&self, query: &str, lang: QueryLanguage) -> Result<String> {
-        self.session.engine().compile_to_sql(query, lang)
-    }
-
-    fn start_query(
+    fn entity_operations(
         &self,
-        sql: String,
+        entity_name: &str,
+    ) -> Vec<holon_api::render_types::OperationDescriptor> {
+        self.session.profiles().operations_for(entity_name)
+    }
+
+    fn watch_query(
+        &self,
+        query: &str,
+        lang: QueryLanguage,
         ctx: Option<crate::QueryContext>,
-    ) -> Result<crate::RowChangeStream> {
-        // TODO: Change BuilderServices::start_query return type to EnrichedChangeStream.
-        // For now, use the raw BackendEngine path (bypasses FrontendSession enrichment).
-        // This is safe because start_query's output feeds into ReactiveEngine's
-        // ensure_query_watching which now also goes through the enriched path.
-        let session = self.session.clone();
+    ) -> Result<holon_api::EnrichedChangeStream> {
+        let engine = self
+            .session
+            .query_engine()
+            .ok_or_else(|| anyhow::anyhow!("no query engine in this (no-Turso) session"))?;
         let rt = self.runtime_handle.clone();
         std::thread::scope(|s| {
-            s.spawn(|| rt.block_on(session.engine().query_and_watch(sql, HashMap::new(), ctx)))
+            s.spawn(|| rt.block_on(engine.watch_query(query, lang, HashMap::new(), ctx)))
                 .join()
                 .unwrap()
         })
@@ -1809,14 +1928,28 @@ impl BuilderServices for ReactiveEngine {
         // The backend still writes the SQL tables; this just keeps the
         // frontend-side signal graph in sync.
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        maybe_clear_focus_on_delete(&self.ui_state, &intent);
 
-        crate::operations::dispatch_operation(
-            &self.runtime_handle,
-            &self.session,
-            &intent.entity_name,
-            intent.op_name,
-            intent.params,
-        );
+        // Fire-and-forget execute. The result-hook projects a structural
+        // op's focus result (`split_block`/`join_block`) straight onto the
+        // in-memory authority — no Turso `editor_cursor` round-trip. Focus
+        // handles are cloned in because the spawned task can't borrow `self`.
+        let session = self.session.clone();
+        let (focused_block, caret_seed) = self.ui_state.focus_handles();
+        let entity_name = intent.entity_name.clone();
+        let op_name = intent.op_name.clone();
+        let params = intent.params;
+        self.runtime_handle.spawn(async move {
+            match session
+                .execute_operation(&entity_name, &op_name, params)
+                .await
+            {
+                Ok(response) => {
+                    apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
+                }
+                Err(e) => tracing::error!("Operation {entity_name}.{op_name} failed: {e}"),
+            }
+        });
     }
 
     fn present_op(
@@ -1846,11 +1979,13 @@ impl BuilderServices for ReactiveEngine {
         );
     }
 
+    // TODO: I've seen other `dispatch_intent...` methods. How do these relate to each other? Anything to DRY?
     fn dispatch_intent_sync(
         &self,
         intent: crate::operations::OperationIntent,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         // Preference sets run inline — no async execute_operation path.
+        // TODO: The extra handling of "preferences" is not nice
         if intent.entity_name == "preferences" && intent.op_name == "set" {
             if let (Some(key), Some(value)) = (
                 intent.params.get("key").and_then(|v| v.as_string()),
@@ -1864,10 +1999,12 @@ impl BuilderServices for ReactiveEngine {
         }
 
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        maybe_clear_focus_on_delete(&self.ui_state, &intent);
 
         let session = self.session.clone();
+        let (focused_block, caret_seed) = self.ui_state.focus_handles();
         Box::pin(async move {
-            session
+            let response = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
                 .await
                 .with_context(|| {
@@ -1876,6 +2013,8 @@ impl BuilderServices for ReactiveEngine {
                         intent.entity_name, intent.op_name
                     )
                 })?;
+            // Same in-process structural-focus projection as `dispatch_intent`.
+            apply_structural_focus(&focused_block, &caret_seed, &intent.op_name, &response);
             Ok(())
         })
     }
@@ -1908,6 +2047,14 @@ impl BuilderServices for ReactiveEngine {
 
     fn focused_block_mutable(&self) -> Option<Mutable<Option<EntityUri>>> {
         Some(self.ui_state.focused_block_mutable())
+    }
+
+    fn set_focus_with_caret(&self, block: EntityUri, offset: usize) {
+        self.ui_state.set_focus_with_caret(block, offset);
+    }
+
+    fn peek_caret_seed(&self, block: &EntityUri) -> Option<usize> {
+        self.ui_state.peek_caret_seed(block)
     }
 
     fn provider_cache(&self) -> Option<Arc<crate::provider_cache::ProviderCache>> {
@@ -1944,25 +2091,15 @@ impl BuilderServices for ReactiveEngine {
         ReactiveEngine::watch_live(self, block_id, services)
     }
 
-    fn watch_query_signal(
+    fn watch_query_live(
         &self,
-        sql: String,
+        query: String,
+        lang: QueryLanguage,
         render_expr: holon_api::render_types::RenderExpr,
         query_context: Option<crate::QueryContext>,
-    ) -> std::pin::Pin<
-        Box<dyn futures_signals::signal::Signal<Item = crate::ReactiveViewModel> + Send>,
-    > {
-        ReactiveEngine::watch_query_signal(self, sql, render_expr, query_context)
-    }
-
-    fn watch_editor_cursor(
-        &self,
-    ) -> Option<
-        std::pin::Pin<
-            Box<dyn futures_signals::signal::Signal<Item = Option<(String, i64)>> + Send>,
-        >,
-    > {
-        Some(ReactiveEngine::watch_editor_cursor(self))
+        services: Arc<dyn BuilderServices>,
+    ) -> (EntityUri, crate::LiveBlock) {
+        ReactiveEngine::watch_query_live(self, query, lang, render_expr, query_context, services)
     }
 
     fn unwatch(&self, block_id: &EntityUri) {
@@ -1973,134 +2110,44 @@ impl BuilderServices for ReactiveEngine {
         self.runtime_handle.clone()
     }
 
-    fn popup_query(
+    fn search_link_candidates(
         &self,
-        sql: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>
-    {
+        filter: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<holon_api::LinkCandidate>>>
+                + Send
+                + 'static,
+        >,
+    > {
         let session = self.session.clone();
-        Box::pin(async move { session.execute_query(sql, HashMap::new(), None).await })
+        let filter = filter.to_string();
+        Box::pin(async move {
+            session
+                .query_engine()
+                .ok_or_else(|| anyhow::anyhow!("no query engine in this (no-Turso) session"))?
+                .search_link_candidates(&filter)
+                .await
+        })
     }
 
     fn editable_text(
         &self,
-        block_id: &str,
+        block_id: &EntityUri,
         field: &str,
     ) -> anyhow::Result<crate::cell::Cell<String>> {
         let guard = self.block_cell_registry.lock().unwrap();
         match &*guard {
             Some(reg) => {
                 use crate::cell::EntityCellRegistryExt;
-                let uri = EntityUri::block(block_id);
                 let reg_dyn: &dyn crate::cell::EntityCellRegistry = reg.as_ref();
-                reg_dyn.live_field::<String>(&uri, field)
+                reg_dyn.live_field::<String>(block_id, field)
             }
             None => Err(anyhow::anyhow!(
                 "editable_text not configured for this ReactiveEngine \
                  (BlockCellRegistry not wired)"
             )),
         }
-    }
-}
-
-/// Headless `BuilderServices` stub for MCP/tests that don't have a ReactiveEngine.
-pub struct HeadlessBuilderServices {
-    engine: Arc<holon::api::BackendEngine>,
-    interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
-    rt_handle: tokio::runtime::Handle,
-}
-
-impl HeadlessBuilderServices {
-    /// Construct from the current tokio runtime context. Panics loudly if
-    /// called outside a tokio runtime — all real call sites already are.
-    pub fn new(engine: Arc<holon::api::BackendEngine>) -> Self {
-        Self::with_handle(engine, tokio::runtime::Handle::current())
-    }
-
-    pub fn with_handle(
-        engine: Arc<holon::api::BackendEngine>,
-        rt_handle: tokio::runtime::Handle,
-    ) -> Self {
-        Self {
-            engine,
-            interpreter: Arc::new(crate::shadow_builders::build_shadow_interpreter()),
-            rt_handle,
-        }
-    }
-}
-
-impl BuilderServices for HeadlessBuilderServices {
-    fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
-        self.interpreter.interpret(expr, ctx, self)
-    }
-
-    fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
-        (table_expr(), vec![])
-    }
-
-    fn resolve_profile(&self, row: &DataRow) -> Option<holon::entity_profile::RowProfile> {
-        let (profile, _computed) = self.engine.profile_resolver().resolve_with_variants(row);
-        Some(profile.as_ref().clone())
-    }
-
-    fn profile_signal(&self) -> Mutable<Arc<holon::entity_profile::ProfileCache>> {
-        self.engine.profile_resolver().profile_signal()
-    }
-
-    fn compile_to_sql(&self, query: &str, lang: QueryLanguage) -> Result<String> {
-        self.engine.compile_to_sql(query, lang)
-    }
-
-    fn start_query(
-        &self,
-        _: String,
-        _: Option<crate::QueryContext>,
-    ) -> Result<crate::RowChangeStream> {
-        anyhow::bail!("HeadlessBuilderServices does not support live queries")
-    }
-
-    fn widget_state(&self, _: &str) -> WidgetState {
-        WidgetState::default()
-    }
-
-    fn set_widget_open(&self, _: &str, _: bool) {
-        // Headless services have no UI to toggle.
-    }
-
-    fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
-        tracing::warn!(
-            "HeadlessBuilderServices.dispatch_intent({}.{}) — no-op in headless mode",
-            intent.entity_name,
-            intent.op_name
-        );
-    }
-
-    fn present_op(
-        &self,
-        op: holon_api::render_types::OperationDescriptor,
-        _: HashMap<String, holon_api::Value>,
-    ) {
-        panic!(
-            "HeadlessBuilderServices::present_op({}.{}) — op_button must not be \
-             reached under a non-interactive services instance. Its YAML branch \
-             is gated by `if_space(<600)` in an interactive session; reaching \
-             this panic means the render path wired an interactive builder into \
-             a headless one — fix the render path, do not swallow this.",
-            op.entity_name, op.name
-        );
-    }
-
-    fn runtime_handle(&self) -> tokio::runtime::Handle {
-        self.rt_handle.clone()
-    }
-
-    fn popup_query(
-        &self,
-        sql: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>
-    {
-        let engine = self.engine.clone();
-        Box::pin(async move { engine.execute_query(sql, HashMap::new(), None).await })
     }
 }
 
@@ -2168,19 +2215,16 @@ impl BuilderServices for StubBuilderServices {
         (table_expr(), vec![])
     }
 
-    fn resolve_profile(&self, _: &DataRow) -> Option<holon::entity_profile::RowProfile> {
+    fn resolve_profile(&self, _: &DataRow) -> Option<holon_api::RenderProfile> {
         None
     }
 
-    fn compile_to_sql(&self, _: &str, _: QueryLanguage) -> Result<String> {
-        anyhow::bail!("StubBuilderServices does not support query compilation")
-    }
-
-    fn start_query(
+    fn watch_query(
         &self,
-        _: String,
+        _: &str,
+        _: QueryLanguage,
         _: Option<crate::QueryContext>,
-    ) -> Result<crate::RowChangeStream> {
+    ) -> Result<holon_api::EnrichedChangeStream> {
         anyhow::bail!("StubBuilderServices does not support live queries")
     }
 
@@ -2218,19 +2262,35 @@ impl BuilderServices for StubBuilderServices {
         self.rt_handle.clone()
     }
 
-    fn popup_query(
+    fn search_link_candidates(
         &self,
-        _: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>
-    {
-        Box::pin(async { anyhow::bail!("StubBuilderServices does not support popup_query") })
+        _: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<holon_api::LinkCandidate>>>
+                + Send
+                + 'static,
+        >,
+    > {
+        Box::pin(async {
+            anyhow::bail!("StubBuilderServices does not support search_link_candidates")
+        })
     }
 }
 
-fn hash_query(sql: &str) -> u64 {
+/// Stable watcher-registry key for a live query: source query + language +
+/// context ids. Including the context fixes a latent collision where two
+/// nodes with the same query but different contexts shared one watcher.
+fn hash_query(query: &str, lang: QueryLanguage, ctx: &Option<crate::QueryContext>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    sql.hash(&mut hasher);
+    query.hash(&mut hasher);
+    format!("{lang:?}").hash(&mut hasher);
+    if let Some(ctx) = ctx {
+        format!("{:?}", ctx.current_block_id).hash(&mut hasher);
+        format!("{:?}", ctx.context_parent_id).hash(&mut hasher);
+        ctx.context_path_prefix.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -2288,19 +2348,16 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
         return;
     }
     match intent.op_name.as_str() {
-        // `focus` and `editor_focus` both move focus; the latter is what
-        // a click dispatches (the GPUI click handler in
-        // `frontends/gpui/src/render/builders/render_entity.rs:47-62`
-        // calls `services.set_focus(Some(id))` *and* dispatches
-        // `editor_focus`). Headless drivers (TUI, Flutter) skip the
-        // direct `set_focus` call and rely solely on the dispatch,
-        // so mirroring `editor_focus` here keeps `focused_block` in
-        // sync across all frontends.
-        "focus" | "editor_focus" => {
+        // `navigation.focus` (sidebar / page navigation) has no CDC path back
+        // into `UiState`, so mirror it here. (Editor focus is no longer a
+        // dispatched op — clicks call `set_focus` directly and split/join set
+        // it from their op result; see ADR 0010.)
+        "focus" => {
             let block_id = intent
                 .params
                 .get("block_id")
                 .and_then(|v| v.as_string())
+                // ALLOW(entity_uri_from_raw): block_id from intent.params Value map (operation-intent ingest)
                 .map(|s| EntityUri::from_raw(s));
             // ALLOW(direct_focus_mutation): mirror of navigation.focus into UiState for value-fn graph; intentional, see surrounding comment.
             ui_state.set_focus(block_id);
@@ -2312,6 +2369,101 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
         // until the backend grows a synchronous "current focus" accessor.
         _ => {}
     }
+}
+
+/// Clear focus when the focused block is being deleted.
+///
+/// Editor focus is in-memory UI state (ADR 0010), so the signal owner must keep
+/// it consistent with the store — the `current_editor_focus` matview used to do
+/// this implicitly via IVM recomputation. A dangling focus on a deleted block
+/// would mis-route chord ops and keep the render-variant switch pointed at a
+/// gone block. Mirrors the PBT reference model's `clear_focus_if_deleted`.
+/// Called from both `dispatch_intent` and `dispatch_intent_sync`.
+fn maybe_clear_focus_on_delete(ui_state: &UiState, intent: &crate::operations::OperationIntent) {
+    if intent.op_name != "delete" {
+        return;
+    }
+    let Some(id) = intent.params.get("id").and_then(|v| v.as_string()) else {
+        return;
+    };
+    // ALLOW(entity_uri_from_raw): id from intent.params Value map (operation-intent ingest)
+    let deleted = EntityUri::from_raw(id);
+    if ui_state.focused_block().as_ref() == Some(&deleted) {
+        // ALLOW(direct_focus_mutation): clear focus of a deleted block, mirroring the reference model.
+        ui_state.set_focus(None);
+    }
+}
+
+/// Extract the post-op focus target from a structural focus-mover's response.
+///
+/// `split_block` / `join_block` return `Value::Object{block_id, cursor_offset}`
+/// (split → 0, join → join boundary). This replaces the old backend
+/// `editor_focus` follow-up: instead of routing focus back through the Turso
+/// `current_editor_focus` CDC stream, the frontend reads it straight off the
+/// operation result and moves the in-memory authority in-process.
+fn structural_focus_target(
+    op_name: &str,
+    response: &Option<holon_api::Value>,
+) -> Option<(EntityUri, usize)> {
+    if op_name != "split_block" && op_name != "join_block" {
+        return None;
+    }
+    let Some(holon_api::Value::Object(map)) = response.as_ref() else {
+        return None;
+    };
+    let block_id = map.get("block_id").and_then(|v| v.as_string())?;
+    let offset = map
+        .get("cursor_offset")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    // ALLOW(entity_uri_from_raw): block_id from a structural op response (operation-result ingest boundary)
+    Some((EntityUri::from_raw(&block_id), offset.max(0) as usize))
+}
+
+/// Apply a structural op's focus result to the in-memory authority + caret
+/// seed. Operates on cloned `Mutable` handles so it can run inside the
+/// spawned dispatch task (which can't borrow `&UiState`).
+fn apply_structural_focus(
+    focused_block: &Mutable<Option<EntityUri>>,
+    caret_seed: &Mutable<Option<(EntityUri, usize)>>,
+    op_name: &str,
+    response: &Option<holon_api::Value>,
+) {
+    if let Some((block, offset)) = structural_focus_target(op_name, response) {
+        caret_seed.set(Some((block.clone(), offset)));
+        if focused_block.get_cloned().as_ref() != Some(&block) {
+            focused_block.set(Some(block));
+        }
+    }
+}
+
+/// Dispatch `intents` as ONE ordered fire-and-forget chain: a single spawned
+/// task awaits each via `dispatch_intent_sync` in sequence, aborting on the
+/// first failure (loudly — the remaining intents must not run against state
+/// the failed one was supposed to establish).
+///
+/// This is the dispatch primitive for "structural ops are commit points"
+/// (docs/Architecture/UI.md): an editor flushing pending text before a
+/// split/join MUST order the flush before the structural op. Two
+/// `dispatch_intent` calls each spawn their own task and can reorder; this
+/// cannot. UI callers (GPUI handlers) stay non-blocking — the chain runs on
+/// the services' runtime.
+pub fn dispatch_intent_chain(
+    services: &Arc<dyn BuilderServices>,
+    intents: Vec<crate::operations::OperationIntent>,
+) {
+    let services = services.clone();
+    services.clone().runtime_handle().spawn(async move {
+        for intent in intents {
+            let label = format!("{}.{}", intent.entity_name, intent.op_name);
+            if let Err(e) = services.dispatch_intent_sync(intent).await {
+                tracing::error!(
+                    "dispatch_intent_chain: {label} failed — aborting remaining intents: {e:#}"
+                );
+                return;
+            }
+        }
+    });
 }
 
 /// Pure ViewModel construction: render expression + data rows + services → ViewModel tree.
@@ -2326,7 +2478,7 @@ pub fn interpret_pure(
     services: &dyn BuilderServices,
 ) -> ReactiveViewModel {
     let ctx = RenderContext {
-        data_rows: rows.to_vec(),
+        data_rows: rows.to_vec().into(),
         available_space: services.viewport_snapshot(),
         ..Default::default()
     };
@@ -2374,6 +2526,149 @@ pub struct LiveBlock {
 mod tests {
     use super::*;
     use holon_api::Value;
+
+    fn focus_intent(op: &str, id: &str) -> crate::operations::OperationIntent {
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(id.to_string()));
+        crate::operations::OperationIntent::new("block".into(), op.to_string(), params)
+    }
+
+    #[test]
+    fn regeneration_initial_snapshot_drops_rows_the_new_query_no_longer_returns() {
+        use holon_api::streaming::{
+            Batch, BatchMetadata, Change, ChangeOrigin, UiEvent, WithMetadata,
+        };
+
+        fn row(id: &str, content: &str) -> HashMap<String, Value> {
+            HashMap::from([
+                ("id".to_string(), Value::String(id.to_string())),
+                ("content".to_string(), Value::String(content.to_string())),
+            ])
+        }
+        fn data_event(gen: u64, rows: Vec<HashMap<String, Value>>) -> UiEvent {
+            UiEvent::Data {
+                batch: WithMetadata {
+                    inner: Batch {
+                        items: rows
+                            .into_iter()
+                            .map(|data| Change::Created {
+                                data,
+                                origin: ChangeOrigin::Local {
+                                    operation_id: None,
+                                    trace_id: None,
+                                },
+                            })
+                            .collect(),
+                    },
+                    metadata: BatchMetadata {
+                        relation_name: "t".into(),
+                        trace_context: None,
+                        sync_token: None,
+                        seq: 0,
+                    },
+                },
+                generation: gen,
+            }
+        }
+        fn structure_event(gen: u64) -> UiEvent {
+            UiEvent::Structure {
+                render_expr: RenderExpr::Literal {
+                    value: holon_api::Value::String(format!("expr-{gen}")),
+                },
+                candidates: Vec::new(),
+                generation: gen,
+            }
+        }
+        fn ids(rqr: &ReactiveRenderedRows) -> Vec<String> {
+            let (_, rows) = rqr.snapshot();
+            let mut v: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r.get("id").and_then(|x| x.as_string()).map(String::from))
+                .collect();
+            v.sort();
+            v
+        }
+
+        let rqr = ReactiveRenderedRows::new();
+        // Generation 1: query returns A + B.
+        rqr.apply_event(structure_event(1));
+        rqr.apply_event(data_event(
+            1,
+            vec![row("block:a", "1"), row("block:b", "1")],
+        ));
+        assert_eq!(ids(&rqr), vec!["block:a", "block:b"]);
+
+        // Generation 2 (query changed, e.g. layout swap): snapshot returns B + C.
+        // A must be dropped — it would otherwise live on as a ghost row.
+        rqr.apply_event(structure_event(2));
+        rqr.apply_event(data_event(
+            2,
+            vec![row("block:b", "2"), row("block:c", "2")],
+        ));
+        assert_eq!(ids(&rqr), vec!["block:b", "block:c"]);
+
+        // A second Data batch in the SAME generation is an incremental CDC
+        // delta, NOT a snapshot — it must not drop unmentioned rows.
+        rqr.apply_event(data_event(2, vec![row("block:d", "2")]));
+        assert_eq!(ids(&rqr), vec!["block:b", "block:c", "block:d"]);
+
+        // Stale-generation data is still discarded.
+        rqr.apply_event(data_event(1, vec![row("block:z", "stale")]));
+        assert_eq!(ids(&rqr), vec!["block:b", "block:c", "block:d"]);
+    }
+
+    #[test]
+    fn structural_focus_target_parses_split_join_response() {
+        let resp = Some(Value::Object(HashMap::from([
+            ("block_id".to_string(), Value::String("block:abc".into())),
+            ("cursor_offset".to_string(), Value::Integer(7)),
+        ])));
+        let (uri, off) = structural_focus_target("split_block", &resp).expect("parses");
+        assert_eq!(uri, EntityUri::block("abc"));
+        assert_eq!(off, 7);
+        // Non-structural ops are ignored.
+        assert!(structural_focus_target("set_field", &resp).is_none());
+        // Negative offsets clamp to 0 (never panics on `as usize`).
+        let neg = Some(Value::Object(HashMap::from([
+            ("block_id".to_string(), Value::String("block:x".into())),
+            ("cursor_offset".to_string(), Value::Integer(-3)),
+        ])));
+        assert_eq!(structural_focus_target("join_block", &neg).unwrap().1, 0);
+    }
+
+    #[test]
+    fn caret_seed_peek_is_non_destructive_and_aged_by_set_focus() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        let b = EntityUri::block("b");
+        ui.set_focus_with_caret(a.clone(), 5);
+        // Peek twice: same answer both times (non-destructive).
+        assert_eq!(ui.peek_caret_seed(&a), Some(5));
+        assert_eq!(ui.peek_caret_seed(&a), Some(5));
+        // Re-focusing the same block keeps the seed.
+        ui.set_focus(Some(a.clone()));
+        assert_eq!(ui.peek_caret_seed(&a), Some(5));
+        // Focusing a different block ages the seed out.
+        ui.set_focus(Some(b.clone()));
+        assert_eq!(ui.peek_caret_seed(&a), None);
+        assert_eq!(ui.peek_caret_seed(&b), None);
+    }
+
+    #[test]
+    fn clear_focus_on_delete_only_clears_the_focused_block() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        ui.set_focus(Some(a.clone()));
+        // Deleting a different block leaves focus intact.
+        maybe_clear_focus_on_delete(&ui, &focus_intent("delete", "block:b"));
+        assert_eq!(ui.focused_block(), Some(a.clone()));
+        // A non-delete op never clears.
+        maybe_clear_focus_on_delete(&ui, &focus_intent("set_field", "block:a"));
+        assert_eq!(ui.focused_block(), Some(a.clone()));
+        // Deleting the focused block clears it.
+        maybe_clear_focus_on_delete(&ui, &focus_intent("delete", "block:a"));
+        assert_eq!(ui.focused_block(), None);
+    }
 
     fn make_row(id: &str, content: &str) -> DataRow {
         let mut row = DataRow::new();
@@ -2429,7 +2724,7 @@ mod tests {
 
     #[tokio::test]
     async fn initial_state_is_loading() {
-        let rq = ReactiveQueryResults::new();
+        let rq = ReactiveRenderedRows::new();
         let interpret = Arc::new(test_interpret);
         let vm = poll_signal!(rq.reactive_signal(interpret));
         let debug = debug_tag(&vm);
@@ -2438,7 +2733,7 @@ mod tests {
 
     #[tokio::test]
     async fn structure_event_sets_render_expr() {
-        let rq = ReactiveQueryResults::new();
+        let rq = ReactiveRenderedRows::new();
         rq.apply_event(UiEvent::Structure {
             render_expr: RenderExpr::FunctionCall {
                 name: "table".to_string(),
@@ -2455,7 +2750,7 @@ mod tests {
 
     #[tokio::test]
     async fn data_event_adds_rows() {
-        let rq = ReactiveQueryResults::new();
+        let rq = ReactiveRenderedRows::new();
         rq.apply_event(UiEvent::Structure {
             render_expr: RenderExpr::FunctionCall {
                 name: "table".to_string(),
@@ -2489,7 +2784,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_data_ignored() {
-        let rq = ReactiveQueryResults::new();
+        let rq = ReactiveRenderedRows::new();
         rq.apply_event(UiEvent::Structure {
             render_expr: RenderExpr::FunctionCall {
                 name: "table".to_string(),
@@ -2524,7 +2819,7 @@ mod tests {
 
     #[tokio::test]
     async fn structure_does_not_clear_data() {
-        let rq = ReactiveQueryResults::new();
+        let rq = ReactiveRenderedRows::new();
         rq.apply_event(UiEvent::Structure {
             render_expr: RenderExpr::FunctionCall {
                 name: "table".to_string(),
@@ -2569,7 +2864,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_returns_current_state() {
-        let rq = ReactiveQueryResults::new();
+        let rq = ReactiveRenderedRows::new();
         rq.apply_event(UiEvent::Structure {
             render_expr: RenderExpr::FunctionCall {
                 name: "table".to_string(),
@@ -2618,7 +2913,7 @@ mod tests {
 
     #[tokio::test]
     async fn row_signal_vec_emits_per_row() {
-        let rq = ReactiveQueryResults::new();
+        let rq = ReactiveRenderedRows::new();
         rq.set_generation(1);
 
         rq.apply_change(

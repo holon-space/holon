@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 holon-api = { workspace = true }
+# For the BlockSnapshot bridge: build/compare the substrate-agnostic
+# `BlockQuerySource` capture shape against generated blocks.
+holon-core = { workspace = true }
 # Used internally for OrgBlockExt — the canonical block-field accessors today
 # (level/tags/priority/task_state/scheduled/deadline/sequence/drawer_properties).
 # These are domain-level concepts even though the trait lives in the org crate;

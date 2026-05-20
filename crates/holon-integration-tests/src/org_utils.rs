@@ -46,12 +46,12 @@ pub fn serialize_blocks_to_org_with_doc(
     doc_block: Option<&Block>,
 ) -> String {
     let mut root_blocks: Vec<&&Block> = blocks.iter().filter(|b| b.parent_id == *doc_uri).collect();
-    // Match production OrgRenderer sorting: source first, then sequence, then ID
+    // Match production OrgRenderer sorting: section content (Source/Image) first,
+    // then sequence, then ID — via the one domain rule (ADR 0005).
     root_blocks.sort_by(|a, b| {
-        let a_is_source = (a.content_type == ContentType::Source) as u8;
-        let b_is_source = (b.content_type == ContentType::Source) as u8;
-        b_is_source
-            .cmp(&a_is_source)
+        a.content_type
+            .sibling_order_group()
+            .cmp(&b.content_type.sibling_order_group())
             .then_with(|| a.sequence().cmp(&b.sequence()))
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
@@ -219,12 +219,12 @@ pub fn serialize_block_recursive(
         .iter()
         .filter(|b| b.parent_id.as_raw_str() == block.id.as_str())
         .collect();
-    // Match production OrgRenderer sorting: source first, then sequence, then ID
+    // Match production OrgRenderer sorting: section content (Source/Image) first,
+    // then sequence, then ID — via the one domain rule (ADR 0005).
     children.sort_by(|a, b| {
-        let a_is_source = (a.content_type == ContentType::Source) as u8;
-        let b_is_source = (b.content_type == ContentType::Source) as u8;
-        b_is_source
-            .cmp(&a_is_source)
+        a.content_type
+            .sibling_order_group()
+            .cmp(&b.content_type.sibling_order_group())
             .then_with(|| a.sequence().cmp(&b.sequence()))
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
@@ -258,15 +258,12 @@ pub fn assign_reference_sequences(blocks: &mut [Block]) {
         if children.iter().any(|b| b.sequence() > 0) {
             continue;
         }
-        let mut sorted: Vec<(String, bool)> = children
+        let mut sorted: Vec<(String, u8)> = children
             .iter()
-            .map(|b| (b.id.to_string(), b.content_type == ContentType::Source))
+            .map(|b| (b.id.to_string(), b.content_type.sibling_order_group()))
             .collect();
-        sorted.sort_by(|(a_id, a_src), (b_id, b_src)| {
-            (*b_src as u8)
-                .cmp(&(*a_src as u8))
-                .then_with(|| a_id.cmp(b_id))
-        });
+        sorted
+            .sort_by(|(a_id, a_grp), (b_id, b_grp)| a_grp.cmp(b_grp).then_with(|| a_id.cmp(b_id)));
         for (i, (id, _)) in sorted.iter().enumerate() {
             seq_map.insert(id.clone(), i as i64);
         }
@@ -291,21 +288,22 @@ pub fn assign_reference_sequences_canonical(blocks: &mut [Block]) {
 
     let mut seq_map: HashMap<String, i64> = HashMap::new();
     for parent_id in &parent_ids {
-        let mut children: Vec<(String, bool, i64)> = blocks
+        let mut children: Vec<(String, u8, i64)> = blocks
             .iter()
             .filter(|b| b.parent_id.as_raw_str() == parent_id.as_str())
             .map(|b| {
                 (
                     b.id.to_string(),
-                    b.content_type == ContentType::Source,
+                    b.content_type.sibling_order_group(),
                     b.sequence(),
                 )
             })
             .collect();
-        // Match production OrgRenderer sorting: source first, then sequence, then ID
-        children.sort_by(|(a_id, a_src, a_seq), (b_id, b_src, b_seq)| {
-            (*b_src as u8)
-                .cmp(&(*a_src as u8))
+        // Match production OrgRenderer sorting: section content (Source/Image)
+        // first, then sequence, then ID — via the one domain rule (ADR 0005).
+        children.sort_by(|(a_id, a_grp, a_seq), (b_id, b_grp, b_seq)| {
+            a_grp
+                .cmp(b_grp)
                 .then_with(|| a_seq.cmp(b_seq))
                 .then_with(|| a_id.cmp(b_id))
         });

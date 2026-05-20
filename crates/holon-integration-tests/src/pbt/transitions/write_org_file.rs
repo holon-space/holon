@@ -8,79 +8,117 @@
 
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
-use regex::Regex;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::SutHandle;
+use crate::pbt::types::{apply_org_headline_tag_split, normalize_content_for_org_roundtrip};
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 
-use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_api::{ContentType, EntityUri, SourceLanguage};
 use holon_orgmode::OrgBlockExt;
+use holon_orgmode::OrgDocumentExt;
+use holon_orgmode::OrgRenderer;
 
-/// Write an org file to the temp directory (before app starts).
+/// Seed a document's blocks before the app starts.
+///
+/// The generator produces `Block` instances directly (it always did, then
+/// threw them away by rendering to org text). This transition carries those
+/// blocks and decides how to materialise them against the SUT: serialise to
+/// org text and write a file for a Turso/org wiring, or write them straight
+/// into the Loro doc for a no-Turso wiring. The reference-state effect is the
+/// same either way — the blocks are inserted as-is, with no re-parsing.
+///
+/// The generated blocks are parented to a `gen-placeholder` document uri; the
+/// real per-document uri is resolved in `apply_to_ref` (and the placeholder is
+/// also what the org renderer uses as the file id on the SUT side, so the
+/// emitted text is byte-identical to the previous text-first generator).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WriteOrgFile {
     pub filename: String,
-    pub content: String,
+    pub blocks: Vec<Block>,
+    /// Custom `#+TODO:` keyword set for this file (extended-gen axis 5).
+    /// `None` = no header, parser defaults apply. `#[serde(default)]` keeps
+    /// pre-axis-5 capture JSONs loadable.
+    #[serde(default)]
+    pub keyword_set: Option<crate::pbt::generators::TodoKeywordSet>,
 }
 
-/// Parse the `#+TODO:` directive from raw org content. Returns the full
-/// keyword set (active and done keywords, in order). Returns `None` if
-/// no `#+TODO:` line is present.
-///
-/// Self-contained mirror of the keyword set the production org parser
-/// will pick up — used so `apply_to_ref` doesn't need to read randomly-
-/// initialised `state.keyword_set` and can instead derive everything
-/// from `self.content`.
-fn parse_todo_directive(content: &str) -> Option<Vec<String>> {
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("#+TODO:") {
-            // `#+TODO: TODO DOING | DONE CANCELLED` — split off the `|` divider
-            // and collect every non-empty whitespace-separated token.
-            let kws: Vec<String> = rest
-                .split_whitespace()
-                .filter(|tok| *tok != "|")
-                .map(|tok| tok.to_string())
-                .collect();
-            if kws.is_empty() {
-                return None;
-            }
-            return Some(kws);
-        }
+/// The placeholder document uri the generator parents top-level blocks to.
+/// Top-level headings carry this as their `parent_id`; `apply_to_ref` remaps
+/// it to the resolved per-document uri, and the SUT-side renderer uses it as
+/// the file id so the emitted org text matches the prior generator output.
+const GEN_PLACEHOLDER: &str = "gen-placeholder";
+
+impl WriteOrgFile {
+    /// Build a `WriteOrgFile` from raw org text. Used by the Gherkin step
+    /// matcher, where authors write org content directly in a docstring. Parses
+    /// the text with the production org parser, then reparents top-level blocks
+    /// onto the `GEN_PLACEHOLDER` document uri so they flow through the same
+    /// seeding path as generator-produced blocks.
+    pub fn from_org_text(filename: String, content: &str) -> anyhow::Result<Self> {
+        let placeholder = EntityUri::block(GEN_PLACEHOLDER);
+        let parsed = holon_orgmode::parse_org_file(
+            std::path::Path::new(&filename),
+            content,
+            &placeholder,
+            std::path::Path::new("."),
+        )?;
+        let doc_id = parsed.document.id.clone();
+        let blocks = parsed
+            .blocks
+            .into_iter()
+            .map(|mut b| {
+                if b.parent_id == doc_id {
+                    b.parent_id = placeholder.clone();
+                }
+                b
+            })
+            .collect();
+        Ok(Self {
+            filename,
+            blocks,
+            keyword_set: None,
+        })
     }
-    None
 }
 
 impl TransitionFactory<ReferenceState> for WriteOrgFile {
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let pre_startup_file_count = state.documents.len();
+        let pre_startup_file_count = state.files.documents.len();
         let file_weight = if pre_startup_file_count < 3 { 3 } else { 1 };
 
-        // Temporarily disable layout overrides to confirm the asymmetry-fix
-        // path on a vanilla seed layout. Restore to `true` after verification.
+        // Layout overrides (custom `index.org` query layouts) are OFF by
+        // default: a vanilla seed layout renders blocks interactively, so the
+        // edit/split/cursor transitions are reachable. Opt back in with
+        // `HOLON_PBT_LAYOUT_OVERRIDE=1` to exercise custom-layout paths.
         let state_for_preconditions = state.clone();
-        let strat = crate::pbt::generators::generate_org_file_content_with_keywords(
-            None,
-            std::env::var("HOLON_PBT_NO_LAYOUT_OVERRIDE").is_err(), // LAYOUT_MUTATIONS_ENABLED
-        )
-        .prop_filter("WriteOrgFile preconditions", move |(filename, content)| {
-            WriteOrgFile {
-                filename: filename.clone(),
-                content: content.clone(),
-            }
-            .preconditions(&state_for_preconditions)
-            .is_good()
-        })
-        .prop_map(|(filename, content)| WriteOrgFile { filename, content })
-        .boxed();
+        let allow_index_override = std::env::var("HOLON_PBT_LAYOUT_OVERRIDE").is_ok();
+        // Axis 5 (promoted 2026-06-10): ~half the files carry a custom
+        // `#+TODO:` keyword set, emitted as the org header on the SUT side
+        // and adopted by the reference doc block.
+        let strat = proptest::option::of(crate::pbt::generators::todo_keyword_set_strategy())
+            .prop_flat_map(move |keyword_set| {
+                crate::pbt::generators::generate_org_file_content_with_keywords(
+                    keyword_set.clone(),
+                    allow_index_override,
+                )
+                .prop_map(move |(filename, blocks)| WriteOrgFile {
+                    filename,
+                    blocks,
+                    keyword_set: keyword_set.clone(),
+                })
+            })
+            .prop_filter("WriteOrgFile preconditions", move |t| {
+                t.preconditions(&state_for_preconditions).is_good()
+            })
+            .boxed();
 
         Validated::Good((file_weight, strat))
     }
@@ -92,7 +130,10 @@ impl TransitionRef<ReferenceState> for WriteOrgFile {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![];
 
-        // Reject if any block IDs in this file already exist under a different document.
+        // Reject if any heading block in this file already exists under a
+        // different document. Mirrors the previous `:ID:`-drawer collision
+        // check: only text/heading blocks carry an `:ID:` drawer, so source
+        // blocks (`{id}::src::N`) are excluded.
         let doc_name = std::path::Path::new(self.filename.as_str())
             .file_stem()
             .and_then(|s| s.to_str())
@@ -100,18 +141,18 @@ impl TransitionRef<ReferenceState> for WriteOrgFile {
         let doc_uri = state
             .doc_uri_by_name(doc_name)
             .unwrap_or_else(|| EntityUri::block("precondition-placeholder"));
-        let id_re = Regex::new(r":ID:\s*(\S+)").unwrap();
-        let mut any_collision = false;
-        for caps in id_re.captures_iter(&self.content) {
-            let block_id = caps.get(1).unwrap().as_str();
-            let block_entity = EntityUri::block(block_id);
-            if let Some(existing_doc) = state.block_state.block_documents.get(&block_entity)
-                && *existing_doc != doc_uri
-            {
-                any_collision = true;
-                break;
-            }
-        }
+        let any_collision = self
+            .blocks
+            .iter()
+            .filter(|b| b.content_type != holon_api::ContentType::Source)
+            .any(|b| {
+                state
+                    .domain
+                    .block_state
+                    .block_documents
+                    .get(&b.id)
+                    .is_some_and(|existing_doc| *existing_doc != doc_uri)
+            });
         checks.push(check(!any_collision, Reason::BlockIdAlreadyExists));
 
         checks
@@ -130,11 +171,13 @@ impl TransitionRef<ReferenceState> for WriteOrgFile {
             .doc_uri_by_name(&doc_name)
             .unwrap_or_else(|| state.next_synthetic_doc_uri());
         state
+            .files
             .documents
             .insert(doc_uri.clone(), self.filename.clone());
 
         // Remove old content blocks from this document (handles re-writing the same file)
         let old_block_ids: Vec<EntityUri> = state
+            .domain
             .block_state
             .block_documents
             .iter()
@@ -142,184 +185,131 @@ impl TransitionRef<ReferenceState> for WriteOrgFile {
             .map(|(id, _)| id.clone())
             .collect();
         for id in &old_block_ids {
-            state.block_state.blocks.remove(id);
-            state.block_state.block_documents.remove(id);
-            state.layout_blocks.remove(id);
+            state.domain.block_state.blocks.remove(id);
+            state.domain.block_state.block_documents.remove(id);
+            state.domain.layout_blocks.remove(id);
+            // A same-id rewrite (index.org layout swap) re-inserts the parsed
+            // expr below; leaving the stale entry made `root_render_expr()`
+            // serve the PREVIOUS layout's template when the new one failed
+            // the `render_expr_from_rhai` exact-match lookup.
+            state.domain.render_expressions.remove(id);
         }
-
-        // Parse #+TODO from self.content so the transition is self-contained:
-        // fixture replay must reproduce todo-keyword behaviour from the saved
-        // transitions alone, without depending on a randomly-initialised
-        // state.keyword_set (the previous source of hidden randomness — see
-        // devlog/2026-05-19-phase-c-validation-diagnosis.md).
-        let parsed_todo_keywords: Option<Vec<String>> = parse_todo_directive(&self.content);
 
         // Add the page block (tags ⊇ ["Page"]) for this org file.
         let mut doc_block =
             Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name.clone());
         doc_block.set_page(true);
-        if let Some(ref kws) = parsed_todo_keywords {
-            use holon_api::types::TaskState;
-            use holon_orgmode::models::OrgDocumentExt;
-            let states: Vec<TaskState> = kws.iter().map(|kw| TaskState::from_keyword(kw)).collect();
-            doc_block.set_todo_keywords(Some(states));
+        // Mirror the SUT parser: a `#+TODO:` header lands on the document
+        // block as the `todo_keywords` property (parser.rs:164).
+        if let Some(ks) = &self.keyword_set {
+            doc_block.set_todo_keywords(Some(ks.0.clone()));
         }
-        state.block_state.blocks.insert(doc_uri.clone(), doc_block);
         state
+            .domain
+            .block_state
+            .blocks
+            .insert(doc_uri.clone(), doc_block);
+        state
+            .domain
             .block_state
             .block_documents
             .insert(doc_uri.clone(), doc_uri.clone());
 
-        // Parse block IDs from content and add to reference state
-        let id_regex = Regex::new(r":ID:\s*(\S+)").unwrap();
-        // `:REQUIRES:` (org-edna dependency drawer key). The production org
-        // parser pulls this out of the drawer into `Block.requires` (a Vec of
-        // `block:` URIs); the reference model must mirror that so the
-        // `requires` edge field compares equal in `assert_blocks_equivalent`.
-        // Values are bare slugs (comma- or whitespace-separated), promoted to
-        // `block:` URIs at the boundary (matches `parser.rs` REQUIRES handling).
-        let requires_regex = Regex::new(r"(?i):REQUIRES:\s*(.+)").unwrap();
-        let headline_regex = Regex::new(r"^\*+\s+(.+)$").unwrap();
-        let src_begin_regex = Regex::new(r"(?i)#\+begin_src\s+(\w+)(?:\s.*)?$").unwrap();
-        let src_id_regex = Regex::new(r":id\s+(\S+)").unwrap();
-        let src_end_regex = Regex::new(r"(?i)#\+end_src").unwrap();
-
-        let mut current_headline: Option<String> = None;
-        let mut current_block_id: Option<EntityUri> = None;
-        let mut in_source_block = false;
-        let mut source_language: Option<String> = None;
-        let mut source_content = String::new();
-        let mut source_block_id: Option<String> = None;
-        let mut source_block_index = 0;
-        let mut sequence_counter: i64 = 0;
-
-        for line in self.content.lines() {
-            if let Some(caps) = headline_regex.captures(line) {
-                current_headline = Some(caps.get(1).unwrap().as_str().trim().to_string());
-                source_block_index = 0;
-            } else if let Some(caps) = id_regex.captures(line) {
-                let block_id = caps.get(1).unwrap().as_str().to_string();
-                let raw_headline = current_headline.clone().unwrap_or_default();
-
-                let known_keywords: Vec<String> =
-                    parsed_todo_keywords.clone().unwrap_or_else(|| {
-                        vec!["TODO".to_string(), "DOING".to_string(), "DONE".to_string()]
-                    });
-                let (content, task_keyword) = known_keywords
-                    .iter()
-                    .find_map(|kw| {
-                        raw_headline.strip_prefix(kw.as_str()).and_then(|rest| {
-                            if rest.is_empty() || rest.starts_with(' ') {
-                                Some((rest.trim_start().to_string(), kw.clone()))
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .map(|(c, kw)| (c, Some(kw)))
-                    .unwrap_or((raw_headline, None));
-
-                let block_uri = EntityUri::block(&block_id);
-                let mut block = Block::new_text(block_uri.clone(), doc_uri.clone(), content);
-                if let Some(kw) = task_keyword {
-                    use holon_api::types::TaskState;
-                    block.set_task_state(Some(TaskState::from_keyword(&kw)));
-                }
-                block.set_sequence(sequence_counter);
-                sequence_counter += 1;
-                state
-                    .block_state
-                    .block_documents
-                    .insert(block_uri.clone(), doc_uri.clone());
-                current_block_id = Some(block_uri.clone());
-                state.block_state.blocks.insert(block_uri, block);
-            } else if let Some(caps) = requires_regex.captures(line) {
-                // `:REQUIRES: a b` (or `a,b`) on the block whose drawer we're
-                // in. Bare slugs → `block:` URIs, matching the production
-                // parser. Single targets are the common generated shape.
-                if let Some(parent_key) = &current_block_id {
-                    let reqs: Vec<String> = caps
-                        .get(1)
-                        .unwrap()
-                        .as_str()
-                        .split(|c: char| c == ',' || c.is_whitespace())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| EntityUri::block(s).to_string())
-                        .collect();
-                    if let Some(block) = state.block_state.blocks.get_mut(parent_key) {
-                        block.requires = reqs;
-                    }
-                }
-            } else if let Some(caps) = src_begin_regex.captures(line) {
-                in_source_block = true;
-                source_language = Some(caps.get(1).unwrap().as_str().to_string());
-                source_content.clear();
-                source_block_id = src_id_regex
-                    .captures(line)
-                    .map(|c| c.get(1).unwrap().as_str().to_string());
-            } else if src_end_regex.is_match(line) && in_source_block {
-                if let Some(parent_key) = &current_block_id {
-                    let parent_block = &state.block_state.blocks[parent_key];
-                    let parent_uri = parent_block.id.clone();
-                    let src_id = source_block_id.take().unwrap_or_else(|| {
-                        format!("{}::src::{}", parent_uri.id(), source_block_index)
-                    });
-                    let src_uri = EntityUri::block(&src_id);
-                    let mut src_block = Block {
-                        id: src_uri.clone(),
-                        parent_id: parent_uri,
-                        content: source_content.trim().to_string(),
-                        content_type: holon_api::ContentType::Source,
-                        source_language: source_language
-                            .as_ref()
-                            .map(|s| s.parse::<holon_api::SourceLanguage>().unwrap()),
-                        created_at: 0,
-                        updated_at: 0,
-                        ..Block::default()
-                    };
-                    if self.filename == "index.org"
-                        && let Some(sl) = src_block.source_language.as_ref()
-                    {
-                        if sl.as_query().is_some() {
-                            state.layout_blocks.headline_ids.insert(parent_key.clone());
-                            state.layout_blocks.query_source_ids.insert(src_uri.clone());
-                        } else if matches!(sl, holon_api::SourceLanguage::Render) {
-                            state.layout_blocks.headline_ids.insert(parent_key.clone());
-                            state
-                                .layout_blocks
-                                .render_source_ids
-                                .insert(src_uri.clone());
-                            if let Some(expr) = super::super::reference_state::render_expr_from_rhai(
-                                src_block.content.as_str(),
-                            ) {
-                                state.render_expressions.insert(src_uri.clone(), expr);
-                            }
-                        }
-                    }
-                    src_block.set_sequence(sequence_counter);
-                    sequence_counter += 1;
-                    state.block_state.blocks.insert(src_uri.clone(), src_block);
-                    state
-                        .block_state
-                        .block_documents
-                        .insert(src_uri, doc_uri.clone());
-                    source_block_index += 1;
-                }
-                in_source_block = false;
-                source_language = None;
-                source_content.clear();
-            } else if in_source_block {
-                if !source_content.is_empty() {
-                    source_content.push('\n');
-                }
-                source_content.push_str(line);
+        // Insert the generated blocks directly into the reference model — no
+        // re-parsing. The generator already built these `Block`s (it used to
+        // render them to org text and throw them away); we keep them.
+        //
+        // Top-level headings are parented to `GEN_PLACEHOLDER`; remap those to
+        // the resolved document uri. Source/child blocks keep their real parent
+        // (the heading uri). The `ID` property is a renderer hint (it makes the
+        // org renderer emit the `:ID:` drawer on the SUT side) — it is not part
+        // of the parsed block on either side, so strip it from the reference
+        // model to match what the SUT's org parser produces.
+        //
+        // Layout classification (query/render source ids, render expressions)
+        // is derived from each block's `source_language`, mirroring the org
+        // parser's index.org handling.
+        let placeholder = EntityUri::block(GEN_PLACEHOLDER);
+        let is_index = self.filename == "index.org";
+        for (seq, generated) in self.blocks.iter().enumerate() {
+            let mut block = generated.clone();
+            if block.parent_id == placeholder {
+                block.parent_id = doc_uri.clone();
             }
+            block.properties.remove("ID");
+            // The SUT renders these blocks to org text and re-parses them; the
+            // org parser `.trim()`s headlines and `.trim_end()`s content. The
+            // reference takes the generated blocks verbatim, so a generator-
+            // produced trailing space (the headline strategy permits one)
+            // survives here while the SUT strips it — `inv-displayed-text`
+            // then diverges by that space. Normalize to mirror the round-trip,
+            // matching `BulkExternalAdd` and `Mutation::apply_to`.
+            block.content = normalize_content_for_org_roundtrip(&block.content, block.content_type);
+            // A trailing `:tag:` group on the title line re-parses as org TAGS.
+            apply_org_headline_tag_split(&mut block);
+            // Carry the file/generation order into `sequence` so the canonical
+            // re-sequencing below recovers the same sibling order the SUT gets
+            // from parsing the rendered org (the renderer is a stable sort by
+            // `sibling_order_group`, preserving this order within each group).
+            // Mirrors the old text-parse path's `set_sequence(sequence_counter)`.
+            block.set_sequence(seq as i64);
+            let block_uri = block.id.clone();
+
+            if is_index
+                && block.content_type == ContentType::Source
+                && let Some(sl) = block.source_language.as_ref()
+            {
+                if sl.as_query().is_some() {
+                    state
+                        .domain
+                        .layout_blocks
+                        .headline_ids
+                        .insert(block.parent_id.clone());
+                    state
+                        .domain
+                        .layout_blocks
+                        .query_source_ids
+                        .insert(block_uri.clone());
+                } else if matches!(sl, SourceLanguage::Render) {
+                    state
+                        .domain
+                        .layout_blocks
+                        .headline_ids
+                        .insert(block.parent_id.clone());
+                    state
+                        .domain
+                        .layout_blocks
+                        .render_source_ids
+                        .insert(block_uri.clone());
+                    // Real DSL parse (same path StartApp's seed classification
+                    // uses) — the exact-match `render_expr_from_rhai` lookup
+                    // silently dropped generator templates not in the
+                    // `valid_render_expressions` list (e.g. the GQL/SQL index
+                    // variants' static `row(text("…"))` templates), leaving
+                    // `root_render_expr()` stale or empty after a swap.
+                    if let Ok(expr) = state.interpreter.parse_dsl(block.content.as_str()) {
+                        state
+                            .domain
+                            .render_expressions
+                            .insert(block_uri.clone(), expr);
+                    }
+                }
+            }
+
+            state
+                .domain
+                .block_state
+                .block_documents
+                .insert(block_uri.clone(), doc_uri.clone());
+            state.domain.block_state.blocks.insert(block_uri, block);
         }
 
         // Re-assign sequences using canonical ordering
-        let mut all_blocks: Vec<Block> = state.block_state.blocks.values().cloned().collect();
+        let mut all_blocks: Vec<Block> =
+            state.domain.block_state.blocks.values().cloned().collect();
         crate::org_utils::assign_reference_sequences_canonical(&mut all_blocks);
-        state.block_state.blocks = all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        state.domain.block_state.blocks =
+            all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
 
         state.rebuild_profile_tracking();
         state.pre_startup_file_count += 1;
@@ -329,21 +319,39 @@ impl TransitionRef<ReferenceState> for WriteOrgFile {
 #[allow(async_fn_in_trait)]
 impl<S: SutHandle> TransitionImpl<ReferenceState, S> for WriteOrgFile {
     async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
-        // Pin the document's identity into the file so production's
-        // org_sync_controller picks up the same `block:ref-doc-N` URI the
-        // reference state minted, instead of falling back to name-chain
-        // resolution and assigning a fresh UUID. Without this the two ID
-        // spaces diverge for documents (Page blocks), but agree for content
-        // blocks — because content blocks already carry `:ID:` in the body.
         let doc_name = std::path::Path::new(self.filename.as_str())
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(&self.filename);
+
+        // Serialise the generated blocks to org text. The blocks are parented
+        // to `GEN_PLACEHOLDER`, so the renderer's file id must match for them
+        // to land at the top level — this reproduces the exact text the
+        // previous text-first generator emitted.
+        let rendered = OrgRenderer::render_entitys(
+            &self.blocks,
+            std::path::Path::new(self.filename.as_str()),
+            &EntityUri::block(GEN_PLACEHOLDER),
+        );
+
+        // Pin the document's identity into the file so production's
+        // file_sync_controller picks up the same `block:ref-doc-N` URI the
+        // reference state minted, instead of falling back to name-chain
+        // resolution and assigning a fresh UUID. Without this the two ID
+        // spaces diverge for documents (Page blocks), but agree for content
+        // blocks — because content blocks already carry `:ID:` in the body.
         let content = match state.doc_uri_by_name(doc_name) {
-            Some(uri) if holon_orgmode::parser::parse_doc_id(&self.content).is_none() => {
-                format!("#+ID: {}\n{}", uri.id(), self.content)
+            Some(uri) if holon_orgmode::parser::parse_doc_id(&rendered).is_none() => {
+                format!("#+ID: {}\n{}", uri.id(), rendered)
             }
-            _ => self.content.clone(),
+            _ => rendered,
+        };
+        // Axis 5: custom keywords (STARTED/NEXT/…) are not in the parser's
+        // default set — without the `#+TODO:` header they'd re-parse as
+        // headline content instead of task states.
+        let content = match &self.keyword_set {
+            Some(ks) => format!("{}\n{}", ks.to_org_header(), content),
+            None => content,
         };
         sut.apply_write_org_file(&self.filename, &content).await;
     }
@@ -357,6 +365,70 @@ impl crate::pbt::transition_budgets::SqlBudget for WriteOrgFile {
             writes: 0,
             ddl: 0,
             tolerance: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod keyword_set_round_trip_tests {
+    use super::*;
+    use crate::pbt::generators::{
+        generate_org_file_content_with_keywords, todo_keyword_set_strategy,
+    };
+
+    proptest::proptest! {
+        /// Axis-5 parity guard: a generated keyword set serialized the way
+        /// `apply_to_sut` does (`#+TODO:` header + `render_entitys`) must
+        /// re-parse to the same per-block task states and the same document
+        /// keyword set the reference model adopts. Without the header,
+        /// custom keywords (STARTED/NEXT/…) re-parse as headline content —
+        /// this pins the divergence shut independent of slice sampling.
+        #[test]
+        fn keyword_set_survives_sut_serialize_parse(
+            (ks, (filename, blocks)) in todo_keyword_set_strategy().prop_flat_map(|ks| {
+                (Just(ks.clone()), generate_org_file_content_with_keywords(Some(ks), false))
+            })
+        ) {
+            let placeholder = EntityUri::block(GEN_PLACEHOLDER);
+            let rendered = OrgRenderer::render_entitys(
+                &blocks,
+                std::path::Path::new(filename.as_str()),
+                &placeholder,
+            );
+            let content = format!("{}\n{}", ks.to_org_header(), rendered);
+
+            let parsed = holon_orgmode::parse_org_file(
+                std::path::Path::new(&filename),
+                &content,
+                &placeholder,
+                std::path::Path::new("."),
+            )
+            .expect("generated org content must parse");
+
+            // Document adopts the keyword set (what apply_to_ref mirrors).
+            prop_assert_eq!(
+                parsed.document.todo_keywords(),
+                Some(ks.0.clone()),
+                "doc todo_keywords must round-trip"
+            );
+
+            // Each generated block's task state survives the round-trip —
+            // keyword AND category (the parser categorizes via the doc's
+            // done-list, the generator via TaskState::from_keyword).
+            for generated in &blocks {
+                let reparsed = parsed
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == generated.id)
+                    .unwrap_or_else(|| panic!("block {} lost in round-trip", generated.id));
+                prop_assert_eq!(
+                    reparsed.task_state(),
+                    generated.task_state(),
+                    "task_state diverged for block {} (content {:?})",
+                    generated.id,
+                    generated.content
+                );
+            }
         }
     }
 }

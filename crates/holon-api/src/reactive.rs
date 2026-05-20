@@ -376,9 +376,12 @@ impl<V> CdcAccumulator<V> {
     }
 }
 
-impl CdcAccumulator<crate::widget_spec::DataRow> {
+impl<K> CdcAccumulator<HashMap<K, crate::Value>>
+where
+    K: std::borrow::Borrow<str> + std::hash::Hash + Eq + Clone + From<String>,
+{
     /// Build from initial query result rows (extracts "id" column as key).
-    pub fn from_rows(rows: Vec<crate::widget_spec::DataRow>) -> Self {
+    pub fn from_rows(rows: Vec<HashMap<K, crate::Value>>) -> Self {
         let mut state = HashMap::with_capacity(rows.len());
         for row in rows {
             if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
@@ -393,8 +396,8 @@ impl CdcAccumulator<crate::widget_spec::DataRow> {
     /// Single source of truth for CDC-to-diff conversion, replacing duplicated
     /// match arms across 5 frontend cdc.rs files.
     pub fn change_to_diff(
-        change: crate::Change<crate::widget_spec::DataRow>,
-    ) -> MapDiff<String, crate::widget_spec::DataRow> {
+        change: crate::Change<HashMap<K, crate::Value>>,
+    ) -> MapDiff<String, HashMap<K, crate::Value>> {
         match change {
             crate::Change::Created { data, .. } => {
                 let key = data
@@ -412,10 +415,13 @@ impl CdcAccumulator<crate::widget_spec::DataRow> {
             crate::Change::FieldsChanged {
                 entity_id, fields, ..
             } => {
-                let mut patch = crate::widget_spec::DataRow::new();
-                patch.insert("id".to_string(), crate::Value::String(entity_id.clone()));
+                let mut patch: HashMap<K, crate::Value> = HashMap::new();
+                patch.insert(
+                    K::from("id".to_string()),
+                    crate::Value::String(entity_id.clone()),
+                );
                 for (name, _old, new) in fields {
-                    patch.insert(name, new);
+                    patch.insert(K::from(name), new);
                 }
                 MapDiff::Update {
                     key: entity_id,
@@ -426,7 +432,7 @@ impl CdcAccumulator<crate::widget_spec::DataRow> {
     }
 
     /// Apply a `Change<DataRow>` directly.
-    pub fn apply_change(&mut self, change: crate::Change<crate::widget_spec::DataRow>) {
+    pub fn apply_change(&mut self, change: crate::Change<HashMap<K, crate::Value>>) {
         let diff = Self::change_to_diff(change);
         // FieldsChanged produces a partial Update — patch in-place if row exists
         if let MapDiff::Update { ref key, ref value } = diff {
@@ -443,7 +449,7 @@ impl CdcAccumulator<crate::widget_spec::DataRow> {
     /// Apply a batch of changes.
     pub fn apply_batch(
         &mut self,
-        changes: impl IntoIterator<Item = crate::Change<crate::widget_spec::DataRow>>,
+        changes: impl IntoIterator<Item = crate::Change<HashMap<K, crate::Value>>>,
     ) {
         for change in changes {
             self.apply_change(change);
@@ -451,7 +457,7 @@ impl CdcAccumulator<crate::widget_spec::DataRow> {
     }
 
     /// Export current state as a Vec<DataRow> (for WidgetSpec construction).
-    pub fn to_vec(&self) -> Vec<crate::widget_spec::DataRow> {
+    pub fn to_vec(&self) -> Vec<HashMap<K, crate::Value>> {
         self.state.values().cloned().collect()
     }
 

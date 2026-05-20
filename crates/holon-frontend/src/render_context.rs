@@ -70,7 +70,11 @@ static EMPTY_ROW: std::sync::LazyLock<Arc<DataRow>> =
 /// first container row (or `EMPTY_ROW` if nothing was bound).
 #[derive(Clone, Default)]
 pub struct RenderContext {
-    pub data_rows: Vec<Arc<DataRow>>,
+    /// Shared slice: `RenderContext` is cloned per `with_*` builder call —
+    /// twice per row in the collection pipeline — so this must be a
+    /// refcount bump, not an O(rows) Vec clone (O(N²) per interpretation
+    /// otherwise).
+    pub data_rows: Arc<[Arc<DataRow>]>,
     /// The single row bound by a collection's per-item loop. Set by `with_row`.
     /// Takes precedence over `data_rows[0]` in `row()` / `row_arc()`.
     pub current_row: Option<Arc<DataRow>>,
@@ -218,9 +222,9 @@ impl RenderContext {
     ///
     /// Clears `current_row` — the new context is at the container level,
     /// not inside a per-row binding.
-    pub fn with_data_rows(&self, data_rows: Vec<Arc<DataRow>>) -> Self {
+    pub fn with_data_rows(&self, data_rows: impl Into<Arc<[Arc<DataRow>]>>) -> Self {
         Self {
-            data_rows,
+            data_rows: data_rows.into(),
             current_row: None,
             ..self.clone()
         }

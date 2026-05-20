@@ -104,7 +104,11 @@ impl E2ETestContext {
             .service
             .execute_query(&source, language, params, None)
             .await?;
-        Ok(result.rows)
+        Ok(result
+            .rows
+            .into_iter()
+            .map(|row| row.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+            .collect())
     }
 
     /// Compile and execute a query, returning a CDC stream.

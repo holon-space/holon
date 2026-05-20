@@ -73,6 +73,70 @@ pbt-all cases='32':
     just pbt orgmode {{cases}}
     just pbt loro {{cases}}
 
+# --- Predefined slices (ADR 0009: declare_pbt_slice! / component_pbt!) --------
+# Slices are discovered from source — no hardcoded list. Each `test_fn:` in
+# crates/holon-integration-tests/tests/ is one runnable slice; the file stem may
+# differ from the slice name (one file can declare several slices), so slices are
+# run by exact test-fn name. `pbt` is a default feature of holon-integration-tests.
+
+_slice_dir := "crates/holon-integration-tests/tests"
+
+# Discover every predefined slice with the ComponentSet/Wiring it composes.
+pbt-list:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{justfile_directory()}}
+    printf '%-32s %-22s %s\n' SLICE COMPOSITION FILE
+    printf '%-32s %-22s %s\n' '-----' '-----------' '----'
+    rg -lU 'test_fn:' {{_slice_dir}} --type rust | sort | while read -r f; do
+        rg -UoN 'test_fn:\s*([A-Za-z0-9_]+)\s*,\s*(?:wiring|set):\s*([^,\n]+)' \
+           -r '$1|$2' "$f" \
+        | sed -E 's/holon_pbt_core:://; s/Wiring:://; s/ComponentSet:://' \
+        | while IFS='|' read -r name comp; do
+            printf '%-32s %-22s %s\n' "$name" "$comp" "$(basename "$f")"
+          done
+    done
+
+# Run one predefined slice by exact name; e.g. `just pbt-slice loro_backend_pbt 64`.
+pbt-slice name cases='64' *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{justfile_directory()}}
+    file=$(rg -lU 'test_fn:\s*{{name}}\b' {{_slice_dir}} --type rust | head -1 || true)
+    if [ -z "${file:-}" ]; then
+        echo "Unknown slice '{{name}}'. Available:" >&2
+        just pbt-list >&2
+        exit 1
+    fi
+    stem=$(basename "$file" .rs)
+    echo ">>> slice {{name}}  (binary: $stem, cases: {{cases}})"
+    PROPTEST_CASES={{cases}} cargo test -p holon-integration-tests \
+        --test "$stem" -- --exact {{name}} --nocapture {{FLAGS}} \
+        2>&1 | tee "/tmp/pbt-slice-{{name}}.log"
+
+# Run every discovered slice sequentially; continues on failure, summary at end.
+pbt-slices cases='32':
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cd {{justfile_directory()}}
+    slices=$(rg -UoN 'test_fn:\s*([A-Za-z0-9_]+)' -r '$1' {{_slice_dir}} --type rust | sort -u)
+    echo "Discovered $(echo "$slices" | wc -l | tr -d ' ') slices."
+    failed=""
+    count=0
+    while read -r s; do
+        [ -z "$s" ] && continue
+        count=$((count + 1))
+        echo ""
+        echo "=== $s ==="
+        just pbt-slice "$s" {{cases}} || failed="$failed $s"
+    done <<< "$slices"
+    echo ""
+    if [ -n "$failed" ]; then
+        echo "Failed slices:$failed"
+        exit 1
+    fi
+    echo "All $count slices passed."
+
 # --- Mutation Testing -------------------------------------------------------
 
 # Run cargo-mutants on a specific file (defaults to petri.rs)

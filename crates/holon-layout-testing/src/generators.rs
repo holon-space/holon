@@ -8,7 +8,7 @@ use futures_signals::signal_vec::MutableVec;
 use holon_api::render_types::{Arg, RenderExpr};
 use holon_api::widget_spec::{DataRow, EnrichedRow};
 use holon_api::{Change, ChangeOrigin, EntityUri, Value};
-use holon_frontend::reactive::{BuilderServices, ReactiveQueryResults, StubBuilderServices};
+use holon_frontend::reactive::{BuilderServices, ReactiveRenderedRows, StubBuilderServices};
 use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::{CollectionVariant, ReactiveViewModel};
 use holon_frontend::RenderContext;
@@ -224,7 +224,7 @@ pub fn vm_columns(children: Vec<Shape>) -> Shape {
 
 // ── Data source helpers ───────────────────────────────────────────────────
 
-pub fn populate_data_source(data_source: &Arc<ReactiveQueryResults>, n: usize) {
+pub fn populate_data_source(data_source: &Arc<ReactiveRenderedRows>, n: usize) {
     data_source.set_generation(0);
     for i in 0..n {
         let id = format!("pbt-row-{i}");
@@ -278,12 +278,12 @@ fn collection_expr(widget: &str) -> RenderExpr {
 
 pub fn vm_shared_collection(
     services: Arc<StubBuilderServices>,
-    data_source: Arc<ReactiveQueryResults>,
+    data_source: Arc<ReactiveRenderedRows>,
     render_expr: RenderExpr,
 ) -> Shape {
     Shape(Arc::new(move || {
         let ctx = RenderContext {
-            data_rows: Vec::new(),
+            data_rows: std::sync::Arc::from([]),
             data_source: Some(data_source.clone()),
             ..Default::default()
         };
@@ -300,7 +300,7 @@ pub fn vm_shared_collection(
                 .iter()
                 .map(|row| {
                     let row_ctx = RenderContext {
-                        data_rows: vec![row.clone()],
+                        data_rows: vec![row.clone()].into(),
                         data_source: None,
                         ..Default::default()
                     };
@@ -432,7 +432,7 @@ pub fn bp_live_block_with_modes(modes: Vec<(String, Blueprint)>) -> Blueprint {
     );
 
     let raw = mint_block_id();
-    let uri = EntityUri::from_raw(&raw);
+    let uri = EntityUri::block(&raw);
     let block_id = uri.to_string();
 
     let nested_handles: Vec<BlockHandle> = modes
@@ -458,9 +458,9 @@ pub fn bp_live_block_with_modes(modes: Vec<(String, Blueprint)>) -> Blueprint {
         initial_mode: 0,
     });
 
-    let shape_block_id = block_id.clone();
+    let shape_uri = uri.clone();
     let shape = Shape(Arc::new(move || {
-        ReactiveViewModel::live_block(EntityUri::from_raw(&shape_block_id))
+        ReactiveViewModel::live_block(shape_uri.clone())
     }));
 
     Blueprint {
@@ -580,7 +580,7 @@ fn arb_wrapped_collection_inner(allow_drawer: bool) -> BoxedStrategy<Blueprint> 
         ]))
     });
     let vms_shared = (3usize..=8,).prop_map(|(n_rows,)| {
-        let data_source = Arc::new(ReactiveQueryResults::new());
+        let data_source = Arc::new(ReactiveRenderedRows::new());
         populate_data_source(&data_source, n_rows);
         let services: Arc<StubBuilderServices> = Arc::new(StubBuilderServices::new());
         let mode_a = Blueprint::leaf(vm_shared_collection(
@@ -723,7 +723,7 @@ pub fn make_streaming_live_block_fixture(
 
     for _ in 0..n_refs {
         let raw_id = mint_block_id();
-        let uri = EntityUri::from_raw(&raw_id);
+        let uri = EntityUri::block(&raw_id);
         let block_id = uri.to_string();
 
         // "empty" mode: empty collection (same as production loading state)
@@ -809,7 +809,7 @@ fn arb_tree_with_live_block_items_inner(deferred: bool) -> BoxedStrategy<Bluepri
 
             for _ in 0..n_refs {
                 let raw_id = mint_block_id();
-                let uri = EntityUri::from_raw(&raw_id);
+                let uri = EntityUri::block(&raw_id);
                 let block_id = uri.to_string();
 
                 let content_shape = make_chat_bubble_content(&block_id, items_per_ref);
@@ -885,7 +885,7 @@ pub fn arb_tree_with_offscreen_live_blocks() -> BoxedStrategy<Blueprint> {
             // Add live_block items (will be off-screen initially)
             for _ in 0..n_refs {
                 let raw_id = mint_block_id();
-                let uri = EntityUri::from_raw(&raw_id);
+                let uri = EntityUri::block(&raw_id);
                 let block_id = uri.to_string();
 
                 let content_shape = make_chat_bubble_content(&block_id, items_per_ref);
@@ -1078,8 +1078,8 @@ pub fn arb_action(
     collapsibles: Arc<Vec<CollapsibleHandle>>,
 ) -> BoxedStrategy<UiInteraction> {
     use crate::sut::LayoutRef;
-    use holon_pbt_core::TransitionFactory;
-    use proptest::strategy::{Strategy, Union};
+    use holon_pbt_core::weighted_arm;
+    use proptest::strategy::Union;
     use validated::Validated;
 
     let gen_state = LayoutGenState {
@@ -1092,29 +1092,32 @@ pub fn arb_action(
 
     let mut arms: Vec<(u32, BoxedStrategy<UiInteraction>)> = Vec::new();
 
-    if let Validated::Good((w, s)) = <SwitchViewMode as TransitionFactory<
-        LayoutRef<'_, LayoutGenState>,
-    >>::weighted_generator(&ref_view)
+    // Each arm built by the shared `holon_pbt_core::weighted_arm` helper —
+    // the same aggregation path the wide-PBT `aggregate_transitions` uses.
+    // No per-variant weight tuning here (multiplier `1`); rejecting
+    // variants drop out silently (`Fail` discarded), as the hand-rolled
+    // branches did.
+    if let Validated::Good(Some(arm)) =
+        weighted_arm::<_, SwitchViewMode, UiInteraction>(&ref_view, 1, |v| UiInteraction::from(v))
     {
-        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
+        arms.push(arm);
     }
-    if let Validated::Good((w, s)) = <ToggleDrawer as TransitionFactory<
-        LayoutRef<'_, LayoutGenState>,
-    >>::weighted_generator(&ref_view)
+    if let Validated::Good(Some(arm)) =
+        weighted_arm::<_, ToggleDrawer, UiInteraction>(&ref_view, 1, |v| UiInteraction::from(v))
     {
-        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
+        arms.push(arm);
     }
-    if let Validated::Good((w, s)) = <ToggleCollapse as TransitionFactory<
-        LayoutRef<'_, LayoutGenState>,
-    >>::weighted_generator(&ref_view)
+    if let Validated::Good(Some(arm)) =
+        weighted_arm::<_, ToggleCollapse, UiInteraction>(&ref_view, 1, |v| UiInteraction::from(v))
     {
-        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
+        arms.push(arm);
     }
-    if let Validated::Good((w, s)) = <DeliverBlockContent as TransitionFactory<
-        LayoutRef<'_, LayoutGenState>,
-    >>::weighted_generator(&ref_view)
+    if let Validated::Good(Some(arm)) =
+        weighted_arm::<_, DeliverBlockContent, UiInteraction>(&ref_view, 1, |v| {
+            UiInteraction::from(v)
+        })
     {
-        arms.push((w, s.prop_map(UiInteraction::from).boxed()));
+        arms.push(arm);
     }
 
     assert!(

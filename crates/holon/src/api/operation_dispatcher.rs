@@ -491,7 +491,11 @@ impl OperationProvider for OperationDispatcher {
             );
 
             // Clone params before execution for observer notification
-            let params_for_observer = params.clone();
+            // (Operation is the String-keyed serde surface; re-key here).
+            let params_for_observer: std::collections::HashMap<String, holon_api::Value> = params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect();
             let resolved_entity_name_typed = EntityName::new(resolved_entity_name);
 
             // Execute operation and get result with changes and undo action
@@ -523,7 +527,12 @@ impl OperationProvider for OperationDispatcher {
             }
 
             // Notify observers of successful execution
-            let executed_operation = Operation::new(resolved_entity_name, op_name, "", params_for_observer);
+            let executed_operation = Operation::new(
+                resolved_entity_name,
+                op_name,
+                "",
+                params_for_observer.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            );
             self.notify_observers(resolved_entity_name, &executed_operation, &operation_result.undo).await;
 
             // Execute follow-up operations (e.g., editor_focus after split_block).
@@ -534,8 +543,15 @@ impl OperationProvider for OperationDispatcher {
                     "[OperationDispatcher] Executing follow-up: entity={}, op={}",
                     fu_entity, fu_op
                 );
-                self.execute_operation(&fu_entity, &fu_op, follow_up.params)
-                    .await
+                self.execute_operation(
+                    &fu_entity,
+                    &fu_op,
+                    follow_up
+                        .params
+                        .into_iter()
+                        .map(|(k, v)| (Arc::from(k.as_str()), v))
+                        .collect(),)
+                .await
                     .map_err(|e| format!("Follow-up {fu_entity}.{fu_op} failed: {e}"))?;
             }
 

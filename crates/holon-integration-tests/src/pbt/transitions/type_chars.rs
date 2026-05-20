@@ -39,7 +39,10 @@ pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
 ) -> Validated<(), Reason> {
     let checks: Vec<Validated<(), Reason>> = vec![
         check(R::atomic_editor_enabled(), Reason::AtomicEditorDisabled),
-        check(state.enable_loro(), Reason::LoroRequiredForAtomicEditor),
+        check(
+            state.enable_loro() || ReferenceState::real_editor_enabled(),
+            Reason::LoroRequiredForAtomicEditor,
+        ),
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
         check(
@@ -68,7 +71,7 @@ pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycl
             Some("TypeChars") => 4,
             _ => 1,
         };
-        let strat = "[a-z]{1,4}"
+        let strat = crate::pbt::generators::typing_text_strategy()
             .prop_map(|text: String| TypeChars { text })
             .boxed();
         (tc_weight, strat)
@@ -97,21 +100,35 @@ where
 
 // ── E2E trait impls (wide PBT entry point; delegate to _cap fns) ──
 
-impl TransitionFactory<ReferenceState> for TypeChars {
+impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for TypeChars {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // ADR 0009 asymmetry #1: "edit content" works on any block store (under
+        // Turso-only via the on-blur `set_field` path), so gate to
+        // `AnyStorageOf({Loro, Turso})` — bisectable across the storage axis.
+        // Headless Turso-only slices stay unaffected: `preconditions` still
+        // requires `enable_loro() || real_editor_enabled()`.
+        ::holon_pbt_core::RequiredWiring::any_storage_of([
+            ::holon_pbt_core::StorageAdapter::Loro,
+            ::holon_pbt_core::StorageAdapter::Turso,
+        ])
+    }
+
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         type_chars_weighted_generator(state)
     }
 }
 
-impl TransitionRef<ReferenceState> for TypeChars {
+impl<R: RefEditorMirror + RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle>
+    TransitionRef<R> for TypeChars
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         type_chars_preconditions(state)
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         type_chars_apply_to_ref(&self.text, state);
     }
 }

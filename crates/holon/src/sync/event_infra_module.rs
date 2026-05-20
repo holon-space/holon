@@ -1,13 +1,13 @@
 //! Event infrastructure DI module.
 //!
-//! Registers the shared event pipeline services needed by both Loro and OrgMode:
+//! Registers the shared block pipeline services needed by both Loro and OrgMode:
 //! - `QueryableCache<Block>` — in-memory block cache fed by CDC
-//! - `TursoEventBus` — event bus wired to Turso CDC
+//! - `BlockFeed` — the convergent `LiveData<Block>` over the `block` matview
 //! - `PublishErrorTracker` — tracks publish errors
-//! - `CacheEventSubscriberHandle` — marker that triggers EventBus → block cache wiring
 //!
-//! Dir/file cache subscriptions are handled by the frontend layer (which has
-//! access to `holon-filesystem` types) via the `extra_cache_subscribers` callback.
+//! The block cache is a thin SQL view fed by the shared Turso connection
+//! directly; downstream sinks (Loro→SQL controller, link indexer) react to the
+//! shared `BlockFeed`.
 
 use fluxdi::{Injector, Module, Provider, Shared};
 use std::sync::Arc;
@@ -20,30 +20,32 @@ use crate::di::DbHandleProvider;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
 use crate::storage::schema_modules::BlockSchemaModule;
+use crate::storage::turso_block_link_indexer::TursoBlockLinkIndexer;
 use crate::sync::PublishErrorTracker;
-use crate::sync::cache_event_subscriber::CacheEventSubscriber;
-use crate::sync::event_bus::EventBus;
 use crate::sync::link_event_subscriber::LinkEventSubscriber;
-use crate::sync::turso_event_bus::{TursoEventBus, WatermarkState};
+use crate::sync::live_data::LiveData;
 use holon_api::block::Block;
+use holon_api::capability::SessionCapabilities;
 use holon_core::block_ordering::BlockOrdering;
 
-/// Marker type for the CacheEventSubscriber background wiring.
-/// Resolving this from DI triggers the EventBus → QueryableCache subscription.
-pub struct CacheEventSubscriberHandle;
-
 /// Marker type for the LinkEventSubscriber background wiring.
-/// Resolving this from DI triggers the EventBus → block_link table subscription.
+/// Resolving this from DI triggers the LiveData<Block> → block_link subscription.
 pub struct LinkEventSubscriberHandle;
 
-/// DI module for shared event infrastructure.
+/// The shared convergent block feed (`LiveData<Block>` over the `block`
+/// matview's CDC stream). Built once and shared by every downstream sink that
+/// needs it (the Loro→SQL controller keeps it alive; the link indexer drives
+/// `block_link` off it). A newtype so DI hands back the inner `Arc` cleanly
+/// (`LiveData::new` already returns an `Arc`). Available in both modes — the
+/// matview exists with or without Loro.
+pub struct BlockFeed(pub Arc<LiveData<Block>>);
+
+/// DI module for shared block infrastructure.
 ///
 /// Register this module when any data pipeline is active (Loro, OrgMode, etc.).
-/// It provides the EventBus, block cache, and error tracker that all pipelines share.
-///
-/// Only wires the block cache subscription. Dir/file cache subscriptions must be
-/// set up by the caller after resolving `CacheEventSubscriberHandle` (since
-/// `holon-filesystem` types are not available in this crate).
+/// It provides the block cache, the shared `BlockFeed`, and the error tracker
+/// that all pipelines share. The block cache is fed directly from the shared
+/// Turso connection, not via any event bus.
 pub struct EventInfraModule;
 
 impl Module for EventInfraModule {
@@ -52,45 +54,31 @@ impl Module for EventInfraModule {
             Shared::new(crate::di::create_queryable_cache_async(&r).await)
         }));
 
-        injector.provide::<TursoEventBus>(Provider::root_async(|resolver| async move {
-            let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
-            let db_handle = db_handle_provider.handle();
-            TursoEventBus::init_schema(&db_handle)
-                .await
-                .expect("Failed to initialize EventBus schema");
-            let watermark_state = WatermarkState::start(&db_handle)
-                .await
-                .expect("Failed to start WatermarkState");
-            let matview_manager = resolver.resolve::<crate::sync::MatviewManager>();
-            Shared::new(TursoEventBus::new(
-                db_handle,
-                watermark_state,
-                matview_manager,
-            ))
-        }));
-
         injector.provide(Provider::root(move |_| {
             Shared::new(PublishErrorTracker::new())
         }));
 
-        injector.provide::<CacheEventSubscriberHandle>(Provider::root_async(
-            |resolver| async move {
-                let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
-                let event_bus = resolver.resolve_async::<TursoEventBus>().await;
-                let event_bus_arc: std::sync::Arc<dyn crate::sync::event_bus::EventBus> =
-                    event_bus.clone();
-
-                let subscriber = CacheEventSubscriber::new(block_cache);
-                if let Err(e) = subscriber.start(event_bus_arc).await {
-                    tracing::error!(
-                        "[EventInfraModule] Failed to start CacheEventSubscriber: {}",
-                        e
-                    );
-                }
-
-                Shared::new(CacheEventSubscriberHandle)
-            },
-        ));
+        // Shared convergent block feed (`LiveData<Block>` over the `block`
+        // matview CDC). Built once; downstream sinks resolve and share it.
+        injector.provide::<BlockFeed>(Provider::root_async(|resolver| async move {
+            let matview_manager = resolver.resolve::<crate::sync::MatviewManager>();
+            let watch = matview_manager
+                .watch("SELECT * FROM block")
+                .await
+                .expect("[EventInfraModule] watch block matview for BlockFeed");
+            let live = LiveData::new(
+                watch.initial_rows,
+                |row: &crate::storage::types::StorageEntity| {
+                    row.get("id")
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| anyhow::anyhow!("block matview row missing id"))
+                },
+                |row: &crate::storage::types::StorageEntity| Block::try_from(row.clone()),
+            );
+            live.subscribe("block", watch.stream);
+            Shared::new(BlockFeed(live))
+        }));
 
         // Register SqlBlockOperations as a separate OperationProvider for the
         // "block" entity, declaring `BlockOperations` (indent / outdent /
@@ -104,16 +92,13 @@ impl Module for EventInfraModule {
         injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
             |resolver| async move {
                 let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
-                let event_bus = resolver.resolve_async::<TursoEventBus>().await;
-                let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
                 let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
 
-                let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
+                let sql_ops = Arc::new(SqlOperationProvider::with_edge_fields(
                     db_handle_provider.handle(),
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
-                    event_bus_arc,
                     BlockSchemaModule.edge_fields(),
                 ));
 
@@ -134,28 +119,30 @@ impl Module for EventInfraModule {
                             crate::sync::block_cell_registry::BlockCellRegistry::sql_only(),
                         ),
                     };
-                let block_ops =
-                    SqlBlockOperations::new(sql_ops, block_cache).with_cell_registry(cell_registry);
+                // The composition root knows what's present, so it resolves the
+                // capability role here and injects it — `SqlBlockOperations`
+                // never probes a Loro-aware component itself.
+                let caps = SessionCapabilities::detect_and_pin(cell_registry.has_loro_backing());
+                let block_ops = SqlBlockOperations::new(sql_ops, block_cache)
+                    .with_cell_registry(cell_registry)
+                    .with_capabilities(caps);
                 Arc::new(block_ops) as Arc<dyn OperationProvider>
             },
         ));
 
         // Expose a shared BlockOrdering instance for consumers that need positional
-        // intent writes (OrgSyncController, future markdown adapter, MCP).
+        // intent writes (FileSyncController, future markdown adapter, MCP).
         // Uses the same SqlBlockOperations construction as the OperationProvider above,
         // routing through the cell_registry for Loro vs SqlOnly mode.
         injector.provide::<dyn BlockOrdering>(Provider::root_async(|resolver| async move {
             let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
-            let event_bus = resolver.resolve_async::<TursoEventBus>().await;
-            let event_bus_arc: Arc<dyn EventBus> = event_bus.clone();
             let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
 
-            let sql_ops = Arc::new(SqlOperationProvider::with_event_bus_and_edge_fields(
+            let sql_ops = Arc::new(SqlOperationProvider::with_edge_fields(
                 db_handle_provider.handle(),
                 BLOCK_WRITE_TABLE.to_string(),
                 "block".to_string(),
                 "block".to_string(),
-                event_bus_arc,
                 BlockSchemaModule.edge_fields(),
             ));
 
@@ -169,25 +156,22 @@ impl Module for EventInfraModule {
                         Arc::new(crate::sync::block_cell_registry::BlockCellRegistry::sql_only())
                     }
                 };
-            let block_ops =
-                SqlBlockOperations::new(sql_ops, block_cache).with_cell_registry(cell_registry);
+            let caps = SessionCapabilities::detect_and_pin(cell_registry.has_loro_backing());
+            let block_ops = SqlBlockOperations::new(sql_ops, block_cache)
+                .with_cell_registry(cell_registry)
+                .with_capabilities(caps);
             Arc::new(block_ops) as Arc<dyn BlockOrdering>
         }));
 
         injector.provide::<LinkEventSubscriberHandle>(Provider::root_async(
             |resolver| async move {
                 let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
-                let event_bus = resolver.resolve_async::<TursoEventBus>().await;
-                let event_bus_arc: std::sync::Arc<dyn crate::sync::event_bus::EventBus> =
-                    event_bus.clone();
+                let block_feed = resolver.resolve_async::<BlockFeed>().await;
 
-                let subscriber = LinkEventSubscriber::new(db_handle_provider.handle());
-                if let Err(e) = subscriber.start(event_bus_arc).await {
-                    tracing::error!(
-                        "[EventInfraModule] Failed to start LinkEventSubscriber: {}",
-                        e
-                    );
-                }
+                let indexer =
+                    std::sync::Arc::new(TursoBlockLinkIndexer::new(db_handle_provider.handle()));
+                let subscriber = LinkEventSubscriber::new(indexer);
+                subscriber.start_from_live_data(block_feed.0.clone());
 
                 Shared::new(LinkEventSubscriberHandle)
             },

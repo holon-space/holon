@@ -14,7 +14,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let height = node.prop_f64("height").map(|v| v as f32);
     let resolved = resolve_image_path(&path);
 
-    if !resolved.exists() {
+    if !image_exists_cached(&resolved) {
         let label = if alt.is_empty() {
             format!("[missing image: {path}]")
         } else {
@@ -100,6 +100,27 @@ fn org_root() -> Option<PathBuf> {
                 .ok()
                 .map(PathBuf::from)
         })
+}
+
+/// Per-frame existence check with a positive cache: `render` runs every
+/// frame, and an uncached `Path::exists()` is a filesystem stat per image
+/// per frame. Only positive results are cached — a missing image keeps
+/// re-statting and appears as soon as the file lands. A file deleted
+/// after being cached skips the "[missing image]" label and surfaces as
+/// gpui's own failed-to-load rendering instead (disclosed, not faked).
+fn image_exists_cached(resolved: &PathBuf) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static KNOWN_GOOD: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let known = KNOWN_GOOD.get_or_init(|| Mutex::new(HashSet::new()));
+    if known.lock().unwrap().contains(resolved) {
+        return true;
+    }
+    let exists = resolved.exists();
+    if exists {
+        known.lock().unwrap().insert(resolved.clone());
+    }
+    exists
 }
 
 fn resolve_image_path(path: &str) -> PathBuf {

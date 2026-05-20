@@ -1,16 +1,14 @@
 //! Proptest strategy generators for PBT transitions.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use proptest::prelude::*;
 
 use holon_api::block::Block;
 use holon_api::{ContentType, EntityUri, QueryLanguage, SourceLanguage, TaskState, Value};
-use holon_orgmode::OrgRenderer;
 use holon_orgmode::models::OrgBlockExt;
 
-use super::query::{QueryTable, TestQuery};
+use super::query::{QuerySource, QueryTable, TestQuery};
 use super::reference_state::{VALID_PROFILE_YAMLS, valid_render_expression_strings};
 use super::types::Mutation;
 use holon_api::predicate::Predicate;
@@ -19,7 +17,7 @@ use std::collections::HashMap;
 
 /// A set of TODO keywords generated per test case.
 /// Drives both the `#+TODO:` org header and the task_state mutation generator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TodoKeywordSet(pub Vec<TaskState>);
 
 impl TodoKeywordSet {
@@ -70,17 +68,76 @@ pub fn todo_keyword_set_strategy() -> impl Strategy<Value = TodoKeywordSet> {
     })
 }
 
+/// Phase 3 extended-generation toggle (`HOLON_PBT_EXTENDED_GEN=1`).
+///
+/// Default generators are deliberately ASCII-only and non-empty, which hides
+/// the byte-offset-vs-char-count bug class entirely. The extended arms add
+/// multi-byte content, empty/whitespace-only strings, and org-special
+/// prefixes — gated behind this env so the blessed default gates stay green
+/// while extended-slice findings are triaged one axis at a time. Promote an
+/// arm into the defaults once its slice is green.
+pub fn extended_gen_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("HOLON_PBT_EXTENDED_GEN").as_deref() == Ok("1");
+        if on {
+            eprintln!("[HOLON_PBT_EXTENDED_GEN] extended generators ACTIVE (Phase 3)");
+        }
+        on
+    })
+}
+
+/// Characters spanning all UTF-8 widths plus ASCII filler. The 2/3/4-byte
+/// codepoints are the payload: any path that converts byte offsets to
+/// keystroke counts (or slices content at a char boundary it computed in
+/// the other unit) breaks on these.
+fn extended_char() -> BoxedStrategy<char> {
+    prop_oneof![
+        2 => proptest::char::range('a', 'z'),
+        1 => Just(' '),
+        2 => prop_oneof![Just('é'), Just('ß'), Just('ñ')],   // 2-byte
+        2 => prop_oneof![Just('€'), Just('中'), Just('日')], // 3-byte
+        2 => prop_oneof![Just('😀'), Just('🎉')],            // 4-byte emoji
+    ]
+    .boxed()
+}
+
+/// Single-line extended content: multi-byte runs, empty, whitespace-only,
+/// and org-special prefixes (`*`, `[[…]]`, `:PROPERTIES:`, `#+`) that a user
+/// can legitimately type but the org renderer must round-trip.
+fn extended_content_arm() -> BoxedStrategy<String> {
+    prop_oneof![
+        4 => prop::collection::vec(extended_char(), 1..=12)
+            .prop_map(|cs| cs.into_iter().collect::<String>()),
+        1 => Just(String::new()),
+        1 => prop_oneof![Just("   ".to_string()), Just("\t".to_string())],
+        // Org-special spellings. `:PROPERTIES:{tail}` (incl. the bare
+        // trailing-tag-group form) is BY-DESIGN org tag syntax — the ref
+        // model mirrors it via `split_headline_tags` in
+        // `normalize_content_for_org_roundtrip`; pinned in
+        // holon-org-format/tests/properties_prefix_headline_repro.rs.
+        2 => ("[A-Za-z0-9 ]{0,12}", 0..4u8).prop_map(|(tail, kind)| match kind {
+            0 => format!("* {tail}"),
+            1 => format!("[[{tail}]]"),
+            2 => format!("#+ {tail}"),
+            _ => format!(":PROPERTIES:{tail}"),
+        }),
+    ]
+    .boxed()
+}
+
 /// Generate single-line block content for headlines.
 /// Headlines must be single-line because the org parser treats newlines in
 /// headline text as content boundaries — multi-line headlines cause
 /// `:PROPERTIES:` drawers to be embedded in the content.
 pub fn content_strategy() -> BoxedStrategy<String> {
-    "[A-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s).boxed()
+    let base = "[A-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s).boxed();
+    prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
 }
 
 /// Same as `content_strategy` but for edit mutations (lowercase start).
 pub fn edit_content_strategy() -> BoxedStrategy<String> {
-    prop_oneof![
+    let base = prop_oneof![
         7 => "[a-zA-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s),
         3 => (
             "[a-z][a-zA-Z0-9 ]{3,15}",
@@ -92,18 +149,52 @@ pub fn edit_content_strategy() -> BoxedStrategy<String> {
                 lines.join("\n")
             }),
     ]
+    .boxed();
+    prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
+}
+
+/// Per-keystroke typing text (`TypeChars`). Always non-empty — a
+/// zero-keystroke transition is unobservable on both sides. Extended mode
+/// mixes multi-byte codepoints into the keystroke stream, stressing the
+/// byte-vs-keystroke conversions in the split/caret path.
+pub fn typing_text_strategy() -> BoxedStrategy<String> {
+    let base = "[a-z]{1,4}".prop_map(|s| s).boxed();
+    prop_oneof![
+        5 => base,
+        5 => prop::collection::vec(extended_char(), 1..=4)
+            .prop_map(|cs| cs.into_iter().collect::<String>()),
+    ]
     .boxed()
 }
 
-/// Build the blocks for an index.org heading with a query source + render source,
-/// then render them to org text.
-fn index_org_content(
+/// Peer-edit content (`PeerEdit::{Create,Update}`). Extended mode adds
+/// multi-byte and org-special content arriving from a remote peer.
+pub fn peer_content_strategy() -> BoxedStrategy<String> {
+    let base = "[a-z]{4,8}".prop_map(|s| s).boxed();
+    prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
+}
+
+/// Externally-added block content (`BulkExternalAdd`). Extended mode adds
+/// the full extended-content arm via the external write path.
+pub fn bulk_content_strategy() -> BoxedStrategy<String> {
+    let base = "[a-zA-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s).boxed();
+    prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
+}
+
+/// Build the blocks for an index.org heading with a query source + render source.
+///
+/// Returns the generated `Block`s directly (a heading + a query source + a
+/// render source). The seeding transition decides how to materialise them
+/// against the SUT — serialise to org text for a Turso/org wiring, or write
+/// them straight into the Loro doc for a no-Turso wiring — so the generator
+/// itself no longer renders to a string.
+fn index_org_blocks(
     headline: &str,
     id: &str,
     query_lang: QueryLanguage,
     query_source: &str,
     render_expr: &str,
-) -> String {
+) -> Vec<Block> {
     let doc_uri = EntityUri::block("gen-placeholder");
     let heading_uri = EntityUri::block(id);
 
@@ -126,16 +217,7 @@ fn index_org_content(
     );
     render_entity.set_sequence(2);
 
-    let blocks = vec![heading, query_block, render_entity];
-    OrgRenderer::render_entitys(
-        &blocks,
-        Path::new("/index.org"),
-        &EntityUri::block("gen-placeholder"),
-    )
-}
-
-pub fn generate_org_file_content() -> impl Strategy<Value = (String, String)> {
-    generate_org_file_content_with_keywords(None, true)
+    vec![heading, query_block, render_entity]
 }
 
 /// Generate `(filename, content)` for a `WriteOrgFile` transition.
@@ -149,7 +231,7 @@ pub fn generate_org_file_content() -> impl Strategy<Value = (String, String)> {
 pub fn generate_org_file_content_with_keywords(
     keyword_set: Option<TodoKeywordSet>,
     allow_index_override: bool,
-) -> BoxedStrategy<(String, String)> {
+) -> BoxedStrategy<(String, Vec<Block>)> {
     use proptest::collection::vec as prop_vec;
 
     let ks = keyword_set.clone();
@@ -167,7 +249,9 @@ pub fn generate_org_file_content_with_keywords(
         "[a-z_]+_[0-9]+\\.org",
         prop_vec(
             (
-                "[A-Z][a-z][a-zA-Z0-9 ]{0,19}",
+                // Seeded headline content — extended arms (multi-byte,
+                // empty, org-special prefixes) stress the parser boundary.
+                content_strategy(),
                 "[a-z0-9-]+",
                 prop::bool::ANY,
                 // `make_requires`: when true (and a prior sibling exists), this
@@ -176,12 +260,19 @@ pub fn generate_org_file_content_with_keywords(
                 // field end-to-end (parser → Loro/SQL junction → projection →
                 // renderer) — the path that was previously never generated.
                 prop::bool::ANY,
+                // Parent selector (extended-gen axis 2): heading `i` parents to
+                // `sel % (i + 1)` — 0 = doc root, k = heading `k-1`. Same
+                // predecessor trick as `make_requires`: only already-built
+                // headings are eligible, so the tree is well-founded by
+                // construction. Default gen ignores this (flat files).
+                prop::num::u8::ANY,
             ),
             1..=5,
         ),
     )
         .prop_map(move |(filename, headings)| {
             let doc_uri = EntityUri::block("gen-placeholder");
+
             let all_keywords: Vec<String> = ks
                 .as_ref()
                 .map(|set| set.all_keywords())
@@ -189,12 +280,29 @@ pub fn generate_org_file_content_with_keywords(
             // Sibling ids in document order, so a heading can depend on its
             // predecessor by id. Collected up front because the dependency
             // target (`ids[i-1]`) must be known while building block `i`.
-            let ids: Vec<String> = headings.iter().map(|(_, id, _, _)| id.clone()).collect();
+            let ids: Vec<String> = headings.iter().map(|(_, id, _, _, _)| id.clone()).collect();
+            // First pass: resolve each heading's parent. Flat (doc root) by
+            // default; under extended gen, heading `i` parents to
+            // `sel % (i + 1)` (0 = root, k = heading k-1) — well-founded by
+            // construction since only earlier headings are eligible.
+            // Duplicate random ids skip nesting rather than self-parent.
+            let parents: Vec<EntityUri> = headings
+                .iter()
+                .enumerate()
+                .map(
+                    |(i, (_, id, _, _, parent_sel))| match *parent_sel as usize % (i + 1) {
+                        0 => doc_uri.clone(),
+                        k if ids[k - 1] != *id => EntityUri::block(&ids[k - 1]),
+                        _ => doc_uri.clone(),
+                    },
+                )
+                .collect();
             let blocks: Vec<Block> = headings
                 .into_iter()
                 .enumerate()
-                .map(|(i, (headline, id, make_task, make_requires))| {
-                    let mut b = Block::new_text(EntityUri::block(&id), doc_uri.clone(), &headline);
+                .map(|(i, (headline, id, make_task, make_requires, _))| {
+                    let mut b =
+                        Block::new_text(EntityUri::block(&id), parents[i].clone(), &headline);
                     b.set_property("ID", Value::String(id.clone()));
                     // Assign a task keyword to ~50% of headlines when keywords exist.
                     // Cycle through keywords using the index for variety.
@@ -202,87 +310,122 @@ pub fn generate_org_file_content_with_keywords(
                         let kw = &all_keywords[i % all_keywords.len()];
                         b.set_task_state(Some(TaskState::from_keyword(kw)));
                     }
-                    // Single-element requires (depend on the previous sibling)
-                    // — kept to one entry so the order-insensitive junction read
-                    // can't false-diff against the parsed order. Skip self-refs
-                    // from duplicate ids. Stored as a `block:` URI to match the
-                    // parser boundary (`EntityUri::from_raw`).
-                    if make_requires && i > 0 && ids[i - 1] != id {
+                    // Single-element requires (depend on the previous TRUE
+                    // sibling — same parent, so nesting stays orthogonal to
+                    // the requires axis) — kept to one entry so the
+                    // order-insensitive junction read can't false-diff against
+                    // the parsed order. Skip self-refs from duplicate ids.
+                    // Stored as a `block:` URI to match the parser boundary.
+                    if make_requires && i > 0 && ids[i - 1] != id && parents[i] == parents[i - 1] {
                         b.requires = vec![EntityUri::block(&ids[i - 1]).to_string()];
                     }
                     b
                 })
                 .collect();
-            let rendered = OrgRenderer::render_entitys(
-                &blocks,
-                Path::new(&filename),
-                &EntityUri::block("gen-placeholder"),
-            );
-            let content = match &ks {
-                Some(set) => format!("{}\n{}", set.to_org_header(), rendered),
-                None => rendered,
-            };
-            (filename, content)
+            (filename, blocks)
         });
 
-    let index_file_prql = ("[A-Z][a-zA-Z0-9 ]{0,15}", "[a-z0-9-]+").prop_map(|(headline, id)| {
-        let content = index_org_content(
+    // Layout query sources are now emitted by `TestQuery::compile_layout_for`
+    // so the SUT runs a query the reference can recover (via
+    // `QuerySource::recognize`) and `evaluate` identically. Each variant pairs a
+    // faithful `QuerySource` with a render template of known interactivity:
+    // PRQL `from children` (navigation-blind direct children — empty under the
+    // layout block) with an interactive template; GQL all-blocks / var-length
+    // descendants and SQL direct-children with static templates.
+    //
+    // The root heading carries the FIXED `:ID: root-layout` — the layout root
+    // is the hardcoded `block:root-layout` (`root_layout_block_uri()`), so a
+    // user index.org only takes over the layout when its root heading keeps
+    // that well-known ID. A random ID would leave the override silently
+    // ignored (the seeded default layout keeps rendering) — that's the
+    // contract pinned by the 2026-06-10 layout-override finding.
+    fn root_layout_bare_id() -> String {
+        holon_api::ROOT_LAYOUT_BLOCK_ID
+            .strip_prefix("block:")
+            .expect("ROOT_LAYOUT_BLOCK_ID is block-schemed")
+            .to_string()
+    }
+    let index_file_prql = "[A-Z][a-zA-Z0-9 ]{0,15}".prop_map(|headline| {
+        let id = root_layout_bare_id();
+        let (src, lang) = TestQuery::layout(QuerySource::DirectChildren {
+            context: EntityUri::block(&id),
+        })
+        .compile_layout_for(QueryLanguage::HolonPrql);
+        let blocks = index_org_blocks(
             &headline,
             &id,
-            QueryLanguage::HolonPrql,
-            "from children\n",
+            lang,
+            &format!("{src}\n"),
             "list(#{item_template: row(state_toggle(col(\"task_state\")), editable_text(col(\"content\")))})",
         );
-        ("index.org".to_string(), content)
+        ("index.org".to_string(), blocks)
     });
 
-    let index_file_gql = ("[A-Z][a-zA-Z0-9 ]{0,15}", "[a-z0-9-]+").prop_map(|(headline, id)| {
-        let content = index_org_content(
+    let index_file_gql = "[A-Z][a-zA-Z0-9 ]{0,15}".prop_map(|headline| {
+        let id = root_layout_bare_id();
+        let (src, lang) =
+            TestQuery::layout(QuerySource::AllBlocks).compile_layout_for(QueryLanguage::HolonGql);
+        let blocks = index_org_blocks(
             &headline,
             &id,
-            QueryLanguage::HolonGql,
-            "MATCH (n) RETURN n\n",
+            lang,
+            &format!("{src}\n"),
             "list(#{item_template: row(text(\"node\"))})",
         );
-        ("index.org".to_string(), content)
+        ("index.org".to_string(), blocks)
     });
 
-    let index_file_gql_varlen =
-        ("[A-Z][a-zA-Z0-9 ]{0,15}", "[a-z0-9-]+").prop_map(|(headline, id)| {
-            let content = index_org_content(
-                &headline,
-                &id,
-                QueryLanguage::HolonGql,
-                "MATCH (root:block)<-[:CHILD_OF*1..3]-(d:block) RETURN d\n",
-                "list(#{item_template: row(text(\"varlen\"))})",
-            );
-            ("index.org".to_string(), content)
-        });
-
-    let index_file_sql = ("[A-Z][a-zA-Z0-9 ]{0,15}", "[a-z0-9-]+").prop_map(|(headline, id)| {
-        let content = index_org_content(
+    let index_file_gql_varlen = "[A-Z][a-zA-Z0-9 ]{0,15}".prop_map(|headline| {
+        let id = root_layout_bare_id();
+        let (src, lang) = TestQuery::layout(QuerySource::DescendantsOfAny {
+            min_depth: 1,
+            max_depth: 3,
+        })
+        .compile_layout_for(QueryLanguage::HolonGql);
+        let blocks = index_org_blocks(
             &headline,
             &id,
-            QueryLanguage::HolonSql,
-            "SELECT * FROM nodes\n",
+            lang,
+            &format!("{src}\n"),
+            "list(#{item_template: row(text(\"varlen\"))})",
+        );
+        ("index.org".to_string(), blocks)
+    });
+
+    let index_file_sql = "[A-Z][a-zA-Z0-9 ]{0,15}".prop_map(|headline| {
+        let id = root_layout_bare_id();
+        let (src, lang) = TestQuery::layout(QuerySource::DirectChildren {
+            context: EntityUri::block(&id),
+        })
+        .compile_layout_for(QueryLanguage::HolonSql);
+        let blocks = index_org_blocks(
+            &headline,
+            &id,
+            lang,
+            &format!("{src}\n"),
             "list(#{item_template: row(text(\"sql node\"))})",
         );
-        ("index.org".to_string(), content)
+        ("index.org".to_string(), blocks)
     });
 
     // Tree view with virtual child — exercises the trailing-slot creation
     // path. `creation_slot: true` triggers `build_trailing_slot`;
     // `virtual_parent` is deliberately omitted — the builder falls back to
     // `ba.ctx.row().get("id")` (the focused block's id).
-    let index_file_tree = ("[A-Z][a-zA-Z0-9 ]{0,15}", "[a-z0-9-]+").prop_map(|(headline, id)| {
-        let content = index_org_content(
+    let index_file_tree = "[A-Z][a-zA-Z0-9 ]{0,15}".prop_map(|headline| {
+        let id = root_layout_bare_id();
+        let (src, lang) = TestQuery::layout(QuerySource::DirectChildren {
+            context: EntityUri::block(&id),
+        })
+        .compile_layout_for(QueryLanguage::HolonPrql);
+        let blocks = index_org_blocks(
             &headline,
             &id,
-            QueryLanguage::HolonPrql,
-            "from children\n",
+            lang,
+            &format!("{src}\n"),
             "tree(#{parent_id: col(\"parent_id\"), sortkey: col(\"sequence\"), item_template: render_entity(), creation_slot: true})",
         );
-        ("index.org".to_string(), content)
+        ("index.org".to_string(), blocks)
     });
 
     let file_with_profile = (
@@ -307,12 +450,7 @@ pub fn generate_org_file_content_with_keywords(
             profile_block.set_sequence(1);
 
             let blocks = vec![heading, profile_block];
-            let content = OrgRenderer::render_entitys(
-                &blocks,
-                Path::new(&filename),
-                &EntityUri::block("gen-placeholder"),
-            );
-            (filename, content)
+            (filename, blocks)
         });
 
     // Shared-tree mount: a headline with `:share-role: mount` and
@@ -357,12 +495,7 @@ pub fn generate_org_file_content_with_keywords(
                 blocks.push(child);
             }
 
-            let content = OrgRenderer::render_entitys(
-                &blocks,
-                Path::new(&filename),
-                &EntityUri::block("gen-placeholder"),
-            );
-            (filename, content)
+            (filename, blocks)
         });
 
     // Shared-tree mount files are gated by `HOLON_PBT_SHARED_TREE_MOUNT=1`.
@@ -401,6 +534,17 @@ pub fn generate_org_file_content_with_keywords(
             ]
             .boxed()
         }
+    } else if extended_gen_enabled() {
+        // Extended-gen axis 4: profile-bearing files in the no-overrides
+        // configuration. The test profile YAMLs render just
+        // `row(editable_text(...))` — no state_toggle — so the ref model
+        // must track the active profile per rendered block. Triaged on the
+        // extended slice before promotion.
+        prop_oneof![
+            8 => regular_file,
+            1 => file_with_profile,
+        ]
+        .boxed()
     } else {
         // Profile-bearing files override the default block entity profile,
         // and the test's profile YAMLs render just `row(editable_text(...))`
@@ -584,6 +728,7 @@ pub fn generate_test_query() -> impl Strategy<Value = TestQuery> {
         table: QueryTable::Blocks,
         columns,
         predicates,
+        source: crate::pbt::query::QuerySource::AllBlocks,
     })
 }
 
@@ -606,11 +751,22 @@ pub fn generate_predicate() -> impl Strategy<Value = Predicate> {
 }
 
 /// Generate a query language, weighted towards PRQL (primary path).
-pub fn generate_query_language() -> impl Strategy<Value = QueryLanguage> {
+/// Extended-gen axis 4 adds GQL (the third user-reachable language);
+/// triaged on the extended slice before promotion.
+pub fn generate_query_language() -> BoxedStrategy<QueryLanguage> {
+    if extended_gen_enabled() {
+        return prop_oneof![
+            4 => Just(QueryLanguage::HolonPrql),
+            3 => Just(QueryLanguage::HolonSql),
+            2 => Just(QueryLanguage::HolonGql),
+        ]
+        .boxed();
+    }
     prop_oneof![
         5 => Just(QueryLanguage::HolonPrql),
         3 => Just(QueryLanguage::HolonSql),
     ]
+    .boxed()
 }
 
 /// Generate content or task_state mutations for layout headline blocks.

@@ -4,7 +4,7 @@
 //! - **Share:** context menu on a block (wired in `lib.rs`) → "Share subtree"
 //!   calls `execute_operation("tree", "share_subtree", ...)` and opens
 //!   a modal with the returned ticket + a bearer-capability warning quoted
-//!   from `docs/SUBTREE_SHARING.md` + a reserved area for degraded events.
+//!   from `docs/Reference/SUBTREE_SHARING.md` + a reserved area for degraded events.
 //! - **Accept:** title-bar button "🔗" opens a modal; the current flow uses
 //!   "Paste from clipboard + use focused block as parent" because wiring a
 //!   full in-modal text-editing form requires gpui_component::input focus
@@ -32,7 +32,7 @@ use holon_api::{EntityName, Value};
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_frontend::FrontendSession;
 
-/// Threat-model sentences from `docs/SUBTREE_SHARING.md` (lines 34–35).
+/// Threat-model sentences from `docs/Reference/SUBTREE_SHARING.md` (lines 34–35).
 /// Quoted verbatim — users of the share UI must see the exact wording so
 /// there's no doubt this is a bearer capability.
 pub const BEARER_CAPABILITY_WARNING: &str = "A ticket is a bearer capability. Anyone who obtains it can read and write the shared subtree until the share is dropped. There is no authn/authz layer inside iroh — peer identity is the only gate, and the initial handshake does not verify \"who you are\" beyond a cryptographic node id.";

@@ -1,7 +1,7 @@
 //! Versioned ticket for sharing a Loro subtree over Iroh.
 //!
 //! A ticket is a bearer capability: anyone holding it can read and write the
-//! shared subtree until the share is dropped. See docs/SUBTREE_SHARING.md.
+//! shared subtree until the share is dropped. See docs/Reference/SUBTREE_SHARING.md.
 //!
 //! Wire format: JSON, wrapped in base64 (URL-safe, no padding) for robust
 //! copy-paste across chat apps. The `v` field lets the schema evolve.

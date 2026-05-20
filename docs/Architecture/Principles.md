@@ -35,6 +35,8 @@ Unlike traditional PKM tools that treat external systems as import/export target
 
 ## The Three Modes
 
+Capture, Orient, and Flow ship as **default layout and profile configuration** (overridable by users), which is why no mode enum exists in the production codebase. The modes are a design vocabulary and a default set of layouts/profiles — not a built-in state machine.
+
 The UI architecture is organized around three modes that match how humans actually work:
 
 ### Capture Mode
@@ -128,11 +130,11 @@ This architecture enables:
 Every operation carries trace context through the entire system:
 
 ```
-Flutter UI (trace_id) → FFI Bridge → Operation → Database (_change_origin column)
-                                                        ↓
-                                     CDC Callback reads trace context
-                                                        ↓
-                                     Change event includes origin trace
+Frontend (trace_id) → Operation → Database (_change_origin column)
+                                        ↓
+                     CDC Callback reads trace context
+                                        ↓
+                     Change event includes origin trace
 ```
 
 This enables debugging, audit trails, and understanding causation across async boundaries.
@@ -141,31 +143,15 @@ This enables debugging, audit trails, and understanding causation across async b
 
 ## AI Services Architecture
 
-AI is organized into three services that map to user needs:
+> **Status: target architecture — not yet implemented.**
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    AI Services Layer (Rust)                     │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │   Watcher    │  │  Integrator  │  │    Guide     │          │
-│  │              │  │              │  │              │          │
-│  │ • Monitoring │  │ • Linking    │  │ • Patterns   │          │
-│  │ • Alerts     │  │ • Context    │  │ • Insights   │          │
-│  │ • Synthesis  │  │ • Search     │  │ • Growth     │          │
-│  │ • Conflicts  │  │ • Bundles    │  │ • Shadow     │          │
-│  └──────────────┘  └──────────────┘  └──────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Foundation Layer                                        │  │
-│  │  • Local embeddings (sentence-transformers)              │  │
-│  │  • Full-text search (Tantivy)                            │  │
-│  │  • Pattern/conflict logs                                 │  │
-│  │  • Trust Ladder state                                    │  │
-│  │  • LLM access (local or cloud, user-controlled)          │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
+The Watcher, Integrator, and Guide are not hard-coded Rust services. They are realized as **declarative Petri-Net configuration**: AI agents are tokens placed on the net, and transitions like "Research" consume them. The Watcher/Integrator/Guide roles become the *default configuration* of tokens and transitions shipped with Holon — user-overridable, not wired in code. See [Vision/PetriNet.md](../Vision/PetriNet.md) §AI for how trust levels attach to transitions.
+
+The three roles and their responsibilities remain the same conceptually:
+
+- **Watcher** — monitoring, alerts, synthesis, conflict detection
+- **Integrator** — cross-system linking, context assembly, confirmation stream, search
+- **Guide** — patterns, insights, growth tracking, shadow self
 
 ### AI Architectural Principles
 
@@ -187,7 +173,7 @@ AI autonomy is gated by demonstrated competence:
 | Agentic | Acts with permission | Low correction rate |
 | Autonomous | Acts within bounds | Extended track record + opt-in |
 
-Trust is tracked **per-feature**, not globally.
+Trust is tracked **per-feature**, not globally. In the Petri-Net model, trust levels attach to individual transitions rather than to a global AI state.
 
 ---
 
@@ -288,7 +274,7 @@ A checkbox bound to `completed` automatically gets `set_completion` wired up bec
 - Its `checked` parameter traces to the `completed` column
 - An operation exists that modifies `completed` with the available parameters
 
-For multi-widget operations (e.g., `move_block` requiring `parent_id` from a drop target), **Gesture-Scoped Parameter Providers** extend this system. Widgets declare what params they provide, gestures accumulate params into a context, and operations declare mappings from alternative sources (e.g., `selected_id` → `parent_id`). See `docs/GESTURE_PARAM_PROVIDERS.md` for details.
+For multi-widget operations (e.g., `move_block` requiring `parent_id` from a drop target), **Gesture-Scoped Parameter Providers** extend this system. Widgets declare what params they provide, gestures accumulate params into a context, and operations declare mappings from alternative sources (e.g., `selected_id` → `parent_id`). See `docs/Proposals/GESTURE_PARAM_PROVIDERS.md` for details.
 
 ### RenderSpec Tree
 
@@ -341,7 +327,7 @@ Holon's data flow is layered. Each layer has one job:
                   └────────────────────────────────┘
                   │
 ┌─────────────────┴───────────────────────────────────────────────┐
-│  Layer 1 — Event log (EventBus + Turso CDC + WAL)                │
+│  Layer 1 — Change log (Loro oplog + Turso CDC + WAL)             │
 │    Durable, ordered, identity-bearing record of every change.   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -499,10 +485,10 @@ The UI uses this to:
 OperationDispatcher
 ├── QueryableCache<TodoistDataSource, TodoistTask>
 ├── QueryableCache<JiraDataSource, JiraIssue>
-└── LoroOperationProvider (authority for blocks)
+└── LoroBlockOperations (authority for blocks)
 ```
 
-Operations are routed by `entity_name` to the appropriate provider. After the authority flip for blocks (Phase 2 of the Cells plan), `LoroOperationProvider` replaces `SqlOperationProvider` for the `block` entity — block writes go through Loro first, Turso projects via `LoroSyncController.on_loro_changed` + `SqlBlockProjector`.
+Operations are routed by `entity_name` to the appropriate provider. `LoroBlockOperations` (post Phase 2 of the Cells plan) is the authority for the `block` entity — block writes go through Loro first, Turso projects via `LoroSyncController` + `BlockConsolidator`.
 
 ### Cells bypass the dispatcher (typed-method path)
 
@@ -525,20 +511,21 @@ fn watch_changes() -> Stream<Change<StorageEntity>>;
 ```
 
 This enables:
-- Flutter frontend (current primary)
-- TUI frontend (secondary)
-- Future: native Rust UI, web frontend
+- GPUI frontend (current primary — desktop; mobile via gpui-mobile)
+- TUI frontend (keyboard-driven + test harness)
+- Dioxus / dioxus-web frontend (prototype)
+- MCP server frontend
 
 ### Reactive Updates
 
 Frontends subscribe to change streams and update reactively:
 
-```dart
-watchChanges().listen((changes) {
-  for (change in changes) {
-    updateWidget(change.id, change.data);
-  }
-});
+```rust
+// GPUI signals (holon-frontend ReactiveViewModel)
+let mut stream = watch_changes(block_id.clone());
+while let Some(change) = stream.next().await {
+    ui_signal.set(change.data);
+}
 ```
 
 No explicit refresh calls—UI state derives from the change stream.
@@ -576,34 +563,35 @@ Flow mode tracks:
 
 ## Dependency Injection
 
-The system uses FluxDI for service registration and resolution:
+The system uses **fluxdi** (`Injector`, `Module`, `Provider`, `Shared`) for service registration and resolution. Modules implement the `Module` trait and register providers; first-wins semantics apply (the first registration wins; `override_provider` is available for test overrides). The composition root is `crates/holon-app/src/wiring.rs` (`FrontendInjectorExt::add_frontend`), which conditionally registers Loro and OrgMode modules based on runtime config. The Turso-free stack is assembled in `crates/holon-app/src/no_turso.rs`.
 
 ```rust
-// Registration via Module trait
+// Registration via Module trait (fluxdi)
 impl Module for OrgModeModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
-        injector.provide::<OrgSyncController>(Provider::root_async(|resolver| async move {
+        injector.provide::<FileSyncController>(Provider::root_async(|resolver| async move {
             let block_reader = resolver.resolve::<dyn BlockReader>();
             let doc_manager = resolver.resolve::<dyn DocumentManager>();
-            Shared::new(OrgSyncController::new(block_reader, doc_manager))
+            Shared::new(FileSyncController::new(block_reader, doc_manager))
         }));
         Ok(())
     }
 }
 
-// Extension traits for convenient registration
+// Extension traits wired in holon-app
 injector.add_orgmode(PathBuf::from("/path/to/org/files"))?;
-injector.add_todoist(todoist_config)?;
 injector.add_mcp_server(8520)?;
 
 // Resolution
-let engine = injector.resolve_async::<BackendEngine>().await;
+let session = injector.resolve_async::<FrontendSession>().await;
 ```
 
+Conditional registration: when `HOLON_LORO_ENABLED` is set, `LoroModule` registers `LoroBlockOperations` as the authority for blocks and `LoroTextCellBacking` for `content` cells. When unset, `SqlOperationProvider` + LWW cell backings are registered instead. The same `FrontendSession` resolution path works for both — the DI container is the switch, not runtime branches.
+
 This enables:
-- Testability (mock providers)
+- Testability (mock providers, in-memory filesystem)
 - Modularity (add providers without changing core code)
-- Configuration (different providers for different environments)
+- Configuration (different providers for different environments — Loro on/off, Turso on/off)
 - Automatic dependency resolution (services declare what they need, DI wires it)
 
 ---
@@ -633,11 +621,11 @@ This enables:
 
 ### Adding a New AI Capability
 
-1. Determine which service owns it (Watcher/Integrator/Guide)
-2. Define required data inputs and outputs
-3. Implement with local-first approach where possible
-4. Add Trust Ladder gating if the feature takes autonomous actions
-5. Include reasoning/explanation in output
+1. Model it as a Petri-Net transition (or a configuration of transitions) — AI agents are tokens consumed by transitions
+2. Define the trust level for the transition (see Trust Ladder above)
+3. Add it to the default configuration (user-overridable)
+4. Ensure the transition's outputs are observable (fail loud if the agent cannot complete)
+5. Include reasoning/explanation in the output token
 
 ---
 
@@ -669,8 +657,9 @@ Between devices:
 
 ## Related Documents
 
-- `docs/Vision/LongTerm.md` - Philosophical foundation and product vision
-- `docs/Vision.md` - Technical vision and roadmap
-- `docs/Vision/AI.md` - AI feature specifications
-- `docs/Architecture.md` - Detailed technical architecture
-- `REACTIVE_PRQL_RENDERING.md` - Query/render system details
+- [docs/Vision/LongTerm.md](../Vision/LongTerm.md) — Philosophical foundation and product vision
+- [docs/Vision.md](../Vision.md) — Technical vision and roadmap
+- [docs/Vision/AI.md](../Vision/AI.md) — AI feature specifications
+- [docs/Vision/PetriNet.md](../Vision/PetriNet.md) — Petri-Net model and AI trust configuration
+- [docs/Architecture.md](../Architecture.md) — Detailed technical architecture
+- [docs/Architecture/RenderPipeline.md](RenderPipeline.md) — Query/render pipeline details

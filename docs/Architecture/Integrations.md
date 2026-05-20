@@ -6,7 +6,9 @@ _Part of [Architecture](../Architecture.md)_
 
 ### MCP Apps: Interactive UI Hosting
 
-Holon embraces **[MCP Apps](https://github.com/modelcontextprotocol/ext-apps)** ([SEP-1865](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)), the standard MCP extension that lets servers deliver interactive HTML UIs — charts, forms, dashboards, kanban boards — rendered securely in sandboxed iframes inside any compliant host. Holon acts as an MCP Apps **host**, embedding these UIs directly in its Dioxus web frontend.
+> **Status: target architecture.** The `AppBridge` host implementation is not yet landed — no `AppBridge` struct exists in `frontends/`. The section below describes the intended design for the Dioxus web frontend (prototype).
+
+Holon embraces **[MCP Apps](https://github.com/modelcontextprotocol/ext-apps)** ([SEP-1865](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)), the standard MCP extension that lets servers deliver interactive HTML UIs — charts, forms, dashboards, kanban boards — rendered securely in sandboxed iframes inside any compliant host. Holon acts as an MCP Apps **host**, embedding these UIs in its Dioxus web frontend.
 
 #### Why MCP Apps for Holon
 
@@ -17,7 +19,7 @@ Holon's vision demands **custom visualizations** per item type (kanban, burndown
 - **Google Calendar MCP server** provides an interactive week view → displayed in Orient mode
 - **Holon's own AI services** expose Watcher dashboards, Integrator confirmation streams, and Guide insights as MCP Apps — available both within Holon and in external chat clients
 
-This gives each integration provider ownership of their visualization while Holon provides the unified data context. The confirmation-driven edge creation stream (see [Vision/AI.md](../../Vision/AI.md) §The Integrator) is a particularly strong fit — an interactive widget where the user confirms or rejects proposed cross-system links at keystroke speed, powered by Holon's local entity graph.
+This gives each integration provider ownership of their visualization while Holon provides the unified data context. The confirmation-driven edge creation stream (see [Vision/AI.md](../Vision/AI.md) §The Integrator) is a particularly strong fit — an interactive widget where the user confirms or rejects proposed cross-system links at keystroke speed, powered by Holon's local entity graph.
 
 #### Dioxus as the Ideal Host
 
@@ -101,7 +103,7 @@ Holon enforces the MCP Apps security model at the browser level:
 - **Auditable communication**: All iframe ↔ host communication uses `postMessage` with origin verification; the `AppBridge` validates message structure before forwarding
 - **Origin isolation**: `ui://` resources are served from a dedicated suborigin (`ui.holon.app`) to prevent same-origin policy bypass
 
-This aligns with Holon's [privacy-first design](../../Vision/AI.md#3-privacy-first-ai) — the server declares what it needs, the browser enforces the boundary, and Holon's own DOM is never exposed.
+This aligns with Holon's [privacy-first design](../Vision/AI.md#3-privacy-first-ai) — the server declares what it needs, the browser enforces the boundary, and Holon's own DOM is never exposed.
 
 #### Use Cases
 
@@ -125,34 +127,54 @@ This aligns with Holon's [privacy-first design](../../Vision/AI.md#3-privacy-fir
 
 ### Integration Pattern
 
-Each external system provides:
+External MCP-based integrations are configured entirely via YAML files; no
+per-integration Rust code is required.  `McpIntegrationsModule` in
+`crates/holon-app/src/mcp_integrations.rs` scans a directory (default
+`{config_dir}/integrations/`, overridable via `HOLON_MCP_INTEGRATIONS_DIR`) and
+for each `*.yaml` file:
 
-1. **SyncProvider** - Fetches data from external API
-2. **DataSource** - Read access to cached data
-3. **OperationProvider** - Routes operations to external API
+1. Parses an `IntegrationFileConfig` — transport, auth, entities, tools.
+2. Expands `${VAR}` references from environment variables or app settings
+   (fail-loud if unset; empty string counts as unset).
+3. Calls `build_mcp_integration()` which connects to the MCP server, builds a
+   `QueryableCache<DynamicEntity>` Turso table for each entity that declares a
+   `schema`, registers an `McpSyncEngine` with one strategy per entity's `sync`
+   config, and wraps the whole thing as an `McpOperationProvider`.
+4. Registers a `RegistryOperationProxy` into the DI `OperationProvider` set so
+   the `OperationDispatcher` routes operations to the right integration.
+5. Spawns a background initial sync and re-syncs individual entities when the
+   MCP server sends resource-update notifications (MCP `subscribe` protocol).
 
-```rust
-// Todoist example
-TodoistSyncProvider
-  → Incremental sync with sync tokens
-  → HTTP requests to Todoist REST API
+For entities with a `vtable` config, a Turso foreign-data-wrapper table
+(`<entity>_fdw`) is also registered, providing query-time MCP fetch in addition
+to (or instead of) the cache table.
 
-TodoistTaskDataSource
-  → Implements DataSource<TodoistTask>
-  → Reads from QueryableCache
-
-TodoistOperationProvider
-  → Routes set_field() to Todoist API
-  → Returns inverse operation for undo
+```
+YAML file (e.g. ~/.config/holon/integrations/todoist.yaml)
+  │  parsed by load_integration_configs()
+  ▼
+McpIntegrationsModule::from_dir()
+  │  calls build_mcp_integration() per file
+  ▼
+McpIntegration { operation_provider, sync_engine, fdw_backed_tables, … }
+  │  stored in McpIntegrationRegistry (DI singleton)
+  ▼
+RegistryOperationProxy  →  OperationDispatcher  (write path)
+McpSyncEngine           →  initial sync_all() + notification re-sync
+QueryableCache<DynamicEntity>  →  Turso cache tables (queryable via SQL/PRQL)
 ```
 
 ### Adding a New External System
 
-1. Define entity types implementing `IntoEntity` + `TryFromEntity`
-2. Implement `DataSource<T>` for read access
-3. Implement domain traits (`TaskOperations`, etc.)
-4. Create `SyncProvider` for data synchronization
-5. Register in DI container
+1. Drop a `*.yaml` file in `{config_dir}/integrations/` (see YAML Sidecar below
+   for the full schema).
+2. Set any `${VAR}` secrets in the environment or in Holon's Settings UI
+   (the key `todoist.api_key` maps to `${TODOIST_API_KEY}` automatically).
+3. Restart the app — `McpIntegrationsModule` picks up the file automatically.
+
+No Rust code is needed for an MCP-backed integration unless the MCP server
+requires special connection handling (OAuth flows are already supported
+generically via `AuthMode::OAuth`).
 
 > **Future direction (F5 follow-up of the Cells plan)**: each external system will gain its own `EntityCellRegistry` impl alongside its `OperationProvider`. Consumers will then read entity field state through `services.cells().live_field::<T>(uri, field)` uniformly across local and external entities. The third-party API stays as the authority; cells project from the existing CDC stream. No changes to the integration story above — this is additive once the cell infrastructure lands.
 
@@ -184,26 +206,61 @@ MCP Server (e.g. ai.todoist.net/mcp)
 
 #### Components
 
-| Component              | File                    | Purpose                                                                                                                                                          |
-| ---------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `McpOperationProvider` | `mcp_provider.rs`       | Connects to MCP server, caches `OperationDescriptor`s from tool schemas, executes tools via `call_tool`. Holds `McpRunningService` to keep the connection alive. |
-| `McpSidecar`           | `mcp_sidecar.rs`        | YAML config that patches UI affordances onto MCP tools: entity mapping, `affected_fields`, `triggered_by`, `precondition` (Rhai), `param_overrides`.             |
-| `RhaiPrecondition`     | `mcp_sidecar.rs`        | Parse-don't-validate wrapper: Rhai expressions are validated at YAML deserialization time. Invalid syntax fails immediately, not at operation execution.         |
-| `mcp_schema_mapping`   | `mcp_schema_mapping.rs` | Converts JSON Schema types to `TypeHint` (String, Bool, Number, OneOf, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`.   |
-| `connect_mcp()`        | `mcp_provider.rs`       | Establishes Streamable HTTP connection to an MCP server, returns `Peer<RoleClient>` + `McpRunningService`.                                                       |
+| Component                  | File (holon-mcp-client unless noted)  | Purpose                                                                                                                                                                |
+| -------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `McpOperationProvider`     | `mcp_provider.rs`                     | Connects to MCP server, caches `OperationDescriptor`s from tool schemas, executes tools via `call_tool`. Holds `McpRunningService` to keep the connection alive.       |
+| `McpSyncEngine`            | `mcp_sync_engine.rs`                  | Syncs MCP entities into Turso cache tables. Full-diff sync (insert/update/delete) or cursor-based incremental sync. Subscribes to MCP resource-update notifications.  |
+| `McpForeignDataWrapper`    | `mcp_vtable.rs`                       | Turso FDW that translates SQL WHERE constraints into MCP tool parameters for query-time fetch (no background sync required).                                           |
+| `IntegrationFileConfig`    | `integration_config.rs`               | Top-level YAML structure: `transport`, `auth`, `entities`, `tools`. `${VAR}` references expanded from env / app settings.                                             |
+| `McpIntegrationsModule`    | `holon-app/mcp_integrations.rs`       | DI module: scans YAML dir, builds `McpIntegrationRegistry`, registers one `RegistryOperationProxy` per integration into the `OperationProvider` set.                  |
+| `McpIntegrationRegistry`   | `holon-app/mcp_integrations.rs`       | DI singleton holding all live `McpIntegration` handles (keeps services alive) and the list of FDW-backed cache table names.                                            |
+| `McpSidecar`               | `mcp_sidecar.rs`                      | Entity and tool annotations parsed from the YAML `entities`/`tools` maps: entity mapping, `affected_fields`, `triggered_by`, `precondition` (Rhai), `undo` config.   |
+| `RhaiPrecondition`         | `mcp_sidecar.rs`                      | Parse-don't-validate wrapper: Rhai expressions are validated at YAML deserialization time. Invalid syntax fails immediately, not at operation execution.               |
+| `mcp_schema_mapping`       | `mcp_schema_mapping.rs`               | Converts JSON Schema types to `TypeHint` (String, Bool, Number, OneOf, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`.        |
+| `connect_mcp()`            | `mcp_provider.rs`                     | Establishes Streamable HTTP connection to an MCP server, returns `Peer<RoleClient>` + `McpRunningService`.                                                             |
 
 #### YAML Sidecar
 
-MCP tool schemas carry parameter types and descriptions but lack UI-specific metadata. The YAML sidecar fills this gap:
+Each integration YAML file (`IntegrationFileConfig`) combines transport/auth
+config with entity and tool declarations.  The full schema:
 
 ```yaml
+# Transport — one of http or child_process
+transport:
+  http:
+    uri: https://ai.todoist.net/mcp      # ${VAR} expanded from env / settings
+  # OR:
+  # child_process:
+  #   command: npx
+  #   args: ["-y", "@my/server-mcp"]
+  #   env: { MY_TOKEN: "${MY_TOKEN}" }
+
+# Auth (HTTP only)
+auth:
+  static_token: "${TODOIST_API_KEY}"    # Bearer token; ${VAR} expanded at startup
+  # OR: oauth: true                     # OAuth 2.1 — uses PendingOAuthFlows
+
+# Optional prefix prepended to all entity/table names (e.g. "cc_" → cc_session)
+# entity_prefix: "td_"
+
 entities:
   todoist_tasks:
-    short_name: task
-    id_column: id
-  todoist_projects:
-    short_name: project
-    id_column: id
+    short_name: task          # display name used in the UI
+    id_column: id             # primary key column (default: "id")
+    schema:                   # DDL for the Turso cache table
+      - { name: id,       sql_type: TEXT, primary_key: true }
+      - { name: content,  sql_type: TEXT }
+      - { name: priority, sql_type: TEXT }
+      - { name: parentId, sql_type: TEXT, indexed: true }
+    sync:
+      list_tool: find-tasks           # MCP tool to call for bulk fetch
+      extract_path: tasks             # JSON key in tool response containing array
+      list_params: { filter: "all" }  # static params passed to list tool
+      cursor:                         # optional cursor-based incremental sync
+        request_param: cursor
+        response_field: nextCursor
+    # vtable:                         # alternative: foreign-data-wrapper (FDW)
+    #   list_resource: ".../{id}"     # on-demand fetch via SQL push-down
 
 tools:
   complete-tasks:
@@ -212,51 +269,66 @@ tools:
     triggered_by:
       - from: completed
         provides: [ids]
-    precondition: "completed == false" # validated as Rhai at load time
+    precondition: "completed == false"  # Rhai expression, validated at parse time
+    undo:
+      reversible: false
   update-tasks:
     entity: todoist_tasks
     affected_fields: [content, description, priority, dueString, labels]
+    undo:
+      tool: update-tasks              # mirror undo: re-call same tool with old values
+      capture: [content, description, priority, dueString, labels]
   add-tasks:
     entity: todoist_tasks
     display_name: Create Task
+    undo:
+      reversible: false
 ```
 
-Tools without sidecar entries still appear as operations, but with no gesture bindings (affected_fields, triggered_by, preconditions).
+The top-level file is `IntegrationFileConfig`; the `entities` and `tools` maps
+are deserialized into `McpSidecar` (in `holon-mcp-client`).  Tools without sidecar
+entries still appear as operations, but with no gesture bindings (affected_fields,
+triggered_by, preconditions).
 
 #### Tool Name Normalization
 
 MCP tools use kebab-case (`complete-tasks`), Holon operations use snake_case (`complete_tasks`). `McpOperationProvider` maintains a `tool_name_map` to translate between the two.
 
-#### DI Registration (Todoist Example)
+#### DI Registration
 
-`McpOperationProvider` coexists with existing hand-written providers. In `holon-todoist/src/di.rs`:
+`McpIntegrationsModule` in `crates/holon-app/src/mcp_integrations.rs` performs
+all DI wiring automatically from the YAML directory.  No per-integration Rust
+code exists — the old `holon-todoist` crate has been deleted.
 
-```rust
-// Existing providers (unchanged):
-// - TodoistSyncProvider → dyn SyncableProvider + dyn OperationProvider ("todoist.sync")
-// - TodoistTaskOperations → dyn OperationProvider (set_field, indent, move_block, etc.)
-// - TodoistProjectDataSource → dyn OperationProvider (move_block for projects)
+Key pieces registered by `McpIntegrationsModule::configure()`:
 
-// New MCP provider (additive):
-// - McpOperationProvider → dyn OperationProvider (complete_tasks, update_tasks, add_tasks, ...)
-//   Wrapped with OperationWrapper for automatic post-operation sync
-```
+- **`McpIntegrationRegistry`** (async DI singleton): builds all `McpIntegration`
+  objects in parallel at startup, resolves Turso `DbHandle` and `SyncTokenStore`
+  from DI, runs initial `sync_all()` in a background `tokio::spawn`.
+- **`RegistryOperationProxy`** (one per YAML file, added to the
+  `dyn OperationProvider` set): delegates `operations()` and
+  `execute_operation()` to the matching `McpOperationProvider` inside the registry.
+- **`PendingOAuthFlows`** (root singleton): parked state for OAuth integrations
+  awaiting user consent; the frontend calls `complete_oauth(provider_name, code, state)`
+  after the browser callback.
 
-The `TodoistConfig.mcp_server_uri` field controls whether the MCP provider is registered. When set, `McpOperationProvider::connect()` runs inside a `block_on` in the DI factory (safe because factories execute on the main tokio runtime). The sidecar YAML is bundled at compile time via `include_str!`.
+After the registry is built, `wiring.rs` additionally:
+- Calls `engine.register_fdw_table()` for every cache table that has FDW backing
+  (from `McpIntegrationRegistry::fdw_backed_tables()`).
+- Installs `sync_engine.clone()` as the `MatviewHook` so FDW cache tables
+  subscribe to resource-update notifications at first access.
 
 #### Reuse Across Integrations
 
-`holon-mcp-client` is integration-agnostic. To add MCP-backed operations for a new system:
-
-1. Create a YAML sidecar with entity mappings and tool annotations
-2. Register `McpOperationProvider` in your integration's DI module with the appropriate MCP server URI
-3. Optionally wrap with `OperationWrapper` for post-operation sync
+`holon-mcp-client` is integration-agnostic.  The same infrastructure handles
+Todoist, Claude History, and any future MCP server — just add a YAML file.  See
+[Adding a New External System](#adding-a-new-external-system) above.
 
 ## Frontend Architecture
 
-Holon's primary frontend is a **Dioxus** web application — Rust compiled to WASM, running entirely in the browser. This eliminates the FFI bridge entirely: frontend and backend share the same Rust types, and communication uses direct async function calls rather than serialized RPC.
+Holon's primary frontend is **GPUI** — a native Rust desktop application. The Dioxus web frontend (see below) is a **prototype**: the core works, but it is not actively tested. See [Engine.md §Supported Frontends](Engine.md) for the full status table.
 
-### Dioxus Web Frontend
+### Dioxus Web Frontend (Prototype)
 
 ```rust
 // Inversion of Control: frontend asks for what to render, backend resolves everything.
@@ -334,17 +406,4 @@ Because Dioxus runs in the browser, `web-sys` provides direct access to `postMes
 
 ## Dependency Injection
 
-Using `ferrous-di` for service composition:
-
-```rust
-pub async fn create_backend_engine<F>(
-    db_path: PathBuf,
-    setup_fn: F,
-) -> Result<Arc<BackendEngine>>
-
-// Registers:
-// - TursoBackend
-// - OperationDispatcher
-// - TransformPipeline
-// - Provider modules (Todoist, OrgMode, etc.)
-```
+The project uses **fluxdi** for service composition. The composition root is `crates/holon-app/src/wiring.rs` (`FrontendInjectorExt::add_frontend`), which assembles the full session with conditional Loro and OrgMode modules. See [Principles.md §Dependency Injection](Principles.md#dependency-injection) for details.

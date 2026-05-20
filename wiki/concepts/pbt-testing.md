@@ -33,10 +33,6 @@ proptest state machine:
   invariants: checked after each transition
 ```
 
-`run_phased_pbt()` drives the state machine. Each step:
-1. Apply `E2ETransition` to both real system (`E2ESut`) and `ReferenceState`
-2. Check all invariants against both
-3. Fail fast on first invariant violation
 
 ## ReferenceState
 

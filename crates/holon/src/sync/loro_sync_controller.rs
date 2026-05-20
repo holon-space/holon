@@ -32,16 +32,14 @@ use loro::{Frontiers, LoroDoc};
 use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, warn};
 
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
-use holon_api::{EntityName, Value};
 
-use crate::api::snapshot_blocks_from_doc;
+use crate::api::{SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled};
 use crate::core::datasource::OperationProvider;
-use crate::storage::BLOCK_WRITE_TABLE;
-use crate::storage::turso::DbHandle;
 use crate::sync::LoroDocumentStore;
-use crate::sync::event_bus::EventOrigin;
+use crate::sync::sync_base_store::{BaseKey, BaseStore};
 
 /// Filename of the sidecar file that persists the sync watermark next to the
 /// `.loro` snapshot. One file per `LoroDocumentStore`.
@@ -187,9 +185,9 @@ impl LoroSyncController {
     async fn run_loop(self) {
         info!("[LoroSyncController] Started outbound Loro→SQL reconcile loop");
         // The only input is `wake` — fired by the Loro `subscribe_root` callback
-        // on every doc change (local writes, peer imports, mirror upserts). Each
-        // wake drives one outbound reconcile. The SQL→Loro direction is owned by
-        // `run_block_mirror`; there is no inbound EventBus consumer.
+        // on every doc change (local writes, peer imports). Each wake drives one
+        // outbound reconcile. There is no SQL→Loro mirror and no inbound EventBus
+        // consumer; Loro is the authority and this loop is its sole projector.
         loop {
             self.wake.notified().await;
             if let Err(e) = self.on_loro_changed().await {
@@ -215,49 +213,7 @@ impl LoroSyncController {
 /// state keyed by stable id.
 #[async_trait::async_trait]
 pub trait SinkReader: Send + Sync {
-    async fn read_blocks(&self) -> Result<HashMap<String, Block>>;
-}
-
-/// Production [`SinkReader`]: reads the `block_raw` base table directly — NOT the
-/// `block` matview, which can lag `block_raw` under IVM and would make the
-/// projection see stale state and re-emit redundant writes. Tags are hydrated
-/// from the `block_tags` junction; `requires` is not read because it is not part
-/// of the block equivalence relation (`blocks_differ`).
-pub struct TursoSinkReader {
-    db_handle: DbHandle,
-}
-
-impl TursoSinkReader {
-    pub fn new(db_handle: DbHandle) -> Self {
-        Self { db_handle }
-    }
-}
-
-#[async_trait::async_trait]
-impl SinkReader for TursoSinkReader {
-    async fn read_blocks(&self) -> Result<HashMap<String, Block>> {
-        let sql = format!(
-            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
-                    b.source_language, b.source_name, b.properties, b.marks, \
-                    b.created_at, b.updated_at, \
-                    COALESCE((SELECT json_group_array(tag) FROM block_tags \
-                              WHERE block_id = b.id), '[]') AS tags \
-             FROM {table} b",
-            table = BLOCK_WRITE_TABLE,
-        );
-        let rows = self
-            .db_handle
-            .query(&sql, HashMap::new())
-            .await
-            .map_err(|e| anyhow::anyhow!("TursoSinkReader query failed: {e}"))?;
-        let mut out = HashMap::with_capacity(rows.len());
-        for row in rows {
-            let block = Block::try_from(row)
-                .map_err(|e| anyhow::anyhow!("TursoSinkReader: Block::try_from row: {e}"))?;
-            out.insert(block.id.to_string(), block);
-        }
-        Ok(out)
-    }
+    async fn read_blocks(&self) -> Result<HashMap<String, SnapshotBlock>>;
 }
 
 /// The downstream Loro→SQL projection (consolidator → SQL sink convergent
@@ -270,7 +226,12 @@ pub struct LoroProjection {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     /// Shared with `LoroSyncController.last_synced`.
     last_synced: Arc<StdMutex<Frontiers>>,
-    command_bus: Arc<dyn OperationProvider>,
+    /// The pinned block consolidator — the single owner of the block sink-write.
+    /// The projection hands it the Loro-vs-base diff as a typed intent
+    /// `ChangeSet`; it records the intent (op-multiset agreement) and writes the
+    /// SQL sink. (Phase 5: replaces the projection's direct
+    /// `execute_batch_with_origin` block call.)
+    consolidator: Arc<crate::sync::consolidator::BlockConsolidator>,
     /// Read side of the sink — reads the *current* persisted block state as the
     /// diff "before". The projection compares Loro (authority) against this and
     /// emits only genuinely-changed rows (compare-and-skip), so re-projecting an
@@ -283,17 +244,22 @@ pub struct LoroProjection {
     /// flush) so two callers can't both fork at the same watermark and emit
     /// overlapping diffs.
     project_lock: tokio::sync::Mutex<()>,
-    /// Delete-pass gate. `false` until the Loro authority is fully seeded from
-    /// the persistent store (`seed_loro_from_persistent_store` →
-    /// [`Self::arm`]). The Loro→SQL projection's DELETE pass deletes sink rows
+    /// Delete-pass gate. `false` until the Loro authority is fully seeded (from
+    /// the bundled Org assets via `create_in_tree` intents) → [`Self::arm`].
+    /// The Loro→SQL projection's DELETE pass deletes sink rows
     /// absent from Loro — which is only correct once Loro is the *complete*
     /// authority. During bootstrap the org initial scan flushes the projection
-    /// (via `OrgSyncController::on_file_changed`) before the seed has mirrored
+    /// (via `FileSyncController::on_file_changed`) before the seed has mirrored
     /// raw-inserted layout blocks (`seed_default_layout`'s journals /
     /// root-layout / sidebar) into Loro; an unarmed projection emits creates +
     /// updates but withholds deletes, so those SQL-only seed rows survive until
     /// the seed reconciles them into Loro. Creates/updates are never gated.
     armed: Arc<AtomicBool>,
+    /// Phase 3 (shadow): the last-projected Loro snapshot. The shadow base-diff
+    /// (Loro authority vs this base) runs alongside the live sink-diff and
+    /// asserts op-multiset agreement before the diff source is flipped. See
+    /// [`crate::sync::sync_base_store`].
+    base_store: crate::sync::sync_base_store::SyncBaseStore,
 }
 
 impl LoroProjection {
@@ -304,22 +270,38 @@ impl LoroProjection {
         sink_reader: Arc<dyn SinkReader>,
         sidecar_path: PathBuf,
     ) -> Self {
+        let base_store =
+            crate::sync::sync_base_store::SyncBaseStore::from_frontiers_sidecar(&sidecar_path);
+        // A `LoroProjection` exists only in the Loro-present config (it IS the
+        // Loro→SQL projection), so the consolidator is pinned to Loro.
+        let caps = crate::sync::capability::SessionCapabilities::detect_and_pin(true);
+        let consolidator = Arc::new(crate::sync::consolidator::BlockConsolidator::new(
+            command_bus,
+            caps,
+        ));
         Self {
             doc_store,
             last_synced,
-            command_bus,
+            consolidator,
             sink_reader,
             sidecar_path,
             project_lock: tokio::sync::Mutex::new(()),
             armed: Arc::new(AtomicBool::new(false)),
+            base_store,
         }
     }
 
-    /// Arm the projection's DELETE pass. Called once, after
-    /// `seed_loro_from_persistent_store` has mirrored every persistent-store
-    /// block (including the raw-inserted seed layout) into Loro, so that Loro
-    /// is now the complete authority and deletes of sink-only rows are
-    /// legitimate. Idempotent.
+    /// Phase 2 shadow counters `(agreements, divergences)`: how many projection
+    /// batches' emitted ops decoded to a `ChangeSet` that agreed with / diverged
+    /// from the source op multiset. The gate requires `divergences == 0`.
+    pub fn shadow_changeset_counters(&self) -> (usize, usize) {
+        self.consolidator.shadow_counters()
+    }
+
+    /// Arm the projection's DELETE pass. Called once, after the seed (bundled
+    /// Org assets via `create_in_tree` intents, incl. the raw-inserted seed
+    /// layout) has populated Loro, so that Loro is now the complete authority
+    /// and deletes of sink-only rows are legitimate. Idempotent.
     pub fn arm(&self) {
         self.armed.store(true, Ordering::SeqCst);
     }
@@ -367,28 +349,64 @@ impl LoroProjection {
         let current = self.current_frontiers().await?;
 
         // "after" = Loro authority. "before" = the SQL sink's current state.
+        // `after_settled` is false when a live tree node was transiently
+        // meta-incomplete (mid-mutation) and therefore skipped — the snapshot
+        // under-reports the live set, so deletes derived from it would be
+        // spurious (see the delete-pass gate below).
         let doc_arc = self.raw_doc().await?;
-        let after: HashMap<String, Block> = {
+        let (after, after_settled): (HashMap<String, SnapshotBlock>, bool) = {
             let doc = &*doc_arc;
-            snapshot_blocks_from_doc(doc)
+            snapshot_blocks_from_doc_settled(doc)
         };
-        let before: HashMap<String, Block> = self.read_sql_snapshot().await?;
+        // ── Phase 3: diff the Loro authority against the BASE, not the cache ──
+        // `before` is the last Loro snapshot we projected (the 3-way base),
+        // NOT the live SQL sink. Diffing against a stable base means:
+        //   • an unchanged Loro snapshot emits zero ops (no lossy
+        //     `sort_key`/`properties` round-trip churn — old #7);
+        //   • a transiently-incomplete sink can't make a live block look
+        //     "deleted" (no add/remove CDC churn);
+        //   • a SQL-only delete that left the node alive in Loro is NOT
+        //     resurrected (the node is in both base and `after` → no create).
+        // Cold boot (unseeded base): seed from the SQL sink so already-persisted
+        // seed-layout rows are treated as updates, not re-creates.
+        // Read the base through the `BaseStore` trait seam (Phase 2). Keyed by
+        // `BaseKey::global()` — one Loro doc for the whole tree today; the key
+        // becomes a real `(peer, file)` when bases go domain-scoped (Phase 3+).
+        let base_key = BaseKey::global();
+        let was_seeded = self.base_store.is_base_seeded(&base_key);
+        let before: Arc<HashMap<String, SnapshotBlock>> = if was_seeded {
+            self.base_store.get_base(&base_key)
+        } else {
+            Arc::new(self.read_sql_snapshot().await?)
+        };
         let snapshot_ms = t0.elapsed().as_millis();
 
         let mut ops = diff_snapshots_to_ops(&before, &after);
+        let had_changes = !ops.is_empty();
 
-        // Delete-pass gate: until the projection is armed (Loro fully seeded
-        // from the persistent store), withhold deletes so the bootstrap org
-        // scan's flush can't delete raw-inserted seed-layout rows that the
-        // seed hasn't mirrored into Loro yet. Creates/updates always flow.
-        if !self.armed.load(Ordering::SeqCst) {
+        // Delete-pass gate. Withhold deletes when EITHER:
+        //  (a) the projection is not yet armed (Loro still seeding from the
+        //      persistent store) — the bootstrap org scan's flush must not
+        //      delete raw-inserted seed-layout rows the seed hasn't mirrored
+        //      into Loro yet; or
+        //  (b) the snapshot is not settled — a live node was transiently
+        //      meta-incomplete and dropped from `after`, so a block still in
+        //      `before` (SQL) looks "deleted". Emitting that delete removes the
+        //      sink row; the next settled projection re-creates it — the
+        //      add/remove CDC churn cycle (`inv-editable-text-has-draggable`).
+        //      A genuinely deleted node parents to Deleted/Unexist and keeps
+        //      `after_settled = true`, so real deletes still flow next pass.
+        // Creates/updates always flow.
+        if !self.armed.load(Ordering::SeqCst) || !after_settled {
             let before_len = ops.len();
             ops.retain(|(name, _)| name != "delete");
             let withheld = before_len - ops.len();
             if withheld > 0 {
                 tracing::warn!(
-                    "[LoroProjection] unarmed: withholding {} delete(s) until Loro authority is seeded",
-                    withheld
+                    "[LoroProjection] withholding {} delete(s) (armed={}, snapshot_settled={})",
+                    withheld,
+                    self.armed.load(Ordering::SeqCst),
+                    after_settled,
                 );
             }
         }
@@ -415,10 +433,29 @@ impl LoroProjection {
                 op_summary,
             );
             let op_count = op_summary.len();
-            self.command_bus
-                .execute_batch_with_origin(&EntityName::new("block"), ops, EventOrigin::Loro)
-                .await
-                .map_err(|e| anyhow::anyhow!("execute_batch_with_origin failed: {}", e))?;
+
+            // Phase 5: the block sink-write flows as a typed intent through the
+            // consolidator. `base_ref` records the base this diff was computed
+            // against (the pre-projection watermark frontiers) so the intent
+            // carries its provenance. `command_id` stays `None` — the projection
+            // diffs the merged Loro authority and so has no single originating
+            // command (block undo/redo is EventBus-independent; verified Risk #7).
+            // The consolidator records the typed `ChangeSet` (op-multiset
+            // agreement, the Phase-2 shadow relation) and writes the SQL sink.
+            let base_ref = {
+                let bytes = self.last_synced.lock().unwrap().encode();
+                Some(
+                    bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>(),
+                )
+            };
+            let provenance = holon_api::Provenance {
+                command_id: None,
+                base_ref,
+            };
+            self.consolidator.apply(ops, provenance).await?;
             // Startup-promptness timing: how long a projection pass took to read
             // the Loro+SQL snapshots and apply the diff. During the boot burst
             // this surfaces whether per-pass snapshot cost (O(blocks)) is the
@@ -431,6 +468,19 @@ impl LoroProjection {
                 after.len(),
                 before.len(),
             );
+        }
+
+        // Advance the Phase-3 base to the just-projected Loro snapshot. Only on
+        // a settled snapshot — an unsettled `after` under-reports the live set,
+        // so committing it as the base would make the next base-diff emit
+        // spurious creates/deletes. (Shadow: this changes only future base-diff
+        // comparisons, not what is applied.)
+        // Skip the write (and the full-store sidecar rewrite it triggers) when
+        // the diff was empty against an already-seeded base — the stored base
+        // is semantically identical to `after`, so replacing it only burns a
+        // document-sized serialize + disk write per idle wake.
+        if after_settled && (had_changes || !was_seeded) {
+            self.base_store.put_base(&base_key, after);
         }
 
         // Advance the watermark. This is the ONLY place last_synced is
@@ -458,7 +508,7 @@ impl LoroProjection {
 
     /// Read the sink's current block state (the diff "before") via the injected
     /// [`SinkReader`].
-    async fn read_sql_snapshot(&self) -> Result<HashMap<String, Block>> {
+    async fn read_sql_snapshot(&self) -> Result<HashMap<String, SnapshotBlock>> {
         self.sink_reader.read_blocks().await
     }
 
@@ -538,27 +588,27 @@ pub(crate) fn is_empty_frontiers(f: &Frontiers) -> bool {
 // -- Block snapshot diff → command-bus ops ---------------------------------
 
 pub(crate) fn diff_snapshots_to_ops(
-    before: &HashMap<String, Block>,
-    after: &HashMap<String, Block>,
-) -> Vec<(String, HashMap<String, Value>)> {
-    let mut ops: Vec<(String, HashMap<String, Value>)> = Vec::new();
+    before: &HashMap<String, SnapshotBlock>,
+    after: &HashMap<String, SnapshotBlock>,
+) -> Vec<(String, holon_api::StorageEntity)> {
+    let mut ops: Vec<(String, holon_api::StorageEntity)> = Vec::new();
 
     // Creates (in "after" but not in "before").
     // Emit in an order where parents come before children: walk "after" in
     // topological order by following parent_id chains. Blocks whose parent
     // is not in "after" go first (they're the roots).
-    let creates: Vec<&Block> = after
+    let creates: Vec<&SnapshotBlock> = after
         .values()
-        .filter(|b| !before.contains_key(b.id.as_str()))
+        .filter(|s| !before.contains_key(s.block.id.as_str()))
         .collect();
     let ordered_creates = topological_sort_creates(creates, after);
-    for block in ordered_creates {
+    for snap in ordered_creates {
         tracing::trace!(
             "[LORO_DIFF_TRACE] CREATE id={} content={:?}",
-            block.id,
-            block.content
+            snap.block.id,
+            snap.block.content
         );
-        ops.push(("create".to_string(), block_to_params(block)));
+        ops.push(("create".to_string(), block_to_params(snap)));
     }
 
     // Updates (in both, but differ).
@@ -584,8 +634,8 @@ pub(crate) fn diff_snapshots_to_ops(
             tracing::trace!(
                 "[LORO_DIFF_TRACE] UPDATE id={} content_before={:?} content_after={:?}",
                 id,
-                old_block.content,
-                new_block.content
+                old_block.block.content,
+                new_block.block.content
             );
             ops.push(("update".to_string(), params));
         }
@@ -593,14 +643,14 @@ pub(crate) fn diff_snapshots_to_ops(
 
     // Deletes (in "before" but not in "after"). Delete leaves first so
     // parent pointers stay consistent during the batch.
-    let deletes: Vec<&Block> = before
+    let deletes: Vec<&SnapshotBlock> = before
         .values()
-        .filter(|b| !after.contains_key(b.id.as_str()))
+        .filter(|s| !after.contains_key(s.block.id.as_str()))
         .collect();
     let ordered_deletes = topological_sort_deletes(deletes, before);
-    for block in ordered_deletes {
+    for snap in ordered_deletes {
         let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String(block.id.to_string()));
+        params.insert("id".into(), Value::String(snap.block.id.to_string()));
         ops.push(("delete".to_string(), params));
     }
 
@@ -609,61 +659,62 @@ pub(crate) fn diff_snapshots_to_ops(
 
 /// Topologically sort creates so parents precede children.
 fn topological_sort_creates<'a>(
-    creates: Vec<&'a Block>,
-    all: &'a HashMap<String, Block>,
-) -> Vec<&'a Block> {
+    creates: Vec<&'a SnapshotBlock>,
+    all: &'a HashMap<String, SnapshotBlock>,
+) -> Vec<&'a SnapshotBlock> {
     let create_ids: std::collections::HashSet<String> =
-        creates.iter().map(|b| b.id.to_string()).collect();
+        creates.iter().map(|s| s.block.id.to_string()).collect();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut result: Vec<&Block> = Vec::new();
+    let mut result: Vec<&SnapshotBlock> = Vec::new();
 
     fn visit<'a>(
-        block: &'a Block,
-        all: &'a HashMap<String, Block>,
+        snap: &'a SnapshotBlock,
+        all: &'a HashMap<String, SnapshotBlock>,
         create_ids: &std::collections::HashSet<String>,
         visited: &mut std::collections::HashSet<String>,
-        result: &mut Vec<&'a Block>,
+        result: &mut Vec<&'a SnapshotBlock>,
     ) {
-        let id = block.id.to_string();
+        let id = snap.block.id.to_string();
         if visited.contains(&id) {
             return;
         }
         visited.insert(id);
-        let parent_id = block.parent_id.as_str();
+        let parent_id = snap.block.parent_id.as_str();
         if create_ids.contains(parent_id)
             && let Some(parent) = all.get(parent_id)
         {
             visit(parent, all, create_ids, visited, result);
         }
-        result.push(block);
+        result.push(snap);
     }
 
-    for block in &creates {
-        visit(block, all, &create_ids, &mut visited, &mut result);
+    for snap in &creates {
+        visit(snap, all, &create_ids, &mut visited, &mut result);
     }
     result
 }
 
 /// Topologically sort deletes so children precede parents (leaves first).
 fn topological_sort_deletes<'a>(
-    deletes: Vec<&'a Block>,
-    all: &'a HashMap<String, Block>,
-) -> Vec<&'a Block> {
+    deletes: Vec<&'a SnapshotBlock>,
+    all: &'a HashMap<String, SnapshotBlock>,
+) -> Vec<&'a SnapshotBlock> {
     let mut creates_order = topological_sort_creates(deletes.clone(), all);
     creates_order.reverse();
     creates_order
 }
 
-pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(block.id.to_string()));
+pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
+    let block = &snap.block;
+    let mut params = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(block.id.to_string()));
     params.insert(
-        "parent_id".to_string(),
+        "parent_id".into(),
         Value::String(block.parent_id.to_string()),
     );
-    params.insert("content".to_string(), Value::String(block.content.clone()));
+    params.insert("content".into(), Value::String(block.content.clone()));
     params.insert(
-        "content_type".to_string(),
+        "content_type".into(),
         Value::String(block.content_type.to_string()),
     );
 
@@ -673,12 +724,19 @@ pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
     } else {
         now
     };
-    params.insert("created_at".to_string(), Value::Integer(created));
-    params.insert("updated_at".to_string(), Value::Integer(now));
-    params.insert(
-        "sort_key".to_string(),
-        Value::String(block.sort_key.clone()),
+    params.insert("created_at".into(), Value::Integer(created));
+    params.insert("updated_at".into(), Value::Integer(now));
+    // Projection-totality guard (R-1): every owned Loro block MUST have a
+    // non-empty fractional_index. An empty sort_key means the projection
+    // failed to carry the Loro authority's order — the "sort_key stays A0"
+    // bug class. This debug_assert fires on the bug; the PBT invariant
+    // `SELECT count(*) FROM block_raw WHERE sort_key IS NULL` fires in CI.
+    debug_assert!(
+        !snap.sort_key.is_empty(),
+        "projection-totality violation: block {} has empty sort_key",
+        block.id
     );
+    params.insert("sort_key".into(), Value::String(snap.sort_key.clone()));
 
     if !block.tags.is_empty() {
         let arr: Vec<Value> = block
@@ -686,7 +744,7 @@ pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
             .iter()
             .map(|t| Value::String(t.clone()))
             .collect();
-        params.insert("tags".to_string(), Value::Array(arr));
+        params.insert("tags".into(), Value::Array(arr));
     }
 
     // `requires` is an edge field (`block_requires` junction). Emit it as a
@@ -699,18 +757,15 @@ pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
             .iter()
             .map(|r| Value::String(r.clone()))
             .collect();
-        params.insert("requires".to_string(), Value::Array(arr));
+        params.insert("requires".into(), Value::Array(arr));
     }
 
     if block.content_type == ContentType::Source {
         if let Some(ref lang) = block.source_language {
-            params.insert(
-                "source_language".to_string(),
-                Value::String(lang.to_string()),
-            );
+            params.insert("source_language".into(), Value::String(lang.to_string()));
         }
         if let Some(ref name) = block.source_name {
-            params.insert("source_name".to_string(), Value::String(name.clone()));
+            params.insert("source_name".into(), Value::String(name.clone()));
         }
         // `_source_header_args` rides into params via the
         // `block.properties` flatten below. Don't also write a
@@ -734,7 +789,7 @@ pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
         if k == "tags" || k == "requires" {
             continue;
         }
-        params.entry(k.clone()).or_insert_with(|| v.clone());
+        params.entry(k.as_str().into()).or_insert_with(|| v.clone());
     }
 
     // Project Block.marks → SQL `marks` TEXT column as a JSON string. None →
@@ -742,7 +797,7 @@ pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
     // discriminator is `marks IS NOT NULL`.
     if let Some(ref marks) = block.marks {
         params.insert(
-            "marks".to_string(),
+            "marks".into(),
             Value::String(holon_api::marks_to_json(marks)),
         );
     }
@@ -754,31 +809,31 @@ pub fn block_to_params(block: &Block) -> HashMap<String, Value> {
 /// `new`, plus the `id` (always needed for the WHERE clause) and `updated_at`.
 /// This prevents Loro outbound reconcile from overwriting SQL fields that a
 /// concurrent direct write has already advanced.
-fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
+fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::StorageEntity {
+    let (old_sort_key, new_sort_key) = (&old.sort_key, &new.sort_key);
+    let old = &old.block;
+    let new = &new.block;
     let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(new.id.to_string()));
+    params.insert("id".into(), Value::String(new.id.to_string()));
 
     let now = chrono::Utc::now().timestamp_millis();
-    params.insert("updated_at".to_string(), Value::Integer(now));
+    params.insert("updated_at".into(), Value::Integer(now));
 
     if old.parent_id != new.parent_id {
-        params.insert(
-            "parent_id".to_string(),
-            Value::String(new.parent_id.to_string()),
-        );
+        params.insert("parent_id".into(), Value::String(new.parent_id.to_string()));
     }
     if old.content != new.content {
-        params.insert("content".to_string(), Value::String(new.content.clone()));
+        params.insert("content".into(), Value::String(new.content.clone()));
     }
     if old.content_type != new.content_type {
         params.insert(
-            "content_type".to_string(),
+            "content_type".into(),
             Value::String(new.content_type.to_string()),
         );
     }
     if old.tags != new.tags {
         let arr: Vec<Value> = new.tags.iter().map(|t| Value::String(t.clone())).collect();
-        params.insert("tags".to_string(), Value::Array(arr));
+        params.insert("tags".into(), Value::Array(arr));
     }
     if old.requires != new.requires {
         let arr: Vec<Value> = new
@@ -786,23 +841,20 @@ fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
             .iter()
             .map(|r| Value::String(r.clone()))
             .collect();
-        params.insert("requires".to_string(), Value::Array(arr));
+        params.insert("requires".into(), Value::Array(arr));
     }
     if old.source_language != new.source_language
         && let Some(ref lang) = new.source_language
     {
-        params.insert(
-            "source_language".to_string(),
-            Value::String(lang.to_string()),
-        );
+        params.insert("source_language".into(), Value::String(lang.to_string()));
     }
     if old.source_name != new.source_name
         && let Some(ref name) = new.source_name
     {
-        params.insert("source_name".to_string(), Value::String(name.clone()));
+        params.insert("source_name".into(), Value::String(name.clone()));
     }
-    if old.sort_key != new.sort_key {
-        params.insert("sort_key".to_string(), Value::String(new.sort_key.clone()));
+    if old_sort_key != new_sort_key {
+        params.insert("sort_key".into(), Value::String(new_sort_key.clone()));
     }
     if old.properties_map() != new.properties_map() {
         for (k, v) in &new.properties {
@@ -815,7 +867,7 @@ fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
             if k == "tags" || k == "requires" {
                 continue;
             }
-            params.entry(k.clone()).or_insert_with(|| v.clone());
+            params.entry(k.as_str().into()).or_insert_with(|| v.clone());
         }
     }
     if old.marks != new.marks {
@@ -825,7 +877,7 @@ fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
             Some(marks) => Value::String(holon_api::marks_to_json(marks)),
             None => Value::Null,
         };
-        params.insert("marks".to_string(), val);
+        params.insert("marks".into(), val);
     }
 
     params
@@ -839,24 +891,24 @@ fn block_diff_params(old: &Block, new: &Block) -> HashMap<String, Value> {
 pub(crate) fn project_shared_doc_to_ops(
     shared_doc: &LoroDoc,
     patch_block: impl Fn(&mut Block),
-) -> Vec<(String, HashMap<String, Value>)> {
+) -> Vec<(String, holon_api::StorageEntity)> {
     let mut blocks = snapshot_blocks_from_doc(shared_doc);
-    for block in blocks.values_mut() {
-        patch_block(block);
+    for snap in blocks.values_mut() {
+        patch_block(&mut snap.block);
     }
     diff_snapshots_to_ops(&HashMap::new(), &blocks)
 }
 
-fn blocks_differ(a: &Block, b: &Block) -> bool {
-    a.content != b.content
-        || a.parent_id != b.parent_id
-        || a.content_type != b.content_type
-        || a.source_language != b.source_language
-        || a.source_name != b.source_name
-        || a.tags != b.tags
-        || a.sort_key != b.sort_key
-        || a.properties_map() != b.properties_map()
-        || a.marks != b.marks
+fn blocks_differ(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
+    a.sort_key != b.sort_key
+        || a.block.content != b.block.content
+        || a.block.parent_id != b.block.parent_id
+        || a.block.content_type != b.block.content_type
+        || a.block.source_language != b.block.source_language
+        || a.block.source_name != b.block.source_name
+        || a.block.tags != b.block.tags
+        || a.block.properties_map() != b.block.properties_map()
+        || a.block.marks != b.block.marks
 }
 
 #[cfg(test)]
@@ -871,14 +923,17 @@ mod marks_outbound_tests {
     use super::*;
     use holon_api::{EntityUri, InlineMark, MarkSpan};
 
-    fn block_with_marks(content: &str, marks: Option<Vec<MarkSpan>>) -> Block {
+    fn block_with_marks(content: &str, marks: Option<Vec<MarkSpan>>) -> SnapshotBlock {
         let mut b = Block::new_text(
             EntityUri::block("b1"),
             EntityUri::no_parent(),
             content.to_string(),
         );
         b.marks = marks;
-        b
+        SnapshotBlock {
+            block: b,
+            sort_key: "A0".to_string(),
+        }
     }
 
     #[test]

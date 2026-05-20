@@ -263,13 +263,10 @@ async fn test_query_and_watch_stream() -> Result<()> {
     // The test below will verify data arrives via the stream.
 
     // Execute an operation that should trigger a stream update
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("block-1".to_string()));
-    params.insert("field".to_string(), Value::String("content".to_string()));
-    params.insert(
-        "value".to_string(),
-        Value::String("Updated content".to_string()),
-    );
+    let mut params: holon_api::StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("block-1".to_string()));
+    params.insert("field".into(), Value::String("content".to_string()));
+    params.insert("value".into(), Value::String("Updated content".to_string()));
 
     ctx.execute_op("block", "set_field", params).await?;
 
@@ -324,13 +321,10 @@ async fn test_operation_triggers_stream_update() -> Result<()> {
         .await?;
 
     // Execute operation
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("block-1".to_string()));
-    params.insert("field".to_string(), Value::String("content".to_string()));
-    params.insert(
-        "value".to_string(),
-        Value::String("New content".to_string()),
-    );
+    let mut params: holon_api::StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("block-1".to_string()));
+    params.insert("field".into(), Value::String("content".to_string()));
+    params.insert("value".into(), Value::String("New content".to_string()));
 
     ctx.execute_op("block", "set_field", params).await?;
 
@@ -373,19 +367,16 @@ async fn test_create_and_delete_workflow() -> Result<()> {
         .await?;
 
     // Create a new block
-    let mut create_params = HashMap::new();
-    create_params.insert("id".to_string(), Value::String("block-2".to_string()));
-    create_params.insert(
-        "content".to_string(),
-        Value::String("New block".to_string()),
-    );
-    create_params.insert("completed".to_string(), Value::Integer(0));
+    let mut create_params: holon_api::StorageEntity = HashMap::new();
+    create_params.insert("id".into(), Value::String("block-2".to_string()));
+    create_params.insert("content".into(), Value::String("New block".to_string()));
+    create_params.insert("completed".into(), Value::Integer(0));
 
     ctx.execute_op("block", "create", create_params).await?;
 
     // Delete the block
-    let mut delete_params = HashMap::new();
-    delete_params.insert("id".to_string(), Value::String("block-2".to_string()));
+    let mut delete_params: holon_api::StorageEntity = HashMap::new();
+    delete_params.insert("id".into(), Value::String("block-2".to_string()));
 
     ctx.execute_op("block", "delete", delete_params).await?;
 
@@ -435,10 +426,10 @@ async fn test_multiple_operations_sequence() -> Result<()> {
 
     // Execute multiple operations
     for i in 1..=3 {
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String("block-1".to_string()));
-        params.insert("field".to_string(), Value::String("content".to_string()));
-        params.insert("value".to_string(), Value::String(format!("Update {}", i)));
+        let mut params: holon_api::StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("block-1".to_string()));
+        params.insert("field".into(), Value::String("content".to_string()));
+        params.insert("value".into(), Value::String(format!("Update {}", i)));
 
         ctx.execute_op("block", "set_field", params).await?;
     }

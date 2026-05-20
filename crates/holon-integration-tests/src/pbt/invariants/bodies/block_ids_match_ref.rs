@@ -1,25 +1,21 @@
-//! Phase 7 — `inv-block-ids-match-ref` (FUNCTIONAL, NEW INVARIANT).
+//! `inv-block-ids-match-ref`.
 //!
 //! Set-equality check between the SQL projection's block ids and the
 //! reference model's non-seed block ids. Bound only on `SutSqlProjection`
 //! + `RefBlockTree` — runs in any slice with a storage backing.
 //!
-//! Catches the bug class `inv-backend-blocks-match-ref` was designed
-//! for (block-tree drift between SQL projection and ref model) but at
-//! a coarser granularity. The deeper field-level comparison stays in
-//! the inline `inv-backend-blocks-match-ref` body in
-//! `sut.rs::check_invariants_async` for now; that one is the
-//! finer-grained safety net.
+//! Catches block-tree drift between SQL projection and ref model at a
+//! coarse granularity; the deeper field-level comparison lives in
+//! `inv-blocks-match-ref/matview`.
 //!
-//! Why this rephrasing matters: set-equality catches the most common
-//! drift symptoms (block exists in ref but not SQL, or vice versa)
-//! without needing `assert_blocks_equivalent` plumbing. Runs in the
-//! Phase 8 storage_consistency_pbt slice with no extra wiring.
+//! Set-equality catches the most common drift symptoms (block exists in ref
+//! but not SQL, or vice versa) without needing `assert_blocks_equivalent`
+//! plumbing. Runs in the storage_consistency_pbt slice with no extra wiring.
 
 use std::collections::BTreeSet;
 
 use holon_pbt_core::capabilities::{EntityUri, RefBlockTree, SutSqlProjection};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvBlockIdsMatchRef;
 
@@ -35,13 +31,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        // Strict in the storage slice; in the wide PBT, the CDC-lag
-        // classifier downgrades it via the surrounding invariant
-        // dispatcher when live_blocks_stale (proxy.cdc_in_flight_cached).
-        RunMode::Strict
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {

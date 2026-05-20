@@ -30,7 +30,7 @@ pub fn generate_directory_id(path: &Path, root_directory: &Path) -> String {
 /// - `file:projects/todo.org` for nested files
 ///
 /// File URIs are transient identifiers used during parsing. They are resolved
-/// to permanent `doc:<uuid>` URIs at startup via OrgSyncController.
+/// to permanent `doc:<uuid>` URIs at startup via FileSyncController.
 /// Generate a file URI from a file path relative to a root directory.
 ///
 /// Both `path` and `root` must already be canonicalized by the caller when
@@ -210,20 +210,13 @@ pub fn parse_org_file(
         &done_kws,
     )?;
 
-    // Assign unique fractional sort_keys per parent group.
-    //
-    // Without this, every parsed block keeps the default `"a0"` sort_key.
-    // `BlockOperations::get_prev_sibling` filters siblings by
-    // `sort_key < block.sort_key` (strict), so when every sibling shares
-    // `"a0"` no predecessor can be found and `indent` / `move_block` /
-    // `outdent` (which calls `gen_key_between(prev, next)` with two equal
-    // `"a0"`s) all break.
-    //
-    // The blocks are pushed in document DFS order, so the index inside each
-    // parent group is the desired sibling order. `gen_n_keys(N)` produces N
-    // evenly-spaced fractional indices we can hand out in order.
-    assign_per_parent_sort_keys(&mut blocks)?;
-
+    // Sibling order is conveyed positionally — blocks are pushed in document
+    // DFS order, so the org sync controller derives each block's
+    // `after_block_id` from that order and the order owner mints the
+    // `sort_key` on create (`place`/`new_child_anchor` for SqlOnly, the Loro
+    // fractional index projected to SQL for Loro mode). The parser must NOT
+    // mint keys: a second key generator here (`gen_n_keys`) lived in a
+    // different value space than the owner's, so the two disagreed on order.
     Ok(ParseResult {
         document,
         blocks,
@@ -231,27 +224,30 @@ pub fn parse_org_file(
     })
 }
 
-/// Walk `blocks` in document order and overwrite `sort_key` so that every
-/// sibling group (same `parent_id`) receives unique, properly-ordered
-/// fractional indices. The relative order inside each group is the order
-/// the blocks were pushed, which mirrors document order.
-fn assign_per_parent_sort_keys(blocks: &mut [Block]) -> Result<()> {
-    use holon_core::fractional_index::gen_n_keys;
-
-    let mut by_parent: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, block) in blocks.iter().enumerate() {
-        by_parent
-            .entry(block.parent_id.as_str().to_string())
-            .or_default()
-            .push(i);
-    }
-    for (_parent, indices) in by_parent {
-        let keys = gen_n_keys(indices.len())?;
-        for (idx, key) in indices.iter().zip(keys) {
-            blocks[*idx].sort_key = key;
-        }
-    }
-    Ok(())
+/// Split a headline TITLE LINE into (title, tags) exactly the way the org
+/// parser does: a trailing `:tag1:tag2:` group is org TAG syntax, not title
+/// text (org has no escape for it). Round-trip normalization mirrors this
+/// parse boundary so reference models agree with the parser.
+///
+/// Runs the same orgize grammar the real parser uses (no TODO keywords, so
+/// leading keywords stay in the title).
+pub fn split_headline_tags(line: &str) -> (String, Vec<String>) {
+    assert!(
+        !line.contains('\n'),
+        "split_headline_tags takes a single title line, got {line:?}"
+    );
+    let config = ParseConfig {
+        todo_keywords: (vec![], vec![]),
+        ..Default::default()
+    };
+    let org = config.parse(format!("* {line}"));
+    let headline = org
+        .document()
+        .first_headline()
+        .unwrap_or_else(|| panic!("synthetic headline must parse: {line:?}"));
+    let title = headline.title_raw().trim().to_string();
+    let tags = headline.tags().map(|t| t.to_string()).collect();
+    (title, tags)
 }
 
 /// Parse keywords config string "TODO,INPROGRESS|DONE,CANCELLED" into (Vec<String>, Vec<String>)
@@ -363,7 +359,9 @@ fn process_headlines(
 
         let now = Utc::now().timestamp_millis();
         let mut block = Block {
+            // ALLOW(entity_uri_from_raw): org parser output: id from extract_or_generate_id()
             id: EntityUri::from_raw(&id),
+            // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
             parent_id: EntityUri::from_raw(parent_id),
             content,
             marks,
@@ -404,13 +402,14 @@ fn process_headlines(
         // be either comma- or whitespace-separated (org-edna convention is
         // space-separated; we accept both for ergonomics). Bare slugs are
         // promoted to `block:` URIs at the boundary so block_requires.required_id
-        // matches block.id (per docs/ORG_SYNTAX.md). Anything else stays as
+        // matches block.id (per docs/Reference/ORG_SYNTAX.md). Anything else stays as
         // a flat string property on block.properties.
         for (key, value) in string_properties.iter() {
             if key.eq_ignore_ascii_case("REQUIRES") {
                 block.requires = value
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
+                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES value: bare slug promoted at parse boundary
                     .map(|s| EntityUri::from_raw(s).to_string())
                     .collect();
             } else {
@@ -437,6 +436,7 @@ fn process_headlines(
 
             let mut src_block = Block {
                 id: EntityUri::block(&src_id),
+                // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
                 parent_id: EntityUri::from_raw(&id),
                 content: source_block.source,
                 content_type: ContentType::Source,
@@ -503,6 +503,7 @@ fn process_headlines(
 
             let mut img_block = Block::new_image(
                 EntityUri::block(&img_id),
+                // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
                 EntityUri::from_raw(&id),
                 image_path,
             );

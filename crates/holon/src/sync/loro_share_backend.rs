@@ -5,7 +5,7 @@
 //! - `accept_shared_subtree(parent_id, ticket)` → returns the new mount
 //!   block's stable id in `response`
 //!
-//! See the crate-level plan in docs/SUBTREE_SHARING.md for the threat model.
+//! See the crate-level plan in docs/Reference/SUBTREE_SHARING.md for the threat model.
 
 use crate::core::SqlOperationProvider;
 use crate::core::datasource::{
@@ -298,8 +298,9 @@ fn spawn_projection_worker(
                     return Ok(());
                 }
 
-                let patch = |blocks: &mut HashMap<String, holon_api::block::Block>| {
-                    for block in blocks.values_mut() {
+                let patch = |blocks: &mut HashMap<String, crate::api::SnapshotBlock>| {
+                    for snap in blocks.values_mut() {
+                        let block = &mut snap.block;
                         if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
                             block.parent_id = mount_uri.clone();
                         }
@@ -535,28 +536,22 @@ impl LoroShareBackend {
         let Some(sql_ops) = self.sql_ops.as_ref() else {
             return Ok(());
         };
-        let mut params: StorageEntity = HashMap::new();
-        params.insert("id".to_string(), Value::String(mount_block_uri.to_string()));
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String(mount_block_uri.to_string()));
         params.insert(
-            "parent_id".to_string(),
+            "parent_id".into(),
             Value::String(parent_block_uri.to_string()),
         );
-        params.insert(
-            "content".to_string(),
-            Value::String(fallback_title.to_string()),
-        );
-        params.insert(
-            "content_type".to_string(),
-            Value::String("text".to_string()),
-        );
+        params.insert("content".into(), Value::String(fallback_title.to_string()));
+        params.insert("content_type".into(), Value::String("text".to_string()));
         // Custom properties — `SqlOperationProvider::prepare_create` packs
         // any key not in `BLOCKS_KNOWN_COLUMNS` into the `properties` JSON.
         params.insert(
-            SHARE_ROLE_PROPERTY.to_string(),
+            SHARE_ROLE_PROPERTY.into(),
             Value::String(SHARE_ROLE_MOUNT.to_string()),
         );
         params.insert(
-            SHARED_TREE_ID_PROPERTY.to_string(),
+            SHARED_TREE_ID_PROPERTY.into(),
             Value::String(shared_tree_id.to_string()),
         );
 

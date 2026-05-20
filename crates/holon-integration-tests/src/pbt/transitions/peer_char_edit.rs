@@ -46,7 +46,7 @@ impl TransitionRef<ReferenceState> for PeerCharEdit {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
             check(ReferenceState::mutable_text_enabled(), Reason::Unmigrated),
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
                 self.peer_idx < state.peers.len(),
                 Reason::PeerIndexOutOfBounds,

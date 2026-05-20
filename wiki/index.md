@@ -43,7 +43,7 @@ See [[schema]] for wiki conventions. See [[log]] for change history.
 | Page | Summary |
 |------|---------|
 | [[concepts/cdc-and-streaming]] | Change Data Capture pipeline: Turso IVM → RowChangeStream → UiEvent → frontend |
-| [[concepts/reactive-view]] | Reactive ViewModel system: ReactiveQueryResults, ReactiveView, ReactiveViewModel, futures-signals |
+| [[concepts/reactive-view]] | Reactive ViewModel system: ReactiveRenderedRows, ReactiveView, ReactiveViewModel, futures-signals |
 | [[concepts/query-pipeline]] | Multi-language query compilation: PRQL → SQL, GQL → SQL, virtual tables, render DSL |
 | [[concepts/petri-net-wsjf]] | WSJF task ranking via Petri net: prototype blocks, Rhai scoring, canary blocks |
 | [[concepts/org-sync]] | Bidirectional org-mode sync: echo suppression, projection+diff, file conventions |
@@ -68,7 +68,7 @@ See [[schema]] for wiki conventions. See [[log]] for change history.
 | `crates/holon-api/src/lib.rs` | `Value`, re-exports of all shared types |
 | `crates/holon-api/src/streaming.rs` | `UiEvent`, `WatchHandle`, `ChangeOrigin` |
 | `crates/holon-api/src/render_types.rs` | `RenderExpr`, `RenderProfile`, `OperationDescriptor` |
-| `crates/holon-frontend/src/reactive.rs` | `ReactiveEngine`, `BuilderServices`, `ReactiveQueryResults` |
+| `crates/holon-frontend/src/reactive.rs` | `ReactiveEngine`, `BuilderServices`, `ReactiveRenderedRows` |
 | `crates/holon-frontend/src/reactive_view.rs` | `ReactiveView` self-managing pipeline |
 | `crates/holon-orgmode/src/org_sync_controller.rs` | `OrgSyncController` with echo suppression |
 | `crates/holon-orgmode/src/org_renderer.rs` | `OrgRenderer` — only path for org text generation |

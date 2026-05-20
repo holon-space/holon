@@ -5,6 +5,7 @@ holon_macros::widget_builder! {
         let modes = ba.args.get_string("modes").unwrap_or("[]").to_string();
 
         let entity_uri = ba.args.get_string("entity_uri")
+            // ALLOW(entity_uri_from_raw): ba.args.get_string('entity_uri') render-spec DSL arg
             .map(|s| holon_api::EntityUri::from_raw(s))
             .expect("view_mode_switcher requires an `entity_uri` argument");
 

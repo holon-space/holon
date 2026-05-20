@@ -39,10 +39,10 @@ You can live-inspect the DB, inspect what the UI should render, etc.
 Use it whenever you have a running application and you want to look under the hood to investigate.
 
 # Org File Conventions
-See [docs/ORG_SYNTAX.md](docs/ORG_SYNTAX.md) — org files store **bare IDs** without `block:`/`doc:` scheme prefixes. The parser adds schemes at the boundary, the renderer strips them.
+See [docs/Reference/ORG_SYNTAX.md](docs/Reference/ORG_SYNTAX.md) — org files store **bare IDs** without `block:`/`doc:` scheme prefixes. The parser adds schemes at the boundary, the renderer strips them.
 
 # Architecture
-See ARCHITECTURE.md
+See [docs/Architecture.md](docs/Architecture.md) (details in docs/Architecture/)
 
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.

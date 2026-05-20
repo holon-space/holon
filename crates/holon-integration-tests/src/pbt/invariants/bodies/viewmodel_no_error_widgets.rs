@@ -11,7 +11,7 @@
 //! / interpretation panicked). `None` → `Skipped`.
 
 use holon_pbt_core::capabilities::SutViewModel;
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelNoErrorWidgets;
 
@@ -26,10 +26,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

@@ -57,11 +57,41 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     });
     let entity: gpui::Entity<EditorView> = any.downcast().expect("editable_text cache type mismatch");
 
-    // Snapshot the live `InputState` value so PBT invariants can detect
-    // UI staleness (e.g. `editable_text` failing to follow SQL
-    // `block.content` after `split_block` / `join_block`).
-    let displayed_text: String = ctx.with_gpui(|_window, cx| {
-        entity.read(cx).input_entity().read(cx).value().to_string()
+    // Snapshot the live `InputState` value so PBT invariants can detect UI
+    // staleness, and reconcile a stale editor against the live row content.
+    //
+    // The `EditorView`'s data-sync subscription (see `EditorView::new`) is
+    // bound to the per-row `Mutable` cell that existed when the editor was
+    // first cached. A structural change (split/join) or a navigation rebuilds
+    // the `ReactiveRowSet` with *fresh* per-row cells, orphaning that
+    // subscription: later external writes (peer edits, file reloads, the
+    // post-split projection) land on the new cell and never reach the cached
+    // editor's `InputState`. The shell still re-renders this builder on the
+    // new cell's data signal, so `content` here is always the live value.
+    // When the editor is NOT window-focused the user cannot be mid-typing, so
+    // pushing the live content into a stale `InputState` is always safe — it
+    // is the backstop that keeps the displayed/edited text converged with the
+    // backend even after the event-driven subscription has been orphaned.
+    let (displayed_text, is_window_focused): (std::sync::Arc<str>, bool) = ctx.with_gpui(|window, cx| {
+        use gpui::Focusable;
+        let view = entity.read(cx);
+        let input = view.input_entity().clone();
+        let is_focused = input.focus_handle(cx).is_focused(window);
+        // `just_focused` is the false→true window-focus edge (e.g. click-to-edit).
+        let just_focused = view.focus_arrived(is_focused);
+        let current = input.read(cx).value().to_string();
+        // Reconcile a stale `InputState` to the live row content when the user
+        // cannot be mid-typing: either the editor is unfocused, or focus *just*
+        // arrived this frame (no keystroke yet). A continuously-focused editor
+        // is left alone so in-flight typing is never yanked.
+        if current != content && (!is_focused || just_focused) {
+            input.update(cx, |state, cx| {
+                state.set_value(&content, window, cx);
+            });
+            (std::sync::Arc::from(content.as_str()), is_focused)
+        } else {
+            (std::sync::Arc::from(current.as_str()), is_focused)
+        }
     });
     let inner = entity.into_any_element();
 
@@ -102,6 +132,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         has_content,
         Some(displayed_text),
     )
+    .with_focused(is_window_focused)
     .into_any_element()
 }
 

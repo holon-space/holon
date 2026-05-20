@@ -1,12 +1,11 @@
-//! Phase 7 — `inv-frontend-root-not-error`.
+//! `inv-frontend-root-not-error`.
 //!
-//! Body verbatim from `sut.rs:6038–6047` (inv-frontend-engine sub-check 14a).
 //! Checks that the frontend's root ViewModel node is not the Error variant.
 //!
 //! 1-subsystem invariant — touches only ViewModel.
 
 use holon_pbt_core::capabilities::SutViewModel;
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvFrontendRootNotError;
 
@@ -21,10 +20,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

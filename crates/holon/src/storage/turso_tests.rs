@@ -1,4 +1,4 @@
-use super::*;
+use crate::storage::backend::StorageBackend;
 use crate::storage::turso::TursoBackend;
 use crate::storage::types::StorageEntity;
 use chrono::Utc;
@@ -184,8 +184,8 @@ mod view_cdc_tests {
         backend.create_entity(&schema).await.unwrap();
 
         let mut entity = StorageEntity::new();
-        entity.insert("id".to_string(), Value::String("item-1".to_string()));
-        entity.insert("value".to_string(), Value::String("test".to_string()));
+        entity.insert("id".into(), Value::String("item-1".to_string()));
+        entity.insert("value".into(), Value::String("test".to_string()));
         backend
             .insert(
                 &holon_api::TypeDefinition::from_table_name("view_base"),
@@ -237,12 +237,12 @@ mod view_cdc_tests {
 
         for i in 1..=5 {
             let mut entity = StorageEntity::new();
-            entity.insert("id".to_string(), Value::String(format!("item-{}", i)));
+            entity.insert("id".into(), Value::String(format!("item-{}", i)));
             entity.insert(
-                "category".to_string(),
+                "category".into(),
                 Value::String(if i <= 3 { "bugs" } else { "features" }.to_string()),
             );
-            entity.insert("priority".to_string(), Value::Integer(i));
+            entity.insert("priority".into(), Value::Integer(i));
             backend
                 .insert(
                     &holon_api::TypeDefinition::from_table_name("view_filter_base"),
@@ -277,7 +277,7 @@ mod view_cdc_tests {
         assert_eq!(count, 1);
 
         let mut updates = StorageEntity::new();
-        updates.insert("priority".to_string(), Value::Integer(5));
+        updates.insert("priority".into(), Value::Integer(5));
         backend
             .update(
                 &holon_api::TypeDefinition::from_table_name("view_filter_base"),

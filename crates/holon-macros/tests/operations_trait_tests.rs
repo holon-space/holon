@@ -88,7 +88,7 @@ where
     async fn value_param(&self, id: &str, data: Value) -> Result<OperationResult>;
     async fn hashmap_param(
         &self,
-        fields: HashMap<String, Value>,
+        fields: holon_api::StorageEntity,
     ) -> Result<(String, OperationResult)>;
 }
 
@@ -115,7 +115,7 @@ impl DispatchTestOps<()> for MockOps {
     }
     async fn hashmap_param(
         &self,
-        _fields: HashMap<String, Value>,
+        _fields: holon_api::StorageEntity,
     ) -> Result<(String, OperationResult)> {
         Ok(("new-id".to_string(), OperationResult::irreversible(vec![])))
     }
@@ -274,9 +274,9 @@ fn operation_descriptor_has_description_from_doc_comment() {
 #[tokio::test]
 async fn dispatch_string_param() {
     let mock = MockOps;
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("test-1".to_string()));
-    params.insert("value".to_string(), Value::String("hello".to_string()));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("test-1".to_string()));
+    params.insert("value".into(), Value::String("hello".to_string()));
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "string_param", &params).await;
     assert!(result.is_ok());
@@ -285,9 +285,9 @@ async fn dispatch_string_param() {
 #[tokio::test]
 async fn dispatch_bool_param() {
     let mock = MockOps;
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("test-1".to_string()));
-    params.insert("flag".to_string(), Value::Boolean(true));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("test-1".to_string()));
+    params.insert("flag".into(), Value::Boolean(true));
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "bool_param", &params).await;
     assert!(result.is_ok());
@@ -296,9 +296,9 @@ async fn dispatch_bool_param() {
 #[tokio::test]
 async fn dispatch_i64_param() {
     let mock = MockOps;
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("test-1".to_string()));
-    params.insert("count".to_string(), Value::Integer(42));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("test-1".to_string()));
+    params.insert("count".into(), Value::Integer(42));
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "i64_param", &params).await;
     assert!(result.is_ok());
@@ -307,9 +307,9 @@ async fn dispatch_i64_param() {
 #[tokio::test]
 async fn dispatch_optional_param_present() {
     let mock = MockOps;
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("test-1".to_string()));
-    params.insert("maybe".to_string(), Value::String("here".to_string()));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("test-1".to_string()));
+    params.insert("maybe".into(), Value::String("here".to_string()));
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "optional_param", &params).await;
     assert!(result.is_ok());
@@ -318,8 +318,8 @@ async fn dispatch_optional_param_present() {
 #[tokio::test]
 async fn dispatch_optional_param_absent() {
     let mock = MockOps;
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("test-1".to_string()));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("test-1".to_string()));
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "optional_param", &params).await;
     assert!(result.is_ok());
@@ -328,7 +328,7 @@ async fn dispatch_optional_param_absent() {
 #[tokio::test]
 async fn dispatch_missing_required_param_errors() {
     let mock = MockOps;
-    let params = HashMap::new();
+    let params: holon_api::StorageEntity = HashMap::new();
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "string_param", &params).await;
     assert!(result.is_err());
@@ -342,7 +342,7 @@ async fn dispatch_missing_required_param_errors() {
 #[tokio::test]
 async fn dispatch_unknown_operation_errors() {
     let mock = MockOps;
-    let params = HashMap::new();
+    let params: holon_api::StorageEntity = HashMap::new();
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "nonexistent", &params).await;
     assert!(result.is_err());
@@ -351,8 +351,8 @@ async fn dispatch_unknown_operation_errors() {
 #[tokio::test]
 async fn dispatch_hashmap_param() {
     let mock = MockOps;
-    let mut params = HashMap::new();
-    params.insert("name".to_string(), Value::String("test".to_string()));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("name".into(), Value::String("test".to_string()));
     let result =
         __operations_dispatch_test_ops::dispatch_operation(&mock, "hashmap_param", &params).await;
     assert!(result.is_ok());

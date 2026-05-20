@@ -11,10 +11,151 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::cell_registry::EntityCellRegistryExt;
-use holon_api::{EntityUri, Operation, OperationDescriptor, Tags, Value};
+use holon_api::{EntityName, EntityUri, Operation, OperationDescriptor, Tags, Value};
 
 // Define Result type using Send + Sync for error
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Write provenance — which system originated a write.
+///
+/// Threaded through the `OperationProvider::*_with_origin` write API and
+/// persisted on the `_change_origin` CDC column so the inbound direction can
+/// echo-suppress its own writes (e.g. the Loro→SQL projection tags its writes
+/// `EventOrigin::Loro`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventOrigin {
+    Loro,
+    Org,
+    Ui,
+    Other(String),
+}
+
+impl EventOrigin {
+    pub fn as_str(&self) -> &str {
+        match self {
+            EventOrigin::Loro => "loro",
+            EventOrigin::Org => "org",
+            EventOrigin::Ui => "ui",
+            EventOrigin::Other(s) => s.as_str(),
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Self {
+        match s {
+            "loro" => EventOrigin::Loro,
+            "org" => EventOrigin::Org,
+            "ui" => EventOrigin::Ui,
+            other => EventOrigin::Other(other.to_string()),
+        }
+    }
+}
+
+/// Common operation provider interface.
+///
+/// Providers that support entity operations implement this trait.
+/// The `*_with_origin` variants allow callers to tag writes with their
+/// provenance so the inverse sync direction can skip echoes.
+#[async_trait]
+pub trait OperationProvider: Send + Sync {
+    /// Get all operations this provider supports
+    fn operations(&self) -> Vec<OperationDescriptor>;
+
+    /// Find operations that can be executed with given arguments
+    fn find_operations(
+        &self,
+        entity_name: &EntityName,
+        available_args: &[String],
+    ) -> Vec<OperationDescriptor> {
+        self.operations()
+            .into_iter()
+            .filter(|op| {
+                if op.entity_name != *entity_name {
+                    return false;
+                }
+                op.required_params.iter().all(|p| {
+                    if available_args.contains(&p.name) {
+                        return true;
+                    }
+                    op.param_mappings
+                        .iter()
+                        .any(|mapping| mapping.provides.contains(&p.name))
+                })
+            })
+            .collect()
+    }
+
+    /// Execute an operation
+    async fn execute_operation(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: holon_api::StorageEntity,
+    ) -> Result<OperationResult>;
+
+    /// Execute multiple operations as a batch.
+    ///
+    /// Default implementation executes sequentially.
+    async fn execute_batch(
+        &self,
+        entity_name: &EntityName,
+        operations: Vec<(String, holon_api::StorageEntity)>,
+    ) -> Result<Vec<OperationResult>> {
+        let mut results = Vec::with_capacity(operations.len());
+        for (op_name, params) in operations {
+            results.push(
+                self.execute_operation(entity_name, &op_name, params)
+                    .await?,
+            );
+        }
+        Ok(results)
+    }
+
+    /// Execute a batch of operations and tag the resulting events with a
+    /// specific [`EventOrigin`].
+    ///
+    /// Default implementation ignores the origin and delegates to
+    /// `execute_batch`.
+    async fn execute_batch_with_origin(
+        &self,
+        entity_name: &EntityName,
+        operations: Vec<(String, holon_api::StorageEntity)>,
+        _: EventOrigin,
+    ) -> Result<Vec<OperationResult>> {
+        self.execute_batch(entity_name, operations).await
+    }
+
+    /// Execute a single operation and tag with [`EventOrigin`].
+    ///
+    /// Default implementation ignores the origin and delegates to
+    /// `execute_operation`.
+    async fn execute_operation_with_origin(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: holon_api::StorageEntity,
+        _: EventOrigin,
+    ) -> Result<OperationResult> {
+        self.execute_operation(entity_name, op_name, params).await
+    }
+
+    /// Get the last created entity ID (if any). Default returns `None`.
+    fn get_last_created_id(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Build the response payload for a structural focus-mover (`split_block` /
+/// `join_block`): the block focus should move to, plus the initial caret
+/// offset. The frontend reads this off the op result and moves the in-memory
+/// focus authority in process (ADR 0010) — keys must match
+/// `holon-frontend::reactive::structural_focus_target` (`block_id`,
+/// `cursor_offset`).
+fn focus_response(block_id: &str, cursor_offset: i64) -> Value {
+    Value::Object(HashMap::from([
+        ("block_id".to_string(), Value::String(block_id.to_string())),
+        ("cursor_offset".to_string(), Value::Integer(cursor_offset)),
+    ]))
+}
 
 /// Information about a completion state including progress percentage
 ///
@@ -217,10 +358,9 @@ impl<T: Send + Sync + ?Sized> MaybeSendSync for T {}
 /// Entities that support hierarchical tree structure
 pub trait BlockEntity: MaybeSendSync {
     /// Get the entity's unique identifier
-    fn id(&self) -> &str;
+    fn id(&self) -> &EntityUri;
 
-    fn parent_id(&self) -> Option<&str>;
-    fn sort_key(&self) -> &str;
+    fn parent_id(&self) -> Option<&EntityUri>;
     fn depth(&self) -> i64;
 
     /// Get the block content (text content of the block)
@@ -261,7 +401,10 @@ where
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
 
     /// Create new entity (returns new ID, changes, and inverse operation for undo)
-    async fn create(&self, fields: HashMap<String, Value>) -> Result<(String, OperationResult)>;
+    async fn create(
+        &self,
+        fields: crate::storage::types::StorageEntity,
+    ) -> Result<(String, OperationResult)>;
 
     /// Delete entity (returns changes and inverse operation for undo)
     async fn delete(&self, id: &str) -> Result<OperationResult>;
@@ -307,7 +450,7 @@ where
     async fn get_by_id(&self, id: &str) -> Result<Option<T>>;
 
     // Helper queries (default implementations)
-    async fn get_children(&self, parent_id: &str) -> Result<Vec<T>>
+    async fn get_children(&self, parent_id: &EntityUri) -> Result<Vec<T>>
     where
         T: BlockEntity,
     {
@@ -320,16 +463,16 @@ where
 
     /// Get all descendants of a parent (recursive). Default uses iterative BFS
     /// over `get_children()`. Implementations may override with a recursive CTE.
-    async fn get_descendants(&self, parent_id: &str) -> Result<Vec<T>>
+    async fn get_descendants(&self, parent_id: &EntityUri) -> Result<Vec<T>>
     where
         T: BlockEntity,
     {
         let mut result = Vec::new();
-        let mut queue = vec![parent_id.to_string()];
+        let mut queue = vec![parent_id.clone()];
         while let Some(pid) = queue.pop() {
             let children = self.get_children(&pid).await?;
             for child in children {
-                queue.push(child.id().to_string());
+                queue.push(child.id().clone());
                 result.push(child);
             }
         }
@@ -343,16 +486,26 @@ pub trait BlockQueryHelpers<T>: DataSource<T>
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
-    /// Get all siblings of a block, sorted by sort_key
-    async fn get_siblings(&self, block_id: &str) -> Result<Vec<T>> {
+    /// Return the children of `parent_id` in authoritative sibling order.
+    ///
+    /// This is the single ordering primitive of the block domain: sibling
+    /// order is a property of the parent→children relation, not of any
+    /// per-block encoding (see ADR 0005). Each backend implements it from
+    /// its internal ordering (Loro fractional index, SQL `ORDER BY
+    /// sort_key`, in-memory child list); the encoding never leaks onto the
+    /// domain entity. All sibling navigation below is defined in terms of
+    /// list position within this result.
+    async fn children_ordered(&self, parent_id: &EntityUri) -> Result<Vec<T>>;
+
+    /// Get all siblings of a block (excluding itself), in sibling order.
+    async fn get_siblings(&self, block_id: &EntityUri) -> Result<Vec<T>> {
         let block: T = self
-            .get_by_id(block_id)
+            .get_by_id(block_id.as_str())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let parent_id = block.parent_id();
 
-        let siblings: Vec<T> = if let Some(pid) = parent_id {
-            self.get_children(pid).await?
+        let siblings: Vec<T> = if let Some(pid) = block.parent_id() {
+            self.children_ordered(pid).await?
         } else {
             return Ok(vec![]);
         };
@@ -363,72 +516,62 @@ where
             .collect())
     }
 
-    /// Get the previous sibling (sibling with sort_key < current sort_key)
-    async fn get_prev_sibling(&self, block_id: &str) -> Result<Option<T>> {
+    /// Get the previous sibling (the child immediately before `block_id` in
+    /// its parent's ordered child list).
+    async fn get_prev_sibling(&self, block_id: &EntityUri) -> Result<Option<T>> {
         let block: T = self
-            .get_by_id(block_id)
+            .get_by_id(block_id.as_str())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let parent_id = block.parent_id();
 
-        let siblings: Vec<T> = if let Some(pid) = parent_id {
-            self.get_children(pid).await?
+        let siblings: Vec<T> = if let Some(pid) = block.parent_id() {
+            self.children_ordered(pid).await?
         } else {
             return Ok(None);
         };
 
-        let prev = siblings
-            .into_iter()
-            .filter(|s: &T| s.sort_key() < block.sort_key())
-            .max_by(|a, b| a.sort_key().cmp(b.sort_key()));
-        Ok(prev)
+        let pos = siblings.iter().position(|s: &T| s.id() == block_id);
+        Ok(pos
+            .and_then(|i| i.checked_sub(1))
+            .and_then(|i| siblings.into_iter().nth(i)))
     }
 
-    /// Get the next sibling (sibling with sort_key > current sort_key)
-    async fn get_next_sibling(&self, block_id: &str) -> Result<Option<T>> {
+    /// Get the next sibling (the child immediately after `block_id` in its
+    /// parent's ordered child list).
+    async fn get_next_sibling(&self, block_id: &EntityUri) -> Result<Option<T>> {
         let block: T = self
-            .get_by_id(block_id)
+            .get_by_id(block_id.as_str())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let parent_id = block.parent_id();
 
-        let siblings: Vec<T> = if let Some(pid) = parent_id {
-            self.get_children(pid).await?
+        let siblings: Vec<T> = if let Some(pid) = block.parent_id() {
+            self.children_ordered(pid).await?
         } else {
             return Ok(None);
         };
 
-        let next = siblings
-            .into_iter()
-            .filter(|s: &T| s.sort_key() > block.sort_key())
-            .min_by(|a: &T, b: &T| a.sort_key().cmp(b.sort_key()));
-        Ok(next)
+        let pos = siblings.iter().position(|s: &T| s.id() == block_id);
+        Ok(pos.and_then(|i| siblings.into_iter().nth(i + 1)))
     }
 
-    /// Get the first child of a parent (lowest sort_key)
-    async fn get_first_child(&self, parent_id: Option<&str>) -> Result<Option<T>> {
+    /// Get the first child of a parent (first in ordered child list).
+    async fn get_first_child(&self, parent_id: Option<&EntityUri>) -> Result<Option<T>> {
         let children: Vec<T> = if let Some(pid) = parent_id {
-            self.get_children(pid).await?
+            self.children_ordered(pid).await?
         } else {
             return Ok(None);
         };
-
-        Ok(children
-            .into_iter()
-            .min_by(|a, b| a.sort_key().cmp(b.sort_key())))
+        Ok(children.into_iter().next())
     }
 
-    /// Get the last child of a parent (highest sort_key)
-    async fn get_last_child(&self, parent_id: Option<&str>) -> Result<Option<T>> {
+    /// Get the last child of a parent (last in ordered child list).
+    async fn get_last_child(&self, parent_id: Option<&EntityUri>) -> Result<Option<T>> {
         let children: Vec<T> = if let Some(pid) = parent_id {
-            self.get_children(pid).await?
+            self.children_ordered(pid).await?
         } else {
             return Ok(None);
         };
-
-        Ok(children
-            .into_iter()
-            .max_by(|a: &T, b: &T| a.sort_key().cmp(b.sort_key())))
+        Ok(children.into_iter().last())
     }
 }
 
@@ -439,12 +582,16 @@ where
     T: BlockEntity + MaybeSendSync + 'static,
 {
     /// Recursively update depths of all descendants when a parent's depth changes
-    async fn update_descendant_depths(&self, parent_id: &str, depth_delta: i64) -> Result<()> {
+    async fn update_descendant_depths(
+        &self,
+        parent_id: &EntityUri,
+        depth_delta: i64,
+    ) -> Result<()> {
         if depth_delta == 0 {
             return Ok(());
         }
 
-        let mut queue = vec![parent_id.to_string()];
+        let mut queue = vec![parent_id.clone()];
 
         while let Some(current_parent_id) = queue.pop() {
             let children: Vec<T> = self.get_children(&current_parent_id).await?;
@@ -452,9 +599,9 @@ where
             for child in children {
                 let current_depth = child.depth();
                 let new_depth = current_depth + depth_delta;
-                self.set_field(child.id(), "depth", Value::Integer(new_depth))
+                self.set_field(child.id().as_str(), "depth", Value::Integer(new_depth))
                     .await?;
-                queue.push(child.id().to_string());
+                queue.push(child.id().clone());
             }
         }
 
@@ -484,29 +631,6 @@ fn read_content_via_cells(
     let reg = registry?;
     let cell = reg.live_field::<String>(uri, "content").ok()?; // ALLOW(ok): expected fall-through when block not in Loro tree / SqlOnly mode
     Some(cell.current())
-}
-
-/// Write a block's content through the cell registry. Returns `Ok(true)`
-/// when the cell-routed write landed; `Ok(false)` when no cell route
-/// exists (synthetic test stores, SqlOnly mode, block not in Loro tree).
-/// Caller falls back to `set_field` on `Ok(false)`.
-async fn write_content_via_cells(
-    registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
-    uri: &EntityUri,
-    new_value: String,
-) -> Result<bool> {
-    let Some(reg) = registry else {
-        return Ok(false);
-    };
-    // ALLOW(ok): same rationale as read_content_via_cells; cell-resolve
-    // errors degrade to the SQL set_field write path.
-    let Ok(cell) = reg.live_field::<String>(uri, "content") else {
-        return Ok(false);
-    };
-    cell.set(new_value)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-    Ok(true)
 }
 
 /// Authoritative block create through the cell registry.
@@ -541,6 +665,29 @@ async fn create_block_via_cells(
     )
     .await
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
+}
+
+/// Authoritative block delete through the cell registry.
+///
+/// Mirrors [`create_block_via_cells`]: routes `join_block`'s merged-away
+/// block delete into Loro (`tree.delete`), so the outbound projector emits
+/// the SQL DELETE tagged `EventOrigin::Loro`. The SQL-direct
+/// `BlockOperations::delete` path removes only the SQL row — the inbound
+/// gate drops its event for Loro, leaving the dead block alive in the Loro
+/// tree (the Full-slice SplitBlock→DeleteBackward divergence).
+///
+/// Returns `Ok(false)` when no cell route is available (synthetic stores,
+/// SqlOnly mode); caller invokes `BlockOperations::delete`. // ALLOW(fallback): doc describes default path
+async fn delete_block_via_cells(
+    registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
+    id: &EntityUri,
+) -> Result<bool> {
+    let Some(reg) = registry else {
+        return Ok(false);
+    };
+    reg.delete_entity(id)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
 
 /// Hierarchical structure operations (for any block-like entity)
@@ -587,9 +734,10 @@ where
     /// propagation, plus the recursive-depth-update for descendants that the
     /// inline implementation was missing.
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
-    async fn indent(&self, id: &str) -> Result<OperationResult> {
+    async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
+        let id_str = id.as_str();
         let block = self
-            .get_by_id(id)
+            .get_by_id(id_str)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         // `move_block` enforces the "must have a parent" invariant, but we
@@ -601,16 +749,27 @@ where
         let prev_sibling = self.get_prev_sibling(id).await?.ok_or_else(|| {
             anyhow::anyhow!("Cannot indent: no previous sibling to become parent")
         })?;
-        let new_parent_id = prev_sibling.id().to_string();
+        let new_parent_uri = prev_sibling.id().clone();
 
         // Indent semantics: the indented block becomes the LAST child of the
         // previous sibling. `move_block` interprets `after_block_id = None`
         // as "insert at the beginning", so we look up the new parent's
-        // current last child and pass its id as the anchor.
-        let new_parent_children: Vec<T> = self.get_children(&new_parent_id).await?;
-        let after_id_owned = new_parent_children.last().map(|c| c.id().to_string());
-
-        self.move_block(id, &new_parent_id, after_id_owned.as_deref())
+        // current last child and pass its id as the anchor. The anchor must
+        // come from the positional authority (`BlockOrdering`: Loro live tree
+        // in Loro mode, sort_key order in SqlOnly) — `get_children` is
+        // UNORDERED (a `get_all` filter), so `.last()` on it picks an
+        // arbitrary sibling and the indented block lands mid-group.
+        let after_uri = match self.ordering() {
+            Some(ordering) => ordering.children(&new_parent_uri).await?.pop(),
+            // Synthetic in-memory test substrate (no wired ordering): keep the
+            // unordered read; those substrates have no positional authority.
+            None => self
+                .get_children(&new_parent_uri)
+                .await?
+                .last()
+                .map(|c| c.id().clone()),
+        };
+        self.move_block(id, &new_parent_uri, after_uri.as_ref())
             .await
     }
 
@@ -619,18 +778,17 @@ where
     /// see `crates/holon-core/src/block_ordering.rs`.
     async fn move_to_position(
         &self,
-        id: &str,
-        parent_id: &str,
-        after_block_id: Option<&str>,
+        id: &EntityUri,
+        parent_id: &EntityUri,
+        after_block_id: Option<&EntityUri>,
     ) -> Result<Vec<FieldDelta>> {
-        let uri = EntityUri::block(id);
         let ordering = self.ordering().ok_or_else(|| {
             anyhow::anyhow!(
                 "move_to_position requires a BlockOrdering — this BlockOperations \
                  impl returned None from ordering()"
             )
         })?;
-        ordering.place(&uri, parent_id, after_block_id).await?;
+        ordering.place(id, parent_id, after_block_id).await?;
         Ok(Vec::new())
     }
 
@@ -645,22 +803,23 @@ where
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["parent_id"])]
     async fn move_block(
         &self,
-        id: &str,
-        parent_id: &str,
-        after_block_id: Option<&str>,
+        id: &EntityUri,
+        parent_id: &EntityUri,
+        after_block_id: Option<&EntityUri>,
     ) -> Result<OperationResult> {
+        let id_str = id.as_str();
         // Capture old state before mutation
-        let maybe_block: Option<T> = self.get_by_id(id).await?;
+        let maybe_block: Option<T> = self.get_by_id(id_str).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let old_parent_id = block
+        let old_parent_uri = block
             .parent_id()
-            .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?
-            .to_string();
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
         let old_predecessor = self.get_prev_sibling(id).await?;
         let old_depth = block.depth();
 
         // Compute new depth for descendants' delta-update.
-        let maybe_parent: Option<T> = self.get_by_id(parent_id).await?;
+        let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
         let new_depth = parent.depth() + 1;
         let depth_delta = new_depth - old_depth;
@@ -668,7 +827,7 @@ where
         // Position + depth update.
         let mut changes = self.move_to_position(id, parent_id, after_block_id).await?;
         let depth_result = self
-            .set_field(id, "depth", Value::Integer(new_depth))
+            .set_field(id_str, "depth", Value::Integer(new_depth))
             .await?;
         changes.extend(depth_result.changes);
 
@@ -683,38 +842,44 @@ where
         use crate::__operations_block_operations;
 
         // Entity name will be set by OperationProvider when operation is executed
+        let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
         Ok(OperationResult::new(
             changes,
             __operations_block_operations::move_block_op(
                 "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
                 id,
-                &old_parent_id,
-                old_predecessor.as_ref().map(|p| p.id()),
+                &old_parent_uri,
+                old_pred_uri.as_ref(),
             ),
         ))
     }
 
     /// Move block out to parent's level (decrease indentation)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
-    async fn outdent(&self, id: &str) -> Result<OperationResult> {
-        let maybe_block: Option<T> = self.get_by_id(id).await?;
+    async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
+        let id_str = id.as_str();
+        let maybe_block: Option<T> = self.get_by_id(id_str).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         let parent_id = block
             .parent_id()
             .ok_or_else(|| anyhow::anyhow!("Cannot outdent root block"))?;
 
-        let maybe_parent: Option<T> = self.get_by_id(parent_id).await?;
+        let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
         let grandparent_id = parent
             .parent_id()
             .ok_or_else(|| anyhow::anyhow!("Cannot outdent: parent is already at root level"))?;
 
         // Capture old predecessor before move (for inverse operation)
-        let old_parent_id = parent_id.to_string();
+        let old_parent_uri = parent_id.clone();
         let old_predecessor = self.get_prev_sibling(id).await?;
 
         // Move to grandparent's children, after parent
-        let move_result = self.move_block(id, grandparent_id, Some(parent_id)).await?;
+        let grandparent_uri = grandparent_id.clone();
+        let parent_uri = old_parent_uri.clone();
+        let move_result = self
+            .move_block(id, &grandparent_uri, Some(&parent_uri))
+            .await?;
 
         // Return inverse: move_block back to old parent after old predecessor.
         // We can't use indent_op here because indent now resolves the previous sibling
@@ -722,13 +887,14 @@ where
         use crate::__operations_block_operations;
 
         // Entity name will be set by OperationProvider when operation is executed
+        let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
         Ok(OperationResult::new(
             move_result.changes,
             __operations_block_operations::move_block_op(
                 "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
                 id,
-                &old_parent_id,
-                old_predecessor.as_ref().map(|p| p.id()),
+                &old_parent_uri,
+                old_pred_uri.as_ref(),
             ),
         ))
     }
@@ -804,7 +970,8 @@ where
         // would create an id-format mismatch — every later
         // `get_by_id`, `parent_id` lookup, and `EntityUri::try_from(Value)`
         // round-trip would silently miss this block.
-        let new_block_id = format!("block:{}", Uuid::new_v4());
+        let new_block_uuid = Uuid::new_v4().to_string();
+        let new_block_id = format!("block:{new_block_uuid}");
 
         // Get current timestamp
         let now = chrono::Utc::now().timestamp_millis();
@@ -815,8 +982,8 @@ where
         // value to persist in the SQL `block.sort_key` column directly.
         let parent_for_anchor = block
             .parent_id()
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "sentinel:no_parent".to_string());
+            .cloned()
+            .unwrap_or_else(EntityUri::no_parent);
         let ordering = self.ordering().ok_or_else(|| {
             anyhow::anyhow!(
                 "split_block requires a BlockOrdering — this BlockOperations impl \
@@ -824,7 +991,7 @@ where
             )
         })?;
         let new_sort_key = ordering
-            .new_child_anchor(&parent_for_anchor, Some(id_str))
+            .new_child_anchor(&parent_for_anchor, Some(id))
             .await?;
 
         // Route the new-block create through the cell registry when a Loro
@@ -841,9 +1008,9 @@ where
         // gate correctly `EchoSuppress`es.
         let parent_for_split = block
             .parent_id()
-            .map(EntityUri::from_raw)
+            .cloned()
             .unwrap_or_else(EntityUri::no_parent);
-        let new_block_uri = EntityUri::from_raw(&new_block_id);
+        let new_block_uri = EntityUri::block(&new_block_uuid);
         let after_uri = id.clone();
         let wrote_create_via_cell = create_block_via_cells(
             self.cells(),
@@ -870,18 +1037,18 @@ where
             // ALLOW(fallback): synthetic-store / SqlOnly mode has no Loro
             // authority — the SQL `create` path is the only way to persist
             // the new block. Disclosed and intentional.
-            let mut new_block_fields = HashMap::new();
-            new_block_fields.insert("id".to_string(), Value::String(new_block_id.clone()));
-            new_block_fields.insert("content".to_string(), Value::String(content_after));
-            new_block_fields.insert("parent_id".to_string(), {
+            let mut new_block_fields = crate::storage::types::StorageEntity::new();
+            new_block_fields.insert("id".into(), Value::String(new_block_id.clone()));
+            new_block_fields.insert("content".into(), Value::String(content_after));
+            new_block_fields.insert("parent_id".into(), {
                 if let Some(ref pid) = block.parent_id() {
                     Value::String(pid.to_string())
                 } else {
                     Value::Null
                 }
             });
-            new_block_fields.insert("depth".to_string(), Value::Integer(block.depth()));
-            new_block_fields.insert("sort_key".to_string(), Value::String(new_sort_key));
+            new_block_fields.insert("depth".into(), Value::Integer(block.depth()));
+            new_block_fields.insert("sort_key".into(), Value::String(new_sort_key));
             // Positional intent for Full (Loro) mode. The literal key here
             // must match `event_bus::POSITION_AFTER_BLOCK_ID_PARAM` over in the
             // `holon` crate — we can't depend on it from `holon-core`, so the
@@ -890,15 +1057,12 @@ where
             // payload, and lifts the value onto the typed
             // `Event::position_after_block_id` field that `apply_create`
             // reads.
-            new_block_fields.insert(
-                "after_block_id".to_string(),
-                Value::String(id_str.to_string()),
-            );
-            new_block_fields.insert("created_at".to_string(), Value::Integer(now));
-            new_block_fields.insert("updated_at".to_string(), Value::Integer(now));
-            new_block_fields.insert("collapsed".to_string(), Value::Boolean(false));
-            new_block_fields.insert("completed".to_string(), Value::Boolean(false));
-            new_block_fields.insert("block_type".to_string(), Value::String("text".to_string()));
+            new_block_fields.insert("after_block_id".into(), Value::String(id_str.to_string()));
+            new_block_fields.insert("created_at".into(), Value::Integer(now));
+            new_block_fields.insert("updated_at".into(), Value::Integer(now));
+            new_block_fields.insert("collapsed".into(), Value::Boolean(false));
+            new_block_fields.insert("completed".into(), Value::Boolean(false));
+            new_block_fields.insert("block_type".into(), Value::String("text".to_string()));
 
             let (_new_block_id, create_result) = self.create(new_block_fields).await?;
             changes.extend(create_result.changes);
@@ -911,37 +1075,22 @@ where
         // through to a direct `set_field` write when no cell route exists
         // (SqlOnly mode, synthetic in-memory test store, block not yet in
         // Loro tree).
-        let content_before_for_cell = content_before.clone();
-        let wrote_via_cell =
-            write_content_via_cells(self.cells(), &split_uri, content_before_for_cell).await?;
-        if !wrote_via_cell {
-            let content_result = self
-                .set_field(id_str, "content", Value::String(content_before))
-                .await?;
-            changes.extend(content_result.changes);
-        }
-        // TODO: Do we need this? self.set_field(id_str, "updated_at", Value::Integer(now))
-        // TODO: Do we need this?     .await?;
+        // `set_field` is the single content-write seam: it routes `content`
+        // through the cell registry (Loro in Full mode) and falls back to a
+        // direct SQL write when no cell route exists (SqlOnly, synthetic test
+        // store, block not yet in the Loro tree).
+        let content_result = self
+            .set_field(id_str, "content", Value::String(content_before))
+            .await?;
+        changes.extend(content_result.changes);
 
-        // Follow-up: move editor cursor to the new block at position 0.
-        // The editor_focus_op is dispatched as a follow-up operation, where
-        // the dispatcher resolves the entity_name from the operation's
-        // explicit `entity_name` field — the placeholder we pass here gets
-        // overwritten before the descriptor's `EntityName` is consulted.
-        // We must still pass a valid URI scheme because `EntityName::new`
-        // debug-asserts (`is_valid_uri_scheme`) immediately on construction.
-        use crate::__operations_editor_cursor_operations;
-        let editor_focus = __operations_editor_cursor_operations::editor_focus_op(
-            "navigation",
-            "main",
-            &new_block_id,
-            0,
-        );
-
+        // Focus moves to the new block at caret offset 0. This is returned in
+        // the op response (not dispatched as a backend `editor_focus`
+        // follow-up): the frontend reads it off the result and moves the
+        // in-memory focus authority in-process, so focus never round-trips
+        // through the Turso `editor_cursor` cache (ADR 0010).
         // TODO: Return inverse operation (combine set_field inverses + delete for new block)
-        Ok(OperationResult::irreversible(changes)
-            .with_response(Value::String(new_block_id))
-            .with_follow_ups(vec![editor_focus]))
+        Ok(OperationResult::irreversible(changes).with_response(focus_response(&new_block_id, 0)))
     }
 
     /// Join a block into its merge target.
@@ -969,18 +1118,19 @@ where
     ///   the cursor is at byte 0, but the SQL caller path may pass through
     ///   stale positions, so we re-check here.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
-    async fn join_block(&self, id: &str, position: i64) -> Result<OperationResult> {
+    async fn join_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         if position != 0 {
             return Ok(OperationResult::irreversible(vec![]));
         }
 
+        let id_str = id.as_str();
         let block: T = self
-            .get_by_id(id)
+            .get_by_id(id_str)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         // Prefer the live (Loro) view via the cell registry; same reasoning
         // as `split_block` — SQL `block.content` lags per-keystroke writes.
-        let join_block_uri = EntityUri::block(id);
+        let join_block_uri = id.clone();
         let block_content = read_content_via_cells(self.cells(), &join_block_uri)
             .unwrap_or_else(|| block.content().to_string());
         let block_id_str = block.id().to_string();
@@ -994,20 +1144,19 @@ where
             let parent_id = block.parent_id().ok_or_else(|| {
                 anyhow::anyhow!("Cannot join: block has no previous sibling and no parent")
             })?;
-            self.get_by_id(parent_id)
+            self.get_by_id(parent_id.as_str())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Cannot join: parent {parent_id} not found"))?
         };
 
-        let target_id_for_live = target.id().to_string();
-        let target_uri = EntityUri::block(&target_id_for_live);
+        let target_uri = target.id().clone();
         let target_content = read_content_via_cells(self.cells(), &target_uri)
             .unwrap_or_else(|| target.content().to_string());
         let join_offset = target_content.len();
         let new_content = format!("{}{}", target_content, block_content);
         let target_id = target.id().to_string();
 
-        let block_children: Vec<T> = self.get_children(&block_id_str).await?;
+        let block_children: Vec<T> = self.get_children(&join_block_uri).await?;
 
         // Case-B refusal (Phase 3.5): joining a first-child block into its
         // parent when it has children of its own would orphan or reposition
@@ -1038,35 +1187,42 @@ where
         // SqlOnly mode falls back to the legacy compute + paired
         // `set_field` shape.
         if !block_children.is_empty() {
-            let target_children: Vec<T> = self.get_children(&target_id).await?;
-            let mut last_after_id: Option<String> =
-                target_children.last().map(|c| c.id().to_string());
+            let move_target_uri = target_uri.clone();
+            let target_children: Vec<T> = self.get_children(&move_target_uri).await?;
+            let mut last_after_uri: Option<EntityUri> =
+                target_children.last().map(|c| c.id().clone());
             for child in block_children.iter() {
+                let child_uri = child.id().clone();
                 let move_changes = self
-                    .move_to_position(child.id(), &target_id, last_after_id.as_deref())
+                    .move_to_position(&child_uri, &move_target_uri, last_after_uri.as_ref())
                     .await?;
                 changes.extend(move_changes);
-                last_after_id = Some(child.id().to_string());
+                last_after_uri = Some(child_uri);
             }
         }
 
-        // Append `id`'s content to the merge target. Prefer writing
-        // through the Loro CRDT layer via the cell registry (single
-        // content writer); drop through to SQL `set_field` when no cell
-        // route exists.
-        let new_content_for_cell = new_content.clone();
-        let wrote_via_cell =
-            write_content_via_cells(self.cells(), &target_uri, new_content_for_cell).await?;
-        if !wrote_via_cell {
-            let content_result = self
-                .set_field(&target_id, "content", Value::String(new_content))
-                .await?;
-            changes.extend(content_result.changes);
-        }
+        // Append `id`'s content to the merge target. `set_field` is the
+        // single content-write seam — it routes through the cell registry
+        // (Loro in Full mode) and falls back to a direct SQL write when no
+        // cell route exists.
+        let content_result = self
+            .set_field(&target_id, "content", Value::String(new_content))
+            .await?;
+        changes.extend(content_result.changes);
 
-        // Delete `id` (its children have already been re-parented).
-        let delete_result = self.delete(&block_id_str).await?;
-        changes.extend(delete_result.changes);
+        // Delete `id` (its children have already been re-parented). Route
+        // through the cell registry (Loro authority) when available —
+        // mirroring the split's `create_block_via_cells` — so the block
+        // leaves the Loro tree and the outbound projector emits the SQL
+        // DELETE. The SQL-direct `self.delete` deletes only the SQL row,
+        // leaving the dead block alive in Loro.
+        let wrote_delete_via_cell = delete_block_via_cells(self.cells(), &join_block_uri).await?;
+        if !wrote_delete_via_cell {
+            // ALLOW(fallback): synthetic-store / SqlOnly mode has no Loro
+            // authority — the SQL delete is the only persistence path.
+            let delete_result = self.delete(&block_id_str).await?;
+            changes.extend(delete_result.changes);
+        }
 
         // Prune any cached cells for the now-deleted block so a same-id
         // re-create within the same session can't observe a stale Cell
@@ -1075,33 +1231,27 @@ where
             reg.on_entity_deleted(&join_block_uri);
         }
 
-        // Follow-up: park the editor cursor on the merge target at the
-        // join boundary, mirroring `split_block`'s editor_focus handoff.
-        use crate::__operations_editor_cursor_operations;
-        let editor_focus = __operations_editor_cursor_operations::editor_focus_op(
-            "navigation",
-            "main",
-            &target_id,
-            join_offset as i64,
-        );
-
+        // Focus moves to the merge target at the join boundary. Returned in
+        // the op response (see `split_block`) rather than dispatched as a
+        // backend `editor_focus` follow-up — the frontend applies it in
+        // process, no Turso `editor_cursor` round-trip (ADR 0010).
         Ok(OperationResult::irreversible(changes)
-            .with_response(Value::String(target_id))
-            .with_follow_ups(vec![editor_focus]))
+            .with_response(focus_response(&target_id, join_offset as i64)))
     }
 
     /// Move a block up (swap with previous sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
-    async fn move_up(&self, id: &str) -> Result<OperationResult> {
+    async fn move_up(&self, id: &EntityUri) -> Result<OperationResult> {
+        let id_str = id.as_str();
         // Capture old state
         let block = self
-            .get_by_id(id)
+            .get_by_id(id_str)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let parent_id = block
+        let parent_uri = block
             .parent_id()
-            .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?
-            .to_string();
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
         let old_predecessor = self.get_prev_sibling(id).await?;
 
         let prev_sibling: T = self
@@ -1114,24 +1264,25 @@ where
 
         // Execute move and collect FieldDeltas
         let move_result = if let Some(before_id) = before_prev {
-            self.move_block(id, &parent_id, Some(before_id.id()))
-                .await?
+            let before_uri = before_id.id().clone();
+            self.move_block(id, &parent_uri, Some(&before_uri)).await?
         } else {
             // Move to beginning
-            self.move_block(id, &parent_id, None).await?
+            self.move_block(id, &parent_uri, None).await?
         };
 
         // Return inverse (move down - restore original position) using macro-generated helper
         // Use move_block_op to restore exact old position (move_up_op is relative, not absolute)
         use crate::__operations_block_operations;
 
+        let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
         Ok(OperationResult::new(
             move_result.changes,
             __operations_block_operations::move_block_op(
                 "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
                 id,
-                &parent_id,
-                old_predecessor.as_ref().map(|p| p.id()),
+                &parent_uri,
+                old_pred_uri.as_ref(),
             ),
         ))
     }
@@ -1142,43 +1293,43 @@ where
     /// Inserts `{{transclude:target_uri}}` at the end of the block's content.
     #[holon_macros::affects("content")]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["target_uri"])]
-    async fn embed_entity(&self, id: &str, target_uri: &str) -> Result<OperationResult> {
+    async fn embed_entity(
+        &self,
+        id: &EntityUri,
+        target_uri: &EntityUri,
+    ) -> Result<OperationResult> {
+        let id_str = id.as_str();
         let block = self
-            .get_by_id(id)
+            .get_by_id(id_str)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
 
         // Prefer live (Loro) view via the cell registry to capture any
         // pending in-memory edits.
-        let embed_uri = EntityUri::block(id);
+        let embed_uri = id.clone();
         let old_content = read_content_via_cells(self.cells(), &embed_uri)
             .unwrap_or_else(|| block.content().to_string());
-        let marker = format!("{{{{transclude:{target_uri}}}}}");
+        let marker = format!("{{{{transclude:{}}}}}", target_uri.as_str());
         let new_content = if old_content.is_empty() {
             marker
         } else {
             format!("{old_content}\n{marker}")
         };
 
-        // Prefer the cell-routed write (Loro) and drop through to SQL
-        // `set_field` when no cell route exists.
-        let new_content_for_cell = new_content.clone();
-        let wrote_via_cell =
-            write_content_via_cells(self.cells(), &embed_uri, new_content_for_cell).await?;
-        let changes = if wrote_via_cell {
-            Vec::new()
-        } else {
-            self.set_field(id, "content", Value::String(new_content))
-                .await?
-                .changes
-        };
+        // `set_field` is the single content-write seam: it routes through
+        // the cell registry (Loro in Full mode) and falls back to a direct
+        // SQL write when no cell route exists.
+        let changes = self
+            .set_field(id_str, "content", Value::String(new_content))
+            .await?
+            .changes;
 
         use crate::__operations_crud_operations;
         Ok(OperationResult::new(
             changes,
             __operations_crud_operations::set_field_op(
                 "placeholder", // Overwritten by OperationDispatcher post-execute (see operation_dispatcher.rs:504)
-                id,
+                id_str,
                 "content",
                 Value::String(old_content),
             ),
@@ -1187,16 +1338,17 @@ where
 
     /// Move a block down (swap with next sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
-    async fn move_down(&self, id: &str) -> Result<OperationResult> {
+    async fn move_down(&self, id: &EntityUri) -> Result<OperationResult> {
+        let id_str = id.as_str();
         // Capture old state
         let block = self
-            .get_by_id(id)
+            .get_by_id(id_str)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-        let parent_id = block
+        let parent_uri = block
             .parent_id()
-            .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?
-            .to_string();
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
         let old_predecessor = self.get_prev_sibling(id).await?;
 
         let next_sibling: T = self
@@ -1205,20 +1357,22 @@ where
             .ok_or_else(|| anyhow::anyhow!("Cannot move down: no next sibling"))?;
 
         // Execute move after next_sibling and collect FieldDeltas
+        let next_sibling_uri = next_sibling.id().clone();
         let move_result = self
-            .move_block(id, &parent_id, Some(next_sibling.id()))
+            .move_block(id, &parent_uri, Some(&next_sibling_uri))
             .await?;
 
         // Return inverse (move up - restore original position) using macro-generated helper
         use crate::__operations_block_operations;
 
+        let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
         Ok(OperationResult::new(
             move_result.changes,
             __operations_block_operations::move_block_op(
                 "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
                 id,
-                &parent_id,
-                old_predecessor.as_ref().map(|p| p.id()),
+                &parent_uri,
+                old_pred_uri.as_ref(),
             ),
         ))
     }
@@ -1229,9 +1383,9 @@ where
     /// block's `tags` list. Demoting removes it. The block's title is the
     /// first line of `content`, so no separate name field is written.
     #[holon_macros::affects("tags")]
-    async fn set_is_document(&self, id: &str, is_document: bool) -> Result<OperationResult> {
+    async fn set_is_document(&self, id: &EntityUri, is_document: bool) -> Result<OperationResult> {
         let block = self
-            .get_by_id(id)
+            .get_by_id(id.as_str())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
 
@@ -1254,7 +1408,9 @@ where
         }
 
         let arr: Vec<Value> = new_tags.iter().map(|t| Value::String(t.clone())).collect();
-        let tags_result = self.set_field(id, "tags", Value::Array(arr)).await?;
+        let tags_result = self
+            .set_field(id.as_str(), "tags", Value::Array(arr))
+            .await?;
         changes.extend(tags_result.changes);
 
         use crate::__operations_block_operations;
@@ -1470,11 +1626,11 @@ pub trait OperationLogOperations: MaybeSendSync {
 // =============================================================================
 
 impl BlockEntity for holon_api::block::Block {
-    fn id(&self) -> &str {
-        self.id.as_str()
+    fn id(&self) -> &EntityUri {
+        &self.id
     }
 
-    fn parent_id(&self) -> Option<&str> {
+    fn parent_id(&self) -> Option<&EntityUri> {
         // Return the full URI (`block:UUID`) — `BlockOperations` default
         // impls feed this back into `DataSource::get_by_id`, and the SQL
         // `block.id` column stores the prefixed form (per
@@ -1486,21 +1642,7 @@ impl BlockEntity for holon_api::block::Block {
         // trait reads as "no parent block" and errors with "Cannot
         // outdent root block" — that's the right behavior for headings
         // directly under a document.
-        if self.parent_id.is_block() {
-            Some(self.parent_id.as_str())
-        } else {
-            None
-        }
-    }
-
-    fn sort_key(&self) -> &str {
-        // Read the actual fractional-index sort_key from the struct field.
-        // The previous impl returned `self.id.as_str()` (the full URI like
-        // `block:UUID`), which contains non-hex `:`/`-` characters and
-        // panicked `gen_key_between` (`from_hex_string` calls
-        // `u8::from_str_radix(.., 16).unwrap()`) inside any `move_block` /
-        // `outdent` / `split_block` / `indent` flow.
-        &self.sort_key
+        self.parent_id.is_block().then_some(&self.parent_id)
     }
 
     fn depth(&self) -> i64 {
@@ -1568,23 +1710,4 @@ impl OperationRegistry for holon_api::block::Block {
     fn short_name() -> Option<&'static str> {
         Some("block")
     }
-}
-
-// ── Editor cursor operations ────────────────────────────────────────────
-
-/// Editor cursor operations for tracking focus state.
-///
-/// Generates `__operations_editor_cursor_operations::editor_focus_op()`
-/// helper used by `split_block` to set cursor on the new block.
-#[holon_macros::operations_trait]
-#[async_trait]
-pub trait EditorCursorOperations {
-    /// Set editor cursor focus on a block at a given byte offset
-    #[holon_macros::affects("block_id", "cursor_offset")]
-    async fn editor_focus(
-        &self,
-        region: &str,
-        block_id: &str,
-        cursor_offset: i64,
-    ) -> Result<OperationResult>;
 }

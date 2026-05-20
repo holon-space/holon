@@ -35,14 +35,13 @@
 
 #![cfg(feature = "pbt")]
 
-use holon_integration_tests::declare_pbt_slice;
+use holon_integration_tests::component_pbt;
 use holon_integration_tests::pbt::invariants::bodies::org_render_fixed_point::InvOrgRenderFixedPoint;
 use holon_integration_tests::pbt::transitions::{BulkExternalAdd, NavigateFocus, SplitBlock};
 
-declare_pbt_slice! {
+component_pbt! {
     test_fn: org_render_fixed_point_pbt,
-    variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
-    inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
+    set: holon_pbt_core::ComponentSet::sql_only(),
     transitions: [
         preset lifecycle,
         BulkExternalAdd,

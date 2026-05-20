@@ -47,17 +47,24 @@ impl MarkdownRenderer {
 
     pub fn render_blocks(blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
         let mut out = String::new();
-        let block_map: HashMap<&str, &Block> = blocks.iter().map(|b| (b.id.as_str(), b)).collect();
+        // Sibling order is caller-provided (the ordered read; ADR 0005); the
+        // renderer trusts the input order and only imposes a content-type
+        // grouping. Index children by parent, preserving input order.
+        let mut children_by_parent: HashMap<&str, Vec<&Block>> = HashMap::new();
+        for b in blocks {
+            children_by_parent
+                .entry(b.parent_id.as_str())
+                .or_default()
+                .push(b);
+        }
+        for kids in children_by_parent.values_mut() {
+            kids.sort_by_key(|b| b.content_type.sibling_order_group());
+        }
 
-        let mut roots: Vec<&Block> = blocks.iter().filter(|b| b.parent_id == *file_id).collect();
-        roots.sort_by(|a, b| {
-            a.sort_key
-                .cmp(&b.sort_key)
-                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-        });
-
-        for r in roots {
-            render_tree(r, &block_map, &mut out, 1);
+        if let Some(roots) = children_by_parent.get(file_id.as_str()) {
+            for r in roots {
+                render_tree(r, &children_by_parent, &mut out, 1);
+            }
         }
         out
     }
@@ -65,7 +72,7 @@ impl MarkdownRenderer {
 
 fn render_tree<'a>(
     block: &'a Block,
-    map: &HashMap<&'a str, &'a Block>,
+    children_by_parent: &HashMap<&'a str, Vec<&'a Block>>,
     out: &mut String,
     depth: u8,
 ) {
@@ -75,21 +82,8 @@ fn render_tree<'a>(
         ContentType::Image => render_image(block, out),
     }
 
-    let mut children: Vec<&Block> = map
-        .values()
-        .copied()
-        .filter(|b| b.parent_id == block.id)
-        .collect();
-    children.sort_by(|a, b| {
-        let group = |ct: ContentType| match ct {
-            ContentType::Source | ContentType::Image => 0,
-            ContentType::Text => 1,
-        };
-        group(a.content_type)
-            .cmp(&group(b.content_type))
-            .then_with(|| a.sort_key.cmp(&b.sort_key))
-            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-    });
+    let empty = Vec::new();
+    let children = children_by_parent.get(block.id.as_str()).unwrap_or(&empty);
 
     for c in children {
         let next_depth = if matches!(c.content_type, ContentType::Text) {
@@ -97,7 +91,7 @@ fn render_tree<'a>(
         } else {
             depth
         };
-        render_tree(c, map, out, next_depth);
+        render_tree(c, children_by_parent, out, next_depth);
     }
 }
 

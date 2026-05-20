@@ -16,6 +16,7 @@ use holon_api::render_types::OperationWiring;
 use crate::input::{InputAction, KeyChord, WidgetInput};
 use crate::navigation::{CollectionNavigator, ListNavigator, TreeNavigator};
 use crate::reactive_view_model::ReactiveViewModel;
+use holon_api::EntityUri;
 
 // ── FocusPath ──────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ impl FocusPath {
     /// Walk the path backwards (from focused node toward root), checking
     /// each ancestor for a handler. Returns the first matching `InputAction`.
     #[tracing::instrument(level = "debug", skip_all, fields(entity_id))]
-    pub fn bubble_input(&self, entity_id: &str, input: &WidgetInput) -> Option<InputAction> {
+    pub fn bubble_input(&self, entity_id: &EntityUri, input: &WidgetInput) -> Option<InputAction> {
         for entry in self.path.iter().rev() {
             if let Some(action) = try_handle(entry, entity_id, input) {
                 return Some(action);
@@ -46,7 +47,7 @@ impl FocusPath {
     }
 
     /// The entity IDs along the path (root to focused).
-    pub fn entity_ids(&self) -> Vec<Option<String>> {
+    pub fn entity_ids(&self) -> Vec<Option<EntityUri>> {
         self.path
             .iter()
             .map(|e| resolve_entity_id(&e.node))
@@ -65,7 +66,7 @@ impl FocusPath {
 ///
 /// DFS through the tree, following `live_block` slot content transparently.
 /// Returns `None` if `entity_id` is not found.
-pub fn build_focus_path(root: &Arc<ReactiveViewModel>, entity_id: &str) -> Option<FocusPath> {
+pub fn build_focus_path(root: &Arc<ReactiveViewModel>, entity_id: &EntityUri) -> Option<FocusPath> {
     let mut stack: Vec<Arc<ReactiveViewModel>> = Vec::new();
     if dfs_find(root, entity_id, &mut stack) {
         let path = stack
@@ -89,7 +90,7 @@ pub fn build_focus_path(root: &Arc<ReactiveViewModel>, entity_id: &str) -> Optio
 /// needing the bubble-up ancestor chain.
 pub fn find_node_by_id(
     root: &Arc<ReactiveViewModel>,
-    entity_id: &str,
+    entity_id: &EntityUri,
 ) -> Option<Arc<ReactiveViewModel>> {
     let mut stack: Vec<Arc<ReactiveViewModel>> = Vec::new();
     if dfs_find(root, entity_id, &mut stack) {
@@ -129,13 +130,13 @@ pub fn walk_tree<F: FnMut(&ReactiveViewModel)>(node: &ReactiveViewModel, f: &mut
 /// operations) without exposing internal node handles to the driver.
 pub fn find_click_intent_oneshot(
     root: &ReactiveViewModel,
-    entity_id: &str,
+    entity_id: &EntityUri,
 ) -> Option<crate::operations::OperationIntent> {
     fn walk(
         node: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
     ) -> Option<crate::operations::OperationIntent> {
-        if resolve_entity_id(node).as_deref() == Some(entity_id) {
+        if resolve_entity_id(node).as_ref() == Some(entity_id) {
             return node.click_intent();
         }
         for child in collect_children(node) {
@@ -159,13 +160,13 @@ pub fn find_click_intent_oneshot(
 /// what GPUI would dispatch on a real click.
 pub fn find_click_intent_in_view_model(
     root: &crate::view_model::ViewModel,
-    entity_id: &str,
+    entity_id: &EntityUri,
 ) -> Option<crate::operations::OperationIntent> {
     fn walk(
         node: &crate::view_model::ViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
     ) -> Option<crate::operations::OperationIntent> {
-        if node.entity_id() == Some(entity_id) {
+        if node.entity_id().as_ref() == Some(entity_id) {
             if let Some(op) = node
                 .operations
                 .iter()
@@ -199,23 +200,25 @@ pub fn find_click_intent_in_view_model(
 /// Returns `None` for unknown regions or when the entity isn't reachable from
 /// the panel's subtree (matching production: a click on a region the user
 /// can't reach does nothing).
-pub fn find_click_intent_in_region(
-    root: &crate::view_model::ViewModel,
-    entity_id: &str,
+/// Resolve a `region` name to its panel subtree within the layout `root`.
+fn find_region_panel<'a>(
+    root: &'a crate::view_model::ViewModel,
     region: &str,
-) -> Option<crate::operations::OperationIntent> {
+) -> Option<&'a crate::view_model::ViewModel> {
     let panel_id = match region {
         "left_sidebar" => "block:default-left-sidebar",
         "main" => "block:default-main-panel",
         "right_sidebar" => "block:default-right-sidebar",
         _ => return None,
     };
+    let panel_id =
+        EntityUri::parse(panel_id).expect("static panel-key literals are valid EntityUris");
 
     fn find_panel<'a>(
         node: &'a crate::view_model::ViewModel,
-        panel_id: &str,
+        panel_id: &EntityUri,
     ) -> Option<&'a crate::view_model::ViewModel> {
-        if node.entity_id() == Some(panel_id) {
+        if node.entity_id().as_ref() == Some(panel_id) {
             return Some(node);
         }
         for child in node.children() {
@@ -226,8 +229,39 @@ pub fn find_click_intent_in_region(
         None
     }
 
-    let panel = find_panel(root, panel_id)?;
+    find_panel(root, &panel_id)
+}
+
+pub fn find_click_intent_in_region(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+) -> Option<crate::operations::OperationIntent> {
+    let panel = find_region_panel(root, region)?;
     find_click_intent_in_view_model(panel, entity_id)
+}
+
+/// True if `entity_id` is rendered anywhere within `region`'s panel subtree.
+///
+/// Mirrors `find_click_intent_in_region`'s traversal (same panel scope, same
+/// `children()` DFS) but only asks "is it there?", not "does it bind a click".
+/// `click_entity` uses this to tell apart two states its intent-poll otherwise
+/// conflates: the entity isn't rendered *yet* (a genuine readiness race worth
+/// polling) versus it's rendered but carries no bound click-intent (e.g. an
+/// `editable_text` block in Main, where click = cursor placement = focus) —
+/// where polling can never surface an intent and is pure wasted wall time.
+pub fn region_contains_entity(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+) -> bool {
+    fn contains(node: &crate::view_model::ViewModel, entity_id: &EntityUri) -> bool {
+        if node.entity_id().as_ref() == Some(entity_id) {
+            return true;
+        }
+        node.children().iter().any(|c| contains(c, entity_id))
+    }
+    find_region_panel(root, region).is_some_and(|panel| contains(panel, entity_id))
 }
 
 /// Build a `FocusPath` across block boundaries for the headless path.
@@ -237,8 +271,8 @@ pub fn find_click_intent_in_region(
 /// `ReactiveViewModel` for that block's content.
 pub fn build_focus_path_cross_block(
     root_content: &Arc<ReactiveViewModel>,
-    block_contents: &HashMap<String, Arc<ReactiveViewModel>>,
-    entity_id: &str,
+    block_contents: &HashMap<EntityUri, Arc<ReactiveViewModel>>,
+    entity_id: &EntityUri,
 ) -> Option<FocusPath> {
     let mut stack: Vec<Arc<ReactiveViewModel>> = Vec::new();
     if dfs_find_cross_block(root_content, block_contents, entity_id, &mut stack) {
@@ -262,7 +296,7 @@ pub fn build_focus_path_cross_block(
 /// `UserDriver` trait defaults that build-once, use-once, discard.
 pub fn bubble_input_oneshot(
     root: &ReactiveViewModel,
-    entity_id: &str,
+    entity_id: &EntityUri,
     input: &WidgetInput,
 ) -> Option<InputAction> {
     match dfs_and_bubble(root, entity_id, input) {
@@ -284,8 +318,12 @@ enum DfsResult {
 ///
 /// When the target entity is found, returns `Found`. Each ancestor frame
 /// then tries to handle the input. The first match returns `Handled`.
-fn dfs_and_bubble(node: &ReactiveViewModel, entity_id: &str, input: &WidgetInput) -> DfsResult {
-    if resolve_entity_id(node).as_deref() == Some(entity_id) {
+fn dfs_and_bubble(
+    node: &ReactiveViewModel,
+    entity_id: &EntityUri,
+    input: &WidgetInput,
+) -> DfsResult {
+    if resolve_entity_id(node).as_ref() == Some(entity_id) {
         if let Some(action) = try_handle_node(node, entity_id, input) {
             return DfsResult::Handled(action);
         }
@@ -310,7 +348,7 @@ fn dfs_and_bubble(node: &ReactiveViewModel, entity_id: &str, input: &WidgetInput
 
 fn try_handle_node(
     node: &ReactiveViewModel,
-    origin_id: &str,
+    origin_id: &EntityUri,
     input: &WidgetInput,
 ) -> Option<InputAction> {
     match input {
@@ -336,7 +374,7 @@ fn try_handle_node(
             Some(InputAction::ExecuteOperation {
                 entity_name: op.descriptor.entity_name.to_string(),
                 operation: op.descriptor.clone(),
-                entity_id: origin_id.to_string(),
+                entity_id: origin_id.clone(),
             })
         }
     }
@@ -344,13 +382,13 @@ fn try_handle_node(
 
 /// Collect all entity IDs reachable from `root` via DFS.
 /// Standalone utility replacing `IncrementalShadowIndex::entity_ids()`.
-pub fn collect_all_entity_ids(root: &ReactiveViewModel) -> Vec<String> {
+pub fn collect_all_entity_ids(root: &ReactiveViewModel) -> Vec<EntityUri> {
     let mut ids = Vec::new();
     collect_ids_dfs(root, &mut ids);
     ids
 }
 
-fn collect_ids_dfs(node: &ReactiveViewModel, ids: &mut Vec<String>) {
+fn collect_ids_dfs(node: &ReactiveViewModel, ids: &mut Vec<EntityUri>) {
     if let Some(id) = resolve_entity_id(node) {
         ids.push(id);
     }
@@ -373,7 +411,8 @@ fn collect_ids_dfs(node: &ReactiveViewModel, ids: &mut Vec<String>) {
 /// The resolver is the bridge: when DFS hits a `live_block`, it asks the
 /// resolver for the block's current `ReactiveViewModel` and continues into
 /// it. Production wires this to `ReactiveEngine::snapshot_reactive`.
-pub type LiveBlockResolver = Arc<dyn Fn(&str) -> Option<Arc<ReactiveViewModel>> + Send + Sync>;
+pub type LiveBlockResolver =
+    Arc<dyn Fn(&EntityUri) -> Option<Arc<ReactiveViewModel>> + Send + Sync>;
 
 /// Frontend-agnostic input router. Caches focus path, rebuilds on focus change.
 ///
@@ -387,7 +426,7 @@ pub struct InputRouter {
 }
 
 struct CachedFocusPath {
-    entity_id: String,
+    entity_id: EntityUri,
     focus_path: FocusPath,
 }
 
@@ -421,7 +460,7 @@ impl InputRouter {
     /// updated: the common prefix up to the collection parent is kept, and
     /// only the segment from collection → new target is rebuilt via DFS.
     #[tracing::instrument(level = "debug", skip_all, fields(entity_id))]
-    pub fn bubble_input(&self, entity_id: &str, input: &WidgetInput) -> Option<InputAction> {
+    pub fn bubble_input(&self, entity_id: &EntityUri, input: &WidgetInput) -> Option<InputAction> {
         self.ensure_focus_path(entity_id);
         let guard = self.cached.read().unwrap();
         let cached = guard.as_ref()?;
@@ -465,7 +504,9 @@ impl InputRouter {
                 .ok();
                 for (i, entry) in cached.focus_path.path.iter().enumerate() {
                     let widget = entry.widget_name.as_deref().unwrap_or("?");
-                    let eid = resolve_entity_id(&entry.node).unwrap_or_else(|| "-".to_string());
+                    let eid = resolve_entity_id(&entry.node)
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|| "-".to_string());
                     let is_collection = if is_collection_widget(entry.widget_name.as_deref()) {
                         " [NAV]"
                     } else {
@@ -493,11 +534,11 @@ impl InputRouter {
         }
     }
 
-    fn ensure_focus_path(&self, entity_id: &str) {
+    fn ensure_focus_path(&self, entity_id: &EntityUri) {
         {
             let guard = self.cached.read().unwrap();
             if let Some(ref cached) = *guard {
-                if cached.entity_id == entity_id {
+                if &cached.entity_id == entity_id {
                     return;
                 }
             }
@@ -512,7 +553,7 @@ impl InputRouter {
             };
             if let Some(fp) = fp {
                 *self.cached.write().unwrap() = Some(CachedFocusPath {
-                    entity_id: entity_id.to_string(),
+                    entity_id: entity_id.clone(),
                     focus_path: fp,
                 });
             }
@@ -523,7 +564,7 @@ impl InputRouter {
     /// common prefix of the cached path (up to the collection parent) and
     /// only DFS from there to find the new target. Falls back to full
     /// rebuild if the optimization doesn't apply.
-    fn update_cache_for_navigation(&self, new_entity_id: &str) {
+    fn update_cache_for_navigation(&self, new_entity_id: &EntityUri) {
         let root_guard = self.root.read().unwrap();
         let Some(ref root) = *root_guard else { return };
 
@@ -558,7 +599,7 @@ impl InputRouter {
                         FocusPathEntry { node, widget_name }
                     }));
                     *cache_guard = Some(CachedFocusPath {
-                        entity_id: new_entity_id.to_string(),
+                        entity_id: new_entity_id.clone(),
                         focus_path: FocusPath { path: new_path },
                     });
                     return;
@@ -566,14 +607,15 @@ impl InputRouter {
             }
         }
 
-        // Fallback: full DFS from root.
+        // ALLOW(fallback): disclosed — when the cached common-prefix optimization
+        // can't apply, rebuild the focus path with a full DFS from root.
         let fp = match resolver {
             Some(r) => build_focus_path_with_resolver(root, new_entity_id, r.as_ref()),
             None => build_focus_path(root, new_entity_id),
         };
         if let Some(fp) = fp {
             *cache_guard = Some(CachedFocusPath {
-                entity_id: new_entity_id.to_string(),
+                entity_id: new_entity_id.clone(),
                 focus_path: fp,
             });
         }
@@ -587,12 +629,12 @@ impl InputRouter {
 /// root to the found node (inclusive).
 fn dfs_find(
     node: &Arc<ReactiveViewModel>,
-    entity_id: &str,
+    entity_id: &EntityUri,
     stack: &mut Vec<Arc<ReactiveViewModel>>,
 ) -> bool {
     stack.push(node.clone());
 
-    if resolve_entity_id(node).as_deref() == Some(entity_id) {
+    if resolve_entity_id(node).as_ref() == Some(entity_id) {
         return true;
     }
 
@@ -611,19 +653,21 @@ fn dfs_find(
 /// map and continues DFS into it.
 fn dfs_find_cross_block(
     node: &Arc<ReactiveViewModel>,
-    block_contents: &HashMap<String, Arc<ReactiveViewModel>>,
-    entity_id: &str,
+    block_contents: &HashMap<EntityUri, Arc<ReactiveViewModel>>,
+    entity_id: &EntityUri,
     stack: &mut Vec<Arc<ReactiveViewModel>>,
 ) -> bool {
     stack.push(node.clone());
 
-    if resolve_entity_id(node).as_deref() == Some(entity_id) {
+    if resolve_entity_id(node).as_ref() == Some(entity_id) {
         return true;
     }
 
     // If this is a live_block, look up the block's content.
     if node.widget_name().as_deref() == Some("live_block") {
         if let Some(block_id) = node.prop_str("block_id") {
+            let block_id = EntityUri::parse(&block_id)
+                .expect("live_block props[\"block_id\"] must be a schemed EntityUri");
             if let Some(content) = block_contents.get(&block_id) {
                 if dfs_find_cross_block(content, block_contents, entity_id, stack) {
                     return true;
@@ -650,8 +694,8 @@ fn dfs_find_cross_block(
 /// where live_block slots in `nav.set_root`'s tree are empty.
 pub fn build_focus_path_with_resolver(
     root: &Arc<ReactiveViewModel>,
-    entity_id: &str,
-    resolver: &(dyn Fn(&str) -> Option<Arc<ReactiveViewModel>> + Send + Sync),
+    entity_id: &EntityUri,
+    resolver: &(dyn Fn(&EntityUri) -> Option<Arc<ReactiveViewModel>> + Send + Sync),
 ) -> Option<FocusPath> {
     let mut stack: Vec<Arc<ReactiveViewModel>> = Vec::new();
     if dfs_find_with_resolver(root, entity_id, resolver, &mut stack) {
@@ -670,18 +714,20 @@ pub fn build_focus_path_with_resolver(
 
 fn dfs_find_with_resolver(
     node: &Arc<ReactiveViewModel>,
-    entity_id: &str,
-    resolver: &(dyn Fn(&str) -> Option<Arc<ReactiveViewModel>> + Send + Sync),
+    entity_id: &EntityUri,
+    resolver: &(dyn Fn(&EntityUri) -> Option<Arc<ReactiveViewModel>> + Send + Sync),
     stack: &mut Vec<Arc<ReactiveViewModel>>,
 ) -> bool {
     stack.push(node.clone());
 
-    if resolve_entity_id(node).as_deref() == Some(entity_id) {
+    if resolve_entity_id(node).as_ref() == Some(entity_id) {
         return true;
     }
 
     if node.widget_name().as_deref() == Some("live_block") {
         if let Some(block_id) = node.prop_str("block_id") {
+            let block_id = EntityUri::parse(&block_id)
+                .expect("live_block props[\"block_id\"] must be a schemed EntityUri");
             if let Some(content) = resolver(&block_id) {
                 if dfs_find_with_resolver(&content, entity_id, resolver, stack) {
                     return true;
@@ -704,7 +750,11 @@ fn dfs_find_with_resolver(
 
 // ── Input handling ─────────────────────────────────────────────────────
 
-fn try_handle(entry: &FocusPathEntry, origin_id: &str, input: &WidgetInput) -> Option<InputAction> {
+fn try_handle(
+    entry: &FocusPathEntry,
+    origin_id: &EntityUri,
+    input: &WidgetInput,
+) -> Option<InputAction> {
     match input {
         WidgetInput::Navigate { direction, hint } => {
             try_navigate(entry, origin_id, *direction, hint)
@@ -715,7 +765,7 @@ fn try_handle(entry: &FocusPathEntry, origin_id: &str, input: &WidgetInput) -> O
 
 fn try_navigate(
     entry: &FocusPathEntry,
-    origin_id: &str,
+    origin_id: &EntityUri,
     direction: crate::navigation::NavDirection,
     hint: &crate::navigation::CursorHint,
 ) -> Option<InputAction> {
@@ -734,7 +784,7 @@ fn try_navigate(
 
 fn try_keychord(
     entry: &FocusPathEntry,
-    origin_id: &str,
+    origin_id: &EntityUri,
     keys: &std::collections::BTreeSet<crate::input::Key>,
 ) -> Option<InputAction> {
     let chord = KeyChord(keys.clone());
@@ -776,7 +826,7 @@ fn try_keychord(
     Some(InputAction::ExecuteOperation {
         entity_name: op.descriptor.entity_name.to_string(),
         operation: op.descriptor.clone(),
-        entity_id: origin_id.to_string(),
+        entity_id: origin_id.clone(),
     })
 }
 
@@ -816,16 +866,21 @@ fn collect_children_arcs(node: &Arc<ReactiveViewModel>) -> Vec<Arc<ReactiveViewM
     collect_children(node.as_ref())
 }
 
-/// Resolve `entity_id` for a node. Returns the explicit ID for nodes that
-/// have one, otherwise falls back to `entity().get("id")`.
-pub fn resolve_entity_id(node: &ReactiveViewModel) -> Option<String> {
+/// Resolve the typed `EntityUri` for a node. Returns the explicit ID for
+/// nodes that have one, otherwise falls back to `entity().get("id")` —
+/// parsed once at this boundary via the centralized `entity_uri_from_id_str`
+/// seam, so the whole routing layer compares `EntityUri`s and a
+/// bare-vs-schemed mismatch is impossible past this point.
+pub fn resolve_entity_id(node: &ReactiveViewModel) -> Option<EntityUri> {
     if let Some(id) = node.entity_id() {
         return Some(id);
     }
     let entity = node.entity();
     match entity.get("id") {
-        Some(holon_api::Value::String(s)) => Some(s.clone()),
-        Some(holon_api::Value::Integer(i)) => Some(i.to_string()),
+        Some(holon_api::Value::String(s)) => Some(holon_api::entity_uri_from_id_str(s)),
+        Some(holon_api::Value::Integer(i)) => {
+            Some(holon_api::entity_uri_from_id_str(&i.to_string()))
+        }
         _ => None,
     }
 }
@@ -834,7 +889,7 @@ fn build_navigator(
     widget: &str,
     items: &[Arc<ReactiveViewModel>],
 ) -> Option<Box<dyn CollectionNavigator>> {
-    let ids: Vec<String> = items
+    let ids: Vec<EntityUri> = items
         .iter()
         .filter_map(|item| resolve_entity_id(item))
         .collect();
@@ -860,10 +915,10 @@ fn build_navigator(
 
 fn collect_tree_structure(
     items: &[Arc<ReactiveViewModel>],
-    dfs_order: &mut Vec<String>,
-    parent_map: &mut HashMap<String, String>,
+    dfs_order: &mut Vec<EntityUri>,
+    parent_map: &mut HashMap<EntityUri, EntityUri>,
 ) {
-    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut stack: Vec<(usize, EntityUri)> = Vec::new();
 
     for item in items {
         let (depth, content) = match item.widget_name().as_deref() {
@@ -904,7 +959,9 @@ fn describe_tree(node: &ReactiveViewModel, depth: usize) -> String {
     let mut out = String::new();
     let indent = "  ".repeat(depth);
     let widget = node.widget_name().unwrap_or_else(|| "?".to_string());
-    let eid = resolve_entity_id(node).unwrap_or_else(|| "-".to_string());
+    let eid = resolve_entity_id(node)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "-".to_string());
     let children = collect_children(node);
     let nav = if is_collection_widget(Some(&widget)) {
         " [NAV]"
@@ -951,17 +1008,26 @@ mod tests {
     }
 
     fn nested_live_block(block_id: &str) -> ReactiveViewModel {
-        ReactiveViewModel::live_block(EntityUri::from_raw(block_id))
+        ReactiveViewModel::live_block(
+            EntityUri::parse(block_id).expect("test fixture ids are schemed"),
+        )
     }
 
     fn list(items: Vec<ReactiveViewModel>) -> ReactiveViewModel {
         ReactiveViewModel::static_collection("list", items, 0.0)
     }
 
+    /// Test-helper mirroring the typed-id boundary: bare → `block:`,
+    /// schemed → parsed as-is. Same canonicalisation `resolve_entity_id`
+    /// applies to fixture row ids.
+    fn uri(s: &str) -> EntityUri {
+        holon_api::entity_uri_from_id_str(s)
+    }
+
     #[test]
     fn build_and_navigate() {
         let tree = Arc::new(list(vec![make_row("a"), make_row("b"), make_row("c")]));
-        let fp = build_focus_path(&tree, "a").expect("should find 'a'");
+        let fp = build_focus_path(&tree, &uri("a")).expect("should find 'a'");
 
         let input = WidgetInput::Navigate {
             direction: NavDirection::Down,
@@ -971,20 +1037,20 @@ mod tests {
             },
         };
 
-        match fp.bubble_input("a", &input) {
+        match fp.bubble_input(&uri("a"), &input) {
             Some(InputAction::Focus {
                 block_id,
                 placement,
             }) => {
-                assert_eq!(block_id, "b");
+                assert_eq!(block_id, uri("b"));
                 assert_eq!(placement, CursorPlacement::FirstLine { column: 5 });
             }
             other => panic!("expected Focus, got {other:?}"),
         }
 
         // Last item: navigation returns None
-        let fp_c = build_focus_path(&tree, "c").expect("should find 'c'");
-        assert!(fp_c.bubble_input("c", &input).is_none());
+        let fp_c = build_focus_path(&tree, &uri("c")).expect("should find 'c'");
+        assert!(fp_c.bubble_input(&uri("c"), &input).is_none());
     }
 
     #[test]
@@ -1005,10 +1071,10 @@ mod tests {
         });
 
         let tree = Arc::new(column(vec![vm]));
-        let fp = build_focus_path(&tree, "entity-1").expect("should find entity");
+        let fp = build_focus_path(&tree, &uri("entity-1")).expect("should find entity");
 
         let input = WidgetInput::chord(&[crate::input::Key::Cmd, crate::input::Key::Enter]);
-        match fp.bubble_input("entity-1", &input) {
+        match fp.bubble_input(&uri("entity-1"), &input) {
             Some(InputAction::ExecuteOperation {
                 entity_name,
                 operation,
@@ -1016,20 +1082,20 @@ mod tests {
             }) => {
                 assert_eq!(entity_name, "block");
                 assert_eq!(operation.name, "cycle_task_state");
-                assert_eq!(entity_id, "entity-1");
+                assert_eq!(entity_id, uri("entity-1"));
             }
             other => panic!("expected ExecuteOperation, got {other:?}"),
         }
 
         // Unmatched chord returns None
         let unmatched = WidgetInput::chord(&[crate::input::Key::Cmd, crate::input::Key::Char('z')]);
-        assert!(fp.bubble_input("entity-1", &unmatched).is_none());
+        assert!(fp.bubble_input(&uri("entity-1"), &unmatched).is_none());
     }
 
     #[test]
     fn nonexistent_entity_returns_none() {
         let tree = Arc::new(list(vec![make_row("a")]));
-        assert!(build_focus_path(&tree, "nonexistent").is_none());
+        assert!(build_focus_path(&tree, &uri("nonexistent")).is_none());
     }
 
     #[test]
@@ -1039,9 +1105,9 @@ mod tests {
         let inner_content = Arc::new(list(vec![make_row("inner-1"), make_row("inner-2")]));
 
         let mut block_contents = HashMap::new();
-        block_contents.insert("block:inner".to_string(), inner_content);
+        block_contents.insert(uri("block:inner"), inner_content);
 
-        let fp = build_focus_path_cross_block(&root_tree, &block_contents, "inner-1")
+        let fp = build_focus_path_cross_block(&root_tree, &block_contents, &uri("inner-1"))
             .expect("should find inner-1 across block boundary");
 
         let input = WidgetInput::Navigate {
@@ -1052,9 +1118,9 @@ mod tests {
             },
         };
 
-        match fp.bubble_input("inner-1", &input) {
+        match fp.bubble_input(&uri("inner-1"), &input) {
             Some(InputAction::Focus { block_id, .. }) => {
-                assert_eq!(block_id, "inner-2");
+                assert_eq!(block_id, uri("inner-2"));
             }
             other => panic!("expected Focus to inner-2, got {other:?}"),
         }
@@ -1064,9 +1130,9 @@ mod tests {
     fn collect_all_entity_ids_traverses_tree() {
         let tree = column(vec![make_row("a"), row(vec![make_row("b"), make_row("c")])]);
         let ids = collect_all_entity_ids(&tree);
-        assert!(ids.contains(&"a".to_string()));
-        assert!(ids.contains(&"b".to_string()));
-        assert!(ids.contains(&"c".to_string()));
+        assert!(ids.contains(&uri("a")));
+        assert!(ids.contains(&uri("b")));
+        assert!(ids.contains(&uri("c")));
     }
 
     #[test]
@@ -1084,20 +1150,20 @@ mod tests {
         };
 
         // First call builds the path
-        match router.bubble_input("a", &input) {
-            Some(InputAction::Focus { block_id, .. }) => assert_eq!(block_id, "b"),
+        match router.bubble_input(&uri("a"), &input) {
+            Some(InputAction::Focus { block_id, .. }) => assert_eq!(block_id, uri("b")),
             other => panic!("expected Focus to b, got {other:?}"),
         }
 
         // After navigation resolved to "b", calling again with "b" should
         // reuse the prefix and navigate to "c"
-        match router.bubble_input("b", &input) {
-            Some(InputAction::Focus { block_id, .. }) => assert_eq!(block_id, "c"),
+        match router.bubble_input(&uri("b"), &input) {
+            Some(InputAction::Focus { block_id, .. }) => assert_eq!(block_id, uri("c")),
             other => panic!("expected Focus to c, got {other:?}"),
         }
 
         // Last element: None
-        assert!(router.bubble_input("c", &input).is_none());
+        assert!(router.bubble_input(&uri("c"), &input).is_none());
     }
 
     #[test]
@@ -1127,7 +1193,7 @@ mod tests {
         let tree = list(vec![sidebar_item, make_row("doc:bar")]);
 
         // Click on the item with a bound action → returns the navigation.focus intent.
-        let intent = find_click_intent_oneshot(&tree, "doc:foo")
+        let intent = find_click_intent_oneshot(&tree, &uri("doc:foo"))
             .expect("doc:foo should yield a click intent");
         assert_eq!(intent.entity_name.as_str(), "navigation");
         assert_eq!(intent.op_name, "focus");
@@ -1137,10 +1203,10 @@ mod tests {
         );
 
         // Click on the item without a bound action → None (driver falls back).
-        assert!(find_click_intent_oneshot(&tree, "doc:bar").is_none());
+        assert!(find_click_intent_oneshot(&tree, &uri("doc:bar")).is_none());
 
         // Click on a non-existent entity → None.
-        assert!(find_click_intent_oneshot(&tree, "doc:nope").is_none());
+        assert!(find_click_intent_oneshot(&tree, &uri("doc:nope")).is_none());
     }
 
     #[test]
@@ -1192,7 +1258,7 @@ mod tests {
         let root = ViewModel::layout("columns", vec![left_panel, main_panel]);
 
         // LeftSidebar click on block:foo → fires the bound nav.focus.
-        let left_intent = find_click_intent_in_region(&root, "block:foo", "left_sidebar")
+        let left_intent = find_click_intent_in_region(&root, &uri("block:foo"), "left_sidebar")
             .expect("left_sidebar click on block:foo should yield an intent");
         assert_eq!(left_intent.entity_name.as_str(), "navigation");
         assert_eq!(left_intent.op_name, "focus");
@@ -1201,14 +1267,14 @@ mod tests {
         // panel's subtree. Returns None; production would fall through to
         // editor_focus.
         assert!(
-            find_click_intent_in_region(&root, "block:foo", "main").is_none(),
+            find_click_intent_in_region(&root, &uri("block:foo"), "main").is_none(),
             "Main click on block:foo must NOT pick up the LeftSidebar's bound action"
         );
 
         // Unknown region → None (defensive).
-        assert!(find_click_intent_in_region(&root, "block:foo", "bogus_region").is_none());
+        assert!(find_click_intent_in_region(&root, &uri("block:foo"), "bogus_region").is_none());
 
         // Entity not in any panel's subtree → None.
-        assert!(find_click_intent_in_region(&root, "block:never", "left_sidebar").is_none());
+        assert!(find_click_intent_in_region(&root, &uri("block:never"), "left_sidebar").is_none());
     }
 }

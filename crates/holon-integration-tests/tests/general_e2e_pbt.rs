@@ -48,7 +48,7 @@
 //!       gracefully (not panic, not show stale data).
 //!
 //! - [ ] **Concurrent multi-document external edits**: Write two `.org` files in one
-//!       transition. Tests file watcher's multi-event processing and OrgSyncController's
+//!       transition. Tests file watcher's multi-event processing and FileSyncController's
 //!       per-document echo suppression.
 //!
 //! - [ ] **Error recovery in watch_ui**: Mutate a render source block to contain garbage
@@ -115,6 +115,26 @@
 // initialize a subscriber and set `RUST_LOG=trace` (or
 // `holon_integration_tests=trace`) to opt in.
 //
+// # Localising a failure across layers
+//
+// On a strict failure the runner already panics with a cross-layer report —
+// every invariant marked ✓/✗/⊘/⚠, grouped by the subsystem each touches, with
+// a "trouble begins at: <layer>" headline naming the lowest diverging layer
+// (so layers below it are exonerated). To get that table *without* a strict
+// panic — to localise a Warn-level divergence (e.g. `inv-displayed-text/
+// viewmodel`) or just inspect which layers are healthy — replay the persisted
+// seed with `HOLON_PBT_LAYER_REPORT`:
+//
+//   HOLON_PBT_LAYER_REPORT=warn PROPTEST_CASES=1 PROPTEST_MAX_SHRINK_ITERS=0 \
+//     RUST_LOG=pbt_invariant=warn \
+//     cargo test -p holon-integration-tests --test general_e2e_pbt \
+//     general_e2e_pbt_sql_only -- --nocapture --exact
+//
+// `=warn` emits the report (via `tracing`, no panic) on every tick that has a
+// Warn or Fail; `=always` emits on every tick regardless (verbose). This
+// replaces the old `HOLON_PBT_INVARIANTS=*:warn` + grep recipe — it keeps
+// strict semantics intact and just adds the readable table.
+//
 // # Bug-class reproducers
 //
 // The atomic editor primitives (`TypeChars` → `PressKey(Enter)`) reproduce
@@ -132,110 +152,25 @@
 // mismatch that masks this bug otherwise. Devlog:
 // `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`.
 
-use std::path::PathBuf;
+use holon_integration_tests::component_pbt;
+use holon_integration_tests::pbt::standard_pbt_config;
+use holon_pbt_core::ComponentSet;
 
-use proptest::prelude::*;
-use proptest::test_runner::FileFailurePersistence;
-
-use holon_integration_tests::declare_pbt_slice;
-use holon_integration_tests::pbt::{
-    CrossExecutor, E2ESut, Full, SqlOnly, enable_atomic_editor_if_unset,
-};
-
-/// Print the per-transition rejection histogram on every panic. Without this
-/// `proptest_state_machine!` swallows the validation::print_rejection_histogram()
-/// hook that `pbt_teardown` runs in the phased-PBT path, and the histogram is
-/// never surfaced when a case fails. Idempotent — install once per process.
-fn install_rejection_histogram_panic_hook() {
-    use std::sync::Once;
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            holon_integration_tests::pbt::validation::print_rejection_histogram();
-            prev(info);
-        }));
-    });
-}
-
-fn pbt_config() -> ProptestConfig {
-    // Activate the keystroke-driven atomic editor primitives
-    // (`TypeChars`, `PressKey`, `DeleteBackward`, `MoveCursor`,
-    // `FocusEditableText`). Without this, the only edit transitions
-    // generated are `EditViaViewModel` / `EditViaDisplayTree`, which
-    // commit whole strings via `on_blur` → `set_field` and so can't
-    // surface bug classes that depend on per-keystroke MutableText
-    // writes (e.g. `split_block` reading stale `block.content` while
-    // pending Loro edits haven't yet projected through to SQL — see
-    // `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`).
-    //
-    // `ReactiveEngineDriver::send_raw_keystroke` (in
-    // `crates/holon-frontend/src/headless_editor_mirror.rs`) routes
-    // each char through `MutableText.apply_local`, matching the
-    // production GPUI path.
-    enable_atomic_editor_if_unset();
-    install_rejection_histogram_panic_hook();
-    // Default of 50 (was 10) so persisted regression seeds are shrunk to a
-    // more minimal form by default. PBT failures are expensive to reproduce
-    // (~25 min per case at the time of writing); a slightly higher shrink
-    // budget pays for itself the next time someone replays the seed.
-    let max_shrink = std::env::var("PROPTEST_MAX_SHRINK_ITERS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50);
-    // Pin the regressions file to an explicit path. The default
-    // `SourceParallel` mode tries to locate `lib.rs`/`main.rs` adjacent to
-    // the test source and prints a misleading "failed to find lib.rs or
-    // main.rs" warning when it can't (proptest_state_machine generates
-    // tests that confuse the heuristic). All three variants share one
-    // file by design — they exercise the same state machine.
-    let regressions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("general_e2e_pbt.proptest-regressions");
-    ProptestConfig {
-        cases: 8,
-        max_shrink_iters: max_shrink,
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
-            // proptest expects a 'static str, so leak the resolved path.
-            Box::leak(regressions.to_string_lossy().into_owned().into_boxed_str()),
-        ))),
-        ..ProptestConfig::default()
-    }
-}
-
-declare_pbt_slice! {
+// Both variants exercise the same state machine and so share one
+// `*.proptest-regressions` file — they pass the same `slice_name` to
+// `standard_pbt_config` (which also activates the atomic editor primitives and
+// installs the rejection-histogram panic hook). `cases` defaults to 8;
+// `PROPTEST_CASES` / `PROPTEST_MAX_SHRINK_ITERS` override at runtime.
+component_pbt! {
     test_fn: general_e2e_pbt,
-    inner_sut: E2ESut<Full>,
-    proptest_config: pbt_config(),
+    set: ComponentSet::full_headless(),
+    proptest_config: standard_pbt_config("general_e2e_pbt"),
     steps: 3..20,
 }
 
-declare_pbt_slice! {
+component_pbt! {
     test_fn: general_e2e_pbt_sql_only,
-    inner_sut: E2ESut<SqlOnly>,
-    proptest_config: pbt_config(),
-    steps: 3..20,
-}
-
-// Same as general_e2e_pbt but receives watch_ui events on
-// futures::executor (not tokio). Catches cross-executor waker bugs like
-// GPUI blank screen where tokio mpsc wakers don't wake a non-tokio event
-// loop.
-//
-// `#[ignore]` by default: this variant is non-deterministic by
-// construction — tokio mpsc wakers don't reliably wake the
-// `futures::executor::block_on` thread, so the same seed can pass or fail
-// depending on scheduler timing. That's exactly the bug class it exists to
-// surface, but it also means it is unsuitable for the default regression
-// sweep (where we want "fixed seed → fixed outcome"). Run explicitly when
-// you need to investigate a cross-executor waker issue:
-//
-//   cargo nextest run -p holon-integration-tests \
-//       general_e2e_pbt_cross_executor --run-ignored only
-declare_pbt_slice! {
-    test_fn: general_e2e_pbt_cross_executor,
-    #[ignore = "non-deterministic by design; run with --ignored to opt in"]
-    inner_sut: E2ESut<CrossExecutor>,
-    proptest_config: pbt_config(),
+    set: ComponentSet::sql_only(),
+    proptest_config: standard_pbt_config("general_e2e_pbt"),
     steps: 3..20,
 }

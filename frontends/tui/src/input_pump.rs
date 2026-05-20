@@ -33,7 +33,6 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use holon_frontend::geometry::GeometryProvider;
-use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_mcp::server::{DebugServices, InteractionCommand, InteractionEvent, InteractionResponse};
 use r3bl_tui::InputEvent;
@@ -117,23 +116,14 @@ pub async fn dispatch_interaction(
                     )),
                 };
             };
-            let mut params = std::collections::HashMap::new();
-            params.insert(
-                "block_id".into(),
-                holon_api::Value::String(entity_id.clone()),
-            );
-            params.insert("region".into(), holon_api::Value::String("main".into()));
-            params.insert("cursor_offset".into(), holon_api::Value::Integer(0));
-            let intent = OperationIntent::new("navigation".into(), "editor_focus".into(), params);
-            match engine.dispatch_intent_sync(intent).await {
-                Ok(()) => InteractionResponse {
-                    handled: true,
-                    detail: None,
-                },
-                Err(e) => InteractionResponse {
-                    handled: false,
-                    detail: Some(format!("editor_focus dispatch failed: {e}")),
-                },
+            // Focus the clicked block by setting the in-memory authority
+            // directly (ADR 0010) — no `editor_cursor` write/CDC round-trip.
+            // ALLOW(entity_uri_from_raw): boundary — entity_id from TUI geometry hit-test (a String)
+            let block_uri = holon_api::EntityUri::from_raw(&entity_id);
+            engine.set_focus(Some(block_uri));
+            InteractionResponse {
+                handled: true,
+                detail: None,
             }
         }
         _ => InteractionResponse {
@@ -166,5 +156,5 @@ fn entity_at(geometry: &dyn GeometryProvider, (px, py): (f32, f32)) -> Option<St
                 .partial_cmp(&b.area())
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .and_then(|(_, info)| info.entity_id)
+        .and_then(|(_, info)| info.entity_id.map(|s| s.to_string()))
 }

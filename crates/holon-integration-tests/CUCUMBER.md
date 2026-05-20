@@ -41,7 +41,7 @@ All core infrastructure is implemented and all tests passing:
 ## Current State
 
 ### What Works
-- **File sync**: Writing org files triggers automatic sync to Loro → EventBus → CacheEventSubscriber → blocks table
+- **File sync**: Writing org files triggers automatic sync to Loro → LoroProjection/BlockConsolidator → `block_raw` table (CDC then drives the block matview + `LiveData<Block>`)
 - **`initial_widget`**: Returns the root layout widget with query results populated and CDC stream for real-time updates
 - **`from children` virtual table**: Queries children of a context block correctly
 - **`from roots` virtual table**: Queries blocks with `parent_id IS NULL`

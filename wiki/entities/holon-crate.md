@@ -44,8 +44,9 @@ crates/holon/src/
 │   ├── loro_block_operations.rs  # Write operations via Loro
 │   ├── loro_sync_controller.rs   # Loro ↔ Turso reconciliation
 │   ├── matview_manager.rs        # Materialized view lifecycle
-│   ├── turso_event_bus.rs        # Event bus over Turso
-│   └── event_bus.rs              # EventBus trait
+│   ├── live_data.rs              # LiveData<Block> (BlockFeed): CDC mirror of the block matview
+│   ├── consolidator.rs           # BlockConsolidator: single writer Loro → SQL block_raw
+│   └── event_bus.rs              # Shared sync vocabulary (EventOrigin, PublishErrorTracker) — no bus
 ├── di/
 │   ├── lifecycle.rs          # create_backend_engine(), startup flow
 │   ├── registration.rs       # register_core_services()

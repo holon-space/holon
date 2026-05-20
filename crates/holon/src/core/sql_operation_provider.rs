@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -15,10 +14,7 @@ use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
 use crate::storage::types::StorageEntity;
-use crate::sync::event_bus::{
-    AggregateType, Event, EventBus, EventKind, EventOrigin, POSITION_AFTER_BLOCK_ID_PARAM,
-    ROUTING_DOC_URI_KEY,
-};
+use crate::sync::event_bus::{EventOrigin, POSITION_AFTER_BLOCK_ID_PARAM};
 use holon_api::{EntityName, OperationDescriptor, OperationParam, TypeHint, Value};
 
 pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
@@ -198,10 +194,9 @@ const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
     "_change_origin",
 ];
 
-/// A prepared operation: SQL statements and events, ready for execution.
+/// A prepared operation: SQL statements ready for execution.
 struct PreparedOp {
     sql_statements: Vec<String>,
-    events: Vec<Event>,
 }
 
 /// SQL-based operation provider that writes directly to a Turso table.
@@ -218,7 +213,6 @@ pub struct SqlOperationProvider {
     /// Edge-typed fields (multi-valued, projected to a junction table).
     /// Indexed by field name for O(1) partition-time lookup.
     edge_fields: HashMap<String, EdgeFieldDescriptor>,
-    event_bus: Option<Arc<dyn EventBus>>,
 }
 
 impl SqlOperationProvider {
@@ -259,143 +253,7 @@ impl SqlOperationProvider {
             entity_short_name,
             known_columns,
             edge_fields,
-            event_bus: None,
         }
-    }
-
-    pub fn with_event_bus(
-        db_handle: DbHandle,
-        table_name: String,
-        entity_name: String,
-        entity_short_name: String,
-        event_bus: Arc<dyn EventBus>,
-    ) -> Self {
-        Self::with_event_bus_and_edge_fields(
-            db_handle,
-            table_name,
-            entity_name,
-            entity_short_name,
-            event_bus,
-            Vec::new(),
-        )
-    }
-
-    /// Same as `with_event_bus` plus an edge-field registry.
-    pub fn with_event_bus_and_edge_fields(
-        db_handle: DbHandle,
-        table_name: String,
-        entity_name: String,
-        entity_short_name: String,
-        event_bus: Arc<dyn EventBus>,
-        edge_fields: Vec<EdgeFieldDescriptor>,
-    ) -> Self {
-        let known_columns = BLOCKS_KNOWN_COLUMNS.iter().map(|s| s.to_string()).collect();
-        let edge_fields = edge_fields
-            .into_iter()
-            .filter(|d| d.entity == entity_name)
-            .map(|d| (d.field.clone(), d))
-            .collect();
-        Self {
-            db_handle,
-            table_name,
-            entity_name,
-            entity_short_name,
-            known_columns,
-            edge_fields,
-            event_bus: Some(event_bus),
-        }
-    }
-
-    fn aggregate_type(&self) -> AggregateType {
-        AggregateType::parse(&self.entity_short_name)
-    }
-
-    async fn publish_event(
-        &self,
-        event_kind: EventKind,
-        aggregate_id: &str,
-        payload: HashMap<String, serde_json::Value>,
-        position_after_block_id: Option<String>,
-        routing_doc_uri: Option<String>,
-        origin: EventOrigin,
-    ) {
-        if let Some(ref bus) = self.event_bus {
-            let event = Event::new(
-                event_kind,
-                self.aggregate_type(),
-                aggregate_id,
-                origin,
-                payload,
-            )
-            .with_position_after_block_id(position_after_block_id)
-            .with_routing_doc_uri(routing_doc_uri);
-            if let Err(e) = bus.publish(event, None).await {
-                tracing::warn!(
-                    "[SqlOperationProvider] Failed to publish {}: {}",
-                    event_kind,
-                    e
-                );
-            }
-        }
-    }
-
-    /// Phase 3: resolve the document URI for a block, preferring the
-    /// caller-supplied `ROUTING_DOC_URI_KEY` param when present.
-    ///
-    /// `OrgSyncController::build_block_params` always sets this key to the
-    /// real ancestor document URI, so the recursive Page-walk in
-    /// `find_document_uri` is unnecessary on the org-ingest hot path
-    /// (~1,200 calls eliminated per re-ingest of a typical vault). Chord-op
-    /// and MCP callers that don't pass the key fall through to the walk —
-    /// correctness preserved.
-    async fn resolve_doc_uri(&self, params: &StorageEntity, block_id: &str) -> Option<String> {
-        if let Some(v) = params.get(crate::sync::event_bus::ROUTING_DOC_URI_KEY)
-            && let Some(s) = v.as_string()
-            && !s.is_empty()
-        {
-            return Some(s.to_string());
-        }
-        self.find_document_uri(block_id).await
-    }
-
-    /// Find the document ancestor for a block using a single recursive CTE.
-    ///
-    /// Returns the block ID of the nearest ancestor with `name IS NOT NULL`
-    /// (document blocks have names, content blocks don't). This replaces the
-    /// previous O(depth) parent chain walk that fired one SELECT per ancestor.
-    async fn find_document_uri(&self, block_id: &str) -> Option<String> {
-        // A page is a block that has a 'Page' tag in the block_tags junction table.
-        // Walk up the parent chain until one matches.
-        let sql = format!(
-            "WITH RECURSIVE chain(id, parent_id, is_page, depth) AS ( \
-                SELECT b.id, b.parent_id, \
-                    CASE WHEN bt.block_id IS NOT NULL THEN 1 ELSE 0 END as is_page, \
-                    0 \
-                FROM {table} b \
-                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
-                WHERE b.id = '{block_id}' \
-                UNION ALL \
-                SELECT b.id, b.parent_id, \
-                    CASE WHEN bt.block_id IS NOT NULL THEN 1 ELSE 0 END as is_page, \
-                    c.depth + 1 \
-                FROM {table} b \
-                JOIN chain c ON b.id = c.parent_id \
-                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
-                WHERE c.is_page = 0 AND c.depth < 50 \
-            ) \
-            SELECT id FROM chain WHERE is_page = 1 LIMIT 1",
-            table = self.table_name,
-            block_id = block_id.replace('\'', "''"),
-        );
-        let rows = self
-            .db_handle
-            .query(&sql, HashMap::new())
-            .await
-            .expect("database query in find_document_uri must succeed");
-        rows.first()
-            .and_then(|r| r.get("id"))
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string())
     }
 
     fn value_to_sql(value: &Value) -> String {
@@ -464,12 +322,12 @@ impl SqlOperationProvider {
         let is_source = params.get("content_type").and_then(|v| v.as_string()) == Some("source");
 
         for (key, value) in params.iter() {
-            if key == "properties" {
+            if &**key == "properties" {
                 // Capture existing properties JSON to merge with extras later
                 if let Some(s) = value.as_string() {
                     existing_properties_json = Some(s.to_string());
                 }
-            } else if key == POSITION_AFTER_BLOCK_ID_PARAM
+            } else if &**key == POSITION_AFTER_BLOCK_ID_PARAM
                 || key.starts_with("_routing_")
                 || key.starts_with("_expected_")
             {
@@ -479,7 +337,7 @@ impl SqlOperationProvider {
                 // `prepare_create`. Other underscore-prefix keys (e.g.
                 // `_source_header_args`, `_source_results`) are real block
                 // properties and must flow through to `extra_props`.
-            } else if let Some(descriptor) = self.edge_fields.get(key.as_str()) {
+            } else if let Some(descriptor) = self.edge_fields.get(key.as_ref()) {
                 // Edge-typed field: must carry a Value::Array. Fail loud if
                 // a caller mis-types this — silently flowing to JSON would
                 // be the *exact* H5 bug we're closing.
@@ -501,18 +359,18 @@ impl SqlOperationProvider {
                     })
                     .collect();
                 edge_field_params.push((descriptor.clone(), ids));
-            } else if self.known_columns.contains(key.as_str()) {
+            } else if self.known_columns.contains(key.as_ref()) {
                 // Trim trailing whitespace from content — org files don't
                 // preserve it, so storing untrimmed content would cause
                 // permanent divergence between DB and org round-trips.
-                let value = if key == "content" {
+                let value = if &**key == "content" {
                     &Self::trimmed_content(value, is_source)
                 } else {
                     value
                 };
-                sql_fields.push((key.clone(), Self::value_to_sql(value)));
+                sql_fields.push((key.to_string(), Self::value_to_sql(value)));
             } else {
-                extra_props.insert(key.clone(), value.clone());
+                extra_props.insert(key.to_string(), value.clone());
             }
         }
 
@@ -570,7 +428,7 @@ impl SqlOperationProvider {
         out
     }
 
-    /// Execute a prepared operation: run SQL statements and publish events.
+    /// Execute a prepared operation: run its SQL statements.
     async fn execute_prepared(&self, prepared: PreparedOp) -> Result<()> {
         for sql in &prepared.sql_statements {
             self.db_handle
@@ -578,49 +436,33 @@ impl SqlOperationProvider {
                 .await
                 .map_err(|e| format!("Failed to execute SQL: {}", e))?;
         }
-        for event in prepared.events {
-            if let Some(ref bus) = self.event_bus
-                && let Err(e) = bus.publish(event, None).await
-            {
-                tracing::warn!("[SqlOperationProvider] Failed to publish event: {}", e);
-            }
-        }
         Ok(())
     }
 
-    fn make_event(
-        &self,
-        kind: EventKind,
-        aggregate_id: &str,
-        payload: HashMap<String, serde_json::Value>,
-    ) -> Event {
-        Event::new(
-            kind,
-            self.aggregate_type(),
-            aggregate_id,
-            EventOrigin::Other("sql".to_string()),
-            payload,
-        )
-    }
-
-    /// Build SQL + event for a create operation without executing.
+    /// Build SQL for a create operation without executing.
     fn prepare_create(&self, params: &StorageEntity) -> PreparedOp {
         // Ensure timestamps are present so the event payload is a complete Block.
         // Without this, CacheEventSubscriber fails to deserialize: "missing field created_at".
         let mut params = params.clone();
         let now_ms = crate::util::now_unix_millis();
         params
-            .entry("created_at".to_string())
+            .entry("created_at".into())
             .or_insert_with(|| Value::Integer(now_ms));
         params
-            .entry("updated_at".to_string())
+            .entry("updated_at".into())
             .or_insert_with(|| Value::Integer(now_ms));
 
         let (mut sql_fields, extra_props, edge_field_params) = self.partition_params(&params);
 
         if !extra_props.is_empty() {
+            // `Value::Null` props are removal sentinels (see `prepare_update`);
+            // on create there is nothing to remove, so they are dropped instead
+            // of serializing a literal JSON `null`.
             let props_json = properties_to_canonical_json(
-                extra_props.into_iter().map(|(k, v)| (k, value_to_json(&v))),
+                extra_props
+                    .into_iter()
+                    .filter(|(_, v)| !matches!(v, Value::Null))
+                    .map(|(k, v)| (k, value_to_json(&v))),
             );
             sql_fields.push((
                 "properties".to_string(),
@@ -674,41 +516,14 @@ impl SqlOperationProvider {
             ));
         }
 
-        // Lift the typed positional intent off the params bag onto the
-        // `Event::position_after_block_id` field. Done at the operation-
-        // provider boundary so chord-op / OrgSync producers stay on the
-        // generic params API but consumers (`LoroSyncController::apply_create`)
-        // read it as first-class metadata.
-        let position_after = params
-            .get(POSITION_AFTER_BLOCK_ID_PARAM)
-            .and_then(|v| v.as_string())
-            .map(String::from);
-        // Same lift for the typed document-routing intent. OrgSync producers
-        // attach `ROUTING_DOC_URI_KEY` to params via `build_block_params`; the
-        // SqlOperationProvider boundary projects it onto the typed Event field
-        // and the payload-side string is dropped in `build_event_payload`.
-        let routing_doc_uri = params
-            .get(ROUTING_DOC_URI_KEY)
-            .and_then(|v| v.as_string())
-            .map(String::from);
-
-        let payload = self.build_event_payload(&params);
-        let event = self
-            .make_event(EventKind::Created, aggregate_id, payload)
-            .with_position_after_block_id(position_after)
-            .with_routing_doc_uri(routing_doc_uri);
-
-        PreparedOp {
-            sql_statements,
-            events: vec![event],
-        }
+        PreparedOp { sql_statements }
     }
 
-    /// Build SQL + event for an update operation without executing.
+    /// Build SQL for an update operation without executing.
     /// Returns None if there are no fields to update.
     ///
-    /// Async because it needs to look up parent_id for the event payload (so the
-    /// OrgSyncController can route to on_block_changed instead of re_render_all_tracked).
+    /// Async because it reads the existing row to merge `properties` JSON and to
+    /// run the per-column diff guard that suppresses no-op UPDATEs.
     async fn prepare_update(&self, params: &StorageEntity) -> Result<Option<PreparedOp>> {
         let id = params
             .get("id")
@@ -805,7 +620,14 @@ impl SqlOperationProvider {
             };
 
             for (k, v) in &extra_props {
-                existing.insert(k.clone(), value_to_json(v));
+                // `Value::Null` is the property-REMOVAL sentinel: a merge that
+                // only ever inserts can never clear a stale key (e.g. a
+                // `#+TODO:` keyword set deleted from the org file header).
+                if matches!(v, Value::Null) {
+                    existing.remove(k);
+                } else {
+                    existing.insert(k.clone(), value_to_json(v));
+                }
             }
 
             // Canonicalize key order so the diff guard's string comparison
@@ -852,7 +674,7 @@ impl SqlOperationProvider {
                         if DIFF_GUARD_SKIP.contains(&k.as_str()) {
                             return true; // keep timestamps — pruned later if nothing else changed
                         }
-                        let old_val = old_row.get(k);
+                        let old_val = old_row.get(k.as_str());
                         !sql_literal_equals_value(new_sql_literal, old_val)
                     });
                 }
@@ -886,21 +708,16 @@ impl SqlOperationProvider {
         for (descriptor, targets) in &edge_field_params {
             sql_statements.extend(Self::edge_field_replace_sql(id, descriptor, targets));
         }
-        Ok(Some(PreparedOp {
-            sql_statements,
-            events: vec![],
-        }))
+        Ok(Some(PreparedOp { sql_statements }))
     }
 
-    /// Build SQL + events for a delete operation (with cascade) without executing.
+    /// Build SQL for a delete operation (with cascade) without executing.
     /// Requires async because cascade discovery queries the DB.
     async fn prepare_delete(&self, params: &StorageEntity) -> Result<PreparedOp> {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
             .ok_or_else(|| "Missing 'id' parameter".to_string())?;
-
-        let doc_uri = self.resolve_doc_uri(params, id).await;
 
         let mut queue = vec![id.to_string()];
         let mut all_ids = Vec::new();
@@ -942,11 +759,7 @@ impl SqlOperationProvider {
             }
         }
 
-        // Document-routing intent lives on the typed `Event::routing_doc_uri`
-        // field. Empty payload — delete events carry no other data; the routing
-        // hint is just for the OrgMode subscriber to know which file to re-render.
         let mut sql_statements = Vec::new();
-        let mut events = Vec::new();
 
         // Delete descendants bottom-up
         for desc_id in all_ids.iter().rev() {
@@ -955,10 +768,6 @@ impl SqlOperationProvider {
                 self.table_name,
                 desc_id.replace('\'', "''")
             ));
-            events.push(
-                self.make_event(EventKind::Deleted, desc_id, HashMap::new())
-                    .with_routing_doc_uri(doc_uri.clone()),
-            );
         }
 
         // Delete the target block itself
@@ -967,120 +776,8 @@ impl SqlOperationProvider {
             self.table_name,
             id.replace('\'', "''")
         ));
-        events.push(
-            self.make_event(EventKind::Deleted, id, HashMap::new())
-                .with_routing_doc_uri(doc_uri.clone()),
-        );
 
-        Ok(PreparedOp {
-            sql_statements,
-            events,
-        })
-    }
-
-    /// Build an event payload from params that CacheEventSubscriber can deserialize as Block.
-    ///
-    /// The problem: `params` is flat — extra properties like `collapse-to` and `column-order`
-    /// are top-level keys. But `Block` expects them nested under a `properties` key.
-    /// Without this restructuring, `serde_json::from_value::<Block>` drops unknown keys
-    /// and `properties` gets `{}` via `#[serde(default)]`, causing INSERT OR REPLACE
-    /// in QueryableCache to overwrite the correct SQL data with empty properties.
-    fn build_event_payload(&self, params: &StorageEntity) -> HashMap<String, serde_json::Value> {
-        let mut payload = HashMap::new();
-
-        let mut data_map = serde_json::Map::new();
-        let mut props_map = serde_json::Map::new();
-
-        let is_source = params.get("content_type").and_then(|v| v.as_string()) == Some("source");
-
-        for (key, value) in params.iter() {
-            // Edge-typed fields live in junction tables, not in the row's
-            // event payload. Skip so a Value::Array doesn't fall into the
-            // debug-formatted default branch below. // ALLOW(fallback): pre-existing comment-only mention; rule trigger is on the noun, not a real fallback path.
-            if self.edge_fields.contains_key(key.as_str()) {
-                continue;
-            }
-            let value = if key == "content" {
-                &Self::trimmed_content(value, is_source)
-            } else {
-                value
-            };
-            let json_val = value_to_json(value);
-
-            // Skip NULL columns: serde's `#[serde(default)]` on Block fields
-            // (tags, properties, marks, …) only fires for ABSENT keys, not
-            // present-but-null. Routing metadata still propagates as null.
-            let is_null = matches!(json_val, serde_json::Value::Null);
-
-            // The typed positional intent is lifted onto
-            // `Event::position_after_block_id` by `prepare_create`; drop it
-            // from the payload entirely so it doesn't double up as a stale
-            // top-level string the consumer might fall back to.
-            if key == POSITION_AFTER_BLOCK_ID_PARAM {
-                continue;
-            }
-            // The typed document-routing intent is lifted onto
-            // `Event::routing_doc_uri` at the operation-provider boundary;
-            // skip it from the payload for the same reason as
-            // `POSITION_AFTER_BLOCK_ID_PARAM`.
-            if key == ROUTING_DOC_URI_KEY {
-                continue;
-            }
-            // Operation-control keys (routing hints, diff guards) ride at
-            // the top level of the event payload, not inside `data`.
-            // Other underscore-prefix keys (e.g. `_source_header_args`,
-            // `_source_results`) are real block-property data and must
-            // flow through the normal column / extra-property paths below.
-            if key.starts_with("_routing_") || key.starts_with("_expected_") {
-                payload.insert(key.clone(), json_val);
-            } else if is_null {
-                continue;
-            } else if key == "properties" {
-                // Existing properties — merge into props_map.
-                // Handles both String (raw JSON from SQL) and Object (parsed by Turso).
-                match value {
-                    Value::String(s) => {
-                        if let Ok(map) =
-                            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s)
-                        {
-                            for (k, v) in map {
-                                props_map.insert(k, v);
-                            }
-                        }
-                    }
-                    Value::Object(obj) => {
-                        for (k, v) in obj {
-                            props_map.insert(k.clone(), value_to_json(v));
-                        }
-                    }
-                    _ => {}
-                }
-            } else if self.known_columns.contains(key.as_str()) {
-                data_map.insert(key.clone(), json_val);
-            } else {
-                // Extra property — nest under `properties`
-                props_map.insert(key.clone(), json_val);
-            }
-        }
-
-        if !props_map.is_empty() {
-            data_map.insert(
-                "properties".to_string(),
-                serde_json::Value::Object(props_map),
-            );
-        }
-
-        if let Some(id_val) = params.get("id").and_then(|v| v.as_string()) {
-            tracing::trace!(
-                "[BUILD_EVENT_TRACE] id={} data_keys={:?} properties={:?}",
-                id_val,
-                data_map.keys().collect::<Vec<_>>(),
-                data_map.get("properties")
-            );
-        }
-
-        payload.insert("data".to_string(), serde_json::Value::Object(data_map));
-        payload
+        Ok(PreparedOp { sql_statements })
     }
 }
 
@@ -1334,24 +1031,6 @@ impl OperationProvider for SqlOperationProvider {
                     );
                 }
 
-                let mut payload = HashMap::new();
-                let fields_json =
-                    serde_json::to_value(vec![(&field, &Value::Null, value)]).unwrap_or_default();
-                payload.insert("fields".to_string(), fields_json);
-                // Document-routing hint rides on the typed `Event::routing_doc_uri`
-                // field — lets the OrgMode event handler route this to
-                // `on_block_changed(doc_id)` instead of `re_render_all_tracked()`.
-                let routing_doc_uri = self.resolve_doc_uri(&params, id).await;
-                self.publish_event(
-                    EventKind::FieldsChanged,
-                    id,
-                    payload,
-                    None,
-                    routing_doc_uri,
-                    origin.clone(),
-                )
-                .await;
-
                 Ok(OperationResult::irreversible(Vec::new()))
             }
             "create" => {
@@ -1360,51 +1039,13 @@ impl OperationProvider for SqlOperationProvider {
                     .and_then(|v| v.as_string())
                     .expect("create: missing 'id'")
                     .to_string();
-                // Ensure timestamps are present so the Created event payload
-                // deserializes as a complete Block in CacheEventSubscriber.
-                // `prepare_create` injects them into its local clone, but the
-                // outer `params` used for the event payload below also needs
-                // them — otherwise the event drops and the cache stays stale.
-                let mut params = params;
-                let now_ms = crate::util::now_unix_millis();
-                params
-                    .entry("created_at".to_string())
-                    .or_insert_with(|| Value::Integer(now_ms));
-                params
-                    .entry("updated_at".to_string())
-                    .or_insert_with(|| Value::Integer(now_ms));
                 let prepared = self.prepare_create(&params);
-                // Execute SQL without publishing events — we'll publish
-                // manually below with _routing_doc_uri attached.
                 for sql in &prepared.sql_statements {
                     self.db_handle
                         .execute(sql, vec![])
                         .await
                         .map_err(|e| format!("Failed to execute SQL: {}", e))?;
                 }
-                // Publish Create event with routing info (block now exists in DB).
-                // Phase 3: prefer the caller-supplied `ROUTING_DOC_URI_KEY` param
-                // (set by `build_block_params` to the real ancestor doc URI) and
-                // fall back to the recursive Page-walk only for chord-op / MCP
-                // callers that don't pass it. The historical "block's own ID as
-                // placeholder" footgun no longer applies — `build_block_params`
-                // unconditionally writes the real `document_uri`.
-                let payload = self.build_event_payload(&params);
-                let routing_doc_uri = self.resolve_doc_uri(&params, &id).await;
-                let position_after = params
-                    .get(POSITION_AFTER_BLOCK_ID_PARAM)
-                    .and_then(|v| v.as_string())
-                    .map(String::from);
-                self.publish_event(
-                    EventKind::Created,
-                    &id,
-                    payload,
-                    position_after,
-                    routing_doc_uri,
-                    origin.clone(),
-                )
-                .await;
-
                 // After INSERT OR IGNORE, read back the actual row to detect
                 // whether the insert was ignored (duplicate name+parent_id).
                 // Return the actual DB id so the caller knows which UUID won.
@@ -1460,41 +1101,8 @@ impl OperationProvider for SqlOperationProvider {
                 Ok(result)
             }
             "update" => {
-                let id = params
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .expect("update: missing 'id'")
-                    .to_string();
                 if let Some(prepared) = self.prepare_update(&params).await? {
                     self.execute_prepared(prepared).await?;
-                    // Read full row after SQL so the event payload is complete.
-                    let select_sql = format!(
-                        "SELECT * FROM {} WHERE id = '{}'",
-                        self.table_name,
-                        id.replace('\'', "''")
-                    );
-                    let full_rows = self
-                        .db_handle
-                        .query(&select_sql, HashMap::new())
-                        .await
-                        .map_err(|e| format!("post-update row read for {}: {}", id, e))?;
-                    let full_row = full_rows.into_iter().next();
-                    let event_data = full_row.as_ref().unwrap_or(&params);
-                    let payload = self.build_event_payload(event_data);
-                    let routing_doc_uri = self.resolve_doc_uri(&params, &id).await;
-                    let position_after = params
-                        .get(POSITION_AFTER_BLOCK_ID_PARAM)
-                        .and_then(|v| v.as_string())
-                        .map(String::from);
-                    self.publish_event(
-                        EventKind::Updated,
-                        &id,
-                        payload,
-                        position_after,
-                        routing_doc_uri,
-                        origin.clone(),
-                    )
-                    .await;
                 }
                 Ok(OperationResult::irreversible(Vec::new()))
             }
@@ -1541,10 +1149,9 @@ impl OperationProvider for SqlOperationProvider {
         }
     }
 
-    /// Execute multiple operations in a single transaction with batch event publishing.
+    /// Execute multiple operations in a single transaction.
     ///
     /// All SQL statements are wrapped in one transaction (single CDC/IVM pass).
-    /// All events are published in a single batch after the transaction commits.
     async fn execute_batch(
         &self,
         entity_name: &EntityName,
@@ -1558,17 +1165,18 @@ impl OperationProvider for SqlOperationProvider {
         .await
     }
 
-    /// Execute a batch and tag the resulting events with the given origin.
+    /// Execute a batch in a single transaction.
     ///
-    /// The `prepare_*` helpers build events with a default origin; this method
-    /// overrides that origin on all collected events before publishing. Used
-    /// by `LoroSyncController` to tag its outbound batches as
-    /// `EventOrigin::Loro` so the inbound direction can skip echoes.
+    /// The `origin` argument is part of the `OperationProvider` write API
+    /// (callers such as `LoroSyncController` tag their outbound batches
+    /// `EventOrigin::Loro`), but the SQL writer no longer consumes it:
+    /// provenance for echo-suppression rides the `_change_origin` CDC column via
+    /// the trace context, not the (now-removed) EventBus.
     async fn execute_batch_with_origin(
         &self,
         entity_name: &EntityName,
         operations: Vec<(String, StorageEntity)>,
-        origin: EventOrigin,
+        _: EventOrigin,
     ) -> Result<Vec<OperationResult>> {
         assert_eq!(
             entity_name.as_str(),
@@ -1584,49 +1192,18 @@ impl OperationProvider for SqlOperationProvider {
 
         // Phase 1: Prepare all operations (may involve async DB reads for delete cascade)
         let mut all_sql = Vec::new();
-        let mut all_events = Vec::new();
-        // Updates are emitted post-SQL (we read the full row back), so the
-        // original positional-intent param needs to be captured here and
-        // threaded onto the constructed Event at line ~1402. Without this,
-        // OrgSync's update ops would lose `after_block_id` and the Loro
-        // consumer would fall through to the sort_key hint scan — exactly
-        // the gen-strategy-mismatch path we're trying to retire.
-        // Phase 3 also carries `routing_doc_uri_param` so the post-update
-        // event-build below can skip the recursive Page-walk in
-        // `find_document_uri` for callers that already pin the doc URI.
-        let mut update_ids: Vec<(String, Option<String>, Option<String>)> = Vec::new();
 
         for (op_name, params) in &operations {
             let prepared = match op_name.as_str() {
                 "create" => self.prepare_create(params),
-                "update" => {
-                    let id = params
-                        .get("id")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or_default()
-                        .to_string();
-                    let position_after = params
-                        .get(POSITION_AFTER_BLOCK_ID_PARAM)
-                        .and_then(|v| v.as_string())
-                        .map(String::from);
-                    let routing_doc_uri_param = params
-                        .get(crate::sync::event_bus::ROUTING_DOC_URI_KEY)
-                        .and_then(|v| v.as_string())
-                        .filter(|s| !s.is_empty())
-                        .map(String::from);
-                    match self.prepare_update(params).await? {
-                        Some(p) => {
-                            update_ids.push((id, position_after, routing_doc_uri_param));
-                            p
-                        }
-                        None => continue,
-                    }
-                }
+                "update" => match self.prepare_update(params).await? {
+                    Some(p) => p,
+                    None => continue,
+                },
                 "delete" => self.prepare_delete(params).await?,
                 other => return Err(format!("Unknown batch operation: {}", other).into()),
             };
             all_sql.extend(prepared.sql_statements.into_iter().map(|s| (s, vec![])));
-            all_events.extend(prepared.events);
         }
 
         let count = operations.len();
@@ -1643,54 +1220,11 @@ impl OperationProvider for SqlOperationProvider {
             .transaction(all_sql)
             .await
             .map_err(|e| format!("Batch transaction failed: {}", e))?;
-        let _tx_ms = _tx_t0.elapsed().as_millis();
-
-        // Phase 2b: Build events for update ops by reading the post-update rows.
-        // prepare_update doesn't emit events (params may be partial); we read
-        // the full row after SQL execution for a complete event payload.
-        for (id, position_after, routing_doc_uri_param) in &update_ids {
-            let select_sql = format!(
-                "SELECT * FROM {} WHERE id = '{}'",
-                self.table_name,
-                id.replace('\'', "''")
-            );
-            let rows = self
-                .db_handle
-                .query(&select_sql, HashMap::new())
-                .await
-                .map_err(|e| format!("post-update row read for {}: {}", id, e))?;
-            if let Some(row) = rows.into_iter().next() {
-                let payload = self.build_event_payload(&row);
-                let routing_doc_uri = match routing_doc_uri_param {
-                    Some(s) => Some(s.clone()),
-                    None => self.find_document_uri(id).await,
-                };
-                let event = self
-                    .make_event(EventKind::Updated, id, payload)
-                    .with_position_after_block_id(position_after.clone())
-                    .with_routing_doc_uri(routing_doc_uri);
-                all_events.push(event);
-            }
-        }
-
-        // Override the default "sql" origin on all events before publish.
-        for event in &mut all_events {
-            event.origin = origin.clone();
-        }
-
-        // Phase 3: Publish all events in a single batch
-        let _pub_t0 = std::time::Instant::now();
-        if let Some(ref bus) = self.event_bus {
-            bus.publish_batch(all_events)
-                .await
-                .map_err(|e| format!("Batch event publish failed: {}", e))?;
-        }
         tracing::info!(
-            "[SqlOperationProvider] batch timing: {} ops, {} sql stmts → tx {}ms, publish {}ms",
+            "[SqlOperationProvider] batch timing: {} ops, {} sql stmts → tx {}ms",
             count,
             _sql_count,
-            _tx_ms,
-            _pub_t0.elapsed().as_millis(),
+            _tx_t0.elapsed().as_millis(),
         );
 
         Ok(vec![OperationResult::irreversible(Vec::new()); count])

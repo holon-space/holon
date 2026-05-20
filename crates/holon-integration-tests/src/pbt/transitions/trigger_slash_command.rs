@@ -99,6 +99,10 @@ pub struct TriggerSlashCommand {
 
 impl TransitionFactory<ReferenceState> for TriggerSlashCommand {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
+    }
+
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let focused_in_main = state.focused_entity(holon_api::Region::Main).cloned();
         let candidates: Vec<EntityUri> = focused_in_main
@@ -127,16 +131,33 @@ impl TransitionRef<ReferenceState> for TriggerSlashCommand {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
+            // Block-interaction transitions need the block to render as an
+            // interactive widget (ops/draggable) reactively over the navigated
+            // focus. Only the default layout does; custom `index.org` query
+            // layouts don't (see RefLifecycle::renders_block_interactively).
+            check(
+                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
+                    state,
+                    &self.block_id,
+                ),
+                Reason::BlocksNotInteractiveUnderLayout,
+            ),
+            // Slash-command input is character typing through the editor's
+            // `on_text_changed` pipeline, which is Loro/MutableText-backed.
+            // SqlOnly has no MutableText, so gate this out exactly like the
+            // other atomic-editor transitions (TypeChars, DeleteBackward, …).
+            check(state.enable_loro(), Reason::LoroRequiredForAtomicEditor),
         ];
 
         checks.push(check(
-            state.block_state.blocks.contains_key(&self.block_id),
+            state.domain.block_state.blocks.contains_key(&self.block_id),
             Reason::FocusedBlockMissing,
         ));
         checks.push(check(
             state
+                .domain
                 .block_state
                 .blocks
                 .get(&self.block_id)
@@ -144,7 +165,7 @@ impl TransitionRef<ReferenceState> for TriggerSlashCommand {
             Reason::FocusedNotText,
         ));
         checks.push(check(
-            !state.layout_blocks.contains(&self.block_id),
+            !state.domain.layout_blocks.contains(&self.block_id),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
@@ -152,7 +173,7 @@ impl TransitionRef<ReferenceState> for TriggerSlashCommand {
             Reason::BlockIsDefaultLayout,
         ));
         checks.push(check(
-            state.block_state.blocks.len() > 2,
+            state.domain.block_state.blocks.len() > 2,
             Reason::InsufficientBlocksForDelete,
         ));
         checks.push(check(
@@ -192,9 +213,9 @@ impl crate::pbt::transition_budgets::SqlBudget for TriggerSlashCommand {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         expected_sql_for_kind(
             MutationKind::Delete,
-            state.active_watches.len(),
-            state.block_state.blocks.len(),
-            state.documents.len(),
+            state.mcp.active_watches.len(),
+            state.domain.block_state.blocks.len(),
+            state.files.documents.len(),
         )
     }
 }

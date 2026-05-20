@@ -33,11 +33,11 @@ async fn prepare_update_ignores_expected_parent_id_after_authority_flip() {
         .expect("in-memory turso");
     let provider = build_provider(db_handle);
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("X".to_string()));
-    params.insert("parent_id".to_string(), Value::String("P_NEW".to_string()));
+    let mut params: holon_api::StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("X".to_string()));
+    params.insert("parent_id".into(), Value::String("P_NEW".to_string()));
     params.insert(
-        "_expected_parent_id".to_string(),
+        "_expected_parent_id".into(),
         Value::String("P_OLD".to_string()),
     );
 
@@ -65,9 +65,9 @@ async fn prepare_update_without_expected_parent_id_has_no_gate() {
         .expect("in-memory turso");
     let provider = build_provider(db_handle);
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String("X".to_string()));
-    params.insert("parent_id".to_string(), Value::String("P_NEW".to_string()));
+    let mut params: holon_api::StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("X".to_string()));
+    params.insert("parent_id".into(), Value::String("P_NEW".to_string()));
 
     let prepared = provider
         .prepare_update(&params)

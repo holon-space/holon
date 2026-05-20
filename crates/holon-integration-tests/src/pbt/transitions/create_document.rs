@@ -33,7 +33,7 @@ impl TransitionFactory<ReferenceState> for CreateDocument {
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = CreateDocument {
-            file_name: format!("doc_{}.org", state.next_doc_id),
+            file_name: format!("doc_{}.org", state.action.next_doc_id),
         };
         instance.preconditions(state).map(|_| {
             let strat = Just(instance).boxed();
@@ -47,7 +47,7 @@ impl TransitionRef<ReferenceState> for CreateDocument {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.app_started, Reason::AppNotStarted)];
+            vec![check(state.action.app_started, Reason::AppNotStarted)];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
@@ -57,6 +57,7 @@ impl TransitionRef<ReferenceState> for CreateDocument {
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         let doc_uri = state.next_synthetic_doc_uri();
         state
+            .files
             .documents
             .insert(doc_uri.clone(), self.file_name.clone());
 
@@ -70,8 +71,13 @@ impl TransitionRef<ReferenceState> for CreateDocument {
         // New empty documents don't have #+TODO: headers — keywords only
         // appear after the file is written with content. The on_file_changed
         // handler syncs parsed keywords to the document block.
-        state.block_state.blocks.insert(doc_uri.clone(), doc_block);
         state
+            .domain
+            .block_state
+            .blocks
+            .insert(doc_uri.clone(), doc_block);
+        state
+            .domain
             .block_state
             .block_documents
             .insert(doc_uri.clone(), doc_uri);
@@ -88,9 +94,9 @@ impl<S: SutHandle> TransitionImpl<ReferenceState, S> for CreateDocument {
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for CreateDocument {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.active_watches.len();
-        let blocks = state.block_state.blocks.len();
-        let docs = state.documents.len();
+        let watches = state.mcp.active_watches.len();
+        let blocks = state.domain.block_state.blocks.len();
+        let docs = state.files.documents.len();
         ExpectedSql {
             reads: REACTIVE_BASE + CACHE_EVENT_READS + 4 + watches * READS_PER_WATCH,
             writes: 4,

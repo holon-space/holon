@@ -13,7 +13,9 @@ default = ["test-infra", "pbt"]
 test-infra = [
     "dep:holon",
     "dep:holon-frontend",
+    "dep:holon-app",
     "dep:holon-orgmode",
+    "dep:holon-filesystem",
     "dep:holon-api",
     "dep:tokio",
     "dep:tokio-stream",
@@ -33,6 +35,11 @@ otel-testing = [
     "dep:memory-stats",
 ]
 chrome-trace = ["dep:tracing-chrome", "otel-testing"]
+# tokio-console async-wait profiler. Build with
+# `RUSTFLAGS="--cfg tokio_unstable" cargo test … --features tokio-console`.
+# `tokio/tracing` enables task instrumentation; otel-testing brings the
+# tracing-subscriber registry the ConsoleLayer attaches to.
+tokio-console = ["dep:console-subscriber", "otel-testing", "tokio/tracing"]
 pbt = [
     "test-infra",
     "otel-testing",
@@ -52,12 +59,15 @@ pbt = [
     "dep:serde_yaml",
     "dep:validated",
     "dep:nonempty-collections",
+    "dep:holon-block-roundtrip-testing",
 ]
 
 [dependencies]
 holon = { workspace = true, features = ["test-helpers"], optional = true }
 holon-frontend = { workspace = true, optional = true }
+holon-app = { workspace = true, optional = true }
 holon-orgmode = { workspace = true, optional = true }
+holon-filesystem = { workspace = true, optional = true }
 holon-api = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs", "sync"], optional = true }
 tokio-stream = { workspace = true, optional = true }
@@ -78,6 +88,7 @@ xcap = { git = "https://github.com/nightscape/xcap", branch = "feat/macos-offscr
 signal-hook = "0.3"
 holon-layout-testing = { path = "../holon-layout-testing", optional = true }
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
+holon-block-roundtrip-testing = { workspace = true, optional = true }
 holon-mcp = { path = "../../frontends/mcp", optional = true }
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
@@ -97,6 +108,7 @@ opentelemetry_sdk = { workspace = true, features = ["testing"], optional = true 
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 tracing-chrome = { workspace = true, optional = true }
+console-subscriber = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 memory-stats = { workspace = true, optional = true }

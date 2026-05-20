@@ -41,7 +41,7 @@
                                             ▲
                                             │
                                   ┌─────────┴────────────┐
-                                  │  OrgSyncController   │
+                                  │  FileSyncController   │
                                   │  (file watcher,      │
                                   │   feeds Loro)        │
                                   └──────────────────────┘
@@ -83,13 +83,15 @@ pub trait TextCellBacking: CellBacking<String> {
 
 **Cell backings (one per protocol)**:
 
-| Backing | Authority for | Read | Write |
-|---------|---------------|------|-------|
-| `LoroTextCellBacking` | block.content (rich text) | `LoroText::to_string()` | `LoroText::insert/delete/update` + commit |
-| `LoroMetaCellBacking<T>` | block scalar fields (completed, collapsed, …) | `meta.get(field)` on tree node | `meta.insert(field, v)` + commit |
-| `LoroTreeParent/PositionCellBacking` | block.parent_id, block.sort_key | tree-node parent / position | `tree.move_to` / `tree.move_after` |
-| `LwwTextCellBacking` | tests / SqlOnly text fields | entity cache | `CrudOperations::set_field` (debounced) |
-| `LwwScalarBacking<T>` | tests / SqlOnly scalar fields | entity cache | `CrudOperations::set_field` |
+Today only `block.content` is cell-ified in Full (Loro) mode; scalar and tree fields go through `BlockCellRegistry::write_field`'s non-cell dispatch paths.
+
+| Backing | Status | Authority for | Read | Write |
+|---------|--------|---------------|------|-------|
+| `LoroTextCellBacking` | Implemented | block.content (rich text) | `LoroText::to_string()` | `LoroText::insert/delete/update` + commit |
+| `LwwTextCellBacking` | Implemented | tests / SqlOnly text fields | entity cache | `CrudOperations::set_field` (debounced) |
+| `LoroMetaCellBacking<T>` | Planned (Cells plan Phase 2) | block scalar fields (completed, collapsed, …) | `meta.get(field)` on tree node | `meta.insert(field, v)` + commit |
+| `LoroTreeParent/PositionCellBacking` | Planned (Cells plan Phase 2) | block.parent_id, block.sort_key | tree-node parent / position | `tree.move_to` / `tree.move_after` |
+| `LwwScalarBacking<T>` | Planned (Cells plan Phase 2) | tests / SqlOnly scalar fields | entity cache | `CrudOperations::set_field` |
 
 **Cell lifetime**: cells are `Weak`-keyed in the registry. They live while at least one consumer holds an `Arc<Cell<T>>`; when the last `Arc` drops, the registry's `Weak` upgrade fails on next lookup and a fresh cell is constructed. Chord-op `delete` paths invoke `EntityCellRegistry::on_entity_deleted(uri)` proactively so a same-id re-create can't observe a stale cell wrapping an orphaned Loro container.
 
@@ -192,7 +194,7 @@ tx.send(changes)?;
 // 4. UI receives via watch_changes_since()
 ```
 
-> **Note**: The EventBus (see [EventBus and Event Sourcing](#eventbus-and-event-sourcing)) provides a unified pub/sub layer on top of these broadcast channels for cross-system event routing.
+> **Note**: These broadcast channels are consumed directly — each `QueryableCache` ingests its provider's stream via `ingest_stream_with_metadata`. An earlier design layered a unified pub/sub `EventBus` on top; it was removed. See [Sync Wiring (no EventBus)](Sync.md#sync-wiring-no-eventbus).
 
 ### TursoBackend
 

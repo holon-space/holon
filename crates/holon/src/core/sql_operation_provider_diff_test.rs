@@ -63,12 +63,9 @@ async fn prepare_update_returns_none_on_identity_update() {
     let (_backend, _handle, provider, id) =
         make_provider_with_block("hello world", None, 1000).await;
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(id));
-    params.insert(
-        "content".to_string(),
-        Value::String("hello world".to_string()),
-    );
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("content".into(), Value::String("hello world".to_string()));
 
     let result = provider
         .prepare_update(&params)
@@ -89,15 +86,15 @@ async fn prepare_update_returns_none_for_timestamp_only_change() {
     let (_backend, _handle, provider, id) =
         make_provider_with_block("stable content", None, 1000).await;
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(id));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
     params.insert(
-        "content".to_string(),
+        "content".into(),
         Value::String("stable content".to_string()),
     );
     // Caller provides an explicit updated_at that differs from the stored value.
     // This simulates the block_to_params regeneration-to-now pattern.
-    params.insert("updated_at".to_string(), Value::Integer(99999));
+    params.insert("updated_at".into(), Value::Integer(99999));
 
     let result = provider
         .prepare_update(&params)
@@ -116,13 +113,10 @@ async fn prepare_update_returns_some_when_content_changed() {
     let (_backend, _handle, provider, id) =
         make_provider_with_block("old content", None, 1000).await;
 
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(id));
-    params.insert(
-        "content".to_string(),
-        Value::String("new content".to_string()),
-    );
-    params.insert("updated_at".to_string(), Value::Integer(99999));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("content".into(), Value::String("new content".to_string()));
+    params.insert("updated_at".into(), Value::Integer(99999));
 
     let result = provider
         .prepare_update(&params)
@@ -155,12 +149,12 @@ async fn prepare_update_returns_none_for_non_canonical_stored_properties() {
         make_provider_with_block("x", Some(stored_props), 1000).await;
 
     // Submit an update with extra_props a=2, b=1 (same values, different order).
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(id));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
     // Extra props are passed as individual Value entries that partition_params
     // routes to extra_props because they're not known SQL columns.
-    params.insert("a".to_string(), Value::Integer(2));
-    params.insert("b".to_string(), Value::Integer(1));
+    params.insert("a".into(), Value::Integer(2));
+    params.insert("b".into(), Value::Integer(1));
 
     let result = provider
         .prepare_update(&params)
@@ -169,5 +163,58 @@ async fn prepare_update_returns_none_for_non_canonical_stored_properties() {
     assert!(
         result.is_none(),
         "canonical-equivalent properties update must return None; got Some (JSON ordering bug)"
+    );
+}
+
+/// `Value::Null` extra-prop is a property-REMOVAL sentinel: the merged
+/// properties JSON must no longer contain the key. Pins the `#+TODO:`
+/// keyword-set-deleted-from-org-header path (org sync emits
+/// `todo_keywords: Null` via `LiveDocumentManager::update_metadata`).
+#[tokio::test]
+async fn prepare_update_null_prop_removes_key_from_properties() {
+    let stored_props = r#"{"keep":"v","todo_keywords":"[{\"keyword\":\"WIP\"}]"}"#;
+    let (_backend, _db, provider, id) =
+        make_provider_with_block("x", Some(stored_props), 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("todo_keywords".into(), Value::Null);
+
+    let result = provider
+        .prepare_update(&params)
+        .await
+        .expect("prepare_update")
+        .expect("Some(PreparedOp) — property removal is a real change");
+
+    let sql = result.sql_statements.join(";");
+    assert!(
+        !sql.contains("todo_keywords"),
+        "removed key must not appear in merged properties JSON; SQL: {sql}"
+    );
+    assert!(
+        sql.contains("keep"),
+        "untouched keys must survive the merge; SQL: {sql}"
+    );
+}
+
+/// Removing a key that doesn't exist is a no-op — the diff guard must
+/// suppress the UPDATE entirely (no spurious CDC).
+#[tokio::test]
+async fn prepare_update_null_prop_for_absent_key_is_noop() {
+    let stored_props = r#"{"keep":"v"}"#;
+    let (_backend, _db, provider, id) =
+        make_provider_with_block("x", Some(stored_props), 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("todo_keywords".into(), Value::Null);
+
+    let result = provider
+        .prepare_update(&params)
+        .await
+        .expect("prepare_update");
+    assert!(
+        result.is_none(),
+        "removing an absent key must be a no-op; got Some"
     );
 }

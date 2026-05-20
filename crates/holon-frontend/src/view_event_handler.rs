@@ -38,6 +38,14 @@ pub struct ViewEventHandler {
     /// (runtime handle + popup_query). Replaces the old `FrontendSession`
     /// plumb line that had to be threaded through the entire render path.
     services: Option<Arc<dyn BuilderServices>>,
+    /// Whether a per-keystroke Loro content writer (a `Cell<String>` backed
+    /// by `MutableText`) is active for this editor. When `true`, the on-blur
+    /// `set_field("content", …)` is dropped as a redundant second writer that
+    /// would race the Loro projection. When `false` (SqlOnly mode, no Loro
+    /// backing, headless/test paths), the on-blur `set_field` is the ONLY
+    /// content writer and MUST fire — otherwise content edits are silently
+    /// lost. Set via [`Self::set_loro_content_writer`] when the cell attaches.
+    loro_content_writer: bool,
 }
 
 impl ViewEventHandler {
@@ -60,6 +68,7 @@ impl ViewEventHandler {
             set_field_op,
             context_params,
             services: None,
+            loro_content_writer: false,
         }
     }
 
@@ -67,6 +76,15 @@ impl ViewEventHandler {
     /// Must be called before link triggers will work.
     pub fn set_async_context(&mut self, services: Arc<dyn BuilderServices>) {
         self.services = Some(services);
+    }
+
+    /// Declare whether a per-keystroke Loro content writer is active for this
+    /// editor (see [`Self::loro_content_writer`]). The GPUI/TUI frontends call
+    /// this with `true` once `BuilderServices::editable_text` resolves a
+    /// `Cell<String>`; when no cell resolves (SqlOnly mode), it stays `false`
+    /// so the on-blur `set_field("content")` remains the content writer.
+    pub fn set_loro_content_writer(&mut self, active: bool) {
+        self.loro_content_writer = active;
     }
 
     /// The block (or row) id the controller is editing, read from
@@ -88,14 +106,22 @@ impl ViewEventHandler {
             } => match action.as_str() {
                 "command_menu" => {
                     if !self.popup.is_active() {
-                        let provider = Arc::new(CommandProvider::new(
-                            self.operations.clone(),
-                            self.context_params.clone(),
-                        ));
+                        let provider = Arc::new(
+                            CommandProvider::new(
+                                self.operations.clone(),
+                                self.context_params.clone(),
+                            )
+                            .with_prefix_start(prefix_start),
+                        );
                         let signal = self.popup.activate(provider, &filter_text);
                         HandleResult::Activated { signal }
                     } else {
-                        self.popup.on_text_changed(&current_line[1..]); // text after "/"
+                        // `filter_text` is the text between the matched "/"
+                        // and the cursor — the same value `activate` receives.
+                        // The old `current_line[1..]` assumed the slash sat at
+                        // line start (it fires mid-line) and byte-sliced into
+                        // multibyte leading chars.
+                        self.popup.on_text_changed(&filter_text);
                         HandleResult::PopupResult(PopupResult::Updated)
                     }
                 }
@@ -138,12 +164,17 @@ impl ViewEventHandler {
     /// CDC delivers the real entity and a new virtual row appears at the end.
     ///
     /// **Phase 2 (Loro single-writer):** for `content` on real (non-virtual)
-    /// entities, the per-keystroke pipeline already writes through
-    /// `MutableText` → Loro → `LoroSyncController.on_loro_changed` → SQL,
-    /// so the on-blur `set_field("content", …)` is a redundant second writer
-    /// that races with the Loro projection. Drop it. Virtual-entity creates
-    /// (which materialize a new entity, not edit content) are unaffected,
-    /// and non-content fields still go through `set_field`.
+    /// entities, when a Loro content writer is active the per-keystroke
+    /// pipeline already writes through `MutableText` → Loro →
+    /// `LoroSyncController.on_loro_changed` → SQL, so the on-blur
+    /// `set_field("content", …)` is a redundant second writer that races with
+    /// the Loro projection — drop it (gated on [`Self::loro_content_writer`]).
+    /// But when Loro is NOT the writer (SqlOnly mode: no `Cell` attaches, so
+    /// the per-keystroke `vm.has_cell()` branch in `editor_view.rs` is skipped)
+    /// the on-blur `set_field` is the ONLY content writer and MUST fire, else
+    /// the edit is silently discarded. Virtual-entity creates (which
+    /// materialize a new entity, not edit content) are unaffected, and
+    /// non-content fields always go through `set_field`.
     fn handle_text_sync(&mut self, new_value: String) -> PopupResult {
         if new_value == self.original_value {
             return PopupResult::NotActive;
@@ -168,10 +199,11 @@ impl ViewEventHandler {
                 entity_name: EntityName::Named(entity_type),
                 op_name: "create".to_string(),
                 params,
+                strip_prefix_start: None,
             };
         }
 
-        if self.field == "content" {
+        if self.field == "content" && self.loro_content_writer {
             return PopupResult::NotActive;
         }
 
@@ -189,6 +221,7 @@ impl ViewEventHandler {
             entity_name: entity_name.clone(),
             op_name: op_name.clone(),
             params,
+            strip_prefix_start: None,
         }
     }
 

@@ -12,7 +12,6 @@ use futures_signals::signal_vec::SignalVec;
 
 use crate::popup_menu::{PopupItem, PopupProvider, PopupResult};
 use crate::reactive::BuilderServices;
-use holon::storage::BLOCK_READ_TABLE;
 
 const CREATE_NEW_ID: &str = "__create_new__";
 
@@ -62,45 +61,35 @@ impl PopupProvider for LinkProvider {
                     let services = services.clone();
                     let f = f.clone();
                     async move {
-                        let escaped = f.replace('\'', "''");
-                        // Subquery wrapping required — Turso rejects bare UNION.
-                        // Page rows: block has a 'Page' tag in block_tags junction table;
-                        // surface the first content line as the label.
-                        let sql = format!(
-                            "SELECT * FROM (SELECT id, content AS label FROM {BLOCK_READ_TABLE} WHERE content LIKE '%{escaped}%' LIMIT 15) \
-                             UNION ALL \
-                             SELECT * FROM (SELECT b.id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) AS label \
-                                            FROM {BLOCK_READ_TABLE} b \
-                                            JOIN block_tags bt ON bt.block_id = b.id \
-                                            WHERE bt.tag = 'Page' \
-                                              AND b.content LIKE '%{escaped}%' LIMIT 5)"
-                        );
-                        services
-                            .popup_query(sql)
-                            .await
-                            .unwrap_or_default()
+                        services.search_link_candidates(&f).await.map_err(|e| {
+                            tracing::warn!(
+                                "[LinkProvider] search_link_candidates failed (filter={f:?}): {e}"
+                            );
+                            e.to_string()
+                        })
                     }
                 });
 
-                let rows = join.await.unwrap_or_default();
-                let mut items: Vec<PopupItem> = rows
-                    .iter()
-                    .map(|row| {
-                        let id = row
-                            .get("id")
-                            .and_then(|v| v.as_string())
-                            .unwrap_or("")
-                            .to_string();
-                        let label = row
-                            .get("label")
-                            .and_then(|v| v.as_string())
-                            .unwrap_or("(untitled)")
-                            .to_string();
-                        PopupItem {
-                            id,
-                            label,
+                let candidates = match join.await {
+                    Ok(Ok(candidates)) => candidates,
+                    Ok(Err(e)) => {
+                        return vec![PopupItem {
+                            id: "__search_error__".to_string(),
+                            label: format!("Search failed: {e}"),
                             icon: None,
-                        }
+                        }];
+                    }
+                    Err(e) => {
+                        tracing::warn!("[LinkProvider] query task panicked: {e}");
+                        return vec![];
+                    }
+                };
+                let mut items: Vec<PopupItem> = candidates
+                    .iter()
+                    .map(|c| PopupItem {
+                        id: c.id.to_string(),
+                        label: c.label.clone(),
+                        icon: None,
                     })
                     .collect();
 

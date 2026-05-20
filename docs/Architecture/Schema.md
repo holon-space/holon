@@ -260,6 +260,14 @@ impl BlockSchemaModule {
 
 `BlockCellRegistry` reads this declaration to map `(field_name, T)` → backing constructor at runtime. The DI module picks the variant per build mode: `LoroTextCellBacking` / `LoroMetaCellBacking<T>` / `LoroTreeParentCellBacking` / `LoroTreePositionCellBacking` in Full mode; `LwwTextCellBacking` / `LwwScalarBacking<T>` in SqlOnly. Type mismatches (`live_field::<i64>` for a `bool` field) error loudly.
 
+**Implementation status (2026-06-11):** `LoroTextCellBacking` is the only
+backing type implemented. The other five (`LoroMetaCellBacking<T>`,
+`LoroTreeParentCellBacking`, `LoroTreePositionCellBacking`,
+`LwwScalarBacking<T>`, `LwwTextCellBacking`) are planned but deferred past
+Phase 1. The `write_field` carve-outs in `block_cell_registry.rs` handle
+routing correctly without them. See
+`codev/specs/0007-architecture-improvement-plan.md` Phase 1 item 4.
+
 See [Storage](Storage.md) for cell internals and [Sync](Sync.md) for the authority + projection model.
 
 ### Key Files
@@ -405,7 +413,7 @@ fields:
   energy:           { type: real, lifetime: transient }
 ```
 
-**Sync**: A `TypeSyncController` mirrors the existing `OrgSyncController` pattern — bidirectional sync between Loro and YAML files with echo-suppression via `last_projection` comparison.
+**Sync**: A `TypeSyncController` mirrors the existing `FileSyncController` pattern — bidirectional sync between Loro and YAML files with echo-suppression via `last_projection` comparison.
 
 **Loro representation**: Type definitions live under a `types/` key in the LoroDoc as nested LoroMaps. Field names are map keys; field metadata (type, lifetime, expr, indexed, etc.) are nested maps.
 

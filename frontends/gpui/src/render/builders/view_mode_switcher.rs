@@ -27,6 +27,7 @@ fn parse_modes(json: &str) -> Vec<ModeDesc> {
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let entity_uri_str = node.prop_str("entity_uri").unwrap_or_else(|| "unknown".to_string());
+    // ALLOW(entity_uri_from_raw): render-spec node.prop_str('entity_uri')
     let entity_uri = holon_api::EntityUri::from_raw(&entity_uri_str);
     let modes = node.prop_str("modes").unwrap_or_else(|| "[]".to_string());
     let slot = node.slot.as_ref().expect("view_mode_switcher requires a slot");

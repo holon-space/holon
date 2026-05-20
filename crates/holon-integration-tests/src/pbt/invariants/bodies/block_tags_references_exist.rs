@@ -1,4 +1,4 @@
-//! Phase 7 — `inv-block-tags-references-exist` (STORAGE, NEW INVARIANT).
+//! `inv-block-tags-references-exist`.
 //!
 //! Referential integrity check: every `block_id` in the `block_tags`
 //! junction table must have a corresponding row in `block_raw`. Orphan
@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 use holon_pbt_core::capabilities::{EntityUri, SutSqlProjection};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvBlockTagsReferencesExist<R>(pub PhantomData<R>);
 
@@ -33,10 +33,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

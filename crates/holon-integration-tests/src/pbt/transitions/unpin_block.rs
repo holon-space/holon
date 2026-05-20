@@ -6,9 +6,15 @@
 //! - Cursor is untouched (close removes from the open-pins set, not from
 //!   the back/forward stack).
 //!
-//! Generator picks any open pin from `state.open_pins`; precondition
-//! requires at least one open pin row with a non-NULL `block_id` (home
-//! rows are skipped — the X button only renders on pinned blocks).
+//! Generator picks an open pin that has a non-NULL `block_id` and is NOT its
+//! region's current cursor focus. The X button renders on *pins* — open
+//! `navigation_history` rows that are not the region's active back/forward
+//! focus. The active focus (the cursor target) is closed by navigating away
+//! (focus_replace), never by an X button, so closing it via `navigation.close`
+//! is a no-op the reference model must not predict. This predicate is
+//! layout-independent: it holds whichever region a user's layout pins into
+//! (pin regions have no cursor focus → all their pins are closeable; the main
+//! panel's single focus row matches `current_focus(region)` → excluded).
 
 use crate::pbt::validation::{Reason, check};
 use proptest::prelude::*;
@@ -30,14 +36,24 @@ pub struct UnpinBlock {
 
 impl TransitionFactory<ReferenceState> for UnpinBlock {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: pin/unpin dispatch `navigation` ops backed by the
+        // Turso-only `NavigationProvider` (registration.rs:267); there is no
+        // Loro-native navigation source (see loro_block_query_source.rs:77).
+        // Gate it out of {Loro} slices.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Enumerate parameter space (all open pins) and let `preconditions`
-        // be the single source of truth for which ones are actually unpinnable.
-        // Avoids duplicating the non-NULL block_id check across two sites.
+        // Enumerate every region's open pins, excluding each region's current
+        // cursor focus (handled by `preconditions`, the single source of truth
+        // for unpinnability). A region's active focus row is the cursor target
+        // — closed via focus_replace, not the X button.
         let candidates: Vec<i64> = state
+            .ui
+            .user
             .open_pins
             .values()
-            .flat_map(|pins| pins.iter())
+            .flatten()
             .filter(|p| {
                 UnpinBlock {
                     history_id: p.history_id,
@@ -62,11 +78,15 @@ impl TransitionRef<ReferenceState> for UnpinBlock {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
-                state.open_pins.values().any(|pins| {
-                    pins.iter()
-                        .any(|p| p.history_id == self.history_id && p.block_id.is_some())
+                state.ui.user.open_pins.iter().any(|(region, pins)| {
+                    let focus = state.current_focus(*region);
+                    pins.iter().any(|p| {
+                        p.history_id == self.history_id
+                            && p.block_id.is_some()
+                            && p.block_id != focus
+                    })
                 }),
                 Reason::NoPinsToRemove,
             ),
@@ -78,7 +98,7 @@ impl TransitionRef<ReferenceState> for UnpinBlock {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        for pins in state.open_pins.values_mut() {
+        for pins in state.ui.user.open_pins.values_mut() {
             pins.retain(|p| p.history_id != self.history_id);
         }
     }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use holon_api::render_types::OperationWiring;
 use holon_api::widget_spec::DataRow;
+use holon_api::EntityUri;
 use holon_api::{EntityName, Value};
 use serde::{Deserialize, Serialize};
 
@@ -182,6 +183,16 @@ pub enum ViewKind {
         gap: f32,
         children: LazyChildren,
     },
+    /// Kanban board: rows grouped into lanes by `lane_field`.
+    ///
+    /// Snapshot fidelity limit (deliberate): `children` are the board's rows
+    /// FLAT — lanes are not modeled as nested structure; `lane_field` is
+    /// carried so snapshot consumers can group. Live GPUI lane rendering
+    /// reads the `ReactiveViewModel` collection directly and never sees this.
+    Board {
+        lane_field: String,
+        children: LazyChildren,
+    },
     /// Generic column layout (e.g. from Array/Object RenderExpr)
     Column {
         #[serde(default)]
@@ -327,9 +338,13 @@ pub enum ViewKind {
     },
     LiveQuery {
         content: Box<ViewModel>,
-        /// Compiled SQL for reactive subscription (compiled from PRQL/GQL/SQL input).
+        /// Source query text (PRQL/GQL/SQL) for reactive subscription —
+        /// compiled behind the query capability when the platform subscribes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        compiled_sql: Option<String>,
+        query: Option<String>,
+        /// Language of `query` (`holon_prql`/`holon_gql`/`holon_sql`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query_lang: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         query_context_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -374,6 +389,7 @@ impl ViewKind {
             ViewKind::Outline { .. } => "outline",
             ViewKind::Table { .. } => "table",
             ViewKind::Columns { .. } => "columns",
+            ViewKind::Board { .. } => "board",
             ViewKind::Column { .. } => "column",
             ViewKind::SourceBlock { .. } => "source_block",
             ViewKind::SourceEditor { .. } => "source_editor",
@@ -846,6 +862,7 @@ impl ViewModel {
             | ViewKind::Tree { children }
             | ViewKind::Table { children }
             | ViewKind::Outline { children }
+            | ViewKind::Board { children, .. }
             | ViewKind::QueryResult { children } => {
                 let name = self.widget_name().unwrap_or("collection");
                 let _ = writeln!(
@@ -1091,6 +1108,7 @@ impl ViewModel {
             | ViewKind::Outline { children }
             | ViewKind::Table { children }
             | ViewKind::Columns { children, .. }
+            | ViewKind::Board { children, .. }
             | ViewKind::Column { children, .. }
             | ViewKind::QueryResult { children }
             | ViewKind::PrefField { children, .. }
@@ -1170,6 +1188,7 @@ impl ViewModel {
             ViewKind::Outline { .. } => "outline",
             ViewKind::Table { .. } => "table",
             ViewKind::Columns { .. } => "columns",
+            ViewKind::Board { .. } => "board",
             ViewKind::Column { .. } => "column",
             ViewKind::SourceBlock { .. } => "source_block",
             ViewKind::SourceEditor { .. } => "source_editor",
@@ -1201,11 +1220,21 @@ impl ViewModel {
     }
 
     /// Extract entity ID from element data or LiveBlock block_id.
-    pub fn entity_id(&self) -> Option<&str> {
+    pub fn entity_id(&self) -> Option<EntityUri> {
         match &self.kind {
-            ViewKind::TableRow { data } => data.get("id").and_then(|v| v.as_string()),
-            ViewKind::LiveBlock { block_id, .. } => Some(block_id.as_str()),
-            _ => self.entity.get("id").and_then(|v| v.as_string()),
+            ViewKind::TableRow { data } => data
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(holon_api::entity_uri_from_id_str),
+            ViewKind::LiveBlock { block_id, .. } => Some(
+                EntityUri::parse(block_id)
+                    .expect("live_block block_id must be a schemed EntityUri"),
+            ),
+            _ => self
+                .entity
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(holon_api::entity_uri_from_id_str),
         }
     }
 
@@ -1354,10 +1383,10 @@ mod tests {
             Arc::new(HashMap::from([("id".into(), Value::String("abc".into()))])),
             vec![],
         );
-        assert_eq!(elem.entity_id(), Some("abc"));
+        assert_eq!(elem.entity_id(), Some(EntityUri::block("abc")));
 
-        let bref = ViewModel::live_block("xyz", ViewModel::empty());
-        assert_eq!(bref.entity_id(), Some("xyz"));
+        let bref = ViewModel::live_block("block:xyz", ViewModel::empty());
+        assert_eq!(bref.entity_id(), Some(EntityUri::block("xyz")));
 
         assert_eq!(ViewModel::empty().entity_id(), None);
     }

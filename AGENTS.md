@@ -10,7 +10,8 @@ Holon is a Personal Knowledge & Task Management system built in Rust. It maintai
 holon/
 ├── crates/                  # Core library crates
 │   ├── holon/               # Top-level integration crate
-│   ├── holon-api/           # Public API types and traits
+│   ├── holon-api/           # Public API types + session capability traits
+│   ├── holon-app/           # Wiring crate (DI assembly of concrete backends)
 │   ├── holon-core/          # Domain model and core logic
 │   ├── holon-engine/        # Petri-net based execution engine
 │   ├── holon-frontend/      # Shared frontend abstractions
@@ -107,7 +108,7 @@ test:     adding or updating tests
 **Pull requests:**
 - Keep PRs focused — one logical change per PR.
 - Run `just lint` locally before pushing; CI will reject PRs that fail any check.
-- Reference related issues or design documents (e.g. `ARCHITECTURE.md`, `VISION.md`) in the PR description where applicable.
+- Reference related issues or design documents (e.g. `docs/Architecture.md`, `docs/Vision.md`) in the PR description where applicable.
 - New public API surface should include doc comments (`///`).
 
 ## Security & Dependency Management
@@ -118,7 +119,7 @@ test:     adding or updating tests
 
 ## Agent-Specific Instructions
 
-- Read `ARCHITECTURE.md` and `ARCHITECTURE_PRINCIPLES.md` before making structural changes.
+- Read `docs/Architecture.md` and `docs/Architecture/Principles.md` before making structural changes.
 - The `experiments/` directory is intentionally unstable — do not depend on it from production crates.
 - `workspace-hack` is managed by `cargo hakari`; do not edit it manually.
 - When adding a new crate, register it in the root `Cargo.toml` `[workspace]` members list and add an entry under `[workspace.dependencies]` for any new external dependency it introduces.

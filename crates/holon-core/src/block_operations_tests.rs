@@ -10,24 +10,31 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    /// Canonical block-id form used for matching inside the synthetic store.
+    /// Production ids are scheme-qualified (`block:UUID`); `BlockOperations`
+    /// now hands the store `EntityUri` values whose `as_str()` carries that
+    /// scheme. Test fixtures still spell ids bare (`"A"`), so we compare on
+    /// the canonical `block:`-prefixed form to accept either spelling.
+    fn canon(id: &str) -> String {
+        // ALLOW(entity_uri_from_raw): canon() parses bare test-fixture id literal into canonical block form
+        EntityUri::from_raw(id).as_str().to_string()
+    }
+
     #[derive(Debug, Clone)]
     struct TestBlock {
-        id: String,
-        parent_id: Option<String>,
+        id: EntityUri,
+        parent_id: Option<EntityUri>,
         sort_key: String,
         depth: i64,
         content: String,
     }
 
     impl BlockEntity for TestBlock {
-        fn id(&self) -> &str {
+        fn id(&self) -> &EntityUri {
             &self.id
         }
-        fn parent_id(&self) -> Option<&str> {
-            self.parent_id.as_deref()
-        }
-        fn sort_key(&self) -> &str {
-            &self.sort_key
+        fn parent_id(&self) -> Option<&EntityUri> {
+            self.parent_id.as_ref()
         }
         fn depth(&self) -> i64 {
             self.depth
@@ -57,19 +64,23 @@ mod tests {
         }
 
         fn get(&self, id: &str) -> Option<TestBlock> {
+            let want = canon(id);
             self.blocks
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|b| b.id == id)
+                .find(|b| b.id.as_str() == want)
                 .cloned()
         }
 
         fn sorted_children(&self, parent_id: &str) -> Vec<TestBlock> {
+            let want = canon(parent_id);
             let blocks = self.blocks.lock().unwrap();
             let mut children: Vec<TestBlock> = blocks
                 .iter()
-                .filter(|b| b.parent_id.as_deref() == Some(parent_id))
+                .filter(|b| {
+                    b.parent_id.as_ref().map(|p| p.as_str().to_string()) == Some(want.clone())
+                })
                 .cloned()
                 .collect();
             children.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
@@ -85,25 +96,33 @@ mod tests {
         async fn get_by_id(&self, id: &str) -> Result<Option<TestBlock>> {
             Ok(self.get(id))
         }
+        async fn get_children(&self, parent_id: &EntityUri) -> Result<Vec<TestBlock>> {
+            // Override the default (exact-string-match) filter so the
+            // synthetic store's bare fixture ids match a scheme-qualified
+            // `parent_id` via `canon`, mirroring `sorted_children`.
+            Ok(self.sorted_children(parent_id.as_str()))
+        }
     }
 
     #[async_trait]
     impl CrudOperations<TestBlock> for MemStore {
         async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult> {
+            let want = canon(id);
             let mut blocks = self.blocks.lock().unwrap();
-            let block = blocks.iter_mut().find(|b| b.id == id).unwrap();
+            let block = blocks.iter_mut().find(|b| b.id.as_str() == want).unwrap();
             let old_value = match field {
                 "parent_id" => block
                     .parent_id
                     .as_ref()
-                    .map_or(Value::Null, |v| Value::String(v.clone())),
+                    .map_or(Value::Null, |v| Value::String(v.as_str().to_string())),
                 "sort_key" => Value::String(block.sort_key.clone()),
                 "depth" => Value::Integer(block.depth),
                 "content" => Value::String(block.content.clone()),
                 _ => Value::Null,
             };
             match field {
-                "parent_id" => block.parent_id = value.as_string().map(|s| s.to_string()),
+                // ALLOW(entity_uri_from_raw): test set_field boundary — parent_id value arrives as a raw string.
+                "parent_id" => block.parent_id = value.as_string().map(EntityUri::from_raw),
                 "sort_key" => block.sort_key = value.as_string().unwrap().to_string(),
                 "depth" => block.depth = value.as_i64().unwrap(),
                 "content" => block.content = value.as_string().unwrap().to_string(),
@@ -117,7 +136,7 @@ mod tests {
 
         async fn create(
             &self,
-            fields: HashMap<String, Value>,
+            fields: crate::storage::types::StorageEntity,
         ) -> Result<(String, OperationResult)> {
             let id = fields
                 .get("id")
@@ -125,11 +144,13 @@ mod tests {
                 .unwrap()
                 .to_string();
             let block = TestBlock {
-                id: id.clone(),
+                // ALLOW(entity_uri_from_raw): test create() boundary — id/parent_id arrive as raw fixture strings.
+                id: EntityUri::from_raw(&id),
                 parent_id: fields
                     .get("parent_id")
                     .and_then(|v| v.as_string())
-                    .map(|s| s.to_string()),
+                    // ALLOW(entity_uri_from_raw): test create() boundary — see `id` above.
+                    .map(EntityUri::from_raw),
                 sort_key: fields
                     .get("sort_key")
                     .and_then(|v| v.as_string())
@@ -147,43 +168,54 @@ mod tests {
         }
 
         async fn delete(&self, id: &str) -> Result<OperationResult> {
-            self.blocks.lock().unwrap().retain(|b| b.id != id);
+            let want = canon(id);
+            self.blocks
+                .lock()
+                .unwrap()
+                .retain(|b| b.id.as_str() != want);
             Ok(OperationResult::irreversible(vec![]))
         }
     }
 
     #[async_trait]
     impl BlockQueryHelpers<TestBlock> for MemStore {
-        async fn get_prev_sibling(&self, block_id: &str) -> Result<Option<TestBlock>> {
+        async fn children_ordered(&self, parent_id: &EntityUri) -> Result<Vec<TestBlock>> {
+            Ok(self.sorted_children(parent_id.as_str()))
+        }
+
+        async fn get_prev_sibling(&self, block_id: &EntityUri) -> Result<Option<TestBlock>> {
             match <Self as BlockOrdering>::prev_sibling(self, block_id).await? {
-                Some(id) => self.get_by_id(&id).await,
+                Some(id) => self.get_by_id(id.as_str()).await,
                 None => Ok(None),
             }
         }
 
-        async fn get_next_sibling(&self, block_id: &str) -> Result<Option<TestBlock>> {
+        async fn get_next_sibling(&self, block_id: &EntityUri) -> Result<Option<TestBlock>> {
             match <Self as BlockOrdering>::next_sibling(self, block_id).await? {
-                Some(id) => self.get_by_id(&id).await,
+                Some(id) => self.get_by_id(id.as_str()).await,
                 None => Ok(None),
             }
         }
 
-        async fn get_first_child(&self, parent_id: Option<&str>) -> Result<Option<TestBlock>> {
+        async fn get_first_child(
+            &self,
+            parent_id: Option<&EntityUri>,
+        ) -> Result<Option<TestBlock>> {
             let Some(pid) = parent_id else {
                 return Ok(None);
             };
             match <Self as BlockOrdering>::first_child(self, pid).await? {
-                Some(id) => self.get_by_id(&id).await,
+                Some(id) => self.get_by_id(id.as_str()).await,
                 None => Ok(None),
             }
         }
 
-        async fn get_last_child(&self, parent_id: Option<&str>) -> Result<Option<TestBlock>> {
+        async fn get_last_child(&self, parent_id: Option<&EntityUri>) -> Result<Option<TestBlock>> {
             let Some(pid) = parent_id else {
                 return Ok(None);
             };
             match <Self as BlockOrdering>::last_child(self, pid).await? {
-                Some(id) => self.get_by_id(&id).await,
+                Some(id) => self.get_by_id(id.as_str()).await,
                 None => Ok(None),
             }
         }
@@ -201,38 +233,38 @@ mod tests {
         async fn place(
             &self,
             uri: &EntityUri,
-            parent_id: &str,
-            after_id: Option<&str>,
+            parent_id: &EntityUri,
+            after_id: Option<&EntityUri>,
         ) -> Result<()> {
             let new_sort_key = self.new_child_anchor(parent_id, after_id).await?;
-            let id = uri.id();
+            let want = canon(uri.as_str());
             let mut blocks = self.blocks.lock().unwrap();
             let block = blocks
                 .iter_mut()
-                .find(|b| b.id == id)
-                .ok_or_else(|| anyhow::anyhow!("MemStore::place: block {id} not found"))?;
-            block.parent_id = Some(parent_id.to_string());
+                .find(|b| b.id.as_str() == want)
+                .ok_or_else(|| anyhow::anyhow!("MemStore::place: block {want} not found"))?;
+            block.parent_id = Some(parent_id.clone());
             block.sort_key = new_sort_key;
             Ok(())
         }
 
         async fn new_child_anchor(
             &self,
-            parent_id: &str,
-            after_id: Option<&str>,
+            parent_id: &EntityUri,
+            after_id: Option<&EntityUri>,
         ) -> Result<String> {
             let (prev_key, next_key) = match after_id {
                 None => {
-                    let first = self.sorted_children(parent_id).into_iter().next();
+                    let first = self.sorted_children(parent_id.as_str()).into_iter().next();
                     (None, first.map(|b| b.sort_key))
                 }
                 Some(after) => {
                     let after_block = self
-                        .get(after)
+                        .get(after.as_str())
                         .ok_or_else(|| anyhow::anyhow!("MemStore: after block {after} missing"))?;
-                    let after_parent = after_block.parent_id.clone().unwrap_or_default();
+                    let after_parent = after_block.parent_id.clone();
                     let next_sib = self
-                        .sorted_children(&after_parent)
+                        .sorted_children(after_parent.as_ref().map(|u| u.as_str()).unwrap_or(""))
                         .into_iter()
                         .find(|b| b.sort_key > after_block.sort_key);
                     (Some(after_block.sort_key), next_sib.map(|b| b.sort_key))
@@ -242,75 +274,77 @@ mod tests {
                 .map_err(|e| format!("{e:#}").into())
         }
 
-        async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
+        async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
             let block = self
-                .get(id)
+                .get(id.as_str())
                 .ok_or_else(|| anyhow::anyhow!("prev_sibling: block {id} missing"))?;
-            let Some(parent_id) = block.parent_id.as_deref() else {
+            let Some(parent_id) = block.parent_id.as_ref() else {
                 return Ok(None);
             };
             Ok(self
-                .sorted_children(parent_id)
+                .sorted_children(parent_id.as_str())
                 .into_iter()
                 .rfind(|b| b.sort_key < block.sort_key)
-                .map(|b| b.id))
+                .map(|b| b.id.clone()))
         }
 
-        async fn next_sibling(&self, id: &str) -> Result<Option<String>> {
+        async fn next_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
             let block = self
-                .get(id)
+                .get(id.as_str())
                 .ok_or_else(|| anyhow::anyhow!("next_sibling: block {id} missing"))?;
-            let Some(parent_id) = block.parent_id.as_deref() else {
+            let Some(parent_id) = block.parent_id.as_ref() else {
                 return Ok(None);
             };
             Ok(self
-                .sorted_children(parent_id)
+                .sorted_children(parent_id.as_str())
                 .into_iter()
                 .find(|b| b.sort_key > block.sort_key)
-                .map(|b| b.id))
+                .map(|b| b.id.clone()))
         }
 
-        async fn first_child(&self, parent_id: &str) -> Result<Option<String>> {
+        async fn first_child(&self, parent_id: &EntityUri) -> Result<Option<EntityUri>> {
             Ok(self
-                .sorted_children(parent_id)
+                .sorted_children(parent_id.as_str())
                 .into_iter()
                 .next()
-                .map(|b| b.id))
+                .map(|b| b.id.clone()))
         }
 
-        async fn last_child(&self, parent_id: &str) -> Result<Option<String>> {
+        async fn last_child(&self, parent_id: &EntityUri) -> Result<Option<EntityUri>> {
             Ok(self
-                .sorted_children(parent_id)
+                .sorted_children(parent_id.as_str())
                 .into_iter()
                 .last()
-                .map(|b| b.id))
+                .map(|b| b.id.clone()))
         }
 
-        async fn children(&self, parent_id: &str) -> Result<Vec<String>> {
+        async fn children(&self, parent_id: &EntityUri) -> Result<Vec<EntityUri>> {
             Ok(self
-                .sorted_children(parent_id)
+                .sorted_children(parent_id.as_str())
                 .into_iter()
-                .map(|b| b.id)
+                .map(|b| b.id.clone())
                 .collect())
         }
 
-        async fn update_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+        async fn update_in_tree(&self, params: holon_api::StorageEntity) -> Result<()> {
             let id = params
                 .get("id")
                 .and_then(|v| v.as_string())
                 .ok_or_else(|| anyhow::anyhow!("MemStore::update_in_tree: missing id"))?
                 .to_string();
             let mut blocks = self.blocks.lock().unwrap();
-            let block = match blocks.iter_mut().find(|b| b.id == id) {
+            let block = match blocks.iter_mut().find(|b| b.id.as_str() == id) {
                 Some(b) => b,
                 None => {
                     drop(blocks);
                     self.insert(TestBlock {
-                        id: id.clone(),
+                        // ALLOW(entity_uri_from_raw): test update_in_tree boundary — id/parent_id arrive as raw strings.
+                        id: EntityUri::from_raw(&id),
                         parent_id: params
                             .get("parent_id")
                             .and_then(|v| v.as_string())
-                            .map(|s| s.to_string()),
+                            // ALLOW(entity_uri_from_raw): test update_in_tree boundary — see `id` above.
+                            .map(EntityUri::from_raw),
                         sort_key: gen_key_between(None, None).map_err(|e| format!("{e:#}"))?,
                         depth: 0,
                         content: params
@@ -326,18 +360,19 @@ mod tests {
                 block.content = c.to_string();
             }
             if let Some(p) = params.get("parent_id").and_then(|v| v.as_string()) {
-                block.parent_id = Some(p.to_string());
+                // ALLOW(entity_uri_from_raw): test update_in_tree boundary — parent_id arrives as a raw string.
+                block.parent_id = Some(EntityUri::from_raw(p));
             }
             Ok(())
         }
 
-        async fn delete_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+        async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> Result<()> {
             let id = params
                 .get("id")
                 .and_then(|v| v.as_string())
                 .ok_or_else(|| anyhow::anyhow!("MemStore::delete_in_tree: missing id"))?
                 .to_string();
-            self.blocks.lock().unwrap().retain(|b| b.id != id);
+            self.blocks.lock().unwrap().retain(|b| b.id.as_str() != id);
             Ok(())
         }
     }
@@ -346,8 +381,8 @@ mod tests {
         let sort_key = gen_key_between(prev_key, None).unwrap();
         let depth: i64 = if parent_id.is_some() { 1 } else { 0 };
         store.insert(TestBlock {
-            id: id.to_string(),
-            parent_id: parent_id.map(|s| s.to_string()),
+            id: EntityUri::block(id),
+            parent_id: parent_id.map(EntityUri::block),
             sort_key,
             depth,
             content: format!("Content {}", id),
@@ -374,12 +409,15 @@ mod tests {
         });
 
         // Move C to beginning
-        store.move_block("C", "P", None).await.unwrap();
+        store
+            .move_block(&EntityUri::block("C"), &EntityUri::block("P"), None)
+            .await
+            .unwrap();
 
         let children = store.sorted_children("P");
-        assert_eq!(children[0].id, "C");
-        assert_eq!(children[1].id, "A");
-        assert_eq!(children[2].id, "B");
+        assert_eq!(children[0].id, EntityUri::block("C"));
+        assert_eq!(children[1].id, EntityUri::block("A"));
+        assert_eq!(children[2].id, EntityUri::block("B"));
     }
 
     #[tokio::test]
@@ -393,12 +431,19 @@ mod tests {
         insert_block(&store, "C", Some("P"), Some(&key_b));
 
         // Move A after B
-        store.move_block("A", "P", Some("B")).await.unwrap();
+        store
+            .move_block(
+                &EntityUri::block("A"),
+                &EntityUri::block("P"),
+                Some(&EntityUri::block("B")),
+            )
+            .await
+            .unwrap();
 
         let children = store.sorted_children("P");
-        assert_eq!(children[0].id, "B");
-        assert_eq!(children[1].id, "A");
-        assert_eq!(children[2].id, "C");
+        assert_eq!(children[0].id, EntityUri::block("B"));
+        assert_eq!(children[1].id, EntityUri::block("A"));
+        assert_eq!(children[2].id, EntityUri::block("C"));
     }
 
     #[tokio::test]
@@ -410,10 +455,10 @@ mod tests {
         insert_block(&store, "B", Some("P"), Some(&key_a));
 
         // Indent B (resolves previous sibling A as new parent)
-        store.indent("B").await.unwrap();
+        store.indent(&EntityUri::block("B")).await.unwrap();
 
         let b = store.get("B").unwrap();
-        assert_eq!(b.parent_id.as_deref(), Some("A"));
+        assert_eq!(b.parent_id, Some(EntityUri::block("A")));
         assert_eq!(b.depth, 2); // A is depth 1, so B becomes depth 2
     }
 
@@ -425,8 +470,8 @@ mod tests {
 
         // B is child of P, depth 2
         let b = TestBlock {
-            id: "B".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "Content B".to_string(),
@@ -434,10 +479,10 @@ mod tests {
         store.insert(b);
 
         // Outdent B: should move to GP level, after P
-        store.outdent("B").await.unwrap();
+        store.outdent(&EntityUri::block("B")).await.unwrap();
 
         let b = store.get("B").unwrap();
-        assert_eq!(b.parent_id.as_deref(), Some("GP"));
+        assert_eq!(b.parent_id, Some(EntityUri::block("GP")));
         assert_eq!(b.depth, 1); // GP is depth 0, so B becomes depth 1
     }
 
@@ -446,7 +491,7 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "R", None, None);
 
-        let result = store.outdent("R").await;
+        let result = store.outdent(&EntityUri::block("R")).await;
         assert!(result.is_err());
     }
 
@@ -459,11 +504,11 @@ mod tests {
         insert_block(&store, "B", Some("P"), Some(&key_a));
 
         // Move B up (before A)
-        store.move_up("B").await.unwrap();
+        store.move_up(&EntityUri::block("B")).await.unwrap();
 
         let children = store.sorted_children("P");
-        assert_eq!(children[0].id, "B");
-        assert_eq!(children[1].id, "A");
+        assert_eq!(children[0].id, EntityUri::block("B"));
+        assert_eq!(children[1].id, EntityUri::block("A"));
     }
 
     #[tokio::test]
@@ -472,7 +517,7 @@ mod tests {
         insert_block(&store, "P", None, None);
         insert_block(&store, "A", Some("P"), None);
 
-        let result = store.move_up("A").await;
+        let result = store.move_up(&EntityUri::block("A")).await;
         assert!(result.is_err());
     }
 
@@ -485,11 +530,11 @@ mod tests {
         insert_block(&store, "B", Some("P"), Some(&key_a));
 
         // Move A down (after B)
-        store.move_down("A").await.unwrap();
+        store.move_down(&EntityUri::block("A")).await.unwrap();
 
         let children = store.sorted_children("P");
-        assert_eq!(children[0].id, "B");
-        assert_eq!(children[1].id, "A");
+        assert_eq!(children[0].id, EntityUri::block("B"));
+        assert_eq!(children[1].id, EntityUri::block("A"));
     }
 
     #[tokio::test]
@@ -498,7 +543,7 @@ mod tests {
         insert_block(&store, "P", None, None);
         insert_block(&store, "A", Some("P"), None);
 
-        let result = store.move_down("A").await;
+        let result = store.move_down(&EntityUri::block("A")).await;
         assert!(result.is_err());
     }
 
@@ -507,8 +552,8 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
-            id: "block:A".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hello World".to_string(),
@@ -522,7 +567,10 @@ mod tests {
         // Find the new block (not A, not P, child of P)
         let children = store.sorted_children("P");
         assert_eq!(children.len(), 2); // A and the new block
-        let new_block = children.iter().find(|b| b.id != "block:A").unwrap();
+        let new_block = children
+            .iter()
+            .find(|b| b.id.as_str() != "block:A")
+            .unwrap();
         assert_eq!(new_block.content, "World");
     }
 
@@ -531,8 +579,8 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
-            id: "block:A".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hello".to_string(),
@@ -544,7 +592,10 @@ mod tests {
         assert_eq!(a.content, "");
 
         let children = store.sorted_children("P");
-        let new_block = children.iter().find(|b| b.id != "block:A").unwrap();
+        let new_block = children
+            .iter()
+            .find(|b| b.id.as_str() != "block:A")
+            .unwrap();
         assert_eq!(new_block.content, "Hello");
     }
 
@@ -553,8 +604,8 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
-            id: "block:A".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hi".to_string(),
@@ -572,29 +623,29 @@ mod tests {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
         store.insert(TestBlock {
-            id: "A".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "foo".to_string(),
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
-            id: "B".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             depth: 1,
             content: "bar".to_string(),
         });
 
-        store.join_block("B", 0).await.unwrap();
+        store.join_block(&EntityUri::block("B"), 0).await.unwrap();
 
         let a = store.get("A").unwrap();
         assert_eq!(a.content, "foobar");
         assert!(store.get("B").is_none());
         let children = store.sorted_children("P");
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].id, "A");
+        assert_eq!(children[0].id, EntityUri::block("A"));
     }
 
     #[tokio::test]
@@ -610,45 +661,45 @@ mod tests {
         //     C (content "sib2")
         let store = MemStore::new();
         store.insert(TestBlock {
-            id: "P".to_string(),
+            id: EntityUri::block("P"),
             parent_id: None,
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 0,
             content: "parent ".to_string(),
         });
         store.insert(TestBlock {
-            id: "A".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "child".to_string(),
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
-            id: "B".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             depth: 1,
             content: "sib1".to_string(),
         });
         let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
-            id: "C".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("C"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_b), None).unwrap(),
             depth: 1,
             content: "sib2".to_string(),
         });
 
-        store.join_block("A", 0).await.unwrap();
+        store.join_block(&EntityUri::block("A"), 0).await.unwrap();
 
         let p = store.get("P").unwrap();
         assert_eq!(p.content, "parent child");
         assert!(store.get("A").is_none());
         let children = store.sorted_children("P");
         assert_eq!(children.len(), 2);
-        assert_eq!(children[0].id, "B");
-        assert_eq!(children[1].id, "C");
+        assert_eq!(children[0].id, EntityUri::block("B"));
+        assert_eq!(children[1].id, EntityUri::block("C"));
     }
 
     #[tokio::test]
@@ -667,44 +718,44 @@ mod tests {
         // After `join_block("A", 0)`: unchanged.
         let store = MemStore::new();
         store.insert(TestBlock {
-            id: "P".to_string(),
+            id: EntityUri::block("P"),
             parent_id: None,
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 0,
             content: "parent ".to_string(),
         });
         store.insert(TestBlock {
-            id: "A".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "child".to_string(),
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
-            id: "B".to_string(),
-            parent_id: Some("P".to_string()),
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             depth: 1,
             content: "sib".to_string(),
         });
         store.insert(TestBlock {
-            id: "X".to_string(),
-            parent_id: Some("A".to_string()),
+            id: EntityUri::block("X"),
+            parent_id: Some(EntityUri::block("A")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "x".to_string(),
         });
         let key_x = store.sorted_children("A").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
-            id: "Y".to_string(),
-            parent_id: Some("A".to_string()),
+            id: EntityUri::block("Y"),
+            parent_id: Some(EntityUri::block("A")),
             sort_key: gen_key_between(Some(&key_x), None).unwrap(),
             depth: 2,
             content: "y".to_string(),
         });
 
-        store.join_block("A", 0).await.unwrap();
+        store.join_block(&EntityUri::block("A"), 0).await.unwrap();
 
         // Parent content unchanged, A still alive, grandchildren still
         // under A — nothing moved.
@@ -714,13 +765,13 @@ mod tests {
         let p_children = store.sorted_children("P");
         assert_eq!(
             p_children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            vec!["A", "B"],
+            vec!["block:A", "block:B"],
             "A and B remain as P's children in original order"
         );
         let a_children = store.sorted_children("A");
         assert_eq!(
             a_children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            vec!["X", "Y"],
+            vec!["block:X", "block:Y"],
             "X and Y remain under A"
         );
     }
@@ -730,14 +781,14 @@ mod tests {
         // Block with no prev sibling AND no parent → both fallbacks unavailable.
         let store = MemStore::new();
         store.insert(TestBlock {
-            id: "Root".to_string(),
+            id: EntityUri::block("Root"),
             parent_id: None,
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 0,
             content: "alone".to_string(),
         });
 
-        let result = store.join_block("Root", 0).await;
+        let result = store.join_block(&EntityUri::block("Root"), 0).await;
         assert!(result.is_err());
     }
 
@@ -751,7 +802,10 @@ mod tests {
         let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
         insert_block(&store, "C", Some("P"), Some(&key_b));
 
-        let result = store.move_block("C", "P", None).await.unwrap();
+        let result = store
+            .move_block(&EntityUri::block("C"), &EntityUri::block("P"), None)
+            .await
+            .unwrap();
         assert!(result.undo.is_reversible());
     }
 
@@ -763,7 +817,7 @@ mod tests {
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         insert_block(&store, "B", Some("P"), Some(&key_a));
 
-        let result = store.indent("B").await.unwrap();
+        let result = store.indent(&EntityUri::block("B")).await.unwrap();
         assert!(result.undo.is_reversible());
     }
 
@@ -775,26 +829,29 @@ mod tests {
 
         // A is child of P1, depth 1
         store.insert(TestBlock {
-            id: "A".to_string(),
-            parent_id: Some("P1".to_string()),
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P1")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "A".to_string(),
         });
         // B is child of A, depth 2
         store.insert(TestBlock {
-            id: "B".to_string(),
-            parent_id: Some("A".to_string()),
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("A")),
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "B".to_string(),
         });
 
         // Move A under P2 (depth doesn't change since both parents are depth 0)
-        store.move_block("A", "P2", None).await.unwrap();
+        store
+            .move_block(&EntityUri::block("A"), &EntityUri::block("P2"), None)
+            .await
+            .unwrap();
 
         let a = store.get("A").unwrap();
-        assert_eq!(a.parent_id.as_deref(), Some("P2"));
+        assert_eq!(a.parent_id, Some(EntityUri::block("P2")));
         assert_eq!(a.depth, 1);
 
         let b = store.get("B").unwrap();

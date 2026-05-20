@@ -32,6 +32,12 @@ pub struct CommandProvider {
     context_params: HashMap<String, Value>,
     /// If Some, we're in param collection mode.
     param_state: Arc<Mutex<Option<ParamCollectionState>>>,
+    /// Line-relative offset of the "/" trigger char (from
+    /// `ViewEvent::TriggerFired.prefix_start`). Threaded into
+    /// `PopupResult::Execute.strip_prefix_start` so the frontend removes
+    /// the typed command text from the editor when the op fires. `None`
+    /// for callers that manage editor text themselves (headless mirror).
+    prefix_start: Option<usize>,
 }
 
 impl CommandProvider {
@@ -40,7 +46,13 @@ impl CommandProvider {
             operations,
             context_params,
             param_state: Arc::new(Mutex::new(None)),
+            prefix_start: None,
         }
+    }
+
+    pub fn with_prefix_start(mut self, prefix_start: usize) -> Self {
+        self.prefix_start = Some(prefix_start);
+        self
     }
 
     pub fn build_command_items(
@@ -131,6 +143,7 @@ impl PopupProvider for CommandProvider {
                 entity_name: ps.operation.entity_name().clone(),
                 op_name: ps.operation.operation_name().to_string(),
                 params,
+                strip_prefix_start: self.prefix_start,
             };
         }
 
@@ -146,6 +159,7 @@ impl PopupProvider for CommandProvider {
                 entity_name: matched.entity_name().clone(),
                 op_name: matched.operation_name().to_string(),
                 params: matched.resolved_params,
+                strip_prefix_start: self.prefix_start,
             };
         }
 

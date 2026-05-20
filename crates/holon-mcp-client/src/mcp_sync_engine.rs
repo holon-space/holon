@@ -113,12 +113,12 @@ impl McpSyncEngine {
             let value = json_value_to_holon_value(json_val);
             if key == id_col {
                 if let Value::String(ref raw) = value {
-                    entity.set(key, Value::String(format!("{scheme}:{raw}")));
+                    entity.set(key.as_str(), Value::String(format!("{scheme}:{raw}")));
                 } else {
-                    entity.set(key, value);
+                    entity.set(key.as_str(), value);
                 }
             } else {
-                entity.set(key, value);
+                entity.set(key.as_str(), value);
             }
         }
         entity
@@ -137,6 +137,7 @@ impl McpSyncEngine {
             Value::Integer(n) => format!("{scheme}:{n}"),
             _ => return None,
         };
+        // ALLOW(entity_uri_from_raw): remote MCP JSON record id at sync boundary
         Some(EntityUri::from_raw(&raw))
     }
 
@@ -235,6 +236,7 @@ impl McpSyncEngine {
                             Some(Value::Integer(n)) => n.to_string(),
                             _ => return None,
                         };
+                        // ALLOW(entity_uri_from_raw): DynamicEntity id-column string from cache.get_all (no typed id)
                         Some((EntityUri::from_raw(&id_str), e))
                     })
                     .collect();

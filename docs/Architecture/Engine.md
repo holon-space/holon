@@ -51,14 +51,13 @@ Block ordering uses fractional indexing:
 
 | Frontend | Status | Notes |
 |----------|--------|-------|
-| GPUI | Primary | Native Rust GUI (runs on Android via Dioxus), embeds MCP server |
-| Flutter | Active | FFI bridge via flutter_rust_bridge |
-| Blinc | Active | Native Rust GUI via blinc-app |
-| MCP | Active | Model Context Protocol server (stdio + HTTP modes) |
-| Dioxus | Experimental | Dioxus-based frontend |
-| Ply | Experimental | Ply-based frontend |
-| TUI | Experimental | Terminal UI frontend |
-| WaterUI | Experimental | WaterUI-based frontend |
+| GPUI | Primary | Desktop. Mobile via `gpui-mobile` optional dep (`frontends/gpui/Cargo.toml`); screen-layout optimization ongoing. Embeds MCP server. |
+| TUI | Active | Keyboard-driven terminal UI; also used as integration-test harness. |
+| MCP | Active | Model Context Protocol server (stdio + HTTP modes). |
+| Dioxus / dioxus-web | Prototype | Core works; not actively tested. |
+| Flutter | Deprecated | Directory removed; integrating a second language/toolstack was too painful. |
+| Ply / WaterUI | Excluded from workspace | Upstream compatibility issues. |
+| Blinc | — | `blinc` feature flag in `crates/holon-frontend/Cargo.toml`, not a frontend directory; excluded from workspace due to upstream compatibility issues. |
 
 ## Consistency Model
 

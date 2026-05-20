@@ -75,6 +75,9 @@ impl Module for DebugServicesPopulatorModule {
             if let Some(root) = orgmode_root {
                 debug.orgmode_root.set(root).ok();
             }
+            if let Ok(fs) = injector.try_resolve::<dyn holon_filesystem::FileSystem>() {
+                debug.org_fs.set(fs).ok();
+            }
             Ok(())
         })
     }

@@ -54,7 +54,7 @@ impl BoundsSnapshot {
     pub fn of_type<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a ElementInfo> + 'a {
         self.entries
             .iter()
-            .filter(move |(_, info)| info.widget_type == name)
+            .filter(move |(_, info)| info.widget_type.as_ref() == name)
             .map(|(_, info)| info)
     }
 

@@ -21,16 +21,16 @@ The reactive view system translates `UiEvent` streams from `watch_ui` into a liv
 The old architecture had separate `ReactiveCollection`, `BlockWatchRegistry`, and `AppState` that required external wiring. The current design unifies these into self-managing components:
 
 ```
-Turso IVM → UiEvent → ReactiveQueryResults → Signal<ViewModel> → Stream → Frontend
+Turso IVM → UiEvent → ReactiveRenderedRows → Signal<ViewModel> → Stream → Frontend
               (IS the cache)      (IS the join)       (IS the API)
 ```
 
-## ReactiveQueryResults
+## ReactiveRenderedRows
 
 `crates/holon-frontend/src/reactive.rs` — the reactive cache for a single query/block.
 
 ```rust
-pub struct ReactiveQueryResults {
+pub struct ReactiveRenderedRows {
     pub render_expr: Mutable<RenderExpr>,    // initialized to loading()
     pub rows: MutableBTreeMap<String, Arc<DataRow>>,
 }
@@ -45,11 +45,11 @@ pub struct ReactiveQueryResults {
 `crates/holon-frontend/src/reactive.rs` — the top-level coordinator.
 
 Implements `BuilderServices`. Manages:
-- `watchers: HashMap<EntityUri, ReactiveQueryResults>` — one per watched block
+- `watchers: HashMap<EntityUri, ReactiveRenderedRows>` — one per watched block
 - `session: Arc<FrontendSession>` — access to `BackendEngine` and Tokio runtime
 - `rt_handle` — for spawning async tasks from sync builder code
 
-Key method: `watch(block_id)` — starts `watch_ui(block_id)` if not already running, returns a reference to the `ReactiveQueryResults`.
+Key method: `watch(block_id)` — starts `watch_ui(block_id)` if not already running, returns a reference to the `ReactiveRenderedRows`.
 
 The single `interpret()` method is the only entry point for DSL evaluation. Builders call `ctx.services.interpret(expr, ctx)` — never `RenderInterpreter` directly.
 
@@ -68,8 +68,8 @@ pub struct ReactiveView {
 `start()` spawns the collection driver task. `stop()` aborts it. `Drop` also stops it.
 
 Two variants:
-- `Block` — subscribes to a block's `ReactiveQueryResults`, manages child block_refs as sub-`ReactiveView`s
-- `Collection` — renders rows from a `ReactiveQueryResults` using an `item_template`
+- `Block` — subscribes to a block's `ReactiveRenderedRows`, manages child block_refs as sub-`ReactiveView`s
+- `Collection` — renders rows from a `ReactiveRenderedRows` using an `item_template`
 
 The `items` `MutableVec` is the signal output. Frontends (GPUI, Flutter) subscribe to `items.signal_vec()` for incremental `VecDiff` updates.
 

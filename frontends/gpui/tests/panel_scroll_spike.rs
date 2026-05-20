@@ -140,7 +140,7 @@ fn initial_paint_records_first_item_entity_id(cx: &mut TestAppContext) {
         bounds
             .all_elements()
             .iter()
-            .filter_map(|(_, info)| info.entity_id.clone())
+            .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
             .collect::<Vec<_>>()
     );
 }
@@ -189,7 +189,7 @@ fn production_shell_scroll_to_reveal_item_brings_far_row_into_bounds(cx: &mut Te
     let registry_ids: Vec<String> = bounds
         .all_elements()
         .iter()
-        .filter_map(|(_, info)| info.entity_id.clone())
+        .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
         .collect();
 
     assert!(
@@ -197,5 +197,110 @@ fn production_shell_scroll_to_reveal_item_brings_far_row_into_bounds(cx: &mut Te
         "post-scroll: {target} missing from BoundsRegistry. \
          visible_before={visible_before}, bounds_for_item({TARGET_IX})={bounds_for_target:?}. \
          entity_ids present: {registry_ids:?}"
+    );
+}
+
+// ─── Phase-2 main-panel virtualization regression tests ──────────────
+
+const BIG_ITEM_COUNT: usize = 200;
+
+/// The memory property virtualization buys: a ~200-row collection paints
+/// only ~viewport-many rows into `BoundsRegistry`, not all N. This is the
+/// path the main panel now takes (its block-mode shell falls through to
+/// `builders::render`'s collection arm instead of the removed eager
+/// every-row-every-frame branch).
+#[gpui::test]
+fn virtualized_list_bounds_stay_viewport_sized(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+    });
+
+    let items: Vec<ReactiveViewModel> = (0..BIG_ITEM_COUNT).map(text_item).collect();
+    let view = Arc::new(ReactiveView::new_static_with_layout(
+        items,
+        CollectionVariant::list(0.0),
+    ));
+    let root = reactive_root(view.clone());
+
+    let bounds = BoundsRegistry::new();
+    let (_entity, vcx) = cx.add_window_view({
+        let bounds = bounds.clone();
+        move |_, _| ReactiveFixtureView::with_bounds(root, viewport(), bounds)
+    });
+    vcx.run_until_parked();
+    bounds.flush();
+
+    let tracked_rows: Vec<String> = bounds
+        .all_elements()
+        .iter()
+        .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
+        .filter(|id| id.starts_with("test-item-"))
+        .collect();
+
+    assert!(
+        registry_has_entity(&bounds, &item_id(0)),
+        "first row must be painted (registry rows: {tracked_rows:?})"
+    );
+    assert!(
+        !registry_has_entity(&bounds, &item_id(BIG_ITEM_COUNT - 1)),
+        "last of {BIG_ITEM_COUNT} rows has bounds without scrolling — the \
+         collection is being rendered eagerly, virtualization regressed"
+    );
+    assert!(
+        tracked_rows.len() < BIG_ITEM_COUNT / 2,
+        "{} of {BIG_ITEM_COUNT} rows have bounds — far more than a viewport's \
+         worth; virtualization regressed",
+        tracked_rows.len()
+    );
+}
+
+/// `scroll_to_reveal_raw_index` (raw `children_snapshot()` position mapped
+/// through `visible_indices`) reveals a far row — the API
+/// `scroll_entity_into_view` uses now that the main panel virtualizes.
+#[gpui::test]
+fn visible_index_scroll_reveals_far_row(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+    });
+
+    let items: Vec<ReactiveViewModel> = (0..ITEM_COUNT).map(text_item).collect();
+    let view = Arc::new(ReactiveView::new_static_with_layout(
+        items,
+        CollectionVariant::list(0.0),
+    ));
+    let root = reactive_root(view.clone());
+
+    let bounds = BoundsRegistry::new();
+    let (entity, vcx) = cx.add_window_view({
+        let bounds = bounds.clone();
+        move |_, _| ReactiveFixtureView::with_bounds(root, viewport(), bounds)
+    });
+    vcx.run_until_parked();
+    bounds.flush();
+
+    let shell = entity
+        .read_with(vcx, |fv, _| fv.reactive_shell(&view))
+        .expect("ReactiveShell entity not in cache");
+    // ALLOW(entity_uri_from_raw): test fixture row id (schemeless, matches text_item's data.id)
+    let target_uri = holon_api::EntityUri::from_raw(&item_id(TARGET_IX));
+    let ix = shell
+        .read_with(vcx, |s, _| s.visible_index_of(&target_uri))
+        .unwrap_or_else(|| {
+            panic!("visible_index_of({target_uri}) returned None in an all-visible list")
+        });
+    assert_eq!(
+        ix, TARGET_IX,
+        "all-visible list: visible index should equal raw index"
+    );
+    shell.read_with(vcx, |s, _| s.list_state_handle().scroll_to_reveal_item(ix));
+
+    shell.update(&mut vcx.cx.clone(), |_, cx| cx.notify());
+    vcx.run_until_parked();
+    bounds.flush();
+
+    assert!(
+        registry_has_entity(&bounds, &item_id(TARGET_IX)),
+        "post-scroll: {} missing from BoundsRegistry",
+        item_id(TARGET_IX)
     );
 }

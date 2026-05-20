@@ -17,16 +17,16 @@ pub struct ElementInfo {
     pub width: f32,
     pub height: f32,
     /// Widget type name: "render_entity", "editable_text", "selectable", etc.
-    pub widget_type: String,
+    pub widget_type: Arc<str>,
     /// The entity URI this element represents (if data-bound).
-    pub entity_id: Option<String>,
+    pub entity_id: Option<Arc<str>>,
     /// Whether this element has visible content (false for empty containers).
     pub has_content: bool,
     /// Id of this widget's immediate tracked parent, if any. `None` at the
     /// root of the tracked tree. Populated by the GPUI `TransparentTracker`
     /// via a thread-local render-path stack, used by fast-UI layout
     /// invariants to rebuild the tree without a parallel view-model walk.
-    pub parent_id: Option<String>,
+    pub parent_id: Option<Arc<str>>,
     /// The text the widget actually puts on screen at the moment it was
     /// recorded. For `editable_text` this is the live `InputState` value;
     /// for plain `text` builders it's the resolved prop. `None` for
@@ -34,7 +34,13 @@ pub struct ElementInfo {
     /// Used by PBT invariants to detect UI staleness — e.g. the on-screen
     /// text of an `editable_text` failing to follow the SQL `block.content`
     /// after `split_block` / `join_block`.
-    pub displayed_text: Option<String>,
+    pub displayed_text: Option<Arc<str>>,
+    /// Whether this widget's focus handle held WINDOW focus at record time.
+    /// `None` for widgets without a focus handle. Engine-level
+    /// `focused_block` moves synchronously on click/split, but window focus
+    /// follows via a spawned binding — drivers gate keystrokes on THIS field
+    /// so a key can't be consumed by the previously-focused editor.
+    pub focused: Option<bool>,
     /// Algebraic declaration of the widget's expected min/max size. The
     /// PBT layout invariant evaluates this against `(width, height)` and
     /// fails on out-of-bounds renders. Defaults to "unconstrained" (all
@@ -50,6 +56,19 @@ impl ElementInfo {
 
     pub fn area(&self) -> f32 {
         self.width * self.height
+    }
+
+    /// True when the recorded rect has actual on-screen extent. Recorded
+    /// bounds are CLIPPED to the content mask (see `visible_bounds` in the
+    /// GPUI tracker), so a row rendered by list overdraw just outside the
+    /// viewport registers with width or height 0. Such an element exists in
+    /// the registry but cannot be clicked — its "center" lies on the clip
+    /// edge, on top of whatever row is actually displayed there (the
+    /// wrong-block click_entity family, 2026-06-11). Bounds-waits and click
+    /// resolution must treat degenerate rects as "not rendered" so the
+    /// scroll-into-view path fires instead.
+    pub fn has_visible_area(&self) -> bool {
+        self.width > 0.0 && self.height > 0.0
     }
 }
 
@@ -76,6 +95,40 @@ pub trait GeometryProvider: Send + Sync {
             .into_iter()
             .find(|(_, info)| info.entity_id.as_deref() == Some(entity_id))
             .map(|(_, info)| info)
+    }
+
+    /// Like [`Self::find_by_entity_id`], but only returns elements whose
+    /// clipped rect has real extent ([`ElementInfo::has_visible_area`]).
+    /// Bounds-waits and click resolution use this: a list-overdraw row just
+    /// outside the viewport registers with a degenerate rect whose center
+    /// lies on the clip edge — clicking it hits a different row.
+    fn find_by_entity_id_visible(&self, entity_id: &str) -> Option<ElementInfo> {
+        self.all_elements()
+            .into_iter()
+            .find(|(_, info)| {
+                info.entity_id.as_deref() == Some(entity_id) && info.has_visible_area()
+            })
+            .map(|(_, info)| info)
+    }
+
+    /// Resolves when the provider's contents may have changed (e.g. a new
+    /// committed render pass). Wait loops should await this instead of a
+    /// fixed-interval sleep, wrapped in a short `tokio::time::timeout` so a
+    /// wake missed between predicate check and await degrades to a slow poll
+    /// rather than a hang.
+    // ALLOW(fallback): default is a 20 ms tick so providers without change
+    // notification keep today's polling cadence — behaviour, not error hiding.
+    fn changed(&self) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(std::time::Duration::from_millis(20)))
+    }
+
+    /// Monotonic counter of committed render passes. Wait loops compare
+    /// entry/exit values to distinguish "element never rendered" from "no
+    /// frame committed at all during the wait" (e.g. an occluded window
+    /// whose display link is paused). Providers without frame generations
+    /// return 0.
+    fn generation(&self) -> u64 {
+        0
     }
 }
 
@@ -107,7 +160,7 @@ impl SharedBoundsRegistry {
     /// different `el_id`) — see the `historical` field doc for why.
     pub fn record(&self, id: String, info: ElementInfo) {
         if let Some(eid) = info.entity_id.as_deref() {
-            let key = (info.widget_type.clone(), eid.to_string());
+            let key = (info.widget_type.to_string(), eid.to_string());
             let mut hist = self.historical.write().unwrap();
             match hist.get(&key) {
                 Some(prev) if prev != &id => {

@@ -1,14 +1,15 @@
 //! Bidirectional sync integration tests for OrgMode ↔ Backend
 //!
 //! Tests the full sync loop:
-//! - Forward: External org file edit → OrgSyncController → Backend (Loro/Turso)
-//! - Backward: UI mutation via BackendEngine → OrgSyncController → Org file on disk
+//! - Forward: External org file edit → FileSyncController → Backend (Loro/Turso)
+//! - Backward: UI mutation via BackendEngine → FileSyncController → Org file on disk
 //! - Round-trip: Both directions in sequence, verifying stability
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::QueryLanguage;
+use holon_filesystem::FileSystem;
 use holon_integration_tests::TestEnvironmentBuilder;
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
@@ -83,9 +84,13 @@ fn forward_sync_external_edit_adds_block() {
 :END:
 ";
         let file_path = env.org_file_path("test.org");
-        tokio::fs::write(&file_path, new_content)
-            .await
-            .expect("write failed");
+        holon_filesystem::FileSystem::write(
+            env.org_fs.as_ref(),
+            &file_path,
+            new_content.as_bytes(),
+        )
+        .await
+        .expect("write failed");
 
         assert!(
             env.wait_for_block("block-2", SYNC_TIMEOUT).await,
@@ -112,9 +117,13 @@ fn forward_sync_external_edit_updates_content() {
         // Externally modify block content
         let new_content = "* Updated Content\n:PROPERTIES:\n:ID: block-1\n:END:\n";
         let file_path = env.org_file_path("test.org");
-        tokio::fs::write(&file_path, new_content)
-            .await
-            .expect("write failed");
+        holon_filesystem::FileSystem::write(
+            env.org_fs.as_ref(),
+            &file_path,
+            new_content.as_bytes(),
+        )
+        .await
+        .expect("write failed");
 
         // Wait for the update to propagate
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
@@ -158,7 +167,7 @@ fn forward_sync_external_delete_removes_block() {
         // Externally remove block-2
         let new_content = "* First\n:PROPERTIES:\n:ID: block-1\n:END:\n";
         let file_path = env.org_file_path("test.org");
-        tokio::fs::write(&file_path, new_content)
+        holon_filesystem::FileSystem::write(env.org_fs.as_ref(), &file_path, new_content.as_bytes())
             .await
             .expect("write failed");
 
@@ -268,14 +277,18 @@ fn backward_sync_ui_create_writes_to_org_file() {
         let file_path = env.org_file_path("test.org");
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
-            let content = tokio::fs::read_to_string(&file_path)
+            let content = env
+                .org_fs
+                .read_to_string(&file_path)
                 .await
                 .expect("read failed");
             if content.contains("New Block") && content.contains("block-new") {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
-                let content = tokio::fs::read_to_string(&file_path)
+                let content = env
+                    .org_fs
+                    .read_to_string(&file_path)
                     .await
                     .unwrap_or_default();
                 panic!(
@@ -312,14 +325,18 @@ fn backward_sync_ui_update_writes_to_org_file() {
         let file_path = env.org_file_path("test.org");
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
-            let content = tokio::fs::read_to_string(&file_path)
+            let content = env
+                .org_fs
+                .read_to_string(&file_path)
                 .await
                 .expect("read failed");
             if content.contains("Modified Title") && !content.contains("Original Title") {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
-                let content = tokio::fs::read_to_string(&file_path)
+                let content = env
+                    .org_fs
+                    .read_to_string(&file_path)
                     .await
                     .unwrap_or_default();
                 panic!(
@@ -357,14 +374,14 @@ fn backward_sync_ui_delete_removes_from_org_file() {
         let file_path = env.org_file_path("test.org");
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
-            let content = tokio::fs::read_to_string(&file_path)
+            let content = env.org_fs.read_to_string(&file_path)
                 .await
                 .expect("read failed");
             if content.contains("Keep") && !content.contains("Delete Me") && !content.contains("block-2") {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
-                let content = tokio::fs::read_to_string(&file_path)
+                let content = env.org_fs.read_to_string(&file_path)
                     .await
                     .unwrap_or_default();
                 panic!(
@@ -405,9 +422,13 @@ fn roundtrip_external_add_then_ui_update_then_verify_org() {
 :END:
 ";
         let file_path = env.org_file_path("test.org");
-        tokio::fs::write(&file_path, new_content)
-            .await
-            .expect("write failed");
+        holon_filesystem::FileSystem::write(
+            env.org_fs.as_ref(),
+            &file_path,
+            new_content.as_bytes(),
+        )
+        .await
+        .expect("write failed");
 
         assert!(
             env.wait_for_block("block-2", SYNC_TIMEOUT).await,
@@ -425,7 +446,9 @@ fn roundtrip_external_add_then_ui_update_then_verify_org() {
         // Step 4: Verify org file reflects the UI update
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
-            let content = tokio::fs::read_to_string(&file_path)
+            let content = env
+                .org_fs
+                .read_to_string(&file_path)
                 .await
                 .expect("read failed");
             if content.contains("Modified By UI") {
@@ -437,7 +460,9 @@ fn roundtrip_external_add_then_ui_update_then_verify_org() {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
-                let content = tokio::fs::read_to_string(&file_path)
+                let content = env
+                    .org_fs
+                    .read_to_string(&file_path)
                     .await
                     .unwrap_or_default();
                 panic!(
@@ -483,7 +508,9 @@ fn roundtrip_ui_create_then_external_update_then_verify_backend() {
         let file_path = env.org_file_path("test.org");
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
-            let content = tokio::fs::read_to_string(&file_path)
+            let content = env
+                .org_fs
+                .read_to_string(&file_path)
                 .await
                 .expect("read failed");
             if content.contains("block-2") {
@@ -499,11 +526,13 @@ fn roundtrip_ui_create_then_external_update_then_verify_backend() {
         env.wait_for_write_window_expiry().await;
 
         // Step 3: External edit changes block-2 content
-        let content = tokio::fs::read_to_string(&file_path)
+        let content = env
+            .org_fs
+            .read_to_string(&file_path)
             .await
             .expect("read failed");
         let updated = content.replace("UI Created", "Externally Updated");
-        tokio::fs::write(&file_path, &updated)
+        holon_filesystem::FileSystem::write(env.org_fs.as_ref(), &file_path, updated.as_bytes())
             .await
             .expect("write failed");
 
@@ -550,7 +579,7 @@ fn stability_no_duplicate_blocks_after_ui_mutation() {
         env.wait_for_block("block-1", SYNC_TIMEOUT).await;
         env.wait_for_block("block-2", SYNC_TIMEOUT).await;
 
-        // UI update — this triggers OrgSyncController → org file write → file watcher
+        // UI update — this triggers FileSyncController → org file write → file watcher
         // last_projection echo suppression prevents re-processing the file
         env.update_block_content("block-1", "Updated A")
             .await
@@ -560,7 +589,7 @@ fn stability_no_duplicate_blocks_after_ui_mutation() {
         let file_path = env.org_file_path("test.org");
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
-            let content = tokio::fs::read_to_string(&file_path)
+            let content = env.org_fs.read_to_string(&file_path)
                 .await
                 .expect("read failed");
             if content.contains("Updated A") {
@@ -626,14 +655,18 @@ fn stability_multiple_rapid_ui_updates_converge() {
         let file_path = env.org_file_path("test.org");
         let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
         loop {
-            let content = tokio::fs::read_to_string(&file_path)
+            let content = env
+                .org_fs
+                .read_to_string(&file_path)
                 .await
                 .expect("read failed");
             if content.contains("Update 5") {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
-                let content = tokio::fs::read_to_string(&file_path)
+                let content = env
+                    .org_fs
+                    .read_to_string(&file_path)
                     .await
                     .unwrap_or_default();
                 panic!(

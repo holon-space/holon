@@ -33,6 +33,10 @@ pub struct LoroDocumentStore {
     storage_dir: PathBuf,
     /// Legacy: aliases mapping doc_ids to file paths (kept for org sync compat)
     doc_id_aliases: Arc<RwLock<HashMap<String, CanonicalPath>>>,
+    /// Counts `save_all` calls to schedule periodic history compaction
+    /// (see `save_all`). `Arc` so clones share one schedule (the struct is
+    /// `Clone`; a per-clone counter would compact on every clone's first save).
+    save_counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
 const GLOBAL_DOC_ID: &str = "holon_tree";
@@ -44,6 +48,7 @@ impl LoroDocumentStore {
             global_doc: Arc::new(RwLock::new(None)),
             storage_dir,
             doc_id_aliases: Arc::new(RwLock::new(HashMap::new())),
+            save_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -155,13 +160,30 @@ impl LoroDocumentStore {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub async fn save_all(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
         let doc = self.global_doc.read().await;
         if let Some(d) = doc.as_ref() {
             let path = self.snapshot_path();
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            d.save_to_file(&path)?;
+            // Periodic history compaction: every Nth save (incl. the first
+            // save of a session, which sheds history accumulated in prior
+            // sessions) write a shallow snapshot instead of a full one.
+            // Holon undo replays the inverse-command log, so trimmed Loro
+            // history is never needed locally; stale P2P peers get a full
+            // snapshot via IrohSyncAdapter's delta-export guard.
+            // Kill-switch: HOLON_LORO_COMPACT=off.
+            const COMPACT_EVERY: u64 = 64;
+            let n = self.save_counter.fetch_add(1, Ordering::Relaxed);
+            let compaction_enabled = std::env::var("HOLON_LORO_COMPACT")
+                .map(|v| v != "off")
+                .unwrap_or(true);
+            if compaction_enabled && n % COMPACT_EVERY == 0 {
+                d.save_compact_to_file(&path)?;
+            } else {
+                d.save_to_file(&path)?;
+            }
         }
         Ok(())
     }

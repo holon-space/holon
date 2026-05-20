@@ -7,61 +7,12 @@ use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 
 use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::core::datasource::OperationProvider;
+use crate::api::operation_engine::{DispatchingOperationEngine, OperationEngine as _};
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::{RowChange, RowChangeStream};
 use crate::storage::types::StorageEntity;
 use crate::storage::{DbHandle, SqlTransformer};
-use holon_api::{
-    BatchWithMetadata, EntityUri, Operation, OperationDescriptor, QueryLanguage, Value,
-};
-use holon_core::{UndoAction, UndoStack};
-
-/// Context for query compilation - determines what virtual tables resolve to
-#[derive(Debug, Clone)]
-pub struct QueryContext {
-    /// Current block ID for `from children` resolution. None = root level (parent_id IS NULL)
-    pub current_block_id: Option<EntityUri>,
-    /// Parent of current block for `from siblings` resolution
-    pub context_parent_id: Option<EntityUri>,
-    /// Path prefix for descendants queries (e.g., "/block-123/%")
-    /// Computed from block_with_path matview when context is created with path lookup.
-    /// This is a SQL LIKE prefix, not an entity ID.
-    pub context_path_prefix: Option<String>,
-}
-
-impl QueryContext {
-    /// Create a root-level context (for queries at the top level)
-    pub fn root() -> Self {
-        Self {
-            current_block_id: None,
-            context_parent_id: None,
-            context_path_prefix: None,
-        }
-    }
-
-    /// Create a context for a specific block
-    pub fn for_block(block_id: &EntityUri, parent_id: Option<EntityUri>) -> Self {
-        Self {
-            current_block_id: Some(block_id.clone()),
-            context_parent_id: parent_id,
-            context_path_prefix: None,
-        }
-    }
-
-    /// Create a context for a specific block with path prefix for descendants queries
-    pub fn for_block_with_path(
-        block_id: &EntityUri,
-        parent_id: Option<EntityUri>,
-        path: String,
-    ) -> Self {
-        Self {
-            current_block_id: Some(block_id.clone()),
-            context_parent_id: parent_id,
-            context_path_prefix: Some(format!("{}/", path)),
-        }
-    }
-}
+use holon_api::{BatchWithMetadata, OperationDescriptor, QueryContext, QueryLanguage, Value};
 
 /// PRQL stdlib defining virtual tables for hierarchical queries
 ///
@@ -91,8 +42,11 @@ pub struct BackendEngine {
     dispatcher: Arc<OperationDispatcher>,
     /// Maps table names to entity names
     table_to_entity_map: Arc<RwLock<HashMap<String, String>>>,
-    /// Undo/redo history
-    undo_stack: Arc<RwLock<UndoStack>>,
+    /// The operation-execution capability (dispatch + undo/redo over the same
+    /// `dispatcher`). Owns the per-session undo stack; the Turso engine's
+    /// operation methods delegate here so dispatch/undo/redo logic lives in one
+    /// place shared with the no-Turso wiring.
+    op_engine: DispatchingOperationEngine,
     /// Manages materialized view lifecycle (creation, CDC, querying).
     matview_manager: crate::sync::MatviewManager,
     /// Entity profile resolver for per-row render + operation resolution
@@ -124,11 +78,12 @@ impl BackendEngine {
         let ddl_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let matview_manager = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex);
         let graph_schema = graph_schema_registry.clone().build();
+        let op_engine = DispatchingOperationEngine::new(dispatcher.clone());
         Ok(Self {
             db_handle,
             dispatcher,
             table_to_entity_map: Arc::new(RwLock::new(HashMap::new())),
-            undo_stack: Arc::new(RwLock::new(UndoStack::default())),
+            op_engine,
             matview_manager,
             profile_resolver,
             sql_transformers,
@@ -390,38 +345,32 @@ impl BackendEngine {
     fn bind_context_params(&self, params: &mut HashMap<String, Value>, context: &QueryContext) {
         match &context.current_block_id {
             Some(id) => {
-                params.insert(
-                    "context_id".to_string(),
-                    Value::String(id.as_str().to_string()),
-                );
+                params.insert("context_id".into(), Value::String(id.as_str().to_string()));
             }
             None => {
-                params.insert("context_id".to_string(), Value::Null);
+                params.insert("context_id".into(), Value::Null);
             }
         }
         match &context.context_parent_id {
             Some(id) => {
                 params.insert(
-                    "context_parent_id".to_string(),
+                    "context_parent_id".into(),
                     Value::String(id.as_str().to_string()),
                 );
             }
             None => {
-                params.insert("context_parent_id".to_string(), Value::Null);
+                params.insert("context_parent_id".into(), Value::Null);
             }
         }
         match &context.context_path_prefix {
             Some(prefix) => {
-                params.insert(
-                    "context_path_prefix".to_string(),
-                    Value::String(prefix.clone()),
-                );
+                params.insert("context_path_prefix".into(), Value::String(prefix.clone()));
             }
             None => {
                 // No path prefix means descendants queries won't match anything
                 // This is intentional - use for_block_with_path() to enable descendants
                 params.insert(
-                    "context_path_prefix".to_string(),
+                    "context_path_prefix".into(),
                     Value::String("__NO_PATH__/".to_string()),
                 );
             }
@@ -443,7 +392,7 @@ impl BackendEngine {
         sql: String,
         mut params: HashMap<String, Value>,
         context: Option<QueryContext>,
-    ) -> Result<Vec<HashMap<String, Value>>> {
+    ) -> Result<Vec<holon_api::StorageEntity>> {
         // Always bind context params (using NULL if no context provided).
         // This enables stdlib virtual tables like `from children` to compile even without context.
         let ctx = context.unwrap_or_else(QueryContext::root);
@@ -668,7 +617,7 @@ impl BackendEngine {
     /// let engine = BackendEngine::new_in_memory().await?;
     ///
     /// let mut params = HashMap::new();
-    /// params.insert("id".to_string(), Value::String("block-1".to_string()));
+    /// params.insert("id".into(), Value::String("block-1".to_string()));
     ///
     /// engine.execute_operation("indent", params).await?;
     /// # Ok(())
@@ -698,143 +647,41 @@ impl BackendEngine {
                 entity_name, op_name, params
             );
 
-            // Build original operation for undo stack
-            let original_op = Operation::new(
-                entity_name.clone(),
-                op_name,
-                "", // display_name will be set from OperationDescriptor if needed
-                params.clone(),
-            );
-
-            // Execute via dispatcher using entity_name
-            // Span context will be propagated via tracing-opentelemetry bridge
-            let operation_result = self.dispatcher
+            // Dispatch + undo-stack bookkeeping live in the shared op engine
+            // (over the same dispatcher). Span context propagates via the
+            // tracing-opentelemetry bridge.
+            self.op_engine
                 .execute_operation(entity_name, op_name, params)
-                .await;
-
-            match &operation_result {
-                Ok(result) => {
-                    match &result.undo {
-                        UndoAction::Undo(_) => {
-                            info!(
-                                "[BackendEngine] execute_operation succeeded: entity={}, op={} (inverse operation available)",
-                                entity_name, op_name
-                            );
-                        }
-                        UndoAction::Irreversible => {
-                            info!(
-                                "[BackendEngine] execute_operation succeeded: entity={}, op={} (no inverse operation)",
-                                entity_name, op_name
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "[BackendEngine] Operation '{}' on entity '{}' failed: {}",
-                        op_name, entity_name, e
-                    );
-                }
-            }
-
-            // If operation succeeded and has an inverse, push to undo stack
-            if let Ok(result) = &operation_result
-                && let UndoAction::Undo(inverse_op) = &result.undo {
-                    let mut undo_stack = self.undo_stack.write().await;
-                    undo_stack.push(original_op, inverse_op.clone());
-                }
-
-            operation_result.map(|r| r.response).map_err(|e| {
-                anyhow::anyhow!(
-                    "Operation '{}' on entity '{}' failed: {}",
-                    op_name,
-                    entity_name,
-                    e
-                )
-            })
+                .await
         }
         .instrument(span)
         .await
     }
 
-    /// Undo the last operation
+    /// Undo the last operation.
     ///
-    /// Executes the inverse operation from the undo stack and pushes it to the redo stack.
-    /// Returns true if an operation was undone, false if the undo stack is empty.
+    /// Delegates to the shared op engine. Returns true if an operation was
+    /// undone, false if the undo stack is empty.
     pub async fn undo(&self) -> Result<bool> {
-        // Pop the inverse operation from undo stack (automatically moves to redo stack)
-        let inverse_op = {
-            let mut undo_stack = self.undo_stack.write().await;
-            undo_stack
-                .pop_for_undo()
-                .ok_or_else(|| anyhow::anyhow!("Nothing to undo"))?
-        };
-
-        // Execute the inverse operation
-        let operation_result = self
-            .dispatcher
-            .execute_operation(
-                &inverse_op.entity_name,
-                &inverse_op.op_name,
-                inverse_op.params.clone(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to execute undo operation: {}", e))?;
-
-        // Update the redo stack with the new inverse operation
-        // The UndoStack already moved (inverse, original) to redo stack,
-        // but we need to update it with the new inverse we got from execution
-        if let UndoAction::Undo(new_inverse_op) = operation_result.undo {
-            let mut undo_stack = self.undo_stack.write().await;
-            undo_stack.update_redo_top(new_inverse_op);
-        }
-
-        Ok(true)
+        self.op_engine.undo().await
     }
 
-    /// Redo the last undone operation
+    /// Redo the last undone operation.
     ///
-    /// Executes the inverse of the last undone operation and pushes it back to the undo stack.
-    /// Returns true if an operation was redone, false if the redo stack is empty.
+    /// Delegates to the shared op engine. Returns true if an operation was
+    /// redone, false if the redo stack is empty.
     pub async fn redo(&self) -> Result<bool> {
-        // Pop the operation to redo from redo stack (automatically moves back to undo stack)
-        let operation_to_redo = {
-            let mut undo_stack = self.undo_stack.write().await;
-            undo_stack
-                .pop_for_redo()
-                .ok_or_else(|| anyhow::anyhow!("Nothing to redo"))?
-        };
-
-        // Execute the operation to redo
-        let operation_result = self
-            .dispatcher
-            .execute_operation(
-                &operation_to_redo.entity_name,
-                &operation_to_redo.op_name,
-                operation_to_redo.params.clone(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to execute redo operation: {}", e))?;
-
-        // Update the undo stack with the new inverse operation
-        // The UndoStack already moved (inverse, operation_to_redo) back to undo stack,
-        // but we need to update it with the new inverse we got from execution
-        if let UndoAction::Undo(new_inverse_op) = operation_result.undo {
-            let mut undo_stack = self.undo_stack.write().await;
-            undo_stack.update_undo_top(new_inverse_op);
-        }
-
-        Ok(true)
+        self.op_engine.redo().await
     }
 
     /// Check if undo is available
     pub async fn can_undo(&self) -> bool {
-        self.undo_stack.read().await.can_undo()
+        self.op_engine.can_undo().await
     }
 
     /// Check if redo is available
     pub async fn can_redo(&self) -> bool {
-        self.undo_stack.read().await.can_redo()
+        self.op_engine.can_redo().await
     }
 
     /// Register a custom OperationProvider
@@ -857,18 +704,11 @@ impl BackendEngine {
     /// # }
     /// ```
     pub async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
-        self.dispatcher
-            .operations()
-            .into_iter()
-            .filter(|op| op.entity_name == entity_name)
-            .collect()
+        self.op_engine.available_operations(entity_name).await
     }
 
     pub async fn has_operation(&self, entity_name: &str, op_name: &str) -> bool {
-        self.dispatcher
-            .operations()
-            .into_iter()
-            .any(|op| op.entity_name == entity_name && op.name == op_name)
+        self.op_engine.has_operation(entity_name, op_name).await
     }
 
     /// Map a table name to an entity name
@@ -909,6 +749,7 @@ mod tests {
     use super::*;
     use crate::core::sql_operation_provider::SqlOperationProvider;
     use crate::di::test_helpers::{create_test_engine, create_test_engine_with_providers};
+    use holon_api::EntityUri;
     use std::sync::Arc;
 
     #[test]
@@ -923,13 +764,10 @@ mod tests {
     #[test]
     fn test_inline_parameters() {
         let mut params = HashMap::new();
-        params.insert(
-            "context_id".to_string(),
-            Value::String("block-123".to_string()),
-        );
-        params.insert("context_parent_id".to_string(), Value::Null);
-        params.insert("num".to_string(), Value::Integer(42));
-        params.insert("flag".to_string(), Value::Boolean(true));
+        params.insert("context_id".into(), Value::String("block-123".to_string()));
+        params.insert("context_parent_id".into(), Value::Null);
+        params.insert("num".into(), Value::Integer(42));
+        params.insert("flag".into(), Value::Boolean(true));
 
         // Test string parameter
         let sql = "SELECT * FROM block WHERE id = $context_id";
@@ -1135,7 +973,7 @@ mod tests {
 
         // Test query with parameter binding
         let mut params = HashMap::new();
-        params.insert("min_depth".to_string(), Value::Integer(0));
+        params.insert("min_depth".into(), Value::Integer(0));
 
         let sql = "SELECT id, title, depth FROM test_blocks WHERE depth >= $min_depth ORDER BY id";
         let results = engine
@@ -1174,8 +1012,8 @@ mod tests {
 
         // Test multiple parameters
         let mut params = HashMap::new();
-        params.insert("min_age".to_string(), Value::Integer(25));
-        params.insert("max_age".to_string(), Value::Integer(35));
+        params.insert("min_age".into(), Value::Integer(25));
+        params.insert("max_age".into(), Value::Integer(35));
 
         let sql =
             "SELECT name, age FROM users WHERE age >= $min_age AND age <= $max_age ORDER BY age";
@@ -1225,10 +1063,10 @@ mod tests {
             .unwrap();
 
         // Execute operation to update completed field
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), Value::String("item-1".to_string()));
-        params.insert("field".to_string(), Value::String("completed".to_string()));
-        params.insert("value".to_string(), Value::Boolean(true));
+        let mut params: StorageEntity = holon_api::StorageEntity::new();
+        params.insert("id".into(), Value::String("item-1".to_string()));
+        params.insert("field".into(), Value::String("completed".to_string()));
+        params.insert("value".into(), Value::Boolean(true));
 
         let result = engine
             .execute_operation(

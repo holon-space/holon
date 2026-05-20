@@ -27,6 +27,7 @@ pub fn dispatch_operation(
     });
 }
 
+// TODO: How does this relate to MatchedOperation? Please DRY and SRP if possible
 /// A fully-resolved intent to execute an operation.
 ///
 /// Produced by UI interaction handlers (click, blur, menu select) and consumed
@@ -157,11 +158,22 @@ pub fn find_ops_affecting<'a>(
         .collect()
 }
 
+// NOTE: `set_field` is NOT obsolete. The Loro/`MutableText` "field-in-sync-
+// with-UI" mechanism is the *implementation underneath* `set_field`, not a
+// replacement for it: `SqlBlockOperations::set_field` routes writes through
+// the `BlockCellRegistry` (content → LoroText, parent_id → tree.mov, the rest
+// → LoroMap meta), and the `LoroSyncController` outbound projector emits the
+// SQL UPDATE. The registry returns `false` for SqlOnly mode, synthetic test
+// stores, and fields with no clean Loro encoding (`sort_key`, `depth`), where
+// `set_field` falls back to a direct SQL write. So `set_field` remains the
+// canonical field-write seam across both backends. This function finds the
+// matching `set_field` *operation descriptor* so the frontend can dispatch a
+// value write from `state_toggle`/`editable_text` widgets.
 /// Find the value-setting operation for `field` on this widget.
 ///
 /// State_toggle, editable_text, etc. need to dispatch a write of a specific
 /// value into `field`. The canonical op for that is the generic `set_field`
-/// (which takes id/field/value params); we prefer that. As a fallback we
+/// (which takes id/field/value params); we prefer that. Otherwise we
 /// accept any op whose `affected_fields` covers `field` AND that takes a
 /// `value` parameter — i.e. an actual setter, not a side-effecting trigger.
 ///

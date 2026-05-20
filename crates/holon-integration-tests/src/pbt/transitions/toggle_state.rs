@@ -26,34 +26,79 @@ use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 /// click-count semantics, not a separate model of behaviour.
 pub const TASK_STATE_CYCLE: &[&str] = &["", "TODO", "DOING", "DONE"];
 
+/// Parse-don't-validate target state for `ToggleState`: clicking the
+/// state_toggle widget can only ever land on a production-cycle member,
+/// so the type makes off-cycle targets unrepresentable. Serialized as
+/// the keyword string (`""`/`"TODO"`/…) so old capture JSONs (which
+/// stored `new_state` as a plain string) still load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub enum CycleTarget {
+    Clear,
+    Todo,
+    Doing,
+    Done,
+}
+
+impl CycleTarget {
+    pub const ALL: [CycleTarget; 4] = [Self::Clear, Self::Todo, Self::Doing, Self::Done];
+
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Clear => "",
+            Self::Todo => "TODO",
+            Self::Doing => "DOING",
+            Self::Done => "DONE",
+        }
+    }
+
+    fn idx(self) -> usize {
+        match self {
+            Self::Clear => 0,
+            Self::Todo => 1,
+            Self::Doing => 2,
+            Self::Done => 3,
+        }
+    }
+}
+
+impl From<CycleTarget> for String {
+    fn from(t: CycleTarget) -> String {
+        t.keyword().to_string()
+    }
+}
+
+impl TryFrom<String> for CycleTarget {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|t| t.keyword() == s)
+            .ok_or_else(|| {
+                format!("not a production-cycle keyword: {s:?} (cycle {TASK_STATE_CYCLE:?})")
+            })
+    }
+}
+
 /// Compute how many state_toggle clicks advance the cycle from
-/// `current` to `target`. Panics if either is outside the production
-/// cycle — the generator's `RENDERED_DEFAULT_STATES` matches the
-/// production order, so a mismatch means generator drift.
+/// `current` to `target`. Total over any `current` keyword: custom
+/// keywords from a doc `#+TODO:` set (axis 5 — STARTED/NEXT/WAITING/…)
+/// are off-cycle, and production's `cycle_state` falls back to index 0
+/// (`unwrap_or(0)` in render_eval.rs) for them — the first click lands
+/// on TODO regardless of the keyword, and reaching the empty state
+/// takes the full cycle.
 ///
-/// Returns a value in `1..=TASK_STATE_CYCLE.len()`; `0` is unreachable
-/// because the generator excludes no-op transitions (`current ==
-/// target`), and a same-state cycle would otherwise return 0 here.
-/// The SutHandle adapter asserts `>0` defensively as a generator-drift
-/// guard.
-pub fn cycle_click_count(current: &str, target: &str) -> u8 {
-    let cur_idx = TASK_STATE_CYCLE
-        .iter()
-        .position(|s| *s == current)
-        .unwrap_or_else(|| {
-            panic!(
-                "[ToggleState] current state {current:?} not in production cycle {TASK_STATE_CYCLE:?}"
-            )
-        });
-    let tgt_idx = TASK_STATE_CYCLE
-        .iter()
-        .position(|s| *s == target)
-        .unwrap_or_else(|| {
-            panic!(
-                "[ToggleState] target state {target:?} not in production cycle {TASK_STATE_CYCLE:?}"
-            )
-        });
-    ((tgt_idx + TASK_STATE_CYCLE.len() - cur_idx) % TASK_STATE_CYCLE.len()) as u8
+/// Returns `0` only for known-current no-op transitions (`current ==
+/// target`), which the generator excludes; the SutHandle adapter
+/// asserts `>0` defensively as a generator-drift guard.
+pub fn cycle_click_count(current: &str, target: CycleTarget) -> u8 {
+    let len = TASK_STATE_CYCLE.len();
+    let tgt_idx = target.idx();
+    match TASK_STATE_CYCLE.iter().position(|s| *s == current) {
+        Some(cur_idx) => ((tgt_idx + len - cur_idx) % len) as u8,
+        None if tgt_idx == 0 => len as u8,
+        None => tgt_idx as u8,
+    }
 }
 
 // ── Capability-bound free function (Phase C, Option A — real user input) ──
@@ -97,7 +142,7 @@ use holon_orgmode::OrgBlockExt;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToggleState {
     pub block_id: EntityUri,
-    pub new_state: String,
+    pub new_state: CycleTarget,
 }
 
 impl TransitionFactory<ReferenceState> for ToggleState {
@@ -111,13 +156,14 @@ impl TransitionFactory<ReferenceState> for ToggleState {
 
         let main_focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let visible_text_block_ids: Vec<EntityUri> = state
+            .domain
             .block_state
             .blocks
             .values()
             .filter(|b| {
                 b.content_type == holon_api::ContentType::Text
                     && !b.is_page()
-                    && !state.layout_blocks.contains(&b.id)
+                    && !state.domain.layout_blocks.contains(&b.id)
                     && main_focus_roots.contains(&b.id)
             })
             .map(|b| b.id.clone())
@@ -125,7 +171,7 @@ impl TransitionFactory<ReferenceState> for ToggleState {
 
         let rows: Vec<holon_api::widget_spec::DataRow> = visible_text_block_ids
             .iter()
-            .filter_map(|id| state.block_state.blocks.get(id))
+            .filter_map(|id| state.domain.block_state.blocks.get(id))
             .map(super::super::reference_state::block_to_data_row)
             .collect();
         let arc_rows: Vec<std::sync::Arc<_>> = rows.into_iter().map(std::sync::Arc::new).collect();
@@ -141,23 +187,19 @@ impl TransitionFactory<ReferenceState> for ToggleState {
             .filter_map(|id| holon_api::EntityUri::parse(&id).ok())
             .collect();
 
-        const RENDERED_DEFAULT_STATES: [&str; 4] = ["", "TODO", "DOING", "DONE"];
-        let candidate_states: Vec<String> = RENDERED_DEFAULT_STATES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let pairs: Vec<(EntityUri, String)> = toggle_block_ids
+        let pairs: Vec<(EntityUri, CycleTarget)> = toggle_block_ids
             .iter()
             .filter(|id| {
                 ToggleState {
                     block_id: (*id).clone(),
-                    new_state: "".to_string(), // dummy for preconditions check
+                    new_state: CycleTarget::Clear, // dummy for preconditions check
                 }
                 .preconditions(state)
                 .is_good()
             })
             .flat_map(|id| {
                 let current_state = state
+                    .domain
                     .block_state
                     .blocks
                     .get(id)
@@ -165,11 +207,12 @@ impl TransitionFactory<ReferenceState> for ToggleState {
                     .map(|ts| ts.keyword.to_string())
                     .unwrap_or_default();
                 let bid = id.clone();
-                candidate_states
-                    .iter()
-                    .filter(move |&s| s != &current_state)
-                    .cloned()
-                    .map(move |s| (bid.clone(), s))
+                // A custom doc keyword (off-cycle, axis 5) never equals a
+                // cycle member, so all four targets remain candidates.
+                CycleTarget::ALL
+                    .into_iter()
+                    .filter(move |t| t.keyword() != current_state)
+                    .map(move |t| (bid.clone(), t))
             })
             .collect();
 
@@ -191,7 +234,17 @@ impl TransitionRef<ReferenceState> for ToggleState {
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
+            // `state_toggle` only exists when the block renders interactively
+            // (default layout); a custom `index.org` layout can omit it. See
+            // RefLifecycle::renders_block_interactively.
+            check(
+                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
+                    state,
+                    &self.block_id,
+                ),
+                Reason::BlocksNotInteractiveUnderLayout,
+            ),
             check(
                 state.current_focus(holon_api::Region::Main).is_some(),
                 Reason::NoFocusInMain,
@@ -209,7 +262,7 @@ impl TransitionRef<ReferenceState> for ToggleState {
             // EditViaViewModel/Indent/MoveUp etc. already exclude
             // layout blocks for the same reason.
             check(
-                !state.layout_blocks.contains(&self.block_id),
+                !state.domain.layout_blocks.contains(&self.block_id),
                 Reason::FocusedInLayoutBlocks,
             ),
             // A custom entity profile for `block` can replace the
@@ -239,7 +292,7 @@ impl TransitionRef<ReferenceState> for ToggleState {
                 id: self.block_id.clone(),
                 fields: [(
                     "task_state".to_string(),
-                    holon_api::Value::String(self.new_state.clone()),
+                    holon_api::Value::String(self.new_state.keyword().to_string()),
                 )]
                 .into(),
             },
@@ -250,53 +303,55 @@ impl TransitionRef<ReferenceState> for ToggleState {
 #[allow(async_fn_in_trait)]
 impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ToggleState {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_toggle_state(&self.block_id, &self.new_state)
-            .await;
+        sut.apply_toggle_state(&self.block_id, self.new_state).await;
     }
 }
 
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for ToggleState {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.active_watches.len();
-        let blocks = state.block_state.blocks.len();
-        let docs = state.documents.len();
+        let watches = state.mcp.active_watches.len();
+        let blocks = state.domain.block_state.blocks.len();
+        let docs = state.files.documents.len();
         expected_sql_for_kind(MutationKind::Update, watches, blocks, docs)
     }
 }
 
 #[cfg(test)]
 mod cycle_click_count_tests {
-    use super::{TASK_STATE_CYCLE, cycle_click_count};
+    use super::CycleTarget::{Clear, Doing, Done, Todo};
+    use super::{CycleTarget, TASK_STATE_CYCLE, cycle_click_count};
 
     #[test]
     fn cycle_order_matches_production() {
         // Locked to sql_operation_provider.rs:1525-1526. If production
         // changes, this test breaks loudly and we update both sides.
         assert_eq!(TASK_STATE_CYCLE, &["", "TODO", "DOING", "DONE"]);
+        let target_keywords: Vec<&str> = CycleTarget::ALL.iter().map(|t| t.keyword()).collect();
+        assert_eq!(target_keywords, TASK_STATE_CYCLE);
     }
 
     #[test]
     fn single_step_clicks() {
-        assert_eq!(cycle_click_count("", "TODO"), 1);
-        assert_eq!(cycle_click_count("TODO", "DOING"), 1);
-        assert_eq!(cycle_click_count("DOING", "DONE"), 1);
-        assert_eq!(cycle_click_count("DONE", ""), 1);
+        assert_eq!(cycle_click_count("", Todo), 1);
+        assert_eq!(cycle_click_count("TODO", Doing), 1);
+        assert_eq!(cycle_click_count("DOING", Done), 1);
+        assert_eq!(cycle_click_count("DONE", Clear), 1);
     }
 
     #[test]
     fn multi_step_clicks() {
-        assert_eq!(cycle_click_count("", "DOING"), 2);
-        assert_eq!(cycle_click_count("", "DONE"), 3);
-        assert_eq!(cycle_click_count("TODO", "DONE"), 2);
+        assert_eq!(cycle_click_count("", Doing), 2);
+        assert_eq!(cycle_click_count("", Done), 3);
+        assert_eq!(cycle_click_count("TODO", Done), 2);
     }
 
     #[test]
     fn wraps_around_cycle() {
         // DONE → "" → TODO is 2 clicks (wraps through empty).
-        assert_eq!(cycle_click_count("DONE", "TODO"), 2);
-        assert_eq!(cycle_click_count("DONE", "DOING"), 3);
-        assert_eq!(cycle_click_count("DOING", "TODO"), 3);
+        assert_eq!(cycle_click_count("DONE", Todo), 2);
+        assert_eq!(cycle_click_count("DONE", Doing), 3);
+        assert_eq!(cycle_click_count("DOING", Todo), 3);
     }
 
     #[test]
@@ -306,7 +361,7 @@ mod cycle_click_count_tests {
         // the modular-arithmetic edge case so a refactor that breaks
         // it fails loudly.
         assert_eq!(
-            cycle_click_count("TODO", "TODO"),
+            cycle_click_count("TODO", Todo),
             0,
             "same-state click_count is 0 (full cycle would also work); \
              generator excludes this case"
@@ -314,14 +369,28 @@ mod cycle_click_count_tests {
     }
 
     #[test]
-    #[should_panic(expected = "not in production cycle")]
-    fn panics_on_unknown_current() {
-        cycle_click_count("UNKNOWN", "TODO");
+    fn custom_keyword_current_mirrors_production_index_0_fallback() {
+        // Production's cycle_state treats an unknown keyword as index 0,
+        // so the first click lands on TODO; Clear takes a full cycle.
+        assert_eq!(cycle_click_count("STARTED", Todo), 1);
+        assert_eq!(cycle_click_count("STARTED", Doing), 2);
+        assert_eq!(cycle_click_count("WAITING", Done), 3);
+        assert_eq!(cycle_click_count("NEXT", Clear), 4);
     }
 
     #[test]
-    #[should_panic(expected = "not in production cycle")]
-    fn panics_on_unknown_target() {
-        cycle_click_count("TODO", "UNKNOWN");
+    fn capture_compat_serde_round_trip() {
+        // Old captures store new_state as the plain keyword string.
+        for t in CycleTarget::ALL {
+            let json = serde_json::to_string(&t).unwrap();
+            assert_eq!(json, format!("{:?}", t.keyword()));
+            assert_eq!(serde_json::from_str::<CycleTarget>(&json).unwrap(), t);
+        }
+        assert!(
+            serde_json::from_str::<CycleTarget>("\"STARTED\"")
+                .unwrap_err()
+                .to_string()
+                .contains("not a production-cycle keyword")
+        );
     }
 }

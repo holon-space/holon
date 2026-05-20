@@ -39,8 +39,6 @@ impl MatchedOperation {
 
 /// Find operations satisfiable with the given available params.
 ///
-/// Ported from Flutter's `OperationMatcher.findSatisfiable()`.
-///
 /// Intent filtering: if gesture-specific params are present (those declared in
 /// `param_mappings.from`), only operations that USE those params are considered.
 /// This prevents e.g. `delete` from matching during drag-drop just because it

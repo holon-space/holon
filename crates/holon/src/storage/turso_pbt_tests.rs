@@ -56,7 +56,7 @@
 //! - Complex CDC-specific scenarios like batch operations and conflict detection
 //! - Complex view scenarios like filtered views with triggers
 
-use super::{ChangeData, RowChange, TursoBackend};
+use super::turso::{ChangeData, RowChange, TursoBackend};
 use crate::api::ChangeOrigin;
 use crate::storage::backend::StorageBackend;
 use crate::storage::types::{Filter, StorageEntity};
@@ -547,19 +547,22 @@ fn get_test_schema(name: &str) -> TypeDefinition {
 /// Helper to apply filter on an entity in reference state
 fn apply_filter_ref(entity: &StorageEntity, filter: &Filter) -> bool {
     match filter {
-        Filter::Eq(field, value) => entity.get(field).map(|v| v == value).unwrap_or(false),
+        Filter::Eq(field, value) => entity
+            .get(field.as_str())
+            .map(|v| v == value)
+            .unwrap_or(false),
         Filter::In(field, values) => entity
-            .get(field)
+            .get(field.as_str())
             .map(|v| values.contains(v))
             .unwrap_or(false),
         Filter::And(filters) => filters.iter().all(|f| apply_filter_ref(entity, f)),
         Filter::Or(filters) => filters.iter().any(|f| apply_filter_ref(entity, f)),
         Filter::IsNull(field) => entity
-            .get(field)
+            .get(field.as_str())
             .map(|v| matches!(v, Value::Null))
             .unwrap_or(true),
         Filter::IsNotNull(field) => entity
-            .get(field)
+            .get(field.as_str())
             .map(|v| !matches!(v, Value::Null))
             .unwrap_or(false),
     }
@@ -584,16 +587,16 @@ fn apply_to_reference(
             value,
         } => {
             let mut data = StorageEntity::new();
-            data.insert("id".to_string(), Value::String(id.clone()));
+            data.insert("id".into(), Value::String(id.clone()));
             data.insert(
-                "parent_id".to_string(),
+                "parent_id".into(),
                 match parent_id {
                     Some(pid) => Value::String(pid.clone()),
                     None => Value::Null,
                 },
             );
-            data.insert("value".to_string(), Value::String(value.clone()));
-            data.insert("_version".to_string(), Value::Null); // Turso adds _version column
+            data.insert("value".into(), Value::String(value.clone()));
+            data.insert("_version".into(), Value::Null); // Turso adds _version column
 
             state
                 .entities
@@ -632,7 +635,7 @@ fn apply_to_reference(
                         .insert(id.clone(), rowid);
 
                     let mut data_with_rowid = data.clone();
-                    data_with_rowid.insert("_rowid".to_string(), Value::String(rowid.to_string()));
+                    data_with_rowid.insert("_rowid".into(), Value::String(rowid.to_string()));
                     let change = RowChange {
                         relation_name: view_name.clone(),
                         change: ChangeData::Created {
@@ -652,7 +655,7 @@ fn apply_to_reference(
             let entities = state.entities.get_mut(entity).unwrap();
             // In concurrent batches, the entity may have been deleted by another operation
             let data = entities.get_mut(id)?;
-            data.insert("value".to_string(), Value::String(value.clone()));
+            data.insert("value".into(), Value::String(value.clone()));
 
             // Track CDC event if enabled
             if state.cdc_enabled {
@@ -679,7 +682,7 @@ fn apply_to_reference(
                     };
                     let mut updated_data_with_rowid = updated_data.clone();
                     updated_data_with_rowid
-                        .insert("_rowid".to_string(), Value::String(rowid.to_string()));
+                        .insert("_rowid".into(), Value::String(rowid.to_string()));
                     let change = RowChange {
                         relation_name: view_name.clone(),
                         change: ChangeData::Updated {
@@ -798,7 +801,7 @@ fn apply_to_reference(
             if let Some(entities) = state.entities.get_mut(entity)
                 && let Some(data) = entities.get_mut(id)
             {
-                data.insert("_version".to_string(), Value::String(version.clone()));
+                data.insert("_version".into(), Value::String(version.clone()));
 
                 // Track view change notifications for views monitoring this entity
                 for (view_name, (view_entity, _count)) in &state.materialized_views {
@@ -816,8 +819,7 @@ fn apply_to_reference(
                         };
 
                         let mut data_with_rowid = data.clone();
-                        data_with_rowid
-                            .insert("_rowid".to_string(), Value::String(rowid.to_string()));
+                        data_with_rowid.insert("_rowid".into(), Value::String(rowid.to_string()));
                         let change = RowChange {
                             relation_name: view_name.clone(),
                             change: ChangeData::Updated {
@@ -921,15 +923,15 @@ async fn apply_to_turso_inner(
             value,
         } => {
             let mut data = StorageEntity::new();
-            data.insert("id".to_string(), Value::String(id.clone()));
+            data.insert("id".into(), Value::String(id.clone()));
             data.insert(
-                "parent_id".to_string(),
+                "parent_id".into(),
                 match parent_id {
                     Some(pid) => Value::String(pid.clone()),
                     None => Value::Null,
                 },
             );
-            data.insert("value".to_string(), Value::String(value.clone()));
+            data.insert("value".into(), Value::String(value.clone()));
 
             backend
                 .insert(&holon_api::TypeDefinition::from_table_name(entity), data)
@@ -939,7 +941,7 @@ async fn apply_to_turso_inner(
         }
         StorageTransition::Update { entity, id, value } => {
             let mut data = StorageEntity::new();
-            data.insert("value".to_string(), Value::String(value.clone()));
+            data.insert("value".into(), Value::String(value.clone()));
 
             backend
                 .update(
@@ -1033,15 +1035,15 @@ async fn apply_to_turso(
             value,
         } => {
             let mut data = StorageEntity::new();
-            data.insert("id".to_string(), Value::String(id.clone()));
+            data.insert("id".into(), Value::String(id.clone()));
             data.insert(
-                "parent_id".to_string(),
+                "parent_id".into(),
                 match parent_id {
                     Some(pid) => Value::String(pid.clone()),
                     None => Value::Null,
                 },
             );
-            data.insert("value".to_string(), Value::String(value.clone()));
+            data.insert("value".into(), Value::String(value.clone()));
 
             // Use CDC connection if available, otherwise use backend
             if let Some(conn) = &test.cdc_connection {
@@ -1056,7 +1058,7 @@ async fn apply_to_turso(
                     entity,
                     fields
                         .iter()
-                        .map(|f| f.as_str())
+                        .map(|f| f.as_ref())
                         .collect::<Vec<_>>()
                         .join(", "),
                     values.join(", ")
@@ -1075,13 +1077,13 @@ async fn apply_to_turso(
         }
         StorageTransition::Update { entity, id, value } => {
             let mut data = StorageEntity::new();
-            data.insert("value".to_string(), Value::String(value.clone()));
+            data.insert("value".into(), Value::String(value.clone()));
 
             // Use CDC connection if available, otherwise use backend
             if let Some(conn) = &test.cdc_connection {
                 let set_clauses: Vec<_> = data
                     .iter()
-                    .filter(|(k, _)| k.as_str() != "id")
+                    .filter(|(k, _)| k.as_ref() != "id")
                     .map(|(k, v)| format!("{} = {}", k, backend.value_to_sql_param(v)))
                     .collect();
 
@@ -2214,8 +2216,8 @@ mod tests {
 
         // Insert initial data
         let mut data1 = StorageEntity::new();
-        data1.insert("id".to_string(), Value::String("id1".to_string()));
-        data1.insert("value".to_string(), Value::String("initial".to_string()));
+        data1.insert("id".into(), Value::String("id1".to_string()));
+        data1.insert("value".into(), Value::String("initial".to_string()));
         backend
             .insert(
                 &holon_api::TypeDefinition::from_table_name(&schema.name),
@@ -2252,8 +2254,8 @@ mod tests {
 
         // Perform operations using backend methods
         let mut data2 = StorageEntity::new();
-        data2.insert("id".to_string(), Value::String("id2".to_string()));
-        data2.insert("value".to_string(), Value::String("inserted".to_string()));
+        data2.insert("id".into(), Value::String("id2".to_string()));
+        data2.insert("value".into(), Value::String("inserted".to_string()));
         backend
             .insert(
                 &holon_api::TypeDefinition::from_table_name(&schema.name),
@@ -2263,7 +2265,7 @@ mod tests {
             .unwrap();
 
         let mut update_data = StorageEntity::new();
-        update_data.insert("value".to_string(), Value::String("updated".to_string()));
+        update_data.insert("value".into(), Value::String("updated".to_string()));
         backend
             .update(
                 &holon_api::TypeDefinition::from_table_name(&schema.name),

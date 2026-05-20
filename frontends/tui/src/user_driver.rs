@@ -175,7 +175,11 @@ impl TuiUserDriver {
     /// returns from `app_handle_input_event` immediately, before the
     /// engine has done anything. A single render-completion barrier
     /// would acknowledge "input handled" but read pre-mutation state.
-    async fn await_chord_settled(&self, root_block_id: &str, deadline: Instant) -> Result<()> {
+    async fn await_chord_settled(
+        &self,
+        root_block_id: &holon_api::EntityUri,
+        deadline: Instant,
+    ) -> Result<()> {
         // 1. Make sure the inner router is warmed for this root so the
         //    quiescence wait can detect emissions. Idempotent.
         self.inner
@@ -223,11 +227,11 @@ impl TuiUserDriver {
 
     /// Look up the region the target entity lives in. Returns `None`
     /// if the entity isn't currently in the registry.
-    fn lookup_region(&self, entity_id: &str) -> Option<usize> {
+    fn lookup_region(&self, entity_id: &holon_api::EntityUri) -> Option<usize> {
         let reg = self.last_registry.lock().unwrap();
         reg.selectables
             .iter()
-            .find(|s| s.entity_id == entity_id)
+            .find(|s| s.entity_id == entity_id.as_str())
             .map(|s| s.region)
     }
 
@@ -249,7 +253,7 @@ impl TuiUserDriver {
     /// registry inside each loop iteration so registry mutations during
     /// CDC don't desync the walk; bails loud if the target ever
     /// disappears or the walk exceeds twice the region size.
-    async fn nav_to(&self, target_entity_id: &str) -> Result<()> {
+    async fn nav_to(&self, target_entity_id: &holon_api::EntityUri) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(5);
 
         let target_region = self.lookup_region(target_entity_id).with_context(|| {
@@ -298,7 +302,7 @@ impl TuiUserDriver {
                 let target_present = reg
                     .selectables
                     .iter()
-                    .any(|s| s.entity_id == target_entity_id);
+                    .any(|s| s.entity_id == target_entity_id.as_str());
                 (focused, region_size, target_present)
             };
             if !target_still_present {
@@ -307,7 +311,7 @@ impl TuiUserDriver {
                      after {steps} steps"
                 );
             }
-            if focused_eid.as_deref() == Some(target_entity_id) {
+            if focused_eid.as_deref() == Some(target_entity_id.as_str()) {
                 return Ok(());
             }
             max_seen = max_seen.max(region_size);
@@ -509,9 +513,9 @@ impl UserDriver for TuiUserDriver {
     /// post-mutation state, not pre-mutation.
     async fn send_key_chord(
         &self,
-        root_block_id: &str,
+        root_block_id: &holon_api::EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &holon_api::EntityUri,
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
     ) -> Result<bool> {
@@ -566,7 +570,7 @@ impl UserDriver for TuiUserDriver {
     /// for sidebar entries); on a Block region, Enter opens edit mode.
     /// Either way the mirror of the GPUI default `click_entity`
     /// (which dispatches `navigation::editor_focus`).
-    async fn click_entity(&self, entity_id: &str, _: &str) -> Result<()> {
+    async fn click_entity(&self, entity_id: &holon_api::EntityUri, _: &str) -> Result<()> {
         // The bare `_` region argument is GPUI-relevant (which screen
         // region the click happened in); the TUI's keyboard nav
         // resolves the region from the registry directly. Bare `_`
@@ -586,50 +590,6 @@ impl UserDriver for TuiUserDriver {
         self.await_chord_settled(entity_id, deadline).await
     }
 
-    /// Override: type-by-keyboard. Navigate to the target, open edit
-    /// mode with Enter, assert `edit_state` is `Some` (loud failure if
-    /// the focused thing has no editable_text — chars would otherwise
-    /// fall through to nav mode and Space would activate the leader),
-    /// emit each char as `Plain { Character(c) }`, then Enter to leave
-    /// edit mode. The CRDT was already mutated by every `apply_local`
-    /// in `handle_edit_input` (the editor commits live, no save step).
-    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-
-        self.nav_to(entity_id).await?;
-        self.send_input(InputEvent::Keyboard(KeyPress::Plain {
-            key: RKey::SpecialKey(SpecialKey::Enter),
-        }))
-        .await?;
-        self.await_render(deadline).await?;
-
-        if self.edit_state.lock().unwrap().is_none() {
-            bail!(
-                "type_text({entity_id}): Enter did not enter edit mode — \
-                 focus is on a Selectable, or the focused Block has no \
-                 editable_text target. type_text only works on Blocks with \
-                 an editable inline text field."
-            );
-        }
-
-        for c in text.chars() {
-            self.send_input(InputEvent::Keyboard(KeyPress::Plain {
-                key: RKey::Character(c),
-            }))
-            .await?;
-            self.await_render(deadline).await?;
-        }
-
-        // Plain Enter in edit mode just exits edit mode (app_main.rs:923-927).
-        // The Loro CRDT was committed live by every apply_local, so "exit
-        // edit" IS "commit".
-        self.send_input(InputEvent::Keyboard(KeyPress::Plain {
-            key: RKey::SpecialKey(SpecialKey::Enter),
-        }))
-        .await?;
-        self.await_chord_settled(entity_id, deadline).await
-    }
-
     /// LIMITATION: TUI has no DnD path through `app_handle_input_event`
     /// (no mouse arm, no keyboard equivalent). Stays on the engine
     /// fast-path so the resulting operation is still exercised, just
@@ -637,9 +597,9 @@ impl UserDriver for TuiUserDriver {
     /// policy: this path is explicit, not silent.
     async fn drop_entity(
         &self,
-        root_block_id: &str,
-        source_id: &str,
-        target_id: &str,
+        root_block_id: &holon_api::EntityUri,
+        source_id: &holon_api::EntityUri,
+        target_id: &holon_api::EntityUri,
     ) -> Result<bool> {
         self.inner
             .drop_entity(root_block_id, source_id, target_id)
@@ -670,9 +630,9 @@ impl UserDriver for TuiUserDriver {
     /// synchronously prove which intent fired, so return `false`.
     async fn click_entity_with_tree(
         &self,
-        _: &str,
+        _: &holon_api::EntityUri,
         _: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &holon_api::EntityUri,
         region: &str,
     ) -> Result<bool> {
         self.click_entity(entity_id, region).await?;
@@ -686,11 +646,11 @@ impl UserDriver for TuiUserDriver {
     // tree the headless driver uses, so the impl can follow the
     // `ReactiveEngineDriver` pattern.
 
-    fn is_widget_visible(&self, _: &str) -> bool {
+    fn is_widget_visible(&self, _: &holon_api::EntityUri) -> bool {
         unimplemented!("TuiUserDriver::is_widget_visible — pending TUI observation impl")
     }
 
-    fn is_in_region(&self, _: &str, _: holon_api::Region) -> bool {
+    fn is_in_region(&self, _: &holon_api::EntityUri, _: holon_api::Region) -> bool {
         unimplemented!("TuiUserDriver::is_in_region — pending TUI observation impl")
     }
 
@@ -702,7 +662,7 @@ impl UserDriver for TuiUserDriver {
         unimplemented!("TuiUserDriver::reachable_entities_in_region — pending TUI observation impl")
     }
 
-    async fn scroll_to_entity(&self, _: &str) -> Result<()> {
+    async fn scroll_to_entity(&self, _: &holon_api::EntityUri) -> Result<()> {
         // TUI has no virtualized lists today — every rendered entity has
         // bounds via its full-screen redraw. Return Ok so the
         // `wait_for_entity_bounds` scroll RPC is a benign no-op under TUI;
@@ -712,11 +672,14 @@ impl UserDriver for TuiUserDriver {
         Ok(())
     }
 
-    fn click_intent_of(&self, _: &str) -> Option<holon_frontend::operations::OperationIntent> {
+    fn click_intent_of(
+        &self,
+        _: &holon_api::EntityUri,
+    ) -> Option<holon_frontend::operations::OperationIntent> {
         unimplemented!("TuiUserDriver::click_intent_of — pending TUI observation impl")
     }
 
-    fn displayed_text(&self, _: &str) -> Option<String> {
+    fn displayed_text(&self, _: &holon_api::EntityUri) -> Option<String> {
         unimplemented!("TuiUserDriver::displayed_text — pending TUI observation impl")
     }
 }

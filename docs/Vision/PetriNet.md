@@ -4,7 +4,7 @@
 
 ## Origin
 
-This document captures the formal model underlying Holon's task and project management: a Petri-Net + Digital Twin framework for personal productivity. The model was developed in a [design conversation](../digital-twins-petri-netze-conversation.md) exploring how industrial process modeling techniques (Petri Nets, Digital Twins) can be adapted for personal project management — and how classical productivity principles (Lean, GTD, Eisenhower, WIP limits) emerge naturally from a small set of primitives rather than being imposed as separate rules.
+This document captures the formal model underlying Holon's task and project management: a Petri-Net + Digital Twin framework for personal productivity. The model was developed in a [design conversation](../Explanation/digital-twins-petri-netze-conversation.md) exploring how industrial process modeling techniques (Petri Nets, Digital Twins) can be adapted for personal project management — and how classical productivity principles (Lean, GTD, Eisenhower, WIP limits) emerge naturally from a small set of primitives rather than being imposed as separate rules.
 
 ---
 
@@ -1274,4 +1274,4 @@ The feedback loop (user reorders → system adjusts weights) is valuable but com
 - [docs/Architecture.md](docs/Architecture.md) — Current technical architecture
 - [Strategy/BusinessAnalysis.md](../Strategy/BusinessAnalysis.md) — Strategic analysis, competitive positioning, go-to-market
 - [Strategy/SWOT.md](../Strategy/SWOT.md) — SWOT matrix
-- [digital-twins-petri-netze-conversation.md](../digital-twins-petri-netze-conversation.md) — Original design conversation (full transcript)
+- [digital-twins-petri-netze-conversation.md](../Explanation/digital-twins-petri-netze-conversation.md) — Original design conversation (full transcript)

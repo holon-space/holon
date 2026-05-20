@@ -8,16 +8,15 @@
 //! - `loro_block_operations`: Generic operations on Loro blocks
 //! - `loro_blocks_datasource`: DataSource for populating QueryableCache
 //! - `event_bus`: Event bus trait and types for event sourcing
-//! - `command_log`: Command log trait and types for persistent undo/redo
 //!
 //! Note: Block hierarchy schema is now managed by `BlockHierarchySchemaModule`
 //! in `storage/schema_modules.rs` via the `SchemaRegistry`.
 
 pub mod block_cell_registry;
-pub mod cache_event_subscriber;
 pub mod canonical_path;
+pub mod capability;
+pub mod consolidator;
 
-pub mod command_log;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -35,7 +34,6 @@ pub mod degraded_signal_bus;
 pub mod device_key_store;
 pub mod event_bus;
 pub mod event_infra_module;
-pub mod event_subscriber;
 #[cfg(test)]
 mod fork_at_test;
 #[cfg(all(
@@ -52,6 +50,7 @@ pub mod link_event_subscriber;
 pub mod live_data;
 pub mod live_value;
 pub mod loro_block_operations;
+pub mod loro_block_query_source;
 pub mod loro_blocks_datasource;
 pub mod loro_document;
 pub mod loro_document_store;
@@ -63,7 +62,9 @@ pub mod loro_module;
 pub mod loro_share_backend;
 pub mod loro_sync_controller;
 pub mod loro_text_cell_backing;
-pub mod matview_manager;
+// The materialized-view manager moved to the `holon-turso` crate; re-export it
+// so `crate::sync::matview_manager::*` paths keep resolving (ADR 0004 Phase 9).
+pub use holon_turso::matview_manager;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod multi_peer;
 #[cfg(all(
@@ -77,27 +78,25 @@ pub mod share_peer_id;
 ))]
 pub mod shared_snapshot_store;
 pub mod shared_tree;
+pub mod sync_base_store;
+pub mod text_merge_provider;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod ticket;
-pub mod turso_command_log;
-pub mod turso_event_bus;
+pub mod turso_block_query_source;
 
-pub use cache_event_subscriber::CacheEventSubscriber;
 pub use canonical_path::CanonicalPath;
-pub use command_log::*;
+pub use capability::{CapabilityProfile, Consolidator, SessionCapabilities};
+pub use consolidator::BlockConsolidator;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub use degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
 pub use event_bus::*;
-pub use event_infra_module::{
-    CacheEventSubscriberHandle, EventInfraModule, LinkEventSubscriberHandle,
-};
-pub use event_subscriber::EventSubscriber;
+pub use event_infra_module::{EventInfraModule, LinkEventSubscriberHandle};
 pub use holon_api::EntityUri;
 #[cfg(all(
     feature = "iroh-sync",
@@ -112,9 +111,8 @@ pub use loro_document::*;
 pub use loro_document_store::*;
 pub use loro_module::{LoroConfig, LoroModule};
 pub use loro_sync_controller::{
-    LoroProjection, LoroSyncController, LoroSyncControllerHandle, SinkReader, TursoSinkReader,
-    block_to_params,
+    LoroProjection, LoroSyncController, LoroSyncControllerHandle, SinkReader, block_to_params,
 };
 pub use matview_manager::{MatviewHook, MatviewManager, WatchResult, reconcile_named_view};
-pub use turso_command_log::TursoCommandLog;
-pub use turso_event_bus::TursoEventBus;
+pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
+pub use text_merge_provider::{TextHandle, TextMergeProvider};

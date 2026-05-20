@@ -271,7 +271,7 @@ async fn test_production_todoist_query_via_backend_engine() -> Result<()> {
     insert_test_data(&engine).await?;
 
     // Load the actual production query (strip render directives for plain prqlc)
-    let raw_prql = include_str!("../../holon-todoist/queries/todoist_hierarchy.prql");
+    let raw_prql = include_str!("fixtures/todoist_hierarchy.prql");
     let prql = strip_render_directives(raw_prql);
     println!("Testing production query:\n{}\n", prql);
 
@@ -296,123 +296,6 @@ async fn test_production_todoist_query_via_backend_engine() -> Result<()> {
         4,
         "Should have 4 rows (2 projects + 2 tasks)"
     );
-
-    Ok(())
-}
-
-/// Test the actual production orgmode_hierarchy.prql query file
-#[tokio::test]
-async fn test_production_orgmode_query_via_backend_engine() -> Result<()> {
-    let engine = create_test_engine().await?;
-
-    // Setup schema for orgmode tables
-    // Create directories table (matches Directory struct - NO path column)
-    engine
-        .db_handle()
-        .execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS directory (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                parent_id TEXT,
-                depth INTEGER DEFAULT 0
-            )
-            "#,
-            vec![],
-        )
-        .await?;
-
-    // Create documents table
-    engine
-        .db_handle()
-        .execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS document (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL,
-                parent_id TEXT,
-                depth INTEGER DEFAULT 0,
-                title TEXT
-            )
-            "#,
-            vec![],
-        )
-        .await?;
-
-    // Create blocks table (matches Block struct)
-    engine
-        .db_handle()
-        .execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS block (
-                id TEXT PRIMARY KEY,
-                file_id TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                parent_id TEXT,
-                depth INTEGER DEFAULT 0,
-                byte_start INTEGER DEFAULT 0,
-                byte_end INTEGER DEFAULT 0,
-                title TEXT,
-                content TEXT,
-                task_state TEXT,
-                priority INTEGER,
-                tags TEXT,
-                scheduled TEXT,
-                deadline TEXT,
-                properties TEXT
-            )
-            "#,
-            vec![],
-        )
-        .await?;
-
-    // Insert test data
-    engine
-        .db_handle()
-        .execute(
-            "INSERT INTO directory (id, name, parent_id, depth) VALUES ('dir-1', 'Test Dir', NULL, 0)",
-            vec![],
-        )
-        .await?;
-
-    engine
-        .db_handle()
-        .execute(
-            "INSERT INTO document (id, name, path, parent_id, depth, title) VALUES ('file-1', 'test.org', '/test/test.org', 'dir-1', 1, 'Test File')",
-            vec![],
-        )
-        .await?;
-
-    engine
-        .db_handle()
-        .execute(
-            "INSERT INTO block (id, file_id, file_path, parent_id, depth, byte_start, title, content, task_state, priority) VALUES ('headline-1', 'file-1', '/test/test.org', 'file-1', 2, 100, 'My Task', 'Task content', 'TODO', 1)",
-            vec![],
-        )
-        .await?;
-
-    // Load the actual production query (strip render directives for plain prqlc)
-    let raw_prql = include_str!("../../holon-orgmode/queries/orgmode_hierarchy.prql");
-    let prql = strip_render_directives(raw_prql);
-    println!("Testing orgmode production query:\n{}\n", prql);
-
-    // Use BackendEngine to compile (same code path as Flutter app)
-    let sql = engine.compile_to_sql(&prql, QueryLanguage::HolonPrql)?;
-    println!("Orgmode query compiled successfully via BackendEngine!");
-    println!("SQL:\n{}\n", sql);
-
-    // Execute via BackendEngine
-    let results = engine.execute_query(sql, HashMap::new(), None).await?;
-    println!("Query executed successfully with {} results", results.len());
-    for (i, row) in results.iter().enumerate() {
-        println!(
-            "Row {}: entity_name={:?}, keys={:?}",
-            i,
-            row.get("entity_name"),
-            row.keys().collect::<Vec<_>>()
-        );
-    }
 
     Ok(())
 }

@@ -38,9 +38,10 @@ use crate::storage::types::StorageEntity;
 use crate::sync::block_cell_registry::BlockCellRegistry;
 use crate::sync::event_bus::EventOrigin;
 use holon_api::EntityUri;
+use holon_api::capability::{Consolidator, SessionCapabilities};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::cell_registry::EntityCellRegistry;
-use holon_core::fractional_index::{gen_key_between, gen_n_keys};
+use holon_core::fractional_index::{default_sort_key, gen_key_between, gen_n_keys};
 
 pub struct SqlBlockOperations {
     sql_ops: Arc<SqlOperationProvider>,
@@ -53,6 +54,14 @@ pub struct SqlBlockOperations {
     /// inheriting the `BlockOperations::cells()` default of `None`
     /// rather than calling into this struct.
     cell_registry: Arc<BlockCellRegistry>,
+    /// The session's order/merge role, injected by the DI composition root —
+    /// the SQL component is *told* whether it owns order, it does not probe a
+    /// Loro-aware component to find out. This is the dependency inversion that
+    /// keeps `SqlBlockOperations` ignorant of Loro: it acts on its capability
+    /// (`Consolidator::Store` ⇒ mint keys / write directly; otherwise an
+    /// upstream consolidator owns order and this component defers). Defaults to
+    /// the direct-store profile so non-DI/test construction degrades safely.
+    caps: SessionCapabilities,
 }
 
 impl SqlBlockOperations {
@@ -65,6 +74,7 @@ impl SqlBlockOperations {
             sql_ops,
             cache,
             cell_registry: Arc::new(BlockCellRegistry::sql_only()),
+            caps: SessionCapabilities::detect_and_pin(false),
         }
     }
 
@@ -75,6 +85,43 @@ impl SqlBlockOperations {
     pub fn with_cell_registry(mut self, registry: Arc<BlockCellRegistry>) -> Self {
         self.cell_registry = registry;
         self
+    }
+
+    /// Pin the session's capability role (who owns order/merge). The DI
+    /// composition root resolves this once from what is actually present and
+    /// hands it in; this component never asks "is Loro present" itself.
+    pub fn with_capabilities(mut self, caps: SessionCapabilities) -> Self {
+        self.caps = caps;
+        self
+    }
+
+    /// Ordered `(id, sort_key)` pairs for a parent, read straight from the
+    /// internal `sort_key` column via the cache wrapper and sorted on it
+    /// (`(sort_key, id)` lexicographic — Turso IVM matviews can't `ORDER BY`,
+    /// so the wrapper sorts). Used by the SqlOnly key-minting writer; the
+    /// `sort_key` encoding stays internal and never surfaces on the domain
+    /// `Block` (ADR 0005).
+    async fn sibling_keys(&self, parent_id: &str) -> Result<Vec<(String, String)>> {
+        let rows = self
+            .cache
+            .query_raw("parent_id = ?", vec![Value::String(parent_id.to_string())])
+            .await?;
+        let mut pairs: Vec<(String, String)> = rows
+            .into_iter()
+            .filter_map(|r| {
+                let id = r
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)?;
+                let sk = r
+                    .get("sort_key")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)?;
+                Some((id, sk))
+            })
+            .collect();
+        pairs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(pairs)
     }
 }
 
@@ -102,38 +149,52 @@ impl BlockQueryHelpers<Block> for SqlBlockOperations {
     // (the SQL cache) — the indirection just keeps `sort_key` reads
     // confined to the ordering adapter so a future backing without a
     // fractional-index string only has to change `BlockOrdering`.
-    async fn get_prev_sibling(&self, block_id: &str) -> Result<Option<Block>> {
+    async fn get_prev_sibling(&self, block_id: &EntityUri) -> Result<Option<Block>> {
         match <Self as BlockOrdering>::prev_sibling(self, block_id).await? {
-            Some(id) => self.get_by_id(&id).await,
+            Some(id) => self.get_by_id(id.as_str()).await,
             None => Ok(None),
         }
     }
 
-    async fn get_next_sibling(&self, block_id: &str) -> Result<Option<Block>> {
+    async fn get_next_sibling(&self, block_id: &EntityUri) -> Result<Option<Block>> {
         match <Self as BlockOrdering>::next_sibling(self, block_id).await? {
-            Some(id) => self.get_by_id(&id).await,
+            Some(id) => self.get_by_id(id.as_str()).await,
             None => Ok(None),
         }
     }
 
-    async fn get_first_child(&self, parent_id: Option<&str>) -> Result<Option<Block>> {
+    async fn get_first_child(&self, parent_id: Option<&EntityUri>) -> Result<Option<Block>> {
         let Some(pid) = parent_id else {
             return Ok(None);
         };
         match <Self as BlockOrdering>::first_child(self, pid).await? {
-            Some(id) => self.get_by_id(&id).await,
+            Some(id) => self.get_by_id(id.as_str()).await,
             None => Ok(None),
         }
     }
 
-    async fn get_last_child(&self, parent_id: Option<&str>) -> Result<Option<Block>> {
+    async fn get_last_child(&self, parent_id: Option<&EntityUri>) -> Result<Option<Block>> {
         let Some(pid) = parent_id else {
             return Ok(None);
         };
         match <Self as BlockOrdering>::last_child(self, pid).await? {
-            Some(id) => self.get_by_id(&id).await,
+            Some(id) => self.get_by_id(id.as_str()).await,
             None => Ok(None),
         }
+    }
+
+    async fn children_ordered(&self, parent_id: &EntityUri) -> Result<Vec<Block>> {
+        // The ordering authority is `BlockOrdering::children` (Loro live tree
+        // in Loro mode, else the SQL cache ordered by the internal sort_key
+        // column). Resolve ids there, then hydrate the domain blocks.
+        let ids = <Self as BlockOrdering>::children(self, parent_id).await?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(b) = self.get_by_id(id.as_str()).await? {
+                out.push(b);
+            }
+        }
+        Ok(out)
     }
 }
 impl BlockMaintenanceHelpers<Block> for SqlBlockOperations {}
@@ -148,15 +209,56 @@ impl BlockOperations<Block> for SqlBlockOperations {
     }
 }
 
+/// Pure monotonic relabel: given `ordered_ids` (the intended order) and the key
+/// each currently carries (`cur_keys`, aligned by index; the default sentinel
+/// `default_sort_key()` means "unkeyed"), return the key each id should
+/// have so that lexical `sort_key` order reproduces `ordered_ids`. Keys already
+/// strictly above their predecessor's final key are kept verbatim; only
+/// violators (out-of-place, or carrying the default sentinel) are re-minted
+/// strictly between their predecessor's final key and the next keepable anchor.
+///
+/// The default sentinel is never "keepable": it is not a `gen_key_between` value
+/// and lands arbitrarily in the lexical keyspace (`"A0"` sorts *above* real
+/// hex-ish indices like `"80"`), so an unkeyed block must always receive a real
+/// minted key (projection totality). Idempotent: a fully-keyed, already-ordered
+/// input returns its input unchanged.
+fn relabel_order(ordered_ids: &[&str], cur_keys: &[String]) -> Result<Vec<String>> {
+    let default_key = default_sort_key();
+    let keepable =
+        |k: &str, prev: Option<&str>| -> bool { k != default_key && prev.is_none_or(|p| k > p) };
+    let mut out: Vec<String> = Vec::with_capacity(ordered_ids.len());
+    let mut prev_final: Option<String> = None;
+    for i in 0..ordered_ids.len() {
+        if keepable(&cur_keys[i], prev_final.as_deref()) {
+            prev_final = Some(cur_keys[i].clone());
+            out.push(cur_keys[i].clone());
+            continue;
+        }
+        let upper: Option<&str> = ((i + 1)..ordered_ids.len())
+            .map(|j| cur_keys[j].as_str())
+            .find(|kj| keepable(kj, prev_final.as_deref()));
+        let new_key = gen_key_between(prev_final.as_deref(), upper)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
+        prev_final = Some(new_key.clone());
+        out.push(new_key);
+    }
+    Ok(out)
+}
+
 #[async_trait]
 impl BlockOrdering for SqlBlockOperations {
     /// Loro mode → `write_position` (tree.mov_after). SqlOnly mode →
     /// `new_child_anchor` + paired `set_field("parent_id") +
     /// set_field("sort_key")` via the underlying `OperationProvider`.
-    async fn place(&self, uri: &EntityUri, parent_id: &str, after_id: Option<&str>) -> Result<()> {
+    async fn place(
+        &self,
+        uri: &EntityUri,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+    ) -> Result<()> {
         if self
             .cell_registry
-            .write_position(uri, parent_id, after_id)
+            .write_position(uri, parent_id.as_str(), after_id.map(|u| u.as_str()))
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
         {
@@ -175,14 +277,12 @@ impl BlockOrdering for SqlBlockOperations {
                 },
             )?;
             if let Some(current_block) = current_block_opt {
-                let current_prev = self.prev_sibling(uri.as_str()).await.map_err(
+                let current_prev = self.prev_sibling(uri).await.map_err(
                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                         format!("place: prev_sibling {}: {e:#}", uri.as_str()).into()
                     },
                 )?;
-                if current_block.parent_id.as_str() == parent_id
-                    && current_prev.as_deref() == after_id
-                {
+                if &current_block.parent_id == parent_id && current_prev.as_ref() == after_id {
                     return Ok(());
                 }
             }
@@ -194,20 +294,120 @@ impl BlockOrdering for SqlBlockOperations {
         // catch this — its idempotency guard short-circuits before the write).
         let id = uri.as_str();
         let mut parent_params: StorageEntity = HashMap::new();
-        parent_params.insert("id".to_string(), Value::String(id.to_string()));
-        parent_params.insert("field".to_string(), Value::String("parent_id".to_string()));
-        parent_params.insert("value".to_string(), Value::String(parent_id.to_string()));
+        parent_params.insert("id".into(), Value::String(id.to_string()));
+        parent_params.insert("field".into(), Value::String("parent_id".to_string()));
+        parent_params.insert(
+            "value".into(),
+            Value::String(parent_id.as_str().to_string()),
+        );
         let entity = EntityName::new(Block::entity_name());
         self.sql_ops
             .execute_operation(&entity, "set_field", parent_params)
             .await?;
         let mut sort_params: StorageEntity = HashMap::new();
-        sort_params.insert("id".to_string(), Value::String(id.to_string()));
-        sort_params.insert("field".to_string(), Value::String("sort_key".to_string()));
-        sort_params.insert("value".to_string(), Value::String(new_sort_key));
+        sort_params.insert("id".into(), Value::String(id.to_string()));
+        sort_params.insert("field".into(), Value::String("sort_key".to_string()));
+        sort_params.insert("value".into(), Value::String(new_sort_key));
         self.sql_ops
             .execute_operation(&entity, "set_field", sort_params)
             .await?;
+        Ok(())
+    }
+
+    /// Total, minimal-diff re-key for the SQL (no-Loro) order owner.
+    ///
+    /// The org re-ingest hands us the file's complete line order for a parent;
+    /// SQL is the sole order owner in this configuration, so we must make
+    /// `ORDER BY sort_key` reproduce `ordered_ids` exactly. The incremental
+    /// `place` loop can't converge a full reorder, but a naïve full rewrite
+    /// (`gen_n_keys` for every child on every change) is O(N) key churn — the
+    /// thing `Replication.md` §5 warns against — and floods CDC.
+    ///
+    /// So we do a **monotonic relabel**: walk `ordered_ids` left→right keeping
+    /// the running maximum assigned key; a block whose current key is already
+    /// strictly greater than its predecessor's final key is left untouched, and
+    /// only an out-of-place block is re-minted with `gen_key_between` strictly
+    /// between its predecessor's final key and the next key we will keep. Result
+    /// is a strictly-increasing total order (correct) that touches only the
+    /// blocks that actually moved (low churn). Idempotent: an already-ordered
+    /// parent makes zero writes.
+    async fn place_all(&self, parent_id: &EntityUri, ordered_ids: &[EntityUri]) -> Result<()> {
+        if ordered_ids.is_empty() {
+            return Ok(());
+        }
+        let parent_str = parent_id.as_str();
+        // (parent_id, sort_key) per block, read from the raw rows — the
+        // internal `sort_key` column is no longer on the domain `Block`.
+        let rows = self.cache.query_raw("", vec![]).await?;
+        let by_id: HashMap<String, (String, String)> = rows
+            .into_iter()
+            .filter_map(|r| {
+                let id = r
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)?;
+                let parent = r
+                    .get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                let sk = r
+                    .get("sort_key")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+                    .unwrap_or_else(default_sort_key);
+                Some((id, (parent, sk)))
+            })
+            .collect();
+        let entity = EntityName::new(Block::entity_name());
+        let default_key = default_sort_key();
+
+        // Resolve current keys in target order, fixing parent_id where it
+        // diverges (rare: a re-parent into this parent). A missing block is
+        // treated as unkeyed (default sentinel) so a not-yet-projected row
+        // still gets a real key rather than panicking the scan.
+        let mut cur_keys: Vec<String> = Vec::with_capacity(ordered_ids.len());
+        for id in ordered_ids {
+            match by_id.get(id.as_str()) {
+                Some((parent, sk)) => {
+                    if parent != parent_str {
+                        let mut parent_params: StorageEntity = HashMap::new();
+                        parent_params.insert("id".into(), Value::String(id.as_str().to_string()));
+                        parent_params
+                            .insert("field".into(), Value::String("parent_id".to_string()));
+                        parent_params.insert("value".into(), Value::String(parent_str.to_string()));
+                        self.sql_ops
+                            .execute_operation(&entity, "set_field", parent_params)
+                            .await?;
+                    }
+                    cur_keys.push(sk.clone());
+                }
+                None => cur_keys.push(default_key.clone()),
+            }
+        }
+
+        // Compute the total order key for each child (keep already-ordered keys,
+        // re-mint only violators) and write only the ones that changed.
+        // Idempotent: a parent whose children carry born-correct keys makes
+        // zero writes — so the common org-ingest path (blocks created already
+        // carrying their order key, see `order_keys`) leaves no half-applied
+        // window for a concurrent reader.
+        let ordered_strs: Vec<&str> = ordered_ids.iter().map(|u| u.as_str()).collect();
+        let target = relabel_order(&ordered_strs, &cur_keys)?;
+        for (i, key) in target.iter().enumerate() {
+            if *key != cur_keys[i] {
+                let mut sort_params: StorageEntity = HashMap::new();
+                sort_params.insert(
+                    "id".into(),
+                    Value::String(ordered_ids[i].as_str().to_string()),
+                );
+                sort_params.insert("field".into(), Value::String("sort_key".to_string()));
+                sort_params.insert("value".into(), Value::String(key.clone()));
+                self.sql_ops
+                    .execute_operation(&entity, "set_field", sort_params)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -231,23 +431,25 @@ impl BlockOrdering for SqlBlockOperations {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
 
+    async fn in_tree(&self, id: &EntityUri) -> Result<Option<bool>> {
+        self.cell_registry
+            .live_in_tree(id.as_str())
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
+
     /// Apply a block update intent — the single org→block mutation seam (no
     /// command bus behind it).
     ///
-    /// Currently SQL-first (delegates to the SQL operation provider, which
-    /// partitions edge fields and lifts `POSITION_AFTER_BLOCK_ID_PARAM`). Picks
-    /// `create`/`update` by the row's prior presence so the emitted CDC kind
-    /// matches.
-    ///
-    /// KNOWN GAP: now that the SQL→Loro mirror is gone, a SQL-first update never
-    /// reaches Loro, so the Loro→SQL projection can revert an org content-edit to
-    /// Loro's stale value on a later reconcile. The fix is to route this path
-    /// Loro-first (like `create_in_tree`), but doing so deterministically
-    /// regresses sibling ordering via the org place loop (the
-    /// `inv-live-children` `ref-doc-3` divergence) — convergence and ordering are
-    /// coupled through the place loop in a not-yet-understood way. Routing updates
-    /// Loro-first belongs with the single-owner-order rewrite (tasks #10/#11).
-    async fn update_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+    /// Loro mode: route each changed field through [`set_field`](CrudOperations::set_field)
+    /// (→ Loro via the cell registry; the outbound projector writes the SQL
+    /// row) and the position through [`place`](Self::place). SqlOnly mode:
+    /// write the SQL row directly, picking `create`/`update` by the row's prior
+    /// presence so the emitted CDC event kind matches (the cache subscriber
+    /// distinguishes `Created`/`Updated`). A block is either a create or an
+    /// update within a single org scan, never both, so the cache read is a
+    /// reliable presence test.
+    async fn update_in_tree(&self, mut params: holon_api::StorageEntity) -> Result<()> {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
@@ -255,15 +457,84 @@ impl BlockOrdering for SqlBlockOperations {
             .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
                 "update_in_tree: missing 'id' param".into()
             })?;
-        let op = if self.cache.get_by_id(&id).await?.is_some() {
-            "update"
+        let after = params
+            .remove(crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM)
+            .and_then(|v| v.as_string().map(str::to_string));
+
+        if matches!(self.consolidator(), Consolidator::Upstream) {
+            let parent_id = params
+                .get("parent_id")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            // Content / edge / scalar fields → Loro via set_field. Skip the
+            // primary key, the routing hint (not a field), and parent_id +
+            // position which `place` owns.
+            for (field, value) in params.into_iter() {
+                if &*field == "id"
+                    || &*field == "parent_id"
+                    || &*field == crate::sync::event_bus::ROUTING_DOC_URI_KEY
+                {
+                    continue;
+                }
+                self.set_field(&id, &field, value).await?;
+            }
+            // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+            let block_uri = EntityUri::from_raw(&id);
+            match (parent_id, after) {
+                (Some(parent), Some(after_id)) => {
+                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+                    let parent_uri = EntityUri::from_raw(&parent);
+                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+                    let after_uri = EntityUri::from_raw(&after_id);
+                    self.place(&block_uri, &parent_uri, Some(&after_uri))
+                        .await?;
+                }
+                // No recorded predecessor: set the parent; the org reconciler's
+                // disk-order replay loop finalises first-child ordering.
+                (Some(parent), None) => {
+                    self.set_field(&id, "parent_id", Value::String(parent))
+                        .await?;
+                }
+                (None, _) => {}
+            }
         } else {
-            "create"
-        };
-        let entity = EntityName::new(Block::entity_name());
-        self.sql_ops
-            .execute_operation_with_origin(&entity, op, params, EventOrigin::Org)
-            .await?;
+            let op = if self.cache.get_by_id(&id).await?.is_some() {
+                "update"
+            } else {
+                "create"
+            };
+            // SQL is the order owner: a freshly created block is born carrying
+            // its real order key — minted between its file predecessor and the
+            // next sibling — so the create and its keying are a single write and
+            // the row is never observable at the default `"A0"`. This closes the
+            // create-default-then-rekey window that let a concurrent reader (or
+            // the PBT invariant) see a half-applied sibling order. Updates keep
+            // their key; position changes route through `place`.
+            if op == "create"
+                && let Some(parent) = params
+                    .get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            {
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+                let parent_uri = EntityUri::from_raw(&parent);
+                let after_uri = after.as_deref().map(EntityUri::from_raw);
+                let key = self
+                    .new_child_anchor(&parent_uri, after_uri.as_ref())
+                    .await?;
+                params.insert("sort_key".into(), Value::String(key));
+            }
+            if let Some(after_id) = after {
+                params.insert(
+                    crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                    Value::String(after_id),
+                );
+            }
+            let entity = EntityName::new(Block::entity_name());
+            self.sql_ops
+                .execute_operation_with_origin(&entity, op, params, EventOrigin::Org)
+                .await?;
+        }
         Ok(())
     }
 
@@ -279,12 +550,13 @@ impl BlockOrdering for SqlBlockOperations {
     /// SqlOnly mode: the registry returns `false`; delete straight from SQL via
     /// the operation provider, preserving the `ROUTING_DOC_URI_KEY` hint so
     /// `prepare_delete` skips the recursive document walk.
-    async fn delete_in_tree(&self, params: HashMap<String, Value>) -> Result<()> {
+    async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> Result<()> {
         let id = params.get("id").and_then(|v| v.as_string()).ok_or_else(
             || -> Box<dyn std::error::Error + Send + Sync> {
                 "delete_in_tree: missing 'id' param".into()
             },
         )?;
+        // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
         let uri = EntityUri::from_raw(id);
         if self
             .cell_registry
@@ -295,6 +567,20 @@ impl BlockOrdering for SqlBlockOperations {
             // Loro-backed: the outbound projector writes the SQL DELETE.
             return Ok(());
         }
+        // Authority-first delete guard (Task 3): the SQL delete fallback is
+        // only reachable for unseeded blocks and SqlOnly mode. In Loro mode,
+        // log a warning so we can observe how often the transitional path fires.
+        if self.cell_registry.has_loro_backing() {
+            tracing::warn!(
+                block_id = %id,
+                "SQL delete fallback in Loro mode — block was unseeded. \
+                 Transitional; re-seed adoption eliminates unseeded blocks."
+            );
+        }
+        // ALLOW(sole_block_writer): SQL delete fallback for unseeded blocks.
+        // Transitional — after sole-writer, all blocks originate in Loro, so
+        // this fires only for pre-existing unseeded vaults the re-seed
+        // adoption pass eliminates. NOT dead code: re-seed can fail mid-adoption.
         let entity = EntityName::new(Block::entity_name());
         self.sql_ops
             .execute_operation_with_origin(&entity, "delete", params, EventOrigin::Org)
@@ -302,15 +588,17 @@ impl BlockOrdering for SqlBlockOperations {
         Ok(())
     }
 
-    fn is_loro_backed(&self) -> bool {
-        self.cell_registry.is_loro_backed()
+    fn has_upstream_consolidator(&self) -> bool {
+        self.caps.profile().has_downstream_projection()
+    }
+
+    fn consolidator(&self) -> Consolidator {
+        self.caps.consolidator()
     }
 
     /// Loro mode → read each block's live fractional index from the Loro tree
-    /// and write it to SQL `sort_key` via the standard `set_field` path,
-    /// mirroring the boot-time seed writeback
-    /// (`loro_module::seed_loro_from_persistent_store`). This closes the
-    /// projection-totality gap: a block created but never repositioned emits no
+    /// and write it to SQL `sort_key` via the standard `set_field` path. This
+    /// closes the projection-totality gap: a block created but never repositioned emits no
     /// Loro mov delta, so the outbound projector never writes its fi and it
     /// keeps the default `"A0"`. The write goes through
     /// `SqlOperationProvider::set_field` (→ `prepare_update`) rather than a raw
@@ -320,21 +608,23 @@ impl BlockOrdering for SqlBlockOperations {
     /// (the `props_check` invariant's "Value::Object serialization bug").
     /// SqlOnly mode → no-op (SQL owns `sort_key`; `live_sort_key` returns
     /// `None`).
-    async fn project_sort_keys(&self, ids: &[&str]) -> Result<()> {
+    async fn project_sort_keys(&self, ids: &[EntityUri]) -> Result<()> {
         let entity = EntityName::new(Block::entity_name());
         for id in ids {
-            let fi = match self.cell_registry.live_sort_key(id).await.map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> {
+            let fi = match self
+                .cell_registry
+                .live_sort_key(id.as_str())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("project_sort_keys: live_sort_key({id}): {e:#}").into()
-                },
-            )? {
+                })? {
                 Some(fi) => fi,
                 None => return Ok(()), // SqlOnly — SQL already owns sort_key
             };
             let mut params: StorageEntity = HashMap::new();
-            params.insert("id".to_string(), Value::String(id.to_string()));
-            params.insert("field".to_string(), Value::String("sort_key".to_string()));
-            params.insert("value".to_string(), Value::String(fi));
+            params.insert("id".into(), Value::String(id.as_str().to_string()));
+            params.insert("field".into(), Value::String("sort_key".to_string()));
+            params.insert("value".into(), Value::String(fi));
             self.sql_ops
                 .execute_operation(&entity, "set_field", params)
                 .await?;
@@ -360,22 +650,30 @@ impl BlockOrdering for SqlBlockOperations {
     /// between writes — values are computed up-front so the chord-op
     /// projection race documented in MEMORY can't bite). The new block's
     /// key is returned for the caller to persist on create.
-    async fn new_child_anchor(&self, parent_id: &str, after_id: Option<&str>) -> Result<String> {
-        let blocks = self.cache.get_all().await?;
-        let mut siblings: Vec<&Block> = blocks
-            .iter()
-            .filter(|b| b.parent_id.as_str() == parent_id)
-            .collect();
-        // Match `OrgRenderer::render_entity_tree` ordering: `(sort_key, id)`
-        // lexicographic. The new block's "after" slot is interpreted in
-        // this same order so the on-disk render matches the intent.
-        siblings.sort_by(|a, b| {
-            a.sort_key
-                .cmp(&b.sort_key)
-                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-        });
+    async fn new_child_anchor(
+        &self,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+    ) -> Result<String> {
+        let parent_id = parent_id.as_str();
+        let after_id: Option<&str> = after_id.map(|u| u.as_str());
+        // P1 isolation: only the SqlOnly (no-Loro) order owner mints keys here.
+        // In Loro mode the fractional index is authoritative — `apply_create`
+        // sets it from `position_after_block_id` and this return value is
+        // discarded — so short-circuit BEFORE the `gen_key_between` generator
+        // and its tied-key rebalance, which would otherwise emit spurious
+        // sibling `set_field("sort_key")` writes against the Loro-projected SQL
+        // view. The placeholder routes through `default_sort_key()` (the single
+        // default owner), never a stray literal.
+        if matches!(self.consolidator(), Consolidator::Upstream) {
+            return Ok(default_sort_key());
+        }
+        // `(id, sort_key)` pairs already in `(sort_key, id)` order — matches
+        // `OrgRenderer::render_entity_tree` so the new block's "after" slot is
+        // interpreted in the same order the on-disk render uses.
+        let siblings = self.sibling_keys(parent_id).await?;
 
-        let has_ties = siblings.windows(2).any(|w| w[0].sort_key == w[1].sort_key);
+        let has_ties = siblings.windows(2).any(|w| w[0].1 == w[1].1);
 
         if has_ties {
             // Insertion index: where the new block lands in the rebalanced
@@ -383,13 +681,11 @@ impl BlockOrdering for SqlBlockOperations {
             let insert_idx = match after_id {
                 None => 0usize,
                 Some(after) => {
-                    siblings
-                        .iter()
-                        .position(|b| b.id.as_str() == after)
-                        .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                    siblings.iter().position(|(id, _)| id == after).ok_or_else(
+                        || -> Box<dyn std::error::Error + Send + Sync> {
                             format!("new_child_anchor: after block {after} missing").into()
-                        })?
-                        + 1
+                        },
+                    )? + 1
                 }
             };
             let new_keys = gen_n_keys(siblings.len() + 1).map_err(
@@ -397,22 +693,19 @@ impl BlockOrdering for SqlBlockOperations {
             )?;
             let new_block_key = new_keys[insert_idx].clone();
             let entity = EntityName::new(Block::entity_name());
-            for (i, sibling) in siblings.iter().enumerate() {
+            for (i, (sib_id, sib_key)) in siblings.iter().enumerate() {
                 let target_key = if i < insert_idx {
                     &new_keys[i]
                 } else {
                     &new_keys[i + 1]
                 };
-                if &sibling.sort_key == target_key {
+                if sib_key == target_key {
                     continue;
                 }
                 let mut params: StorageEntity = HashMap::new();
-                params.insert(
-                    "id".to_string(),
-                    Value::String(sibling.id.as_str().to_string()),
-                );
-                params.insert("field".to_string(), Value::String("sort_key".to_string()));
-                params.insert("value".to_string(), Value::String(target_key.clone()));
+                params.insert("id".into(), Value::String(sib_id.clone()));
+                params.insert("field".into(), Value::String("sort_key".to_string()));
+                params.insert("value".into(), Value::String(target_key.clone()));
                 self.sql_ops
                     .execute_operation(&entity, "set_field", params)
                     .await?;
@@ -422,84 +715,83 @@ impl BlockOrdering for SqlBlockOperations {
 
         let (prev_key, next_key): (Option<String>, Option<String>) = match after_id {
             None => {
-                let first = siblings.first().map(|b| b.sort_key.clone());
+                let first = siblings.first().map(|(_, sk)| sk.clone());
                 (None, first)
             }
             Some(after) => {
-                let after_block = siblings
+                let after_key = siblings
                     .iter()
-                    .find(|b| b.id.as_str() == after)
+                    .find(|(id, _)| id == after)
+                    .map(|(_, sk)| sk.clone())
                     .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
                         format!("new_child_anchor: after block {after} missing").into()
                     })?;
                 let next = siblings
                     .iter()
-                    .find(|b| b.sort_key > after_block.sort_key)
-                    .map(|b| b.sort_key.clone());
-                (Some(after_block.sort_key.clone()), next)
+                    .find(|(_, sk)| *sk > after_key)
+                    .map(|(_, sk)| sk.clone());
+                (Some(after_key), next)
             }
         };
         gen_key_between(prev_key.as_deref(), next_key.as_deref())
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
 
-    async fn prev_sibling(&self, id: &str) -> Result<Option<String>> {
-        let blocks = self.cache.get_all().await?;
-        let block = blocks.iter().find(|b| b.id.as_str() == id).ok_or_else(
-            || -> Box<dyn std::error::Error + Send + Sync> {
-                format!("prev_sibling: block {id} missing").into()
-            },
-        )?;
+    async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
+        let id = id.as_str();
+        let Some(block) = self.cache.get_by_id(id).await? else {
+            return Err(format!("prev_sibling: block {id} missing").into());
+        };
         if !block.parent_id.is_block() {
             return Ok(None);
         }
-        let parent_id = block.parent_id.as_str();
-        Ok(blocks
-            .iter()
-            .filter(|b| b.parent_id.as_str() == parent_id)
-            .filter(|b| b.sort_key < block.sort_key)
-            .max_by(|a, b| a.sort_key.cmp(&b.sort_key))
-            .map(|b| b.id.as_str().to_string()))
+        let siblings = self.sibling_keys(block.parent_id.as_str()).await?;
+        let pos = siblings.iter().position(|(sid, _)| sid == id);
+        Ok(pos
+            .and_then(|i| i.checked_sub(1))
+            .and_then(|i| siblings.get(i))
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            .map(|(sid, _)| EntityUri::from_raw(sid)))
     }
 
-    async fn next_sibling(&self, id: &str) -> Result<Option<String>> {
-        let blocks = self.cache.get_all().await?;
-        let block = blocks.iter().find(|b| b.id.as_str() == id).ok_or_else(
-            || -> Box<dyn std::error::Error + Send + Sync> {
-                format!("next_sibling: block {id} missing").into()
-            },
-        )?;
+    async fn next_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
+        let id = id.as_str();
+        let Some(block) = self.cache.get_by_id(id).await? else {
+            return Err(format!("next_sibling: block {id} missing").into());
+        };
         if !block.parent_id.is_block() {
             return Ok(None);
         }
-        let parent_id = block.parent_id.as_str();
-        Ok(blocks
-            .iter()
-            .filter(|b| b.parent_id.as_str() == parent_id)
-            .filter(|b| b.sort_key > block.sort_key)
-            .min_by(|a, b| a.sort_key.cmp(&b.sort_key))
-            .map(|b| b.id.as_str().to_string()))
+        let siblings = self.sibling_keys(block.parent_id.as_str()).await?;
+        let pos = siblings.iter().position(|(sid, _)| sid == id);
+        Ok(pos
+            .and_then(|i| siblings.get(i + 1))
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            .map(|(sid, _)| EntityUri::from_raw(sid)))
     }
 
-    async fn first_child(&self, parent_id: &str) -> Result<Option<String>> {
-        let blocks = self.cache.get_all().await?;
-        Ok(blocks
-            .iter()
-            .filter(|b| b.parent_id.as_str() == parent_id)
-            .min_by(|a, b| a.sort_key.cmp(&b.sort_key))
-            .map(|b| b.id.as_str().to_string()))
+    async fn first_child(&self, parent_id: &EntityUri) -> Result<Option<EntityUri>> {
+        Ok(self
+            .sibling_keys(parent_id.as_str())
+            .await?
+            .into_iter()
+            .next()
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            .map(|(id, _)| EntityUri::from_raw(&id)))
     }
 
-    async fn last_child(&self, parent_id: &str) -> Result<Option<String>> {
-        let blocks = self.cache.get_all().await?;
-        Ok(blocks
-            .iter()
-            .filter(|b| b.parent_id.as_str() == parent_id)
-            .max_by(|a, b| a.sort_key.cmp(&b.sort_key))
-            .map(|b| b.id.as_str().to_string()))
+    async fn last_child(&self, parent_id: &EntityUri) -> Result<Option<EntityUri>> {
+        Ok(self
+            .sibling_keys(parent_id.as_str())
+            .await?
+            .into_iter()
+            .last()
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            .map(|(id, _)| EntityUri::from_raw(&id)))
     }
 
-    async fn children(&self, parent_id: &str) -> Result<Vec<String>> {
+    async fn children(&self, parent_id: &EntityUri) -> Result<Vec<EntityUri>> {
+        let parent_id = parent_id.as_str();
         // Loro mode: the Loro tree is the order authority. Read it directly so
         // the org-scan place loop sees `create_in_tree` blocks immediately —
         // the outbound projector that fills the SQL cache is not running during
@@ -511,17 +803,15 @@ impl BlockOrdering for SqlBlockOperations {
                 format!("children({parent_id}): {e:#}").into()
             },
         )? {
-            return Ok(kids);
+            // ALLOW(entity_uri_from_raw): child id String from cell_registry.live_children() (Loro output)
+            return Ok(kids.iter().map(|k| EntityUri::from_raw(k)).collect());
         }
-        let blocks = self.cache.get_all().await?;
-        let mut kids: Vec<&Block> = blocks
-            .iter()
-            .filter(|b| b.parent_id.as_str() == parent_id)
-            .collect();
-        kids.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
-        Ok(kids
+        Ok(self
+            .sibling_keys(parent_id)
+            .await?
             .into_iter()
-            .map(|b| b.id.as_str().to_string())
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            .map(|(id, _)| EntityUri::from_raw(&id))
             .collect())
     }
 }
@@ -539,7 +829,17 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // encoding doesn't round-trip cleanly today); on `Ok(false)` we
         // fall through to the legacy SQL `set_field` path so existing
         // behaviour is preserved for those fields.
-        let uri = EntityUri::block(id);
+        // `id` arrives in mixed forms: already-schemed (`block:foo`) from the
+        // org update path (`build_block_params` → `block.id.to_string()`), or
+        // bare (`foo`) from some `LoroBlockOperations` callers. `from_raw`
+        // normalizes both (parses a schemed id as-is, treats a bare id as a
+        // block) — `EntityUri::block(id)` double-prefixed a schemed id to
+        // `block:block:foo`, which `write_field`/`update_block_fields` then
+        // failed to resolve ("Block not found"), aborting the org scan's update
+        // pass *before* the place loop ran (the BulkExternalAdd sibling-order
+        // scramble, `inv-live-children-match-ref`).
+        // ALLOW(entity_uri_from_raw): set_field id &str from CrudOperations API surface
+        let uri = EntityUri::from_raw(id);
         let routed = self
             .cell_registry
             .write_field(&uri, field, value.clone())
@@ -555,16 +855,16 @@ impl CrudOperations<Block> for SqlBlockOperations {
         }
 
         let mut params: StorageEntity = HashMap::new();
-        params.insert("id".to_string(), Value::String(id.to_string()));
-        params.insert("field".to_string(), Value::String(field.to_string()));
-        params.insert("value".to_string(), value);
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("field".into(), Value::String(field.to_string()));
+        params.insert("value".into(), value);
         let entity = EntityName::new(Block::entity_name());
         self.sql_ops
             .execute_operation(&entity, "set_field", params)
             .await
     }
 
-    async fn create(&self, fields: HashMap<String, Value>) -> Result<(String, OperationResult)> {
+    async fn create(&self, fields: holon_api::StorageEntity) -> Result<(String, OperationResult)> {
         let entity = EntityName::new(Block::entity_name());
         let id = fields
             .get("id")
@@ -580,7 +880,7 @@ impl CrudOperations<Block> for SqlBlockOperations {
 
     async fn delete(&self, id: &str) -> Result<OperationResult> {
         let mut params: StorageEntity = HashMap::new();
-        params.insert("id".to_string(), Value::String(id.to_string()));
+        params.insert("id".into(), Value::String(id.to_string()));
         let entity = EntityName::new(Block::entity_name());
         self.sql_ops
             .execute_operation(&entity, "delete", params)
@@ -754,8 +1054,11 @@ mod tests {
 
         // Use a real block as parent so the is_block() guard in prev_sibling
         // doesn't short-circuit — the idempotency check relies on prev_sibling.
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let parent = EntityUri::from_raw("block:test-parent");
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let a_id = EntityUri::from_raw("block:test-a");
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
         let b_id = EntityUri::from_raw("block:test-b");
 
         // IDs stored in block_raw use full URI form (e.g. "block:test-a") so
@@ -788,14 +1091,14 @@ mod tests {
         // First placement: B is already after A (sort_key "a1" > "a0").
         // The idempotency guard detects this via prev_sibling and skips the write.
         // Pass full URI strings — place() compares against EntityUri::as_str().
-        ops.place(&b_id, parent.as_str(), Some(a_id.as_str()))
+        ops.place(&b_id, &parent, Some(&a_id))
             .await
             .expect("place B after A (first call)");
 
         let sort_key_after_first = read_sort_key(&handle, b_id.as_str()).await;
 
         // Second call — must be a no-op (same guard fires again).
-        ops.place(&b_id, parent.as_str(), Some(a_id.as_str()))
+        ops.place(&b_id, &parent, Some(&a_id))
             .await
             .expect("place B after A (second call)");
 

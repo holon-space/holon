@@ -12,6 +12,11 @@
 
 #![allow(dead_code)]
 
+pub mod random_pbt;
+pub mod random_pbt_sim;
+pub mod sim_windowed_replay;
+pub mod windowed_replay;
+
 use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +34,20 @@ use holon_integration_tests::{GeometryDriver, XcapBackend};
 /// The `on_ready` callback the SUT runner invokes once StartApp completes.
 pub type OnReady = Box<dyn FnOnce(&PbtReadyContext) -> Option<PbtReadyResult> + Send>;
 
+/// Extract the panic message from a caught payload (`panic!`/`format!` →
+/// `String`; `expect`/`&str` literals → `&str`).
+pub fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "<panic with non-string payload>".to_string()
+    }
+}
+
 struct GpuiLaunchContext {
+    engine: Arc<holon::api::BackendEngine>,
     session: Arc<holon_frontend::FrontendSession>,
     reactive_engine: Arc<holon_frontend::reactive::ReactiveEngine>,
     runtime_handle: tokio::runtime::Handle,
@@ -86,6 +104,7 @@ where
         let on_ready: OnReady = Box::new(move |pbt_ctx: &PbtReadyContext| {
             ctx_tx
                 .send(GpuiLaunchContext {
+                    engine: pbt_ctx.engine.clone(),
                     session: pbt_ctx.session.clone(),
                     reactive_engine: pbt_ctx.reactive_engine.clone(),
                     runtime_handle: pbt_ctx.runtime_handle.clone(),
@@ -141,7 +160,7 @@ where
 
     try_start_embedded_mcp(
         &launch_ctx.runtime_handle,
-        &launch_ctx.session,
+        &launch_ctx.engine,
         &launch_ctx.reactive_engine,
         launch_ctx.debug_services.clone(),
         "PBT_MCP_PORT",
@@ -182,6 +201,9 @@ where
                 cx.background_executor()
                     .timer(Duration::from_millis(200))
                     .await;
+                // NOTE: no unconditional frame pump here — see the matching
+                // comment in `windowed_replay::run_window` (pump frames break
+                // per-keystroke pacing and drop typed characters).
                 if quit_rx.try_recv().is_ok() {
                     holon_integration_tests::test_tracing::flush_chrome_trace();
                     if pbt_failed_for_quit.load(std::sync::atomic::Ordering::SeqCst) {

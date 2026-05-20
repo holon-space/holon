@@ -15,8 +15,117 @@ use holon_core::storage::types::StorageEntity;
 pub const ENTITY_NAME: &str = "navigation";
 pub const SHORT_NAME: &str = "nav";
 
-// Re-export EditorCursorOperations from holon-core (trait + macro-generated helpers)
-pub use holon_core::EditorCursorOperations;
+/// The `region` operation parameter shared by every navigation op.
+fn region_param() -> OperationParam {
+    OperationParam {
+        name: "region".to_string(),
+        type_hint: TypeHint::OneOf {
+            values: Region::ALL.iter().map(|r| Value::from(*r)).collect(),
+        },
+        description: "UI region to navigate".to_string(),
+    }
+}
+
+/// The navigation entity's full operation descriptor set: the manual focus /
+/// pin / history ops plus the macro-generated editor-cursor ops. Shared by
+/// every `NavigationProvider` implementation (Turso-backed and in-memory) so
+/// the render layer builds identical click intents regardless of backend.
+pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
+    let manual_ops = vec![
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: "focus".to_string(),
+            display_name: "Focus".to_string(),
+            description: "Navigate to focus on a specific block".to_string(),
+            required_params: vec![
+                region_param(),
+                OperationParam {
+                    name: "block_id".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Block ID to focus on".to_string(),
+                },
+            ],
+            affected_fields: vec!["block_id".to_string()],
+            param_mappings: vec![],
+            ..Default::default()
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: "focus_pin".to_string(),
+            display_name: "Pin Block".to_string(),
+            description: "Pin a block to a region (move-to-top dedup; right sidebar uses this)"
+                .to_string(),
+            required_params: vec![
+                region_param(),
+                OperationParam {
+                    name: "block_id".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Block ID to pin".to_string(),
+                },
+            ],
+            affected_fields: vec!["block_id".to_string()],
+            param_mappings: vec![],
+            ..Default::default()
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: "close".to_string(),
+            display_name: "Close Pin".to_string(),
+            description: "Soft-close a navigation_history row by id (sidebar X button)".to_string(),
+            required_params: vec![OperationParam {
+                name: "history_id".to_string(),
+                type_hint: TypeHint::Number,
+                description: "navigation_history.id to close".to_string(),
+            }],
+            affected_fields: vec!["closed_at".to_string()],
+            param_mappings: vec![],
+            ..Default::default()
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: "go_back".to_string(),
+            display_name: "Go Back".to_string(),
+            description: "Navigate to previous view in history".to_string(),
+            required_params: vec![region_param()],
+            affected_fields: vec!["block_id".to_string()],
+            param_mappings: vec![],
+            ..Default::default()
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: "go_forward".to_string(),
+            display_name: "Go Forward".to_string(),
+            description: "Navigate to next view in history".to_string(),
+            required_params: vec![region_param()],
+            affected_fields: vec!["block_id".to_string()],
+            param_mappings: vec![],
+            ..Default::default()
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: "go_home".to_string(),
+            display_name: "Go Home".to_string(),
+            description: "Navigate to home view (no block focused)".to_string(),
+            required_params: vec![region_param()],
+            affected_fields: vec!["block_id".to_string()],
+            param_mappings: vec![],
+            ..Default::default()
+        },
+    ];
+    manual_ops
+}
 
 /// Navigation provider for managing region focus state
 pub struct NavigationProvider {
@@ -55,6 +164,32 @@ impl NavigationProvider {
             "[NavigationProvider] focus: current history_id = {}",
             current_history_id
         );
+
+        // Step 1b: Idempotent re-focus. If the cursor's current row already
+        // targets `block_id`, focusing it again must be a no-op — inserting a
+        // fresh row would pile up duplicate back-stack entries on repeated
+        // clicks AND desync the AUTOINCREMENT history_id that `close`/unpin
+        // address by id (a later same-id close then hits the wrong row, leaking
+        // a stale open row into `focus_roots`). Mirrors the reference model's
+        // `current_focus(region) == block_id` skip in `navigate_focus.rs`.
+        let current_block = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_history_block.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to read current focus block: {}", e))?
+            .first()
+            .and_then(|row| row.get("block_id"))
+            .and_then(|v| v.as_string_owned());
+        if current_block.as_deref() == block_id {
+            tracing::debug!(
+                "[NavigationProvider] focus: idempotent re-focus on {:?} — no-op",
+                block_id
+            );
+            return Ok(OperationResult::irreversible(vec![]));
+        }
 
         // Step 2: Delete any forward history (entries after current cursor)
         tracing::debug!("[NavigationProvider] focus: executing DELETE from navigation_history");
@@ -122,6 +257,34 @@ impl NavigationProvider {
             )
             .await
             .map_err(|e| format!("Failed to update navigation cursor: {}", e))?;
+
+        // Step 6: Retention cap — keep only the 100 most recent closed rows
+        // per region so unbounded navigation doesn't grow the table (and the
+        // CDC/matview state derived from it) forever. Back/forward beyond the
+        // window is intentionally forgotten.
+        let mut prune_params = HashMap::new();
+        prune_params.insert("region".to_string(), Value::from(region));
+        let threshold = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_prune_threshold.sql"),
+                prune_params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to read history prune threshold: {}", e))?
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64());
+        if let Some(threshold_id) = threshold {
+            prune_params.insert("threshold_id".to_string(), Value::Integer(threshold_id));
+            self.db_handle
+                .query(
+                    include_str!("../../sql/navigation/prune_closed_history.sql"),
+                    prune_params,
+                )
+                .await
+                .map_err(|e| format!("Failed to prune closed history rows: {}", e))?;
+        }
 
         tracing::debug!("[NavigationProvider] focus: completed successfully");
         Ok(OperationResult::irreversible(vec![]))
@@ -325,152 +488,12 @@ impl NavigationProvider {
         params.insert("current_id".to_string(), Value::Integer(current_history_id));
         Ok(current_history_id)
     }
-
-    fn region_param() -> OperationParam {
-        OperationParam {
-            name: "region".to_string(),
-            type_hint: TypeHint::OneOf {
-                values: Region::ALL.iter().map(|r| Value::from(*r)).collect(),
-            },
-            description: "UI region to navigate".to_string(),
-        }
-    }
-}
-
-#[async_trait]
-impl EditorCursorOperations for NavigationProvider {
-    async fn editor_focus(
-        &self,
-        region: &str,
-        block_id: &str,
-        cursor_offset: i64,
-    ) -> Result<OperationResult> {
-        let mut params = HashMap::new();
-        params.insert("region".to_string(), Value::String(region.to_string()));
-        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
-        params.insert("cursor_offset".to_string(), Value::Integer(cursor_offset));
-
-        self.db_handle
-            .query(
-                "INSERT OR REPLACE INTO editor_cursor (region, block_id, cursor_offset) \
-                 VALUES ($region, $block_id, $cursor_offset)",
-                params,
-            )
-            .await
-            .map_err(|e| format!("Failed to update editor cursor: {e}"))?;
-
-        Ok(OperationResult::irreversible(vec![]))
-    }
 }
 
 #[async_trait]
 impl OperationProvider for NavigationProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        let manual_ops = vec![
-            OperationDescriptor {
-                entity_name: ENTITY_NAME.into(),
-                entity_short_name: SHORT_NAME.to_string(),
-                id_column: "region".to_string(),
-                name: "focus".to_string(),
-                display_name: "Focus".to_string(),
-                description: "Navigate to focus on a specific block".to_string(),
-                required_params: vec![
-                    Self::region_param(),
-                    OperationParam {
-                        name: "block_id".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "Block ID to focus on".to_string(),
-                    },
-                ],
-                affected_fields: vec!["block_id".to_string()],
-                param_mappings: vec![],
-                ..Default::default()
-            },
-            OperationDescriptor {
-                entity_name: ENTITY_NAME.into(),
-                entity_short_name: SHORT_NAME.to_string(),
-                id_column: "region".to_string(),
-                name: "focus_pin".to_string(),
-                display_name: "Pin Block".to_string(),
-                description: "Pin a block to a region (move-to-top dedup; right sidebar uses this)"
-                    .to_string(),
-                required_params: vec![
-                    Self::region_param(),
-                    OperationParam {
-                        name: "block_id".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "Block ID to pin".to_string(),
-                    },
-                ],
-                affected_fields: vec!["block_id".to_string()],
-                param_mappings: vec![],
-                ..Default::default()
-            },
-            OperationDescriptor {
-                entity_name: ENTITY_NAME.into(),
-                entity_short_name: SHORT_NAME.to_string(),
-                id_column: "region".to_string(),
-                name: "close".to_string(),
-                display_name: "Close Pin".to_string(),
-                description: "Soft-close a navigation_history row by id (sidebar X button)"
-                    .to_string(),
-                required_params: vec![OperationParam {
-                    name: "history_id".to_string(),
-                    type_hint: TypeHint::Number,
-                    description: "navigation_history.id to close".to_string(),
-                }],
-                affected_fields: vec!["closed_at".to_string()],
-                param_mappings: vec![],
-                ..Default::default()
-            },
-            OperationDescriptor {
-                entity_name: ENTITY_NAME.into(),
-                entity_short_name: SHORT_NAME.to_string(),
-                id_column: "region".to_string(),
-                name: "go_back".to_string(),
-                display_name: "Go Back".to_string(),
-                description: "Navigate to previous view in history".to_string(),
-                required_params: vec![Self::region_param()],
-                affected_fields: vec!["block_id".to_string()],
-                param_mappings: vec![],
-                ..Default::default()
-            },
-            OperationDescriptor {
-                entity_name: ENTITY_NAME.into(),
-                entity_short_name: SHORT_NAME.to_string(),
-                id_column: "region".to_string(),
-                name: "go_forward".to_string(),
-                display_name: "Go Forward".to_string(),
-                description: "Navigate to next view in history".to_string(),
-                required_params: vec![Self::region_param()],
-                affected_fields: vec!["block_id".to_string()],
-                param_mappings: vec![],
-                ..Default::default()
-            },
-            OperationDescriptor {
-                entity_name: ENTITY_NAME.into(),
-                entity_short_name: SHORT_NAME.to_string(),
-                id_column: "region".to_string(),
-                name: "go_home".to_string(),
-                display_name: "Go Home".to_string(),
-                description: "Navigate to home view (no block focused)".to_string(),
-                required_params: vec![Self::region_param()],
-                affected_fields: vec!["block_id".to_string()],
-                param_mappings: vec![],
-                ..Default::default()
-            },
-        ];
-        // Add macro-generated editor cursor operations
-        let mut ops = manual_ops;
-        ops.extend(
-            holon_core::__operations_editor_cursor_operations::editor_cursor_operations(
-                ENTITY_NAME,
-                SHORT_NAME,
-                ENTITY_NAME,
-                "region",
-            ),
-        );
-        ops
+        navigation_operation_descriptors()
     }
 
     async fn execute_operation(
@@ -524,13 +547,10 @@ impl OperationProvider for NavigationProvider {
             "go_back" => self.go_back(region).await,
             "go_forward" => self.go_forward(region).await,
             "go_home" => self.go_home(region).await,
-            _ => {
-                // Try macro-generated editor cursor operations dispatch
-                holon_core::__operations_editor_cursor_operations::dispatch_operation(
-                    self, op_name, &params,
-                )
-                .await
-            }
+            other => Err(format!(
+                "NavigationProvider: unknown operation '{other}' for entity '{ENTITY_NAME}'"
+            )
+            .into()),
         }
     }
 }

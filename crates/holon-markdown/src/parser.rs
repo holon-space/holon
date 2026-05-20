@@ -39,7 +39,6 @@ use holon_api::types::{ContentType, SourceLanguage, Tags, TaskState};
 use holon_api::EntityUri;
 use markdown::mdast::Node;
 use markdown::{Constructs, ParseOptions};
-use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -251,8 +250,9 @@ pub fn parse_markdown_file(
         parent_stack.push((depth, EntityUri::block(&id)));
     }
 
-    assign_per_parent_sort_keys(&mut blocks)?;
-
+    // Sibling order is conveyed positionally (document order); the order
+    // owner mints `sort_key` on create via the sync controller's place loop.
+    // The parser must NOT mint keys — see `holon-org-format` parser.
     Ok(ParseResult {
         document,
         blocks,
@@ -474,25 +474,6 @@ fn apply_frontmatter_to_document(doc: &mut Block, fm: &Frontmatter) {
         let json = serde_json::to_string(&fm.extra).expect("YAML extras serialize to JSON");
         doc.set_property("frontmatter_extra", holon_api::Value::String(json));
     }
-}
-
-fn assign_per_parent_sort_keys(blocks: &mut [Block]) -> Result<()> {
-    use holon_core::fractional_index::gen_n_keys;
-
-    let mut by_parent: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, block) in blocks.iter().enumerate() {
-        by_parent
-            .entry(block.parent_id.as_str().to_string())
-            .or_default()
-            .push(i);
-    }
-    for (_parent, indices) in by_parent {
-        let keys = gen_n_keys(indices.len())?;
-        for (idx, key) in indices.iter().zip(keys) {
-            blocks[*idx].sort_key = key;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

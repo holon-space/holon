@@ -84,7 +84,7 @@ npm run test:coverage
 
 ## Browser Development Mode
 
-The application also supports running in browser mode for rapid development. See [README_BROWSER_MODE.md](../README_BROWSER_MODE.md) for details.
+The application also supports running in browser mode for rapid development. See [README_BROWSER_MODE.md](../Explanation/README_BROWSER_MODE.md) for details.
 
 ## Mocking Tauri Commands
 

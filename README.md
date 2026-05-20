@@ -44,14 +44,15 @@ Operations are fire-and-forget. Effects are observed through reactive CDC stream
 
 Both owned data (Loro CRDT) and third-party data flow into the same Turso cache. The UI queries this single unified surface using PRQL, GQL, or raw SQL. Rendering is specified separately in Rhai-based render expressions.
 
-For the full architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the full architecture, see [docs/Architecture.md](docs/Architecture.md).
 
 ## Crate Structure
 
 ```
 crates/
 ├── holon/                    # Main orchestration: Turso cache, CDC, query engine
-├── holon-api/                # Shared types, operations, change descriptors
+├── holon-api/                # Shared types, operations, change descriptors, session capability traits
+├── holon-app/                # Wiring crate: DI assembly naming concrete backends
 ├── holon-core/               # Core traits: DataSource, CrudOperations, BlockOperations
 ├── holon-engine/             # Standalone Petri-net engine CLI (YAML nets, WSJF ranking)
 ├── holon-frontend/           # Platform-agnostic ViewModel layer (MVVM)
@@ -145,12 +146,12 @@ cargo run -p holon-engine -- --help
 
 | Document | Contents |
 |----------|----------|
-| [VISION.md](VISION.md) | Technical vision & phased roadmap |
-| [VISION_LONG_TERM.md](VISION_LONG_TERM.md) | Philosophical foundation: Integral Theory, flow psychology, the Holon promise |
-| [VISION_AI.md](VISION_AI.md) | Three AI roles (Watcher, Integrator, Guide), trust ladder, privacy model |
-| [VISION_PETRI_NET.md](VISION_PETRI_NET.md) | Petri-Net primitives, Digital Twins, WSJF sorting |
-| [VISION_UI.md](VISION_UI.md) | UI/UX design system: three modes (Capture, Orient, Flow), color palette, micro-interactions |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Full technical architecture: traits, data flow, CDC, entity types |
+| [docs/Vision.md](docs/Vision.md) | Technical vision & phased roadmap |
+| [docs/Vision/LongTerm.md](docs/Vision/LongTerm.md) | Philosophical foundation: Integral Theory, flow psychology, the Holon promise |
+| [docs/Vision/AI.md](docs/Vision/AI.md) | Three AI roles (Watcher, Integrator, Guide), trust ladder, privacy model |
+| [docs/Vision/PetriNet.md](docs/Vision/PetriNet.md) | Petri-Net primitives, Digital Twins, WSJF sorting |
+| [docs/Vision/UI.md](docs/Vision/UI.md) | UI/UX design system: three modes (Capture, Orient, Flow), color palette, micro-interactions |
+| [docs/Architecture.md](docs/Architecture.md) | Full technical architecture: traits, data flow, CDC, entity types (details in [docs/Architecture/](docs/Architecture/)) |
 
 ## Core Dependencies
 

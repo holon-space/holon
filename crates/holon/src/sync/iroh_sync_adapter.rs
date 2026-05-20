@@ -41,9 +41,33 @@ mod adapter {
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
     use tokio::time::sleep;
-    use tracing::{debug, info};
+    use tracing::{debug, info, warn};
 
     const MAX_MSG_SIZE: usize = 10 * 1024 * 1024;
+
+    /// Export the updates the peer is missing (relative to `peer_vv`). When
+    /// local history has been compacted past the peer's version (shallow
+    /// snapshot → `ExportMode::updates` fails), fall back to a full snapshot
+    /// so a stale peer still converges. `label` tags the log line.
+    fn export_delta_or_full_snapshot(
+        doc: &LoroDoc,
+        peer_vv: &loro::VersionVector,
+        label: &str,
+    ) -> Result<Vec<u8>> {
+        match doc.export(ExportMode::updates(peer_vv)) {
+            Ok(delta) => Ok(delta),
+            Err(e) => {
+                warn!(
+                    "[{label}] delta export failed ({e}) — peer is behind compacted \
+                     history; sending full snapshot instead"
+                );
+                // ALLOW(fallback): disclosed via the warn! above — convergence
+                // for peers behind compacted history is the designed behavior.
+                doc.export(ExportMode::Snapshot)
+                    .with_context(|| format!("[{label}] full-snapshot export for stale peer"))
+            }
+        }
+    }
 
     async fn write_framed(stream: &mut iroh::endpoint::SendStream, data: &[u8]) -> Result<()> {
         let len = (data.len() as u32).to_be_bytes();
@@ -170,7 +194,7 @@ mod adapter {
         }
 
         let peer_vv = loro::VersionVector::decode(&peer_vv_bytes)?;
-        let our_delta = doc.export(ExportMode::updates(&peer_vv))?;
+        let our_delta = export_delta_or_full_snapshot(doc, &peer_vv, "init")?;
         debug!("[init] sending our delta ({} bytes)...", our_delta.len());
         write_framed(&mut send, &our_delta).await?;
         send.finish()?;
@@ -251,9 +275,7 @@ mod adapter {
             .context("[accept] Failed to decode peer VV")?;
 
         // Compute delta + send our VV
-        let our_delta = doc
-            .export(ExportMode::updates(&peer_vv))
-            .context("[accept] Failed to export delta")?;
+        let our_delta = export_delta_or_full_snapshot(doc, &peer_vv, "accept")?;
         let our_vv = doc.oplog_vv();
         debug!("[accept] sending delta ({} bytes) + VV", our_delta.len());
         write_framed(&mut send, &our_delta).await?;

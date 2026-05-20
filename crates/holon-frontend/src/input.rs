@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use holon_api::render_types::OperationDescriptor;
+use holon_api::EntityUri;
 
 // Re-export Key and KeyChord from holon-api (canonical definition)
 pub use holon_api::input_types::{Key, KeyChord};
@@ -45,12 +46,12 @@ pub enum InputAction {
     ExecuteOperation {
         entity_name: String,
         operation: OperationDescriptor,
-        entity_id: String,
+        entity_id: EntityUri,
     },
 
     /// Focus a different block (navigation result).
     Focus {
-        block_id: String,
+        block_id: EntityUri,
         placement: CursorPlacement,
     },
 }

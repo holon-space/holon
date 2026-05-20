@@ -164,6 +164,8 @@ impl FixtureSource for GherkinFixtureSource {
                 out.push(NamedFixture {
                     name: case.name,
                     description: file.display().to_string(),
+                    wiring: None,
+                    env_flags: Default::default(),
                     steps: case.steps,
                 });
             }

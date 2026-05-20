@@ -35,6 +35,22 @@ impl EntityUri {
 
     /// Construct from scheme + opaque path: `"{scheme}:{path}"`.
     pub fn new(scheme: &str, path: &str) -> Self {
+        // Guard against double-scheming: the `path` must be a bare value, not an
+        // already-scheme-qualified URI. Passing e.g. `EntityUri::block("block:abc")`
+        // would silently produce `"block:block:abc"`, and a downstream
+        // `UPDATE … WHERE id = 'block:block:abc'` then matches zero rows — the
+        // class of bug behind KF-8 (a dropped re-parent in SqlOnly). Restricted
+        // to KNOWN holon schemes so synthetic ids (`default-main-panel::src::0`)
+        // and `block:{peer}:{counter}` paths don't false-positive. For an
+        // already-schemed string use [`EntityUri::from_raw`] / [`EntityUri::parse`].
+        debug_assert!(
+            !["block:", "doc:", "file:", "sentinel:"]
+                .iter()
+                .any(|p| path.starts_with(p)),
+            "EntityUri::new({scheme:?}, {path:?}): path already begins with a scheme \
+             prefix — double-scheme bug. Use EntityUri::from_raw / parse for an \
+             already-schemed string, or pass the bare id."
+        );
         let raw = format!("{scheme}:{path}");
         EntityUri(Uri::parse(raw).unwrap_or_else(|e| {
             panic!("EntityUri::new({scheme:?}, {path:?}) produced invalid URI: {e}")
@@ -44,6 +60,15 @@ impl EntityUri {
     // -- Block constructors --
 
     pub fn block(id: &str) -> Self {
+        // `id` must be a BARE block id (a UUID or Loro stable id), never an
+        // already-schemed URI. Passing `"block:abc"` here mints
+        // `"block:block:abc"` — the recurring re-scheme bug. Use
+        // [`EntityUri::from_raw`] (idempotent) when the input may already
+        // carry a scheme.
+        debug_assert!(
+            !id.starts_with("block:"),
+            "EntityUri::block() got an already-schemed id {id:?}; use EntityUri::parse() instead"
+        );
         Self::new("block", id)
     }
 
@@ -167,9 +192,28 @@ impl EntityUri {
 
     /// Parse a raw parent_id string into an EntityUri.
     /// Handles `doc:x`, `block:x`, `sentinel:no_parent`, and bare strings (→ `block:x`).
+    ///
+    /// **Boundary-only (parse, don't validate).** Call this *once*, at the edge
+    /// where a string first enters the system from something we don't control —
+    /// the org parser, a SQL/matview row, a Loro field, an MCP/FFI param. From
+    /// there on, pass the `EntityUri` through; do not turn it back into a string
+    /// and re-`from_raw` it deeper in. Re-parsing internal data is the smell
+    /// that lets scheme-fragility (bare `x` vs `block:x`) leak between layers —
+    /// it's flagged by archlint `entity_uri_from_raw`. When the scheme is known
+    /// statically prefer `EntityUri::block(..)` / `EntityUri::parse(..)`.
     pub fn from_raw(s: &str) -> Self {
         if let Ok(uri) = Self::parse(s) {
-            return uri;
+            // A bare synthetic id containing `::` separators (e.g.
+            // `root-layout::src::0`, `default-main-panel::render::0`) is a
+            // valid RFC 3986 URI: scheme `root-layout`, path `:src::0`. A real
+            // `scheme:path` URI never has a path starting with `:` — that
+            // shape is the head of a bare id, not a scheme. Mis-accepting it
+            // made `is_block()` false downstream, so `resolve_to_tree_id`
+            // silently missed existing Loro nodes and field writes forked to
+            // the SQL path (layout-swap Loro divergence, 2026-06-11).
+            if !uri.id().starts_with(':') {
+                return uri;
+            }
         }
         // Bare string without scheme — treat as block ID
         Self::block(s)
@@ -277,6 +321,34 @@ mod tests {
     fn parse_invalid() {
         // No scheme → not a valid absolute URI
         assert!(EntityUri::parse("just-a-string").is_err());
+    }
+
+    /// Bare synthetic ids with `::` separators must parse as BLOCK ids, not
+    /// as a URI with the id's head for a scheme. `root-layout::src::0` is a
+    /// valid RFC 3986 URI (scheme `root-layout`, path `:src::0`) — accepting
+    /// that parse made `is_block()` false and `resolve_to_tree_id` miss
+    /// existing Loro nodes (layout-swap Loro divergence, 2026-06-11).
+    #[test]
+    fn from_raw_double_colon_synthetic_id_is_block() {
+        for raw in [
+            "root-layout::src::0",
+            "default-main-panel::render::0",
+            "block:root-layout::src::0",
+        ] {
+            let uri = EntityUri::from_raw(raw);
+            assert!(uri.is_block(), "{raw:?} → {uri:?} must be a block URI");
+            assert_eq!(uri.id(), raw.strip_prefix("block:").unwrap_or(raw));
+            // Idempotent: re-parsing the schemed form round-trips.
+            let again = EntityUri::from_raw(uri.as_str());
+            assert_eq!(again, uri);
+        }
+        // Real schemes are untouched.
+        assert_eq!(EntityUri::from_raw("person:abc").scheme(), "person");
+        assert!(EntityUri::from_raw("sentinel:no_parent").is_sentinel());
+        assert_eq!(
+            EntityUri::from_raw("https://jira.example.com/ISSUE-1").scheme(),
+            "https"
+        );
     }
 
     #[test]

@@ -47,6 +47,12 @@ pub enum Reason {
     FocusedNotDescendantOfFocusRoot,
     NoFocusableBlocks,
     SidebarFocusNotRendered,
+    /// The LeftSidebar drawer is collapsed, so its page entries aren't
+    /// rendered/clickable — a sidebar click-to-focus is impossible until the
+    /// drawer is re-opened (a separate `ToggleDrawer` transition). Mirrors
+    /// production `columns.rs`, which drops the closed drawer's panel from the
+    /// layout and keeps only the toggle.
+    LeftSidebarDrawerClosed,
 
     // ---------- siblings ----------
     NoPreviousSibling,
@@ -63,6 +69,7 @@ pub enum Reason {
     NoGrandparent,
     DragDropDisabled,
     SourceNotRendered,
+    BlocksNotInteractiveUnderLayout,
     CyclicParentMove,
     NoOpParentMove,
 
@@ -97,7 +104,6 @@ pub enum Reason {
     NoDocumentsAvailable,
     BlockStateEmpty,
     NoWatchesActive,
-    ConcurrentMutationsDisabled,
 
     // ---------- pin / sidebar ----------
     NoPinCandidates,

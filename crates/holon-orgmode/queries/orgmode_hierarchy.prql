@@ -22,7 +22,10 @@ append (
     derive {
         content = title,
         entity_name = "block",
-        sort_key = s"substr('000000000000' || {sequence}, length('000000000000' || {sequence}) - 11)",
+        # Order by the block's native fractional sort_key (the single order
+        # owner). Replaces the legacy zero-padded `sequence` projection, which
+        # was a second order encoding that disagreed with the fractional index.
+        sort_key = sort_key,
     }
     derive { ui = (render (row (draggable (pie_menu (bullet) fields:this.*) on:'drag') (spacer 10) (state_toggle this.task_state) (editable_text content:this.title) (badge content:this.priority color:"cyan"))) }
 )

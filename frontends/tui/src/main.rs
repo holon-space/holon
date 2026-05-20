@@ -52,7 +52,7 @@ async fn main() -> CommonResult<()> {
         status_message: "Ready".to_string(),
         current_model: Arc::new(Mutex::new(Arc::new(ReactiveViewModel::empty()))),
         watch_started: Arc::new(AtomicBool::new(false)),
-        last_registry: Arc::new(Mutex::new(RenderRegistry::default())),
+        last_registry: holon_tui::geometry::TuiGeometry::new(),
         focus_index: Arc::new(AtomicUsize::new(NO_FOCUS)),
         focus_pin: Arc::new(Mutex::new(None)),
         edit_state: Arc::new(Mutex::new(None)),

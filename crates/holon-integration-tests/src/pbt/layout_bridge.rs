@@ -63,7 +63,7 @@ impl LayoutRefState for ReferenceState {
     /// once the app has started. Before `apply_start_app` they don't render
     /// yet, so return empty so `ToggleDrawer` skips them.
     fn drawer_handles(&self) -> &[DrawerHandle] {
-        if self.app_started {
+        if self.action.app_started {
             default_drawer_handles()
         } else {
             &[]
@@ -86,7 +86,9 @@ impl LayoutRefState for ReferenceState {
     /// Extending to "also include collapsed ones available to expand"
     /// needs a rendered-tree walk — follow-up.
     fn collapsible_target_ids(&self) -> Vec<String> {
-        self.expanded_toggles
+        self.ui
+            .tab
+            .expanded_toggles
             .iter()
             .map(|uri| uri.to_string())
             .collect()
@@ -99,7 +101,12 @@ impl LayoutRefState for ReferenceState {
     fn drawer_is_open(&self, block_id: &str) -> bool {
         // Default to open: production default layout boots both sidebars open.
         // `ToggleDrawer::apply_to_ref` flips the recorded state.
-        self.drawer_open.get(block_id).copied().unwrap_or(true)
+        self.ui
+            .tab
+            .drawer_open
+            .get(block_id)
+            .copied()
+            .unwrap_or(true)
     }
 }
 

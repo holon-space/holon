@@ -21,7 +21,7 @@ use holon_api::CompiledExpr;
 use holon_api::predicate::Predicate;
 use holon_api::render_types::{OperationDescriptor, RenderExpr, RenderVariant};
 use holon_api::{EntityName, Value, row_id};
-use rhai::{Engine as RhaiEngine, Scope};
+use rhai::Engine as RhaiEngine;
 
 use futures_signals::signal_map::SignalMapExt;
 
@@ -53,80 +53,16 @@ const UI_STATE_VARIABLES: &[&str] = &[
 pub type LiveEntities = HashMap<EntityName, Arc<LiveData<StorageEntity>>>;
 
 // ---------------------------------------------------------------------------
-// Core types (Send + Sync safe — no Rhai AST stored)
+// Core types — moved to holon-api (storage de-leak Stage 10); re-exported so
+// `holon::entity_profile::*` paths keep working. holon keeps the profile
+// *sources*: YAML/org parsing below and the LiveData-backed ProfileResolver.
 // ---------------------------------------------------------------------------
 
-/// Resolved profile for a single row: how to render it + what operations apply.
-///
-/// `operations` is injected by `ProfileResolver` at resolve time from the
-/// entity's registered operations — NOT stored in profile YAML.
-#[derive(Debug, Clone)]
-pub struct RowProfile {
-    pub name: String,
-    pub render: RenderExpr,
-    pub operations: Vec<OperationDescriptor>,
-    /// All matching variant candidates (for multi-variant frontend selection).
-    /// Empty when resolved via the legacy single-variant path.
-    pub variants: Vec<RenderVariant>,
-}
-
-/// Stored profile spec — render expression only, no operations.
-/// Operations are injected by `ProfileResolver` at resolve time.
-#[derive(Debug, Clone)]
-pub struct StoredProfile {
-    pub name: String,
-    pub render: RenderExpr,
-}
-
-/// A conditional override within an entity profile.
-///
-/// Stores condition as source string (Rhai ASTs are !Send).
-/// The condition is split into a data part (Rhai, backend-evaluated)
-/// and a UI part (`Predicate`, frontend-evaluated).
-#[derive(Debug, Clone)]
-pub struct StoredVariant {
-    pub name: String,
-    /// Merge/resolution priority. Higher priority variants are checked first.
-    /// Seeded defaults use -1, omitted defaults to 0, users can set higher.
-    pub priority: i32,
-    /// Original full Rhai condition source (empty = always matches).
-    pub condition_source: String,
-    /// Data-only Rhai condition (None = always true on data side).
-    pub data_condition: Option<String>,
-    /// Frontend-evaluable UI condition extracted from the full condition.
-    pub ui_condition: Predicate,
-    pub profile: Arc<StoredProfile>,
-}
-
-/// Backward-compat alias.
-pub type RowVariant = StoredVariant;
-
-/// Virtual child configuration: default field values for the always-present
-/// editable placeholder appended to collections. The driver creates a
-/// synthetic DataRow from these defaults (plus a `virtual:` ID and parent_id),
-/// then renders it through the normal entity profile via `render_entity()`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct VirtualChildConfig {
-    pub defaults: std::collections::HashMap<String, holon_api::Value>,
-}
-
-/// Complete profile for one entity type.
-/// Computed field expressions are pre-compiled at parse time.
-#[derive(Debug, Clone)]
-pub struct EntityProfile {
-    pub entity_name: EntityName,
-    /// All variants (including the conditionless "default"). Sorted by priority
-    /// descending at resolution time — highest priority checked first.
-    pub variants: Vec<StoredVariant>,
-    /// Pre-compiled computed fields in topological order.
-    pub computed_fields: Vec<CompiledComputedField>,
-    /// When set, collections displaying this entity type's children append a
-    /// virtual editable placeholder at the end. Typing into it materializes
-    /// a real entity.
-    pub virtual_child: Option<VirtualChildConfig>,
-}
-
-use crate::type_registry::CompiledComputedField;
+pub use holon_api::entity_profile::{
+    CompiledComputedField, EntityProfile, ProfileCache, ProfileResolving, RowVariant,
+    StoredProfile, StoredVariant, VirtualChildConfig, value_to_dynamic,
+};
+pub use holon_api::render_types::RenderProfile;
 
 // ---------------------------------------------------------------------------
 // YAML parsing
@@ -136,7 +72,7 @@ use crate::type_registry::CompiledComputedField;
 ///
 /// Uses the Rhai-based render DSL parser. Accepts both Rhai syntax and JSON.
 pub fn parse_render_text(text: &str) -> Result<RenderExpr> {
-    crate::render_dsl::parse_render_dsl(text)
+    holon_api::render_dsl::parse_render_dsl(text)
 }
 
 /// Profile data deserialized from YAML. Also the shared intermediate
@@ -432,6 +368,27 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
     })
 }
 
+/// Build the set of type-defined profiles from a [`TypeRegistry`].
+///
+/// `profile_from_type_def` can't see `virtual_child` (it's stored in a side map
+/// on the registry — `TypeDefinition` lives in `holon-api`, `VirtualChildConfig`
+/// in `holon`), so it's attached here. Single source of truth shared by the
+/// Turso DI path and the no-Turso bundled-only resolver.
+pub fn type_profiles_from_registry(
+    type_registry: &crate::type_registry::TypeRegistry,
+) -> Vec<EntityProfile> {
+    type_registry
+        .all()
+        .iter()
+        .filter_map(|td| {
+            profile_from_type_def(td).map(|mut p| {
+                p.virtual_child = type_registry.virtual_child_config(&td.name);
+                p
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Computed field parsing + topo-sort
 // ---------------------------------------------------------------------------
@@ -498,192 +455,6 @@ fn topo_sort_computed_fields(
 }
 
 // ---------------------------------------------------------------------------
-// Resolution (compiles Rhai on-demand)
-// ---------------------------------------------------------------------------
-
-impl EntityProfile {
-    /// Resolve a single row to its RowProfile.
-    pub fn resolve(
-        &self,
-        row: &HashMap<String, holon_api::Value>,
-        engine: &RhaiEngine,
-    ) -> Option<Arc<StoredProfile>> {
-        self.resolve_with_computed(row, engine).0
-    }
-
-    /// Resolve profile AND return computed field values.
-    /// Single Rhai evaluation pass — use this when you need computed values in row data.
-    pub fn resolve_with_computed(
-        &self,
-        row: &HashMap<String, holon_api::Value>,
-        engine: &RhaiEngine,
-    ) -> (
-        Option<Arc<StoredProfile>>,
-        HashMap<String, holon_api::Value>,
-    ) {
-        let mut scope = self.build_scope(row, engine);
-
-        let profile = self.resolve_from_scope(engine, &mut scope);
-        let computed = self.extract_computed_values(&scope);
-        (profile, computed)
-    }
-
-    /// Resolve ALL matching candidates for a row (multi-variant mode).
-    ///
-    /// Evaluates each variant's `data_condition` via Rhai. Returns all variants
-    /// whose data conditions match, each carrying its `ui_condition` predicate
-    /// for frontend-side selection. The default profile is appended as last
-    /// candidate with `Predicate::Always`.
-    #[allow(clippy::type_complexity)] // returns (matched variants, evaluated field values) tuple
-    pub fn resolve_candidates(
-        &self,
-        row: &HashMap<String, holon_api::Value>,
-        engine: &RhaiEngine,
-    ) -> (
-        Vec<(&StoredVariant, Arc<StoredProfile>)>,
-        HashMap<String, holon_api::Value>,
-    ) {
-        let mut scope = self.build_scope(row, engine);
-
-        let mut candidates = Vec::new();
-        for variant in &self.variants {
-            let data_matches = match &variant.data_condition {
-                None => true, // No data condition = always matches on data side
-                Some(dc) => eval_bool_source(engine, dc, &mut scope),
-            };
-            if data_matches {
-                candidates.push((variant, variant.profile.clone()));
-            }
-        }
-
-        let computed = self.extract_computed_values(&scope);
-        (candidates, computed)
-    }
-
-    /// Resolve collection-level variants for this entity.
-    ///
-    /// Returns all collection variants (each carries a `ui_condition` for
-    /// frontend-side view-mode switching). The collection default is appended
-    /// with `Predicate::Always`.
-    fn resolve_from_scope(
-        &self,
-        engine: &RhaiEngine,
-        scope: &mut Scope<'_>,
-    ) -> Option<Arc<StoredProfile>> {
-        // Variants are sorted by priority desc.
-        // First match wins — conditionless variants (empty condition_source) always match.
-        for variant in &self.variants {
-            if variant.condition_source.is_empty()
-                || eval_bool_source(engine, &variant.condition_source, scope)
-            {
-                return Some(variant.profile.clone());
-            }
-        }
-        None
-    }
-
-    fn extract_computed_values(&self, scope: &Scope<'_>) -> HashMap<String, holon_api::Value> {
-        self.computed_fields
-            .iter()
-            .filter_map(|(name, _expr)| {
-                scope
-                    .get_value::<rhai::Dynamic>(name)
-                    .map(|d| (name.clone(), dynamic_to_value(&d)))
-            })
-            .collect()
-    }
-
-    fn build_scope(
-        &self,
-        row: &HashMap<String, holon_api::Value>,
-        engine: &RhaiEngine,
-    ) -> Scope<'static> {
-        let mut scope = Scope::new();
-
-        for (key, value) in row {
-            scope.push(key.clone(), value_to_dynamic(value));
-
-            // Flatten `properties` object so inner fields (task_state, priority, etc.)
-            // are available as top-level scope variables for profile conditions.
-            if key == "properties"
-                && let holon_api::Value::Object(props) = value
-            {
-                for (prop_key, prop_value) in props {
-                    if !row.contains_key(prop_key) {
-                        scope.push(prop_key.clone(), value_to_dynamic(prop_value));
-                    }
-                }
-            }
-        }
-
-        // Evaluate computed fields in topo order via shared evaluator
-        let mut computed_ctx = row.clone();
-        crate::computed::resolve_computed_fields_with_scope(
-            engine,
-            &mut scope,
-            &self.computed_fields,
-            &mut computed_ctx,
-        );
-
-        scope
-    }
-}
-
-fn dynamic_to_value(d: &rhai::Dynamic) -> holon_api::Value {
-    if d.is_unit() {
-        holon_api::Value::Null
-    } else if let Some(s) = d.clone().try_cast::<String>() {
-        holon_api::Value::String(s)
-    } else if let Some(i) = d.clone().try_cast::<i64>() {
-        holon_api::Value::Integer(i)
-    } else if let Some(f) = d.clone().try_cast::<f64>() {
-        holon_api::Value::Float(f)
-    } else if let Some(b) = d.clone().try_cast::<bool>() {
-        holon_api::Value::Boolean(b)
-    } else {
-        holon_api::Value::String(d.to_string())
-    }
-}
-
-fn eval_bool_source(engine: &RhaiEngine, source: &str, scope: &mut Scope) -> bool {
-    match engine.eval_with_scope::<bool>(scope, source) {
-        Ok(val) => val,
-        Err(e) => {
-            let msg = format!("{e}");
-            if msg.contains("Variable not found") || msg.contains("Output type incorrect") {
-                tracing::trace!("[eval_bool_source] '{source}': {e}");
-            } else {
-                tracing::warn!("[eval_bool_source] '{source}' failed: {e}");
-            }
-            false
-        }
-    }
-}
-
-fn value_to_dynamic(value: &holon_api::Value) -> rhai::Dynamic {
-    match value {
-        holon_api::Value::String(s) => rhai::Dynamic::from(s.clone()),
-        holon_api::Value::Integer(i) => rhai::Dynamic::from(*i),
-        holon_api::Value::Float(f) => rhai::Dynamic::from(*f),
-        holon_api::Value::Boolean(b) => rhai::Dynamic::from(*b),
-        holon_api::Value::Null => rhai::Dynamic::UNIT,
-        holon_api::Value::DateTime(s) => rhai::Dynamic::from(s.clone()),
-        holon_api::Value::Json(s) => rhai::Dynamic::from(s.clone()),
-        holon_api::Value::Array(arr) => {
-            let items: Vec<rhai::Dynamic> = arr.iter().map(value_to_dynamic).collect();
-            rhai::Dynamic::from(items)
-        }
-        holon_api::Value::Object(obj) => {
-            let mut map = rhai::Map::new();
-            for (k, v) in obj {
-                map.insert(k.clone().into(), value_to_dynamic(v));
-            }
-            rhai::Dynamic::from(map)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Entity lookup registration for Rhai
 // ---------------------------------------------------------------------------
 
@@ -711,7 +482,7 @@ fn register_entity_lookups(engine: &mut RhaiEngine, live_entities: &LiveEntities
 fn storage_entity_to_rhai_map(entity: &StorageEntity) -> rhai::Dynamic {
     let mut map = rhai::Map::new();
     for (k, v) in entity {
-        if k == "properties" {
+        if &**k == "properties" {
             if let holon_api::Value::Object(props) = v {
                 for (pk, pv) in props {
                     map.insert(pk.clone().into(), value_to_dynamic(pv));
@@ -725,7 +496,7 @@ fn storage_entity_to_rhai_map(entity: &StorageEntity) -> rhai::Dynamic {
                 }
             }
         }
-        map.insert(k.clone().into(), value_to_dynamic(v));
+        map.insert(k.as_ref().into(), value_to_dynamic(v));
     }
     rhai::Dynamic::from(map)
 }
@@ -733,71 +504,6 @@ fn storage_entity_to_rhai_map(entity: &StorageEntity) -> rhai::Dynamic {
 // ---------------------------------------------------------------------------
 // ProfileResolving trait + ProfileResolver
 // ---------------------------------------------------------------------------
-
-/// Trait for DI — allows testing with mock resolvers.
-pub trait ProfileResolving: Send + Sync {
-    fn resolve(&self, row: &HashMap<String, holon_api::Value>) -> Arc<RowProfile>;
-
-    /// Resolve profile AND return computed field values in one pass.
-    fn resolve_with_computed(
-        &self,
-        row: &HashMap<String, holon_api::Value>,
-    ) -> (Arc<RowProfile>, HashMap<String, holon_api::Value>);
-
-    fn resolve_batch(&self, rows: &[HashMap<String, holon_api::Value>]) -> Vec<Arc<RowProfile>>;
-
-    /// Resolve ALL matching variant candidates for a row (multi-variant mode).
-    ///
-    /// Returns a `RenderProfile` with `variants` populated — the frontend picks
-    /// the active one based on local UI state.
-    fn resolve_with_variants(
-        &self,
-        row: &HashMap<String, holon_api::Value>,
-    ) -> (Arc<RowProfile>, HashMap<String, holon_api::Value>) {
-        // Default: fall back to single-variant resolution
-        self.resolve_with_computed(row)
-    }
-
-    /// Get virtual child config for an entity type, if declared in its profile.
-    // ALLOW(unused_param): trait shape; default impl ignores name
-    fn virtual_child_config(&self, _entity_name: &str) -> Option<VirtualChildConfig> {
-        None
-    }
-
-    /// Get collection-level variants (tree/table/board view modes).
-    ///
-    /// Collection profiles are entity-agnostic — any entity with the required
-    /// columns (e.g. parent_id for trees) can use them.
-    fn resolve_collection_variants(&self) -> Vec<RenderVariant> {
-        Vec::new()
-    }
-
-    /// Mutable holding the current profile cache snapshot.
-    ///
-    /// Each rebuild swaps in a fresh `Arc<ProfileCache>`, so consumers can
-    /// `.signal_cloned()` it to react to profile YAML edits without waiting
-    /// for a structural CDC event.
-    ///
-    /// Default: a Mutable holding an empty cache that never changes
-    /// (for mock resolvers / tests).
-    fn profile_signal(&self) -> futures_signals::signal::Mutable<Arc<ProfileCache>> {
-        futures_signals::signal::Mutable::new(Arc::new(ProfileCache::empty()))
-    }
-}
-
-#[derive(Debug)]
-pub struct ProfileCache {
-    profiles: HashMap<EntityName, EntityProfile>,
-}
-
-impl ProfileCache {
-    /// Empty cache used by stub/mock resolvers.
-    pub fn empty() -> Self {
-        Self {
-            profiles: HashMap::new(),
-        }
-    }
-}
 
 /// Concrete profile resolver backed by LiveData (CDC-driven, live-updating).
 ///
@@ -906,15 +612,17 @@ impl ProfileResolver {
         *self.live_entities.write().unwrap() = entities;
     }
 
-    /// Look up operations for an entity name.
-    fn operations_for(&self, entity_name: &str) -> Vec<OperationDescriptor> {
+    /// Look up operations for an entity name. Entity-level (keyed by id scheme),
+    /// so this returns exactly the operations the renderer attaches to a row of
+    /// that entity (see `materialize`). Exposed via the `ProfileResolving` trait.
+    fn lookup_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
         self.entity_operations
             .get(&EntityName::new(entity_name))
             .cloned()
             .unwrap_or_default()
     }
 
-    /// Combine a StoredProfile with entity operations to produce a RowProfile.
+    /// Combine a StoredProfile with entity operations to produce a RenderProfile.
     ///
     /// Operations are looked up by the ID scheme (e.g. "block" from "block:xxx"),
     /// not by `entity_name` which may be a view/matview alias like "focus_roots".
@@ -922,11 +630,11 @@ impl ProfileResolver {
         &self,
         stored: &StoredProfile,
         row: &HashMap<String, holon_api::Value>,
-    ) -> Arc<RowProfile> {
+    ) -> Arc<RenderProfile> {
         let ops = row_id(row)
-            .map(|id| self.operations_for(id.scheme()))
+            .map(|id| self.lookup_operations(id.scheme()))
             .unwrap_or_default();
-        Arc::new(RowProfile {
+        Arc::new(RenderProfile {
             name: stored.name.clone(),
             render: stored.render.clone(),
             operations: ops,
@@ -958,7 +666,7 @@ impl ProfileResolver {
                 profiles.insert(name, filtered);
             }
         }
-        ProfileCache { profiles }
+        ProfileCache::new(profiles)
     }
 
     /// Merge a new profile into an existing one with the same entity name.
@@ -1018,28 +726,32 @@ impl ProfileResolver {
 }
 
 impl ProfileResolving for ProfileResolver {
-    fn resolve(&self, row: &HashMap<String, holon_api::Value>) -> Arc<RowProfile> {
+    fn operations_for(&self, entity_name: &str) -> Vec<OperationDescriptor> {
+        self.lookup_operations(entity_name)
+    }
+
+    fn resolve(&self, row: &HashMap<String, holon_api::Value>) -> Arc<RenderProfile> {
         self.resolve_with_computed(row).0
     }
 
     fn resolve_with_computed(
         &self,
         row: &HashMap<String, holon_api::Value>,
-    ) -> (Arc<RowProfile>, HashMap<String, holon_api::Value>) {
+    ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
 
         let entity_uri = row_id(row).expect("No id found");
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
-        let entity_profile = match cache.profiles.get(&entity_name) {
+        let entity_profile = match cache.get(&entity_name) {
             Some(profile) => profile.clone(),
             None => {
                 tracing::trace!(
                     "No profile registered for entity '{entity_name_str}' — using default",
                 );
                 return (
-                    Arc::new(RowProfile {
+                    Arc::new(RenderProfile {
                         name: "default".to_string(),
                         render: holon_api::RenderExpr::Literal {
                             value: holon_api::Value::String("".to_string()),
@@ -1073,7 +785,7 @@ impl ProfileResolving for ProfileResolver {
         (self.materialize(&stored, row), computed)
     }
 
-    fn resolve_batch(&self, rows: &[HashMap<String, holon_api::Value>]) -> Vec<Arc<RowProfile>> {
+    fn resolve_batch(&self, rows: &[HashMap<String, holon_api::Value>]) -> Vec<Arc<RenderProfile>> {
         rows.iter()
             .map(|row| ProfileResolving::resolve(self, row))
             .collect()
@@ -1082,20 +794,20 @@ impl ProfileResolving for ProfileResolver {
     fn resolve_with_variants(
         &self,
         row: &HashMap<String, holon_api::Value>,
-    ) -> (Arc<RowProfile>, HashMap<String, holon_api::Value>) {
+    ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
         let entity_uri = row_id(row).expect("No id found");
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
-        let entity_profile = match cache.profiles.get(&entity_name) {
+        let entity_profile = match cache.get(&entity_name) {
             Some(profile) => profile.clone(),
             None => {
                 tracing::trace!(
                     "No profile registered for entity '{entity_name_str}' — using default",
                 );
                 return (
-                    Arc::new(RowProfile {
+                    Arc::new(RenderProfile {
                         name: "default".to_string(),
                         render: holon_api::RenderExpr::Literal {
                             value: holon_api::Value::String("".to_string()),
@@ -1112,7 +824,7 @@ impl ProfileResolving for ProfileResolver {
         let (candidates, computed) = entity_profile.resolve_candidates(row, &engine);
 
         let ops = row_id(row)
-            .map(|id| self.operations_for(id.scheme()))
+            .map(|id| self.lookup_operations(id.scheme()))
             .unwrap_or_default();
 
         let render_variants: Vec<RenderVariant> = candidates
@@ -1141,7 +853,7 @@ impl ProfileResolving for ProfileResolver {
                  Variants tried: {variants:?}"
             )
         });
-        let first_profile = Arc::new(RowProfile {
+        let first_profile = Arc::new(RenderProfile {
             name: stored.name.clone(),
             render: stored.render.clone(),
             operations: ops.clone(),
@@ -1154,7 +866,7 @@ impl ProfileResolving for ProfileResolver {
     fn resolve_collection_variants(&self) -> Vec<RenderVariant> {
         let cache = self.cache_signal.get_cloned();
         let collection_name = EntityName::new("collection");
-        let Some(collection_profile) = cache.profiles.get(&collection_name) else {
+        let Some(collection_profile) = cache.get(&collection_name) else {
             return Vec::new();
         };
 
@@ -1172,10 +884,7 @@ impl ProfileResolving for ProfileResolver {
 
     fn virtual_child_config(&self, entity_name: &str) -> Option<VirtualChildConfig> {
         let cache = self.cache_signal.get_cloned();
-        cache
-            .profiles
-            .get(entity_name)
-            .and_then(|p| p.virtual_child.clone())
+        cache.get(entity_name).and_then(|p| p.virtual_child.clone())
     }
 
     fn profile_signal(&self) -> futures_signals::signal::Mutable<Arc<ProfileCache>> {
@@ -1197,7 +906,7 @@ mod tests {
     use super::*;
 
     fn init_render_dsl() {
-        crate::render_dsl::register_widget_names(&[
+        holon_api::render_dsl::register_widget_names(&[
             "table",
             "live_block",
             "columns",

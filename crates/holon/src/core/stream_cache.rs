@@ -11,7 +11,6 @@
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json;
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -235,7 +234,7 @@ where
                         Value::Json(serde_json::to_string(&value).unwrap_or_default())
                     }
                 };
-                entity.insert(key, our_value);
+                entity.insert(key.into(), our_value);
             }
         }
 
@@ -425,7 +424,7 @@ where
         self.datasource.set_field(id, field, value).await
     }
 
-    async fn create(&self, fields: HashMap<String, Value>) -> Result<(String, OperationResult)> {
+    async fn create(&self, fields: holon_api::StorageEntity) -> Result<(String, OperationResult)> {
         // Delegate to datasource - full entity arrives via stream
         self.datasource.create(fields).await
     }

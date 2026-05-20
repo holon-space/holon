@@ -26,11 +26,18 @@ pub struct RemoveWatch {
 
 impl TransitionFactory<ReferenceState> for RemoveWatch {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: the navigation / CDC-watch / MCP providers this transition
+        // dispatches have no Loro-native source in the no-Turso wiring
+        // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (active watch IDs) and let
         // `preconditions` be the single source of truth for which ones are
         // actually removable. Avoids duplicating the app_started / watch_exists checks.
         let candidates: Vec<String> = state
+            .mcp
             .active_watches
             .keys()
             .filter(|query_id| {
@@ -56,9 +63,9 @@ impl TransitionRef<ReferenceState> for RemoveWatch {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
-                state.active_watches.contains_key(&self.query_id),
+                state.mcp.active_watches.contains_key(&self.query_id),
                 Reason::NoActiveWatches,
             ),
         ];
@@ -70,7 +77,7 @@ impl TransitionRef<ReferenceState> for RemoveWatch {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.active_watches.remove(&self.query_id);
+        state.mcp.active_watches.remove(&self.query_id);
     }
 }
 

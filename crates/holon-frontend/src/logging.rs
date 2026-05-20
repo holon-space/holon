@@ -22,7 +22,7 @@
 //! ```
 //!
 //! `RUST_LOG` controls filtering for all destinations.
-
+// TODO: Why is this in holon-frontend? Logging is not frontend-specific. Is there a duplicate implementation outside of holon-frontend?
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;

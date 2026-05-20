@@ -76,7 +76,7 @@ impl Module for DioxusModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
         let db_path = self.holon_config.resolve_db_path(&self.config_dir);
 
-        holon::di::open_and_register_core(injector, db_path)
+        holon::di::open_and_register_core(injector, db_path, holon::di::StorageSelector::Turso)
             .map_err(|e| to_di_err("configure", &e))?;
 
         injector

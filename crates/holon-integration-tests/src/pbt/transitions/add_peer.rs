@@ -37,34 +37,26 @@ pub fn add_peer_preconditions<R: RefPeers + RefLifecycle>(state: &R) -> Validate
         .map(|_| ())
 }
 
-pub fn add_peer_weighted_generator<R: RefPeers + RefLifecycle>(
-    state: &R,
-) -> Validated<(u32, BoxedStrategy<AddPeer>), Reason> {
-    add_peer_preconditions(state).map(|_| (1, Just(AddPeer).boxed()))
-}
-
-pub fn add_peer_apply_to_ref<R: RefPeersMut>(state: &mut R) {
-    state.add_peer_from_primary_snapshot();
-}
-
-// ── E2E trait impls (delegate to _cap fns) ────────────────────────
-
-impl TransitionFactory<ReferenceState> for AddPeer {
+impl<R: RefPeers + RefLifecycle> TransitionFactory<R> for AddPeer {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        add_peer_weighted_generator(state)
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
+    }
+
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        add_peer_preconditions(state).map(|_| (1, Just(AddPeer).boxed()))
     }
 }
 
-impl TransitionRef<ReferenceState> for AddPeer {
+impl<R: RefPeers + RefPeersMut + RefLifecycle> TransitionRef<R> for AddPeer {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         add_peer_preconditions(state)
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        add_peer_apply_to_ref(state);
+    fn apply_to_ref(&self, state: &mut R) {
+        state.add_peer_from_primary_snapshot();
     }
 }
 

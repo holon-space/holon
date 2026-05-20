@@ -33,6 +33,11 @@ use holon_frontend::size_expectation::SizeBounds;
 #[derive(Clone)]
 pub struct BoundsRegistry {
     inner: Arc<RwLock<BoundsState>>,
+    /// Woken on every committed-buffer rotation (`begin_pass`/`flush`) and on
+    /// cold-phase `record`s — i.e. whenever `committed` may have changed.
+    /// Backs [`GeometryProvider::changed`] so test wait-loops wake per frame
+    /// commit instead of sleeping a fixed interval.
+    commit_notify: Arc<tokio::sync::Notify>,
 }
 
 struct BoundsState {
@@ -48,6 +53,12 @@ struct BoundsState {
     /// also writes to committed so single-frame readers (fast UI tests) see
     /// the full tree instead of just the first-recorded widget.
     cold: bool,
+    /// Monotonic count of committed-buffer rotations (each non-empty
+    /// `begin_pass`/`flush`). Lets a reader detect that a *fresh* frame has
+    /// painted even when both the old and new frames are non-empty — needed by
+    /// the windowed capture-minimizer, which re-points one window at successive
+    /// SUTs and must wait for the rebound frame, not read the previous one.
+    committed_gen: u64,
 }
 
 impl Default for BoundsRegistry {
@@ -64,7 +75,9 @@ impl BoundsRegistry {
                 committed: HashMap::new(),
                 seq: 0,
                 cold: true,
+                committed_gen: 0,
             })),
+            commit_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -83,6 +96,8 @@ impl BoundsRegistry {
         state.staged.insert(id.clone(), info.clone());
         if state.cold {
             state.committed.insert(id, info);
+            drop(state);
+            self.commit_notify.notify_waiters();
         }
     }
 
@@ -103,11 +118,23 @@ impl BoundsRegistry {
     pub fn begin_pass(&self) {
         let mut state = self.inner.write().unwrap();
         let new = std::mem::take(&mut state.staged);
-        if !new.is_empty() {
+        let rotated = !new.is_empty();
+        if rotated {
             state.committed = new;
             state.cold = false;
+            state.committed_gen += 1;
         }
         state.seq = 0;
+        drop(state);
+        if rotated {
+            self.commit_notify.notify_waiters();
+        }
+    }
+
+    /// Number of committed-buffer rotations so far (see [`BoundsState::committed_gen`]).
+    /// Strictly increases on each non-empty `begin_pass`/`flush`.
+    pub fn committed_generation(&self) -> u64 {
+        self.inner.read().unwrap().committed_gen
     }
 
     /// Promote the current staged buffer to committed without starting a new
@@ -123,6 +150,9 @@ impl BoundsRegistry {
         if !new.is_empty() {
             state.committed = new;
             state.cold = false;
+            state.committed_gen += 1;
+            drop(state);
+            self.commit_notify.notify_waiters();
         }
     }
 }
@@ -141,6 +171,19 @@ impl GeometryProvider for BoundsRegistry {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+
+    /// Wakes on the next committed-buffer rotation (a fresh frame's data is
+    /// readable). Callers must wrap in a timeout: a notification can land
+    /// between their predicate check and this await, and GPUI only paints
+    /// when something requests a frame.
+    fn changed(&self) -> futures::future::BoxFuture<'static, ()> {
+        let notify = self.commit_notify.clone();
+        Box::pin(async move { notify.notified().await })
+    }
+
+    fn generation(&self) -> u64 {
+        self.committed_generation()
+    }
 }
 
 // Thread-local render-path stack used by `BoundsTracker` / `TransparentTracker`
@@ -152,14 +195,29 @@ impl GeometryProvider for BoundsRegistry {
 // work through a single dispatcher. The thread-local therefore always reflects
 // the current render pass's path without any locking.
 thread_local! {
-    static RENDER_PATH: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static RENDER_PATH: std::cell::RefCell<Vec<Arc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn current_parent() -> Option<String> {
+fn current_parent() -> Option<Arc<str>> {
     RENDER_PATH.with(|p| p.borrow().last().cloned())
 }
 
-fn push_parent(id: String) {
+/// Clip a tracked element's layout bounds to the active content mask so the
+/// recorded rectangle is the *visible* (and therefore clickable) region — not
+/// the unclipped layout box. GPUI's mouse hit-test uses `bounds ∩ content_mask`
+/// (`Window::hit_test`), so an element that overflows its scroll/panel clip is
+/// only interactive within the visible part. Recording the unclipped box let
+/// the PBT driver compute a click point (the geometric centre) that fell in the
+/// overflowed, off-panel region where no hitbox exists, so the click silently
+/// missed and bound operations (e.g. `navigation.focus`) never fired.
+fn visible_bounds(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    window: &gpui::Window,
+) -> gpui::Bounds<gpui::Pixels> {
+    bounds.intersect(&window.content_mask().bounds)
+}
+
+fn push_parent(id: Arc<str>) {
     RENDER_PATH.with(|p| p.borrow_mut().push(id));
 }
 
@@ -181,15 +239,16 @@ pub fn tracked(
     widget_type: &str,
     entity_id: Option<&str>,
     has_content: bool,
-    displayed_text: Option<String>,
+    displayed_text: Option<Arc<str>>,
 ) -> BoundsTracker {
     BoundsTracker {
-        el_id: el_id.into(),
+        el_id: Arc::from(el_id.into()),
         registry: registry.clone(),
-        widget_type: widget_type.to_string(),
-        entity_id: entity_id.map(|s| s.to_string()),
+        widget_type: Arc::from(widget_type),
+        entity_id: entity_id.map(Arc::from),
         has_content,
         displayed_text,
+        focused: None,
         expected_size: SizeBounds::default(),
         child: Some(child),
     }
@@ -203,6 +262,13 @@ impl BoundsTracker {
         self.expected_size = expected;
         self
     }
+
+    /// Record whether this widget's focus handle held window focus at
+    /// render time (focusable widgets only — see `ElementInfo::focused`).
+    pub fn with_focused(mut self, focused: bool) -> Self {
+        self.focused = Some(focused);
+        self
+    }
 }
 
 /// Transparent wrapper element that records its child's bounds into a
@@ -214,12 +280,13 @@ impl BoundsTracker {
 /// tests, observability) use `TransparentTracker` below, which returns the
 /// child's layout id directly and adds no style of its own.
 pub struct BoundsTracker {
-    el_id: String,
+    el_id: Arc<str>,
     registry: BoundsRegistry,
-    widget_type: String,
-    entity_id: Option<String>,
+    widget_type: Arc<str>,
+    entity_id: Option<Arc<str>>,
     has_content: bool,
-    displayed_text: Option<String>,
+    displayed_text: Option<Arc<str>>,
+    focused: Option<bool>,
     expected_size: SizeBounds,
     child: Option<AnyElement>,
 }
@@ -237,15 +304,15 @@ pub struct BoundsTracker {
 /// about entity identity or "has content" semantics — those are recorded by
 /// specific builders (like `live_block`) on their own via `tracked()`.
 pub struct TransparentTracker {
-    el_id: String,
-    widget_type: &'static str,
+    el_id: Arc<str>,
+    widget_type: Arc<str>,
     registry: BoundsRegistry,
     expected_size: SizeBounds,
     /// Optional entity binding for region-scoped queries against
     /// `BoundsRegistry`. `live_block` sets this so PBT generators can find
     /// which subtree of the rendered tree belongs to which panel (e.g.
     /// `block:default-left-sidebar`) without consulting ref-state predictions.
-    entity_id: Option<String>,
+    entity_id: Option<Arc<str>>,
     child: Option<AnyElement>,
 }
 
@@ -257,8 +324,8 @@ impl TransparentTracker {
         child: AnyElement,
     ) -> Self {
         Self {
-            el_id,
-            widget_type,
+            el_id: Arc::from(el_id),
+            widget_type: Arc::from(widget_type),
             registry,
             expected_size: SizeBounds::default(),
             entity_id: None,
@@ -269,7 +336,7 @@ impl TransparentTracker {
     /// Bind an entity URI so region queries can find this subtree by
     /// `entity_id` (e.g. the `live_block` for the LeftSidebar binds itself
     /// to `block:default-left-sidebar`).
-    pub fn with_entity_id(mut self, entity_id: impl Into<String>) -> Self {
+    pub fn with_entity_id(mut self, entity_id: impl Into<Arc<str>>) -> Self {
         self.entity_id = Some(entity_id.into());
         self
     }
@@ -324,22 +391,24 @@ impl Element for TransparentTracker {
         cx: &mut App,
     ) {
         let parent_id = current_parent();
+        let vis = visible_bounds(bounds, window);
         self.registry.record(
-            self.el_id.clone(),
+            self.el_id.to_string(),
             ElementInfo {
-                x: f32::from(bounds.origin.x),
-                y: f32::from(bounds.origin.y),
-                width: f32::from(bounds.size.width),
-                height: f32::from(bounds.size.height),
-                widget_type: self.widget_type.to_string(),
+                x: f32::from(vis.origin.x),
+                y: f32::from(vis.origin.y),
+                width: f32::from(vis.size.width),
+                height: f32::from(vis.size.height),
+                widget_type: Arc::clone(&self.widget_type),
                 entity_id: self.entity_id.clone(),
                 has_content: false,
                 parent_id,
                 displayed_text: None,
+                focused: None,
                 expected_size: self.expected_size.clone(),
             },
         );
-        push_parent(self.el_id.clone());
+        push_parent(Arc::clone(&self.el_id));
         self.child.as_mut().unwrap().prepaint(window, cx);
         pop_parent();
     }
@@ -404,22 +473,24 @@ impl Element for BoundsTracker {
         cx: &mut App,
     ) {
         let parent_id = current_parent();
+        let vis = visible_bounds(bounds, window);
         self.registry.record(
-            self.el_id.clone(),
+            self.el_id.to_string(),
             ElementInfo {
-                x: f32::from(bounds.origin.x),
-                y: f32::from(bounds.origin.y),
-                width: f32::from(bounds.size.width),
-                height: f32::from(bounds.size.height),
-                widget_type: self.widget_type.clone(),
+                x: f32::from(vis.origin.x),
+                y: f32::from(vis.origin.y),
+                width: f32::from(vis.size.width),
+                height: f32::from(vis.size.height),
+                widget_type: Arc::clone(&self.widget_type),
                 entity_id: self.entity_id.clone(),
                 has_content: self.has_content,
                 parent_id,
                 displayed_text: self.displayed_text.clone(),
+                focused: self.focused,
                 expected_size: self.expected_size.clone(),
             },
         );
-        push_parent(self.el_id.clone());
+        push_parent(Arc::clone(&self.el_id));
         self.child.as_mut().unwrap().prepaint(window, cx);
         pop_parent();
     }

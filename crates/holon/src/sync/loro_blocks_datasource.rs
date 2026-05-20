@@ -158,7 +158,7 @@ impl CrudOperations<Block> for LoroBlocksDataSource {
         Err("Use LoroBlockOperations for mutations".into())
     }
 
-    async fn create(&self, _: HashMap<String, Value>) -> Result<(String, OperationResult)> {
+    async fn create(&self, _: holon_api::StorageEntity) -> Result<(String, OperationResult)> {
         Err("Use LoroBlockOperations for mutations".into())
     }
 

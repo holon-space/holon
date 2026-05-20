@@ -25,6 +25,12 @@ pub struct SimulateRestart;
 
 impl TransitionFactory<ReferenceState> for SimulateRestart {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: restart reopens the Turso DB from disk and waits on the
+        // CDC accumulator via `ctx.engine()`. The no-Turso restart story (rebuild
+        // the Loro container + re-ingest org) is out of scope for a1.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         SimulateRestart
             .preconditions(state)
@@ -37,9 +43,9 @@ impl TransitionRef<ReferenceState> for SimulateRestart {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
-                !state.block_state.blocks.is_empty(),
+                !state.domain.block_state.blocks.is_empty(),
                 Reason::BlockStateEmpty,
             ),
         ];

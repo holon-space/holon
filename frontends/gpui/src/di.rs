@@ -16,8 +16,8 @@ use std::sync::Arc;
 use fluxdi::{Injector, Module, ModuleLifecycleFuture, Shared};
 
 use holon::di::CoreInfraModule;
+use holon_app::HolonFrontendModule;
 use holon_frontend::config::{HolonConfig, SessionConfig};
-use holon_frontend::frontend_module::HolonFrontendModule;
 use holon_frontend::preferences::PrefKey;
 use holon_frontend::reactive::{
     BuilderServices, BuilderServicesSlot, ReactiveEngine, RenderInterpreterInjectorExt,

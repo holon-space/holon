@@ -4,7 +4,7 @@
 //! Second implementation of the file-format seam introduced in Phase 1 of
 //! `codev/specs/0006-pre-velocity-refactors.md`. Org-mode is the first impl
 //! (`holon-orgmode`), markdown is this one. Sharing the same trait lets the
-//! `OrgSyncController::with_format(...)` constructor host either format
+//! `FileSyncController::with_format(...)` constructor host either format
 //! without touching the controller's logic.
 //!
 //! The crate intentionally keeps the parser, renderer, and adapter together

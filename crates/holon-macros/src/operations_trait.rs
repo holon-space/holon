@@ -53,32 +53,41 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     let crate_path = if is_internal {
         quote! { crate }
     } else {
-        quote! { holon }
+        quote! { holon_core }
     };
 
     // Determine the Operation type path - Operation is now in holon-api
     // All crates should use holon_api::Operation
     let operation_type_path = quote! { holon_api::Operation };
 
-    // OperationResult is re-exported from holon::core::datasource for external crates
-    // For holon-core itself, use crate::OperationResult
-    // For holon crate, use crate::core::datasource::OperationResult
-    // For external crates, use holon::core::datasource::OperationResult
+    // OperationResult is re-exported from holon_core for external crates
     let operation_result_path = if pkg_name == "holon-core" {
         quote! { crate::OperationResult }
     } else if pkg_name == "holon" {
-        quote! { crate::core::datasource::OperationResult }
+        quote! { holon_core::OperationResult }
     } else {
-        quote! { holon::core::datasource::OperationResult }
+        quote! { holon_core::OperationResult }
     };
 
     // UndoAction is still needed for extracting undo from OperationResult
     let undo_action_path = if pkg_name == "holon-core" {
         quote! { crate::UndoAction }
     } else if pkg_name == "holon" {
-        quote! { crate::core::datasource::UndoAction }
+        quote! { holon_core::UndoAction }
     } else {
-        quote! { holon::core::datasource::UndoAction }
+        quote! { holon_core::UndoAction }
+    };
+
+    // UnknownOperationError and Result: for external crates use holon_core root.
+    let unknown_op_error_path = if is_internal {
+        quote! { crate::core::datasource::UnknownOperationError }
+    } else {
+        quote! { holon_core::UnknownOperationError }
+    };
+    let result_path = if is_internal {
+        quote! { crate::core::datasource::Result }
+    } else {
+        quote! { holon_core::Result }
     };
 
     // Extract all async fn methods (skip associated types, consts, etc.)
@@ -351,9 +360,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                             }
                         }
                     } else if type_str_cleaned == "HashMap" {
-                        // For HashMap<String, Value>, use directly
+                        // StorageEntity keys are Arc<str>; Value::Object keys are String
                         quote! {
-                            (#param_name_lit.to_string(), holon_api::Value::Object(#param_name_ident))
+                            (#param_name_lit.to_string(), holon_api::Value::Object(#param_name_ident.into_iter().map(|(k, v)| (k.to_string(), v)).collect()))
                         }
                     } else if type_str_cleaned.contains("DateTime") {
                         if is_required {
@@ -534,10 +543,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         // For HashMap<String, Value>, extract the whole StorageEntity
                         // Check original type to confirm it's HashMap<String, Value>
                         let original_type_str = quote! { #pat_type.ty }.to_string();
-                        let original_type_contains_value = original_type_str.contains("Value");
+                        let original_type_contains_value = original_type_str.contains("Value")
+                            || original_type_str.contains("StorageEntity");
                         if original_type_contains_value {
                             quote! {
-                                let #param_name_ident: std::collections::HashMap<String, holon_api::Value> = params.clone();
+                                let #param_name_ident: holon_api::StorageEntity = params.clone();
                             }
                         } else {
                             quote! {
@@ -571,11 +581,13 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         if is_optional {
                             quote! {
                                 let #param_name_ident: Option<holon_api::EntityUri> = params.get(#param_name_str)
+                                    // ALLOW(entity_uri_from_raw): MCP operation params HashMap string → EntityUri at dispatch edge
                                     .and_then(|v| v.as_string().map(|s| holon_api::EntityUri::from_raw(s)));
                             }
                         } else {
                             quote! {
                                 let #param_name_ident: holon_api::EntityUri = params.get(#param_name_str)
+                                    // ALLOW(entity_uri_from_raw): MCP operation params HashMap string → EntityUri at dispatch edge
                                     .and_then(|v| v.as_string().map(|s| holon_api::EntityUri::from_raw(s)))
                                     .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected EntityUri-as-String)", #param_name_str))?;
                             }
@@ -591,20 +603,32 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
 
                     param_extractions_code.push(extraction);
 
-                    // If parameter type is &str, we need to borrow the String
-                    // Also handle Option<&str> specially
-                    if (is_ref_type && type_str_cleaned == "String") || is_option_ref_str {
+                    // EntityUri (owned `&EntityUri` or `Option<&EntityUri>`) is
+                    // always extracted as a typed `EntityUri` / `Option<EntityUri>`
+                    // (see the EntityUri extraction branch above), so we borrow it
+                    // here. This must come before the `is_option_ref_str` arm:
+                    // `Option<&EntityUri>` also has a reference inner type, and the
+                    // `&str` arm would otherwise wrongly emit `.map(|s| s.as_str())`.
+                    if type_str_cleaned == "EntityUri" {
+                        if is_optional && is_option_ref_str {
+                            // Option<&EntityUri>: extracted as Option<EntityUri>, borrow each.
+                            param_names_for_call.push(quote! { #param_name_ident.as_ref() });
+                        } else if is_optional {
+                            // Option<EntityUri> (owned): move it.
+                            param_names_for_call.push(quote! { #param_name_ident });
+                        } else if is_ref_type {
+                            // &EntityUri: extracted as owned EntityUri, borrow it.
+                            param_names_for_call.push(quote! { &#param_name_ident });
+                        } else {
+                            // EntityUri (owned): move it.
+                            param_names_for_call.push(quote! { #param_name_ident });
+                        }
+                    } else if (is_ref_type && type_str_cleaned == "String") || is_option_ref_str {
                         if is_optional {
                             // For Option<&str>, extract as Option<String> and borrow
                             param_names_for_call.push(quote! { #param_name_ident.as_ref().map(|s| s.as_str()) });
                         } else {
                             param_names_for_call.push(quote! { &*#param_name_ident });
-                        }
-                    } else if is_ref_type && type_str_cleaned == "EntityUri" {
-                        if is_optional {
-                            param_names_for_call.push(quote! { #param_name_ident.as_ref() });
-                        } else {
-                            param_names_for_call.push(quote! { &#param_name_ident });
                         }
                     } else {
                         param_names_for_call.push(quote! { #param_name_ident });
@@ -740,7 +764,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
             {
                 match op_name {
                     #(#dispatch_cases),*
-                    _ => Err(#crate_path::core::datasource::UnknownOperationError::new(
+                    _ => Err(#unknown_op_error_path::new(
                         stringify!(#trait_name),
                         op_name,
                     ).into())
@@ -759,7 +783,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
             {
                 match op_name {
                     #(#dispatch_cases),*
-                    _ => Err(#crate_path::core::datasource::UnknownOperationError::new(
+                    _ => Err(#unknown_op_error_path::new(
                         stringify!(#trait_name),
                         op_name,
                     ).into())
@@ -870,7 +894,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
             use super::*;
             use holon_api::StorageEntity;
             use holon_api::Value;
-            use #crate_path::core::datasource::Result;
+            use #result_path;
             // Operation is now in holon-api, use holon_api::Operation
             use #operation_type_path as Operation;
 
@@ -1250,6 +1274,7 @@ fn infer_type_string(type_str: &str) -> String {
         "bool" => "bool".to_string(),
         "f64" => "f64".to_string(),
         "f32" => "f32".to_string(),
+        s if s.contains("StorageEntity") => "HashMap".to_string(),
         s if s.contains("HashMap") => "HashMap".to_string(),
         s if s.contains("Vec") => "Vec".to_string(),
         s if s.contains("DateTime") => "DateTime".to_string(),

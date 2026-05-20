@@ -138,7 +138,7 @@ Full user-visible pipeline executes through the SUT:
 `inv10h_live` is now anchored on `block:default-main-panel` instead of the root layout block. The main-panel `ensure_watching` provides the actual data source (the GQL query results — descendants of focus root) and its render expression's `item_template` (`render_entity()`, resolved per-row via the block profile's `default` variant).
 
 Implementation:
-- `reactive.ensure_watching(&EntityUri::block("default-main-panel"))` gets the main-panel `ReactiveQueryResults`.
+- `reactive.ensure_watching(&EntityUri::block("default-main-panel"))` gets the main-panel `ReactiveRenderedRows`.
 - Short watch-stream wait drains the first emission so `mp_data_rows` isn't empty on cold start.
 - `HeadlessLiveTree::new(mp_results, item_template, services, runtime)` instantiates the persistent collection, sharing the same row data source as the production GPUI frontend.
 - Fresh items are computed by re-interpreting `item_template` against the current `mp_data_rows` snapshot; live items are read from the persistent tree's `items()`.

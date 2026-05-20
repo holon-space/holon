@@ -35,7 +35,7 @@ impl fmt::Debug for Shape {
 /// One mode-switchable block discovered while building a blueprint.
 #[derive(Clone)]
 pub struct BlockHandle {
-    /// The block id as passed to `EntityUri::from_raw(...).to_string()`.
+    /// The block id in its canonical stringified `EntityUri` form.
     pub block_id: String,
     /// Mode names in display order.
     pub mode_names: Vec<String>,

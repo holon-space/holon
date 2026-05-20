@@ -1,6 +1,6 @@
 # Use Cases: Cross-Source Integration
 
-**Related design**: [External Element Embedding](../DESIGN_EXTERNAL_ELEMENT_EMBEDDING.md)
+**Related design**: [External Element Embedding](../Explanation/DESIGN_EXTERNAL_ELEMENT_EMBEDDING.md)
 
 These use cases motivate the unified matview approach (Option 4) for embedding external elements into Holon's block tree.
 

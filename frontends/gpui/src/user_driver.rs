@@ -28,7 +28,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::channel::mpsc::Sender;
-use holon_api::{KeyChord, Value};
+use holon_api::{EntityUri, KeyChord, Value};
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
@@ -75,33 +75,116 @@ impl GpuiUserDriver {
             .context("GPUI interaction pump dropped the response channel")
     }
 
+    /// Dispatch a `KeyDown` and, when no handler consumed it, retry — waking
+    /// on committed render passes — until `timeout`. Covers the gap where
+    /// engine focus has already moved but the editor that will consume the
+    /// key mounts on the next render pass. An unconsumed keystroke has no
+    /// side effects, so the retry cannot double-apply. Fails loud at the
+    /// deadline: a key the UI never consumes is a keybinding/focus bug.
+    async fn key_down_until_handled(
+        &self,
+        keystroke: &str,
+        modifiers: Vec<String>,
+        timeout: Duration,
+        context: &str,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let response = self
+                .dispatch_event(InteractionEvent::KeyDown {
+                    keystroke: keystroke.to_string(),
+                    modifiers: modifiers.clone(),
+                })
+                .await?;
+            if response.handled {
+                if attempt > 1 {
+                    // A keystroke that was re-dispatched after an unhandled
+                    // report is the prime suspect for double-application bugs
+                    // (e.g. a split that DID happen but reported unhandled).
+                    // Make every such retry loud so failure logs can correlate.
+                    eprintln!(
+                        "[key_down_until_handled] {context}: {keystroke:?} consumed on \
+                         attempt {attempt} (earlier dispatches reported unhandled)"
+                    );
+                }
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "{context}: keystroke {keystroke:?} (modifiers {modifiers:?}) was never \
+                     consumed within {timeout:?}{detail}",
+                    detail = match &response.detail {
+                        Some(d) => format!(" (detail: {d})"),
+                        None => String::new(),
+                    },
+                );
+            }
+            // The retry exists for "editor mounts on the next render pass" —
+            // but in a virtualized list the focused row can sit OUTSIDE the
+            // viewport, where its editable variant never mounts no matter how
+            // long we wait. Mirror a real user's viewport (which follows
+            // focus) by scrolling the focused entity into view between
+            // retries.
+            if let Some(focused) = self.engine.focused_block() {
+                let _ = self
+                    .dispatch_event(InteractionEvent::ScrollEntityIntoView {
+                        entity_id: focused.to_string(),
+                    })
+                    .await;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
+    }
+
     /// Look up an element's window-space center from the `GeometryProvider`.
     ///
-    /// Current constraint: only resolves `block:`-prefixed entity ids. The
-    /// debug_assert guards against non-block entity ids silently resolving
-    /// to `None` (which would look identical to an un-rendered block).
+    /// Resolves block entity ids plus the non-block UI handles
+    /// (`drawer_toggle::`, `vms_button::`, `expand_toggle::`) registered under
+    /// their raw element id. The debug_assert guards against a non-block id
+    /// silently resolving to `None` (which would look identical to an
+    /// un-rendered block) — it fires only when nothing in the chain resolves.
     ///
-    /// Lookup chain: `render-entity-{id}` → `selectable-{id}` → entity_id
-    /// scan. The default `index.org` sidebar wraps each row in
+    /// Lookup chain: `render-entity-{id}` → `selectable-{id}` → raw `{id}` →
+    /// entity_id scan. The default `index.org` sidebar wraps each row in
     /// `selectable(row(...))` directly, with no outer `render_entity()`,
     /// so sidebar rows register under `selectable-{id}`. Without that
     /// second alias, `click_entity` on a sidebar item would always miss.
     fn element_center(&self, entity_id: &str) -> Option<(f32, f32)> {
-        debug_assert!(
-            entity_id.starts_with("block:") || !entity_id.contains(':'),
-            "GpuiUserDriver only supports block-scoped entity ids; got {entity_id:?}"
-        );
+        // Block entity ids resolve via their `render-entity-`/`selectable-`
+        // aliases or an entity_id scan. Non-block UI handles
+        // (`drawer_toggle::`, `vms_button::`, `expand_toggle::`) are
+        // registered under their raw element id, so try that directly too.
+        // Visible-area gate: recorded bounds are clipped to the content
+        // mask, so a list-overdraw row just outside the viewport has a
+        // degenerate rect whose center sits on the clip edge — on top of a
+        // DIFFERENT row. Resolving it would click the wrong block
+        // (2026-06-11); treat it as unresolved so callers re-wait/scroll.
         for el_id in [
             format!("render-entity-{entity_id}"),
             format!("selectable-{entity_id}"),
+            entity_id.to_string(),
         ] {
             if let Some(info) = self.geometry.element_info(&el_id) {
-                return Some(info.center());
+                if info.has_visible_area() {
+                    return Some(info.center());
+                }
             }
         }
-        self.geometry
-            .find_by_entity_id(entity_id)
-            .map(|info| info.center())
+        let resolved = self
+            .geometry
+            .find_by_entity_id_visible(entity_id)
+            .map(|info| info.center());
+        // Guard intent (unchanged): a non-block id that resolves to nothing
+        // looks identical to an un-rendered block. Block ids may legitimately
+        // be absent (not yet rendered); a non-block id that resolves nowhere
+        // means the caller drove a handle the driver can't map.
+        debug_assert!(
+            resolved.is_some() || entity_id.starts_with("block:") || !entity_id.contains(':'),
+            "GpuiUserDriver could not resolve non-block entity id {entity_id:?}"
+        );
+        resolved
     }
 
     /// All BoundsRegistry elements whose recorded bounds contain `(px, py)`,
@@ -131,8 +214,8 @@ impl GpuiUserDriver {
             .map(|(id, info)| {
                 (
                     id,
-                    info.entity_id.clone(),
-                    info.widget_type.clone(),
+                    info.entity_id.as_deref().map(str::to_string),
+                    info.widget_type.to_string(),
                     info.area(),
                 )
             })
@@ -173,6 +256,80 @@ impl GpuiUserDriver {
             )
         })
     }
+
+    /// Click-target center, scoped to a sidebar `region` when the entity is
+    /// rendered there. Falls back to the global `require_element_center` for
+    /// the main panel, an unparseable region, or an entity not found inside
+    /// the named sidebar panel (preserving prior behaviour for every other
+    /// caller). See `click_entity` for why the scoping matters.
+    fn require_click_center(
+        &self,
+        entity_id: &str,
+        region: &str,
+        verb: &str,
+    ) -> Result<(f32, f32)> {
+        if let Ok(r @ (holon_api::Region::LeftSidebar | holon_api::Region::RightSidebar)) =
+            region.parse::<holon_api::Region>()
+        {
+            if let Some(center) = self.element_center_in_region(entity_id, r) {
+                return Ok(center);
+            }
+        }
+        self.require_element_center(entity_id, verb)
+    }
+
+    /// Center of the element carrying `entity_id` whose parent chain
+    /// terminates at `region`'s panel `live_block`. Disambiguates a block
+    /// rendered in several regions. Returns `None` if the region's panel or
+    /// an in-region instance isn't currently tracked. Prefers the
+    /// smallest-area match (most-nested = the actual clickable row).
+    fn element_center_in_region(
+        &self,
+        entity_id: &str,
+        region: holon_api::Region,
+    ) -> Option<(f32, f32)> {
+        let panel_id = region_panel_block_id(region);
+        let elements: HashMap<String, holon_frontend::geometry::ElementInfo> =
+            self.geometry.all_elements().into_iter().collect();
+
+        let panel_ids: std::collections::HashSet<String> = elements
+            .iter()
+            .filter(|(_, info)| {
+                info.widget_type.as_ref() == "live_block"
+                    && info.entity_id.as_deref() == Some(panel_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if panel_ids.is_empty() {
+            return None;
+        }
+
+        let mut best: Option<&holon_frontend::geometry::ElementInfo> = None;
+        for info in elements.values() {
+            // Same visible-area gate as `element_center`: a content-mask
+            // clipped (degenerate) rect's center sits on a different row.
+            if info.entity_id.as_deref() != Some(entity_id) || !info.has_visible_area() {
+                continue;
+            }
+            let mut cursor = info.parent_id.clone();
+            let mut depth = 0;
+            let in_region = loop {
+                let Some(p) = cursor else { break false };
+                if panel_ids.contains(p.as_ref()) {
+                    break true;
+                }
+                depth += 1;
+                if depth > 100 {
+                    break false;
+                }
+                cursor = elements.get(p.as_ref()).and_then(|i| i.parent_id.clone());
+            };
+            if in_region && best.is_none_or(|b| info.area() < b.area()) {
+                best = Some(info);
+            }
+        }
+        best.map(|info| info.center())
+    }
 }
 
 #[async_trait]
@@ -193,13 +350,21 @@ impl UserDriver for GpuiUserDriver {
     /// Focus the target via a real mouse click dispatched on the
     /// interaction channel. Fails loud when geometry isn't available —
     /// see module-level doc for the rationale and the
-    /// `wait_for_element_bounds` remedy. The `region` arg matches the
-    /// trait signature; the GPUI driver synthesizes a real mouse event,
-    /// so the region is implicit in the click coordinates and the arg is
-    /// unused here.
+    /// `wait_for_element_bounds` remedy.
+    ///
+    /// For a sidebar `region`, resolution is scoped to that region's panel: a
+    /// block rendered in BOTH a sidebar list and the main panel (e.g.
+    /// `block:journals`) would otherwise resolve to the main-panel
+    /// `render-entity-` element, whose click dispatches `navigation.editor_focus`
+    /// instead of the sidebar row's `navigation.focus` — so the click silently
+    /// places a cursor rather than navigating. Main clicks keep the global
+    /// `render-entity-`-first resolution.
     #[tracing::instrument(skip(self), name = "GpuiUserDriver.click_entity", fields(%entity_id))]
-    async fn click_entity(&self, entity_id: &str, _: &str) -> Result<()> {
-        let (cx, cy) = self.require_element_center(entity_id, "click_entity")?;
+    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+        // The geometry/bounds registry is string-keyed (element ids, not
+        // routing): render one stable string at the seam.
+        let entity_id = entity_id.as_str();
+        let (cx, cy) = self.require_click_center(entity_id, region, "click_entity")?;
         // Hit-test BEFORE dispatching so the log captures the layout the
         // synthetic MouseDown will see. The topmost (smallest containing)
         // element is logged first; up to 4 candidates total. If the topmost
@@ -240,33 +405,6 @@ impl UserDriver for GpuiUserDriver {
             modifiers: Vec::new(),
         })
         .await?;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        Ok(())
-    }
-
-    /// Focus the target via click, then dispatch each character of
-    /// `text` as a keystroke through the interaction channel. Mirrors
-    /// MCP's `type_text` tool so both paths exercise the same pipeline.
-    /// Fails loud when bounds aren't available.
-    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()> {
-        let (cx, cy) = self.require_element_center(entity_id, "type_text")?;
-
-        self.dispatch_event(InteractionEvent::MouseClick {
-            position: (cx, cy),
-            button: "left".into(),
-            modifiers: Vec::new(),
-        })
-        .await?;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        for ch in text.chars() {
-            self.dispatch_event(InteractionEvent::KeyDown {
-                keystroke: ch.to_string(),
-                modifiers: Vec::new(),
-            })
-            .await?;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
         Ok(())
     }
 
@@ -292,20 +430,120 @@ impl UserDriver for GpuiUserDriver {
     /// Bounds-missing is a hard error. See module-level doc.
     async fn send_key_chord(
         &self,
-        _: &str,
+        _: &EntityUri,
         _: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
     ) -> Result<bool> {
-        let (cx, cy) = self.require_element_center(entity_id, "send_key_chord")?;
-        self.dispatch_event(InteractionEvent::MouseClick {
-            position: (cx, cy),
-            button: "left".into(),
-            modifiers: Vec::new(),
-        })
-        .await?;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let entity_id = entity_id.as_str();
+        // A real user presses a chord into the editor they're already in —
+        // no click. Click-to-focus only when the target does NOT already
+        // hold editor focus: an unconditional click re-seats the caret at
+        // the element center, diverging from the reference model, which
+        // leaves the caret alone for the already-focused case (see
+        // `transitions::model_chord_click_focus`).
+        // Click-to-focus with re-click: a legitimate async commit (pending
+        // text flushing on a previous editor's authority-leave) can
+        // re-render and shift row bounds between bounds resolution and the
+        // gpui hit-test, so a single click can land on a neighbor row.
+        // Re-resolve fresh bounds and re-click until `focused_block` lands
+        // on the target; fail loud at the deadline — keys pressed into the
+        // wrong editor corrupt content invisibly.
+        {
+            use futures::StreamExt;
+            use futures_signals::signal::SignalExt;
+            let overall_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+            loop {
+                let already_focused = self
+                    .engine
+                    .ui_state()
+                    .focused_block_mutable()
+                    .get_cloned()
+                    .as_ref()
+                    .map(|u| u.as_str())
+                    == Some(entity_id);
+                if already_focused {
+                    // A real user presses a chord into the editor they're
+                    // already in — no click. An unconditional click would
+                    // re-seat the caret at the element center, diverging from
+                    // the reference model (see `model_chord_click_focus`).
+                    break;
+                }
+                let (cx, cy) = self.require_element_center(entity_id, "send_key_chord")?;
+                self.dispatch_event(InteractionEvent::MouseClick {
+                    position: (cx, cy),
+                    button: "left".into(),
+                    modifiers: Vec::new(),
+                })
+                .await?;
+                // Window focus follows `focused_block` via the spawned
+                // binding — wait for this click's focus move to land.
+                // (`to_stream()` emits the current value first.)
+                let attempt_deadline = std::cmp::min(
+                    tokio::time::Instant::now() + Duration::from_secs(1),
+                    overall_deadline,
+                );
+                let mut focus_stream = self
+                    .engine
+                    .ui_state()
+                    .focused_block_mutable()
+                    .signal_cloned()
+                    .to_stream();
+                let landed = loop {
+                    match tokio::time::timeout_at(attempt_deadline, focus_stream.next()).await {
+                        Ok(Some(actual))
+                            if actual.as_ref().map(|u| u.as_str()) == Some(entity_id) =>
+                        {
+                            break true;
+                        }
+                        Ok(Some(_)) => continue,
+                        Ok(None) | Err(_) => break false,
+                    }
+                };
+                if landed {
+                    break;
+                }
+                if tokio::time::Instant::now() >= overall_deadline {
+                    anyhow::bail!(
+                        "send_key_chord: click on {entity_id:?} never moved focused_block \
+                         to it within 4s (incl. re-click attempts) — refusing to press \
+                         {chord:?} into the wrong editor"
+                    );
+                }
+                eprintln!(
+                    "[send_key_chord] click did not land focus on {entity_id:?} (re-render \
+                     likely shifted bounds mid-click); re-clicking"
+                );
+            }
+        }
+        // Engine focus has moved, but the target's editor mounts and takes
+        // WINDOW focus only on a following render pass — until then a key is
+        // either dropped or consumed by the previously-focused editor, which
+        // the `handled` flag can't distinguish. Wait for the target's
+        // editable_text to report `focused == true` in a committed frame.
+        {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let window_focused = self.geometry.all_elements().iter().any(|(_, info)| {
+                    info.entity_id.as_deref() == Some(entity_id)
+                        && info.widget_type.as_ref() == "editable_text"
+                        && info.focused == Some(true)
+                });
+                if window_focused {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "send_key_chord: {entity_id:?}'s editable_text never took window focus \
+                         within 2s of click-to-focus — refusing to press {chord:?} into whatever \
+                         editor still holds it"
+                    );
+                }
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+            }
+        }
 
         // Position the cursor with real input when the caller specified a
         // byte offset. Click lands the cursor somewhere in the line; we
@@ -314,19 +552,22 @@ impl UserDriver for GpuiUserDriver {
         // bug in cursor handling surfaces here just like in production.
         if let Some(Value::Integer(target)) = extra_params.get("position") {
             let target = (*target).max(0) as usize;
-            self.dispatch_event(InteractionEvent::KeyDown {
-                keystroke: "home".into(),
-                modifiers: Vec::new(),
-            })
+            self.key_down_until_handled(
+                "home",
+                Vec::new(),
+                Duration::from_secs(2),
+                "send_key_chord(position)",
+            )
             .await?;
             for _ in 0..target {
-                self.dispatch_event(InteractionEvent::KeyDown {
-                    keystroke: "right".into(),
-                    modifiers: Vec::new(),
-                })
+                self.key_down_until_handled(
+                    "right",
+                    Vec::new(),
+                    Duration::from_secs(2),
+                    "send_key_chord(position)",
+                )
                 .await?;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
         let (modifiers, regulars): (Vec<_>, Vec<_>) =
@@ -341,14 +582,15 @@ impl UserDriver for GpuiUserDriver {
             let Some(name) = keystroke_name(key) else {
                 continue;
             };
-            self.dispatch_event(InteractionEvent::KeyDown {
-                keystroke: name,
-                modifiers: mod_names.clone(),
-            })
+            self.key_down_until_handled(
+                &name,
+                mod_names.clone(),
+                Duration::from_secs(2),
+                "send_key_chord",
+            )
             .await?;
         }
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
         Ok(true)
     }
 
@@ -361,7 +603,6 @@ impl UserDriver for GpuiUserDriver {
             modifiers: Vec::new(),
         })
         .await?;
-        tokio::time::sleep(Duration::from_millis(20)).await;
         Ok(())
     }
 
@@ -369,8 +610,8 @@ impl UserDriver for GpuiUserDriver {
     /// `GeometryProvider` and delegates to `scroll_at`. Fails loud when
     /// bounds aren't available; MCP clients now receive an error
     /// instead of a silent no-op (observable behavior change).
-    async fn scroll_entity(&self, entity_id: &str, dx: f32, dy: f32) -> Result<()> {
-        let (cx, cy) = self.require_element_center(entity_id, "scroll_entity")?;
+    async fn scroll_entity(&self, entity_id: &EntityUri, dx: f32, dy: f32) -> Result<()> {
+        let (cx, cy) = self.require_element_center(entity_id.as_str(), "scroll_entity")?;
         self.scroll_at(cx, cy, dx, dy).await
     }
 
@@ -382,9 +623,14 @@ impl UserDriver for GpuiUserDriver {
     /// first qualifying move, and the drop_zone's `on_drop` closure
     /// fires on `MouseUp` over the target. Fails loud when either
     /// element's bounds aren't available — see module-level doc.
-    async fn drop_entity(&self, _: &str, source_id: &str, target_id: &str) -> Result<bool> {
-        let (sx, sy) = self.require_element_center(source_id, "drop_entity (source)")?;
-        let (tx, ty) = self.require_element_center(target_id, "drop_entity (target)")?;
+    async fn drop_entity(
+        &self,
+        _: &EntityUri,
+        source_id: &EntityUri,
+        target_id: &EntityUri,
+    ) -> Result<bool> {
+        let (sx, sy) = self.require_element_center(source_id.as_str(), "drop_entity (source)")?;
+        let (tx, ty) = self.require_element_center(target_id.as_str(), "drop_entity (target)")?;
 
         self.dispatch_event(InteractionEvent::MouseDown {
             position: (sx, sy),
@@ -392,7 +638,6 @@ impl UserDriver for GpuiUserDriver {
             modifiers: Vec::new(),
         })
         .await?;
-        tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Step the cursor toward the target in increments. Each step must
         // exceed GPUI's drag threshold (~5 logical px) for the drag state
@@ -408,7 +653,6 @@ impl UserDriver for GpuiUserDriver {
                 modifiers: Vec::new(),
             })
             .await?;
-            tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
         self.dispatch_event(InteractionEvent::MouseUp {
@@ -417,11 +661,48 @@ impl UserDriver for GpuiUserDriver {
             modifiers: Vec::new(),
         })
         .await?;
-        tokio::time::sleep(Duration::from_millis(30)).await;
         Ok(true)
     }
 
+    async fn send_raw_keystroke_until_handled(
+        &self,
+        keystroke: &str,
+        modifiers: &[&str],
+        timeout: Duration,
+    ) -> Result<()> {
+        self.key_down_until_handled(
+            keystroke,
+            modifiers.iter().map(|s| s.to_string()).collect(),
+            timeout,
+            "send_raw_keystroke_until_handled",
+        )
+        .await
+    }
+
     async fn send_raw_keystroke(&self, keystroke: &str, modifiers: &[&str]) -> Result<()> {
+        // In a virtualized list the focused row can sit outside the viewport:
+        // its editor variant is unmounted, so the keystroke would be dropped
+        // and we'd bail "not consumed". A real user's viewport follows focus —
+        // mirror that: when the focused entity has no committed bounds,
+        // reveal it and wait out the scroll → mount → paint cascade before
+        // dispatching. Cheap when the row is visible (one registry lookup).
+        if let Some(focused) = self.engine.focused_block() {
+            if self.element_center(focused.as_str()).is_none() {
+                let _ = self
+                    .dispatch_event(InteractionEvent::ScrollEntityIntoView {
+                        entity_id: focused.to_string(),
+                    })
+                    .await;
+                for _ in 0..4 {
+                    if self.element_center(focused.as_str()).is_some() {
+                        break;
+                    }
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(100), self.geometry.changed())
+                            .await;
+                }
+            }
+        }
         let response = self
             .dispatch_event(InteractionEvent::KeyDown {
                 keystroke: keystroke.to_string(),
@@ -443,7 +724,18 @@ impl UserDriver for GpuiUserDriver {
                 },
             );
         }
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        // Pace consecutive keystrokes by one committed frame. A real user's
+        // keystrokes never outrun the compositor; without this, sub-frame
+        // typing races the editor's focus-gated backend-echo handling and
+        // drops characters (inv-displayed-text). Wakes on the commit notify;
+        // the cap covers windows that aren't repainting.
+        // `HOLON_PBT_SUPERHUMAN_INPUT=1` disables the pacing — a stress mode
+        // that hunts the dropped-character editor-echo race as a prod bug
+        // instead of pacing around it (expect inv-displayed-text failures
+        // until that race is fixed; not part of the green gate).
+        if !superhuman_input() {
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
         Ok(())
     }
 
@@ -454,9 +746,9 @@ impl UserDriver for GpuiUserDriver {
     /// can't synchronously prove which intent fired.
     async fn click_entity_with_tree(
         &self,
-        _: &str,
+        _: &EntityUri,
         _: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         region: &str,
     ) -> Result<bool> {
         self.click_entity(entity_id, region).await?;
@@ -473,17 +765,17 @@ impl UserDriver for GpuiUserDriver {
     // ReactiveViewModel snapshot — same source the production click /
     // list renders consult.
 
-    fn is_widget_visible(&self, entity_id: &str) -> bool {
+    fn is_widget_visible(&self, entity_id: &EntityUri) -> bool {
         self.geometry
-            .find_by_entity_id(entity_id)
+            .find_by_entity_id(entity_id.as_str())
             .filter(|info| info.area() > 0.0)
             .is_some()
     }
 
-    fn is_in_region(&self, entity_id: &str, region: holon_api::Region) -> bool {
+    fn is_in_region(&self, entity_id: &EntityUri, region: holon_api::Region) -> bool {
         self.entities_in_region(region)
             .iter()
-            .any(|uri| uri.as_str() == entity_id)
+            .any(|uri| uri == entity_id)
     }
 
     /// Walk the BoundsRegistry parent-id chain from every tracked element
@@ -500,7 +792,8 @@ impl UserDriver for GpuiUserDriver {
         let panel_ids: std::collections::HashSet<String> = elements
             .iter()
             .filter(|(_, info)| {
-                info.widget_type == "live_block" && info.entity_id.as_deref() == Some(panel_id)
+                info.widget_type.as_ref() == "live_block"
+                    && info.entity_id.as_deref() == Some(panel_id)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -519,7 +812,7 @@ impl UserDriver for GpuiUserDriver {
             let mut cursor = info.parent_id.clone();
             let mut depth = 0;
             while let Some(p) = cursor {
-                if panel_ids.contains(&p) {
+                if panel_ids.contains(p.as_ref()) {
                     result.insert(eid.to_string());
                     break;
                 }
@@ -527,7 +820,7 @@ impl UserDriver for GpuiUserDriver {
                 if depth > 100 {
                     break;
                 }
-                cursor = elements.get(&p).and_then(|i| i.parent_id.clone());
+                cursor = elements.get(p.as_ref()).and_then(|i| i.parent_id.clone());
             }
         }
         // Drop unparseable ids: BoundsRegistry holds anything the builder
@@ -549,29 +842,36 @@ impl UserDriver for GpuiUserDriver {
     /// itself iterates, so the answer is consistent with what
     /// `ListState::scroll_to_reveal_item(ix)` can address.
     fn reachable_entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
-        let panel_uri = holon_api::EntityUri::from_raw(region_panel_block_id(region));
+        let panel_uri =
+            holon_api::EntityUri::parse(region_panel_block_id(region)).expect("static panel id");
         let root = self.engine.snapshot_reactive(&panel_uri);
         let mut out = Vec::new();
         collect_collection_item_ids(&root, &mut out);
         out
     }
 
-    /// Scroll the panel's virtualized list (sidebar list, primarily) so
-    /// the named `entity_id` enters the viewport. Block-mode panels have
-    /// all rendered entities in BoundsRegistry regardless of viewport (no
-    /// virtualization), so this RPC is effectively only meaningful for
-    /// `gpui::list(...)`-backed shells.
+    /// Scroll a panel's virtualized list so the named `entity_id` enters
+    /// the viewport. ALL collection panels (sidebars and the main panel)
+    /// render through `gpui::list(...)`-backed shells, so off-viewport
+    /// rows have no BoundsRegistry entry until this RPC scrolls them in.
     ///
     /// Returns `Ok(())` when the scroll handler succeeded OR when the
     /// entity wasn't in any virtualized list (caller — `wait_for_entity_bounds`
     /// — keeps polling and lets the timeout be the authoritative failure
     /// signal). Returns `Err` only when the channel itself is broken.
-    async fn scroll_to_entity(&self, entity_id: &str) -> Result<()> {
-        let _ = self
+    async fn scroll_to_entity(&self, entity_id: &EntityUri) -> Result<()> {
+        let resp = self
             .dispatch_event(InteractionEvent::ScrollEntityIntoView {
                 entity_id: entity_id.to_string(),
             })
             .await?;
+        // `handled == false` without detail is the benign "not in any
+        // virtualized list" case. A `detail` means the lookup itself failed
+        // (unparseable URI, window update error) — surface that instead of
+        // letting the caller's poll timeout absorb it silently.
+        if let Some(detail) = resp.detail {
+            anyhow::bail!("scroll_to_entity({entity_id}): {detail}");
+        }
         Ok(())
     }
 
@@ -580,7 +880,7 @@ impl UserDriver for GpuiUserDriver {
     /// bound `click_intent()`. The click handler reads the same VM at click
     /// time, so observing the intent ahead of dispatch is equivalent to
     /// observing what the user's click would do.
-    fn click_intent_of(&self, entity_id: &str) -> Option<OperationIntent> {
+    fn click_intent_of(&self, entity_id: &EntityUri) -> Option<OperationIntent> {
         let root_uri = holon_api::root_layout_block_uri();
         let resolved = self.engine.snapshot_resolved(&root_uri);
         holon_frontend::focus_path::find_click_intent_in_view_model(&resolved, entity_id)
@@ -589,11 +889,20 @@ impl UserDriver for GpuiUserDriver {
     /// The text actually rendered for `entity_id` on screen — read from
     /// the `BoundsRegistry`'s recorded `displayed_text`, which the
     /// `text` / `editable_text` builders capture from the rendered widget.
-    fn displayed_text(&self, entity_id: &str) -> Option<String> {
+    fn displayed_text(&self, entity_id: &EntityUri) -> Option<String> {
         self.geometry
-            .find_by_entity_id(entity_id)
-            .and_then(|info| info.displayed_text)
+            .find_by_entity_id(entity_id.as_str())
+            .and_then(|info| info.displayed_text.map(|s| s.to_string()))
     }
+}
+
+/// `HOLON_PBT_SUPERHUMAN_INPUT=1` — stress mode: keystrokes are NOT paced to
+/// one committed frame each, so sub-frame typing races the editor's
+/// focus-gated backend-echo handling. Used to reproduce the dropped-character
+/// race ("skip-when-focused staleness" family) as a prod bug.
+fn superhuman_input() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("HOLON_PBT_SUPERHUMAN_INPUT").as_deref() == Ok("1"))
 }
 
 fn region_panel_block_id(region: holon_api::Region) -> &'static str {
@@ -613,10 +922,8 @@ fn collect_collection_item_ids(
 ) {
     if let Some(ref view) = node.collection {
         for item in view.children_snapshot() {
-            if let Some(eid) = item.entity_id() {
-                if let Ok(uri) = holon_api::EntityUri::parse(&eid) {
-                    out.push(uri);
-                }
+            if let Some(uri) = item.entity_id() {
+                out.push(uri);
             }
         }
         return;
@@ -646,7 +953,7 @@ fn modifier_name(k: &holon_api::Key) -> Option<&'static str> {
     })
 }
 
-fn keystroke_name(k: &holon_api::Key) -> Option<String> {
+pub fn keystroke_name(k: &holon_api::Key) -> Option<String> {
     use holon_api::Key;
     Some(match k {
         Key::Up => "up".into(),

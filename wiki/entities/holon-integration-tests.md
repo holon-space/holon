@@ -37,7 +37,7 @@ crates/holon-integration-tests/src/pbt/
 ├── reference_state.rs  # ReferenceState — in-memory model of expected system state
 ├── generators.rs       # proptest generators for blocks, queries, mutations
 ├── sut.rs              # E2ESut — System Under Test wrapper
-├── phased.rs           # pbt_setup, pbt_step, pbt_teardown, run_phased_pbt
+├── phased.rs           # pbt_setup, pbt_step, pbt_teardown
 ├── query.rs            # TestQuery, WatchSpec
 ├── types.rs            # Shared test types
 ├── loro_sut.rs         # Loro-specific SUT operations

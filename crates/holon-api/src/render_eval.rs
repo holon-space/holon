@@ -85,7 +85,7 @@ pub fn resolve_color_name(s: &str) -> &str {
     }
 }
 
-pub fn resolve_states(args: &ResolvedArgs, row: &HashMap<String, Value>) -> Vec<String> {
+pub fn resolve_states<K: RowKey>(args: &ResolvedArgs, row: &HashMap<K, Value>) -> Vec<String> {
     if let Some(states_expr) = args.get_template("states") {
         let val = eval_to_value(states_expr, row);
         if let Value::Array(items) = val {
@@ -466,10 +466,16 @@ fn concat_invoke(resolved: &ResolvedArgs) -> Value {
     Value::String(parts.join(""))
 }
 
+/// Key bound for row maps accepted by the eval entry points: both the
+/// Arc<str>-keyed `StorageEntity` (engine side) and the String-keyed
+/// `DataRow` (frontend/FRB side) qualify.
+pub trait RowKey: std::borrow::Borrow<str> + std::hash::Hash + Eq {}
+impl<T: std::borrow::Borrow<str> + std::hash::Hash + Eq> RowKey for T {}
+
 /// Scalar-only legacy path (preserved behavior for callers that don't
 /// have a value-fn registry). Thin wrapper over `eval_to_interp` that
 /// drops `Rows` to `Value::Null` with a warning.
-pub fn resolve_args(args: &[Arg], row: &HashMap<String, Value>) -> ResolvedArgs {
+pub fn resolve_args<K: RowKey>(args: &[Arg], row: &HashMap<K, Value>) -> ResolvedArgs {
     resolve_args_with(args, row, &CORE_VALUE_FN_LOOKUP)
 }
 
@@ -480,9 +486,9 @@ pub fn resolve_args(args: &[Arg], row: &HashMap<String, Value>) -> ResolvedArgs 
 /// row-sets panic — positional args are scalar by convention, so a row
 /// set there is a user error in the DSL worth surfacing at the first
 /// evaluation.
-pub fn resolve_args_with(
+pub fn resolve_args_with<K: RowKey>(
     args: &[Arg],
-    row: &HashMap<String, Value>,
+    row: &HashMap<K, Value>,
     fns: &dyn ValueFnLookup,
 ) -> ResolvedArgs {
     let mut positional = Vec::new();
@@ -547,7 +553,7 @@ pub fn is_template_arg(name: &str) -> bool {
 /// `eval_to_value`. Thin wrapper over `eval_to_interp` with the empty
 /// lookup: row-sets become `Value::Null` + a warning, since a scalar
 /// caller cannot meaningfully consume one.
-pub fn eval_to_value(expr: &RenderExpr, row: &HashMap<String, Value>) -> Value {
+pub fn eval_to_value<K: RowKey>(expr: &RenderExpr, row: &HashMap<K, Value>) -> Value {
     match eval_to_interp(expr, row, &CORE_VALUE_FN_LOOKUP) {
         InterpValue::Value(v) => v,
         InterpValue::Rows(_) => {
@@ -564,17 +570,19 @@ pub fn eval_to_value(expr: &RenderExpr, row: &HashMap<String, Value>) -> Value {
 /// (other than the legacy `concat` shim) produce `Value::Null`. The
 /// pre-F1 "silently return first arg" fallback is gone — a typo'd // ALLOW(fallback): historical name in doc comment
 /// function call now produces a visible `Null` at the consumer.
-pub fn eval_to_interp(
+pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
-    row: &HashMap<String, Value>,
+    row: &HashMap<K, Value>,
     fns: &dyn ValueFnLookup,
 ) -> InterpValue {
     use InterpValue::*;
     match expr {
         RenderExpr::Literal { value } => Value(value.clone()),
-        RenderExpr::ColumnRef { name } => {
-            Value(row.get(name).cloned().unwrap_or(crate::Value::Null))
-        }
+        RenderExpr::ColumnRef { name } => Value(
+            row.get(name.as_str())
+                .cloned()
+                .unwrap_or(crate::Value::Null),
+        ),
         RenderExpr::BinaryOp { op, left, right } => {
             let l = eval_to_value(left, row);
             let r = eval_to_value(right, row);
@@ -817,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_eval_to_value_literal() {
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::Literal {
             value: Value::Integer(42),
         };
@@ -826,8 +834,8 @@ mod tests {
 
     #[test]
     fn test_eval_to_value_column_ref() {
-        let mut row = HashMap::new();
-        row.insert("name".to_string(), Value::String("Alice".into()));
+        let mut row = crate::StorageEntity::new();
+        row.insert("name".into(), Value::String("Alice".into()));
         let expr = RenderExpr::ColumnRef {
             name: "name".to_string(),
         };
@@ -836,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_eval_to_value_missing_column() {
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::ColumnRef {
             name: "missing".to_string(),
         };
@@ -845,7 +853,7 @@ mod tests {
 
     #[test]
     fn test_eval_to_value_binary_op() {
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::BinaryOp {
             op: BinaryOperator::Add,
             left: Box::new(RenderExpr::Literal {
@@ -860,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_eval_to_value_concat() {
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "concat".to_string(),
             args: vec![
@@ -886,7 +894,7 @@ mod tests {
 
     #[test]
     fn test_eval_to_value_array() {
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::Array {
             items: vec![
                 RenderExpr::Literal {
@@ -905,8 +913,8 @@ mod tests {
 
     #[test]
     fn test_resolve_args_named_and_positional() {
-        let mut row = HashMap::new();
-        row.insert("col1".to_string(), Value::String("val1".into()));
+        let mut row = crate::StorageEntity::new();
+        row.insert("col1".into(), Value::String("val1".into()));
 
         let args = vec![
             Arg {
@@ -1083,7 +1091,7 @@ mod tests {
 
     #[test]
     fn f1_unknown_fn_returns_null_not_first_arg() {
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "definitely_not_registered".to_string(),
             args: vec![Arg {
@@ -1102,7 +1110,7 @@ mod tests {
         // pre-Task-#12 inline shim is gone — this test guards the
         // proper registration path so existing DSL `concat(...)` calls
         // keep producing identical output.
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "concat".to_string(),
             args: vec![
@@ -1137,7 +1145,7 @@ mod tests {
 
     #[test]
     fn registered_value_fn_dispatches() {
-        let row = HashMap::new();
+        let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "echo".to_string(),
             args: vec![Arg {
@@ -1157,7 +1165,7 @@ mod tests {
     fn resolve_args_with_empty_lookup_matches_legacy() {
         // Verifies resolve_args() and resolve_args_with(…, &EMPTY) are
         // observationally identical — the byte-compat promise.
-        let mut row = HashMap::new();
+        let mut row = crate::StorageEntity::new();
         row.insert("n".into(), Value::Integer(3));
 
         let args = vec![

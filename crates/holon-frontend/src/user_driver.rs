@@ -49,14 +49,20 @@ pub const DROP_TARGET_PARAM: &str = "parent_id";
 /// from the dropzone widget's declarative spec (see
 /// `ViewKind::DropZone { op_name }`).
 pub fn build_drop_intent(
-    source_id: &str,
-    target_id: &str,
+    source_id: &EntityUri,
+    target_id: &EntityUri,
     target_entity: EntityName,
     op_name: &str,
 ) -> OperationIntent {
     let mut params = HashMap::new();
-    params.insert(DROP_SOURCE_PARAM.into(), Value::String(source_id.into()));
-    params.insert(DROP_TARGET_PARAM.into(), Value::String(target_id.into()));
+    params.insert(
+        DROP_SOURCE_PARAM.into(),
+        Value::String(source_id.to_string()),
+    );
+    params.insert(
+        DROP_TARGET_PARAM.into(),
+        Value::String(target_id.to_string()),
+    );
     OperationIntent::new(target_entity, op_name.into(), params)
 }
 
@@ -126,9 +132,9 @@ pub trait UserDriver: Send + Sync {
     /// Returns `true` if the chord matched an operation and was dispatched.
     async fn send_key_chord(
         &self,
-        root_block_id: &str,
+        root_block_id: &EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
     ) -> Result<bool>;
@@ -138,9 +144,9 @@ pub trait UserDriver: Send + Sync {
     /// operation name if the chord matched, `None` otherwise.
     fn resolve_key_chord(
         &self,
-        root_block_id: &str,
+        root_block_id: &EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         chord: &KeyChord,
     ) -> Option<String> {
         let input = WidgetInput::KeyChord {
@@ -163,7 +169,7 @@ pub trait UserDriver: Send + Sync {
     /// `synthetic_dispatch` shortcut into a screen-mode driver where the
     /// user couldn't actually reach the action without going through the
     /// click handler. See [`UserDriver`] doc block on medium-faithfulness.
-    async fn click_entity(&self, entity_id: &str, region: &str) -> Result<()>;
+    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()>;
 
     /// Tree-aware click — same gesture as `click_entity`, but with access
     /// to a `ReactiveViewModel` root the headless driver can use to
@@ -177,22 +183,44 @@ pub trait UserDriver: Send + Sync {
     /// post-click state must observe through the SUT.
     async fn click_entity_with_tree(
         &self,
-        root_block_id: &str,
+        root_block_id: &EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         region: &str,
     ) -> Result<bool>;
 
-    /// Replace the content of an entity with the given text — the headless
-    /// equivalent of "focus the editor and type". Headless drivers
-    /// `synthetic_dispatch` `block::update { id, content }`; screen
-    /// drivers synthesize per-keystroke input through the real focus +
-    /// editor pipeline (IME, `InputState`, cursor-dependent edits).
+    /// Replace `entity_id`'s content with `text` by driving the *real* editor:
+    /// focus it (a click, as `FocusEditableText` does), clear the existing
+    /// content caret-wise, then type the replacement one codepoint at a time —
+    /// every step a `send_raw_keystroke`, so the edit traverses the same editor
+    /// pipeline (cursor model, `MutableText`, `on_text_changed`, the structural
+    /// `split`/`join` decisions in `structural_block_action`) a user's typing
+    /// would. This is the faithful replacement for `synthetic_dispatch`-ing a
+    /// `block::update { content }`.
     ///
-    /// No default impl by design — silently inheriting the headless body
-    /// in a screen driver would hide the bug class atomic editor PBT
-    /// primitives target (in-memory vs DB content divergence).
-    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()>;
+    /// The default impl composes the medium-agnostic real-input verbs, so it is
+    /// correct for both headless (`send_raw_keystroke` → `HeadlessEditorMirror`)
+    /// and screen drivers (real `InputState`) without per-driver code — unlike
+    /// the synthetic `type_text`, it cannot launder a shortcut past the editor.
+    async fn replace_text(&self, entity_id: &EntityUri, text: &str) -> Result<()> {
+        // Focus the editor the same way `FocusEditableText` does.
+        self.click_entity(entity_id, "main").await?;
+        // Clear existing content: caret to end, then one backspace per char.
+        // Each backspace is a real `MutableText` delete; we stop exactly at
+        // caret 0 so the final keystroke doesn't fall through to `join_block`.
+        let existing = self.displayed_text(entity_id).ok_or_else(|| {
+            anyhow::anyhow!("replace_text: {entity_id} is not rendered — no content to replace")
+        })?;
+        self.send_raw_keystroke("end", &[]).await?;
+        for _ in existing.chars() {
+            self.send_raw_keystroke("backspace", &[]).await?;
+        }
+        // Type the replacement one codepoint at a time.
+        for ch in text.chars() {
+            self.send_raw_keystroke(&ch.to_string(), &[]).await?;
+        }
+        Ok(())
+    }
 
     // ── Observation verbs ──────────────────────────────────────────────
     //
@@ -212,10 +240,21 @@ pub trait UserDriver: Send + Sync {
     /// Generators are sync, so all observation must be sync too; if a
     /// future impl needs to wait for state to settle, expose a separate
     /// barrier verb and have the generator call it explicitly.
-    fn is_widget_visible(&self, entity_id: &str) -> bool;
+    fn is_widget_visible(&self, entity_id: &EntityUri) -> bool;
+
+    /// Byte offset of the editor caret tracked for `block_id`, when this
+    /// driver's medium exposes one. `Err(reason)` = caret unobservable in
+    /// this medium (default; a disclosed skip, not a silent pass — GPUI's
+    /// caret lives in window-local `InputState`). `Ok(None)` = observable
+    /// medium but no caret tracked for this block yet (no keystroke since
+    /// focus). Used by `inv-editor-caret-matches-ref`.
+    fn editor_cursor_byte(&self, block_id: &EntityUri) -> Result<Option<usize>, String> {
+        let _ = block_id;
+        Err("editor caret not observable by this driver".to_string())
+    }
 
     /// True iff `entity_id` is visible AND located within `region`'s panel.
-    fn is_in_region(&self, entity_id: &str, region: holon_api::Region) -> bool;
+    fn is_in_region(&self, entity_id: &EntityUri, region: holon_api::Region) -> bool;
 
     /// Entity ids currently visible in `region`'s panel. Use this when you
     /// want the actually-on-screen set (post-scroll, post-viewport-cull).
@@ -235,19 +274,19 @@ pub trait UserDriver: Send + Sync {
     ///
     /// Stays `async` because this is an action verb — screen drivers
     /// dispatch real scroll input that must be awaited.
-    async fn scroll_to_entity(&self, entity_id: &str) -> Result<()>;
+    async fn scroll_to_entity(&self, entity_id: &EntityUri) -> Result<()>;
 
     /// The click intent bound to `entity_id` if the rendered widget has
     /// one (e.g. a `selectable` whose action is `navigation_focus(...)`).
     /// Read-only — does not dispatch. Used by the generator to decide
     /// "would clicking here do what I want?"
-    fn click_intent_of(&self, entity_id: &str) -> Option<OperationIntent>;
+    fn click_intent_of(&self, entity_id: &EntityUri) -> Option<OperationIntent>;
 
     /// The text the user actually sees rendered for `entity_id`. Screen
     /// drivers return the live displayed text; headless returns the
     /// ViewModel's resolved content. None for widgets without textual
     /// content.
-    fn displayed_text(&self, entity_id: &str) -> Option<String>;
+    fn displayed_text(&self, entity_id: &EntityUri) -> Option<String>;
 
     /// Scroll at a window coordinate. `dx`/`dy` are scroll-wheel line deltas
     /// (positive `dy` = scroll down, positive `dx` = scroll right). Default
@@ -261,7 +300,7 @@ pub trait UserDriver: Send + Sync {
     /// the element and turning the wheel. Default impl is a no-op. Native
     /// drivers look up the element's screen position via their geometry
     /// provider and delegate to `scroll_at` with the element's center.
-    async fn scroll_entity(&self, _: &str, _: f32, _: f32) -> Result<()> {
+    async fn scroll_entity(&self, _: &EntityUri, _: f32, _: f32) -> Result<()> {
         Ok(())
     }
 
@@ -279,9 +318,9 @@ pub trait UserDriver: Send + Sync {
     /// source isn't draggable or no drop zone exists for the target.
     async fn drop_entity(
         &self,
-        root_block_id: &str,
-        source_id: &str,
-        target_id: &str,
+        root_block_id: &EntityUri,
+        source_id: &EntityUri,
+        target_id: &EntityUri,
     ) -> Result<bool>;
 
     /// Send a single keystroke through the platform input pipeline. Used by
@@ -305,6 +344,23 @@ pub trait UserDriver: Send + Sync {
              Atomic editor primitives need a real-input driver (GpuiUserDriver). \
              Was PBT_ATOMIC_EDITOR=1 set in a headless run?"
         )
+    }
+
+    /// Like [`UserDriver::send_raw_keystroke`], but retry until some handler
+    /// consumes the keystroke or `timeout` elapses. Real-window drivers
+    /// override this to cover the editor-mount race: after a focus move, the
+    /// view that will consume the key may mount only on a later render pass
+    /// (and in a virtualized list, only after the focused row scrolls into
+    /// view). Headless drivers consume synchronously — the default just
+    /// forwards.
+    async fn send_raw_keystroke_until_handled(
+        &self,
+        keystroke: &str,
+        modifiers: &[&str],
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let _ = timeout;
+        self.send_raw_keystroke(keystroke, modifiers).await
     }
 
     /// Whether `send_raw_keystroke` routes through a real input pipeline
@@ -351,7 +407,7 @@ impl ReactiveEngineDriver {
     /// call before every chord. Used by per-frontend drivers that route input
     /// through the real UI pipeline but still need the engine-quiescence
     /// barrier (`tui` `TuiUserDriver`).
-    pub async fn warm_for_block(&self, root_block_id: &str) -> Result<()> {
+    pub async fn warm_for_block(&self, root_block_id: &EntityUri) -> Result<()> {
         self.router.ensure_block_watch(root_block_id);
         self.router
             .wait_until_ready(Duration::from_secs(2))
@@ -413,7 +469,7 @@ impl UserDriver for ReactiveEngineDriver {
     /// `send_key_chord` uses for its router fallback. If the entity is // ALLOW(fallback): pre-existing doc on router-poll behavior
     /// never found, we fall through to cursor placement — same as GPUI
     /// when nothing intercepts the click.
-    async fn click_entity(&self, entity_id: &str, region: &str) -> Result<()> {
+    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -430,27 +486,37 @@ impl UserDriver for ReactiveEngineDriver {
             {
                 return self.apply_intent(intent).await;
             }
+            // The entity is already rendered in this region but binds no
+            // click-intent (e.g. an `editable_text` block in Main, where a
+            // click just places the cursor / focuses). Polling cannot make an
+            // intent materialise, so stop waiting and let the focus path below
+            // run immediately — the same focus-on-click GPUI does for a block
+            // with no bound action. Keep polling only while the entity is
+            // still ABSENT, a genuine "tree not resolved yet" race. This turns
+            // SplitBlock's per-click cost from a flat 2s deadline burn into a
+            // single snapshot.
+            if crate::focus_path::region_contains_entity(&resolved, entity_id, region) {
+                break;
+            }
             if Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         // No bound action found within the deadline — fall through to
-        // cursor placement, matching GPUI's `render_entity` click
-        // handler when nothing intercepts.
-        let mut params = HashMap::new();
-        params.insert("region".into(), Value::String(region.to_string()));
-        params.insert("block_id".into(), Value::String(entity_id.to_string()));
-        params.insert("cursor_offset".into(), Value::Integer(0));
-        self.synthetic_dispatch("navigation", "editor_focus", params)
-            .await
+        // focusing the block, matching GPUI's `render_entity` click handler.
+        // Focus is pure in-memory state (ADR 0010): set the authority
+        // directly instead of dispatching `navigation.editor_focus`.
+        let _ = region;
+        self.engine.set_focus(Some(entity_id.clone()));
+        Ok(())
     }
 
     async fn send_key_chord(
         &self,
-        root_block_id: &str,
+        root_block_id: &EntityUri,
         _: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
     ) -> Result<bool> {
@@ -466,6 +532,22 @@ impl UserDriver for ReactiveEngineDriver {
             .wait_until_ready(Duration::from_secs(2))
             .await
             .context("block contents not populated within timeout")?;
+
+        // Chord dispatch clicks the entity before pressing the chord (see
+        // the GPUI driver), and that click re-opens the block's editor. Seed
+        // the caret mirror like the resulting editor mount would — a cursor
+        // tracked during an earlier editor session on this block is stale.
+        // When the entity is ALREADY the focused editor no click happens
+        // (the chord goes straight to the open editor, like a real user),
+        // so the tracked caret must be left untouched — mirrors the
+        // already-active early-return in the PBT ref's
+        // `model_chord_click_focus`.
+        if self.engine.focused_block().as_ref() != Some(entity_id) {
+            self.editor_mirror
+                .seed_for_click(&self.engine, entity_id)
+                .await
+                .with_context(|| format!("send_key_chord: caret seed for clicked {entity_id}"))?;
+        }
 
         let input = WidgetInput::KeyChord {
             keys: chord.0.clone(),
@@ -500,13 +582,11 @@ impl UserDriver for ReactiveEngineDriver {
             None => {
                 let engine_for_resolver = self.engine.clone();
                 let resolver: crate::focus_path::LiveBlockResolver =
-                    Arc::new(move |block_id: &str| {
-                        let uri = EntityUri::from_raw(block_id);
-                        Some(Arc::new(engine_for_resolver.snapshot_reactive(&uri)))
+                    Arc::new(move |block_id: &EntityUri| {
+                        Some(Arc::new(engine_for_resolver.snapshot_reactive(block_id)))
                     });
 
-                let root_uri = EntityUri::from_raw(root_block_id);
-                let root_tree = Arc::new(self.engine.snapshot_reactive(&root_uri));
+                let root_tree = Arc::new(self.engine.snapshot_reactive(root_block_id));
                 let fp = crate::focus_path::build_focus_path_with_resolver(
                     &root_tree,
                     entity_id,
@@ -537,7 +617,7 @@ impl UserDriver for ReactiveEngineDriver {
                 entity_id,
             }) => {
                 let mut params = HashMap::new();
-                params.insert("id".into(), Value::String(entity_id));
+                params.insert("id".into(), Value::String(entity_id.to_string()));
                 params.extend(extra_params);
                 let tick_snapshot = self.router.current_tick();
                 self.synthetic_dispatch(&entity_name, &operation.name, params)
@@ -555,9 +635,9 @@ impl UserDriver for ReactiveEngineDriver {
 
     fn resolve_key_chord(
         &self,
-        root_block_id: &str,
+        root_block_id: &EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         chord: &KeyChord,
     ) -> Option<String> {
         // If the router's index is populated, use it; otherwise fall back to
@@ -597,9 +677,9 @@ impl UserDriver for ReactiveEngineDriver {
     /// gesture would have been impossible for a real user.
     async fn drop_entity(
         &self,
-        root_block_id: &str,
-        source_id: &str,
-        target_id: &str,
+        root_block_id: &EntityUri,
+        source_id: &EntityUri,
+        target_id: &EntityUri,
     ) -> Result<bool> {
         // Bootstrap router on the layout root. `send_key_chord` does this
         // too — without it, drop_entity sees an empty router when it's the
@@ -621,13 +701,13 @@ impl UserDriver for ReactiveEngineDriver {
                     walk_tree(tree, &mut |n| {
                         if !found_source
                             && n.widget_name().as_deref() == Some("draggable")
-                            && n.row_id().as_deref() == Some(source_id)
+                            && n.row_id().as_deref() == Some(source_id.as_str())
                         {
                             found_source = true;
                         }
                         if target_entity.is_none()
                             && n.widget_name().as_deref() == Some("drop_zone")
-                            && n.row_id().as_deref() == Some(target_id)
+                            && n.row_id().as_deref() == Some(target_id.as_str())
                         {
                             target_entity =
                                 Some(n.entity_name().unwrap_or_else(|| EntityName::new("block")));
@@ -701,15 +781,22 @@ impl UserDriver for ReactiveEngineDriver {
             .await
     }
 
+    /// Headless caret observation: read the `HeadlessEditorMirror`'s tracked
+    /// byte cursor (same map `send_raw_keystroke` advances). Keyed by the
+    /// full URI string, matching `handle_keystroke`'s `block_uri.to_string()`.
+    fn editor_cursor_byte(&self, block_id: &EntityUri) -> Result<Option<usize>, String> {
+        Ok(self.editor_mirror.tracked_cursor(&block_id.to_string()))
+    }
+
     /// Tree-aware click: dispatch the bound `click_intent()` if the node has
     /// one, else fall through to `click_entity` (cursor placement). Headless
     /// — synchronous resolution against the passed `root_tree`, no router
     /// warm-up needed because the caller already produced the tree.
     async fn click_entity_with_tree(
         &self,
-        _: &str,
+        _: &EntityUri,
         root_tree: &ReactiveViewModel,
-        entity_id: &str,
+        entity_id: &EntityUri,
         region: &str,
     ) -> Result<bool> {
         if let Some(intent) = crate::focus_path::find_click_intent_oneshot(root_tree, entity_id) {
@@ -720,15 +807,6 @@ impl UserDriver for ReactiveEngineDriver {
         Ok(false)
     }
 
-    /// Headless content replacement — dispatches `block::update { id, content }`.
-    /// Screen drivers override this to drive the real editor pipeline.
-    async fn type_text(&self, entity_id: &str, text: &str) -> Result<()> {
-        let mut params = HashMap::new();
-        params.insert("id".into(), Value::String(entity_id.to_string()));
-        params.insert("content".into(), Value::String(text.to_string()));
-        self.synthetic_dispatch("block", "update", params).await
-    }
-
     // ── Observation verbs ──────────────────────────────────────────────
     //
     // Headless answers via VM-tree walk over the router's per-block
@@ -737,12 +815,12 @@ impl UserDriver for ReactiveEngineDriver {
     // app start — callers that need synchronous answers must
     // `warm_for_block` first.
 
-    fn is_widget_visible(&self, entity_id: &str) -> bool {
+    fn is_widget_visible(&self, entity_id: &EntityUri) -> bool {
         let contents = self.router.block_contents.lock().unwrap();
         contents.values().any(|tree| {
             let mut found = false;
             walk_tree(tree, &mut |n| {
-                if !found && n.entity_id().as_deref() == Some(entity_id) {
+                if !found && n.entity_id().as_ref() == Some(entity_id) {
                     found = true;
                 }
             });
@@ -750,24 +828,22 @@ impl UserDriver for ReactiveEngineDriver {
         })
     }
 
-    fn is_in_region(&self, entity_id: &str, region: holon_api::Region) -> bool {
+    fn is_in_region(&self, entity_id: &EntityUri, region: holon_api::Region) -> bool {
         self.entities_in_region(region)
             .iter()
-            .any(|uri| uri.as_str() == entity_id)
+            .any(|uri| uri == entity_id)
     }
 
     fn entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
         let panel_id = region_panel_block_id(region);
         let contents = self.router.block_contents.lock().unwrap();
-        let Some(tree) = contents.get(panel_id) else {
+        let Some(tree) = contents.get(&panel_id) else {
             return Vec::new();
         };
         let mut out = Vec::new();
         walk_tree(tree, &mut |n| {
-            if let Some(eid) = n.entity_id() {
-                if let Ok(uri) = holon_api::EntityUri::parse(&eid) {
-                    out.push(uri);
-                }
+            if let Some(uri) = n.entity_id() {
+                out.push(uri);
             }
         });
         out
@@ -781,11 +857,11 @@ impl UserDriver for ReactiveEngineDriver {
 
     /// No-op: headless has no viewport. Tests that exercise scrolling as
     /// a user verb must run against a screen driver.
-    async fn scroll_to_entity(&self, _: &str) -> Result<()> {
+    async fn scroll_to_entity(&self, _: &EntityUri) -> Result<()> {
         Ok(())
     }
 
-    fn click_intent_of(&self, entity_id: &str) -> Option<OperationIntent> {
+    fn click_intent_of(&self, entity_id: &EntityUri) -> Option<OperationIntent> {
         let contents = self.router.block_contents.lock().unwrap();
         for tree in contents.values() {
             if let Some(intent) = crate::focus_path::find_click_intent_oneshot(tree, entity_id) {
@@ -795,7 +871,7 @@ impl UserDriver for ReactiveEngineDriver {
         None
     }
 
-    fn displayed_text(&self, entity_id: &str) -> Option<String> {
+    fn displayed_text(&self, entity_id: &EntityUri) -> Option<String> {
         let contents = self.router.block_contents.lock().unwrap();
         for tree in contents.values() {
             let mut result: Option<String> = None;
@@ -803,7 +879,7 @@ impl UserDriver for ReactiveEngineDriver {
                 if result.is_some() {
                     return;
                 }
-                if n.entity_id().as_deref() == Some(entity_id) {
+                if n.entity_id().as_ref() == Some(entity_id) {
                     result = n.prop_str("content");
                 }
             });
@@ -820,12 +896,13 @@ impl UserDriver for ReactiveEngineDriver {
 /// layouts that move panels to other block ids would need this map updated
 /// — but the PBT generators that drive `Region`-based queries are scoped to
 /// the default layout for exactly that reason.
-fn region_panel_block_id(region: holon_api::Region) -> &'static str {
-    match region {
+fn region_panel_block_id(region: holon_api::Region) -> EntityUri {
+    let key = match region {
         holon_api::Region::LeftSidebar => "block:default-left-sidebar",
         holon_api::Region::Main => "block:default-main-panel",
         holon_api::Region::RightSidebar => "block:default-right-sidebar",
-    }
+    };
+    EntityUri::parse(key).expect("static panel-key literals are valid EntityUris")
 }
 
 // ── HeadlessInputRouter ───────────────────────────────────────────────
@@ -838,13 +915,13 @@ fn region_panel_block_id(region: holon_api::Region) -> &'static str {
 struct HeadlessInputRouter {
     engine: Arc<ReactiveEngine>,
     /// Per-block content snapshots. Updated by drain tasks on each emission.
-    block_contents: Arc<Mutex<HashMap<String, Arc<ReactiveViewModel>>>>,
+    block_contents: Arc<Mutex<HashMap<EntityUri, Arc<ReactiveViewModel>>>>,
     /// block_id → drain task handle.
-    watches: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    watches: Arc<Mutex<HashMap<EntityUri, tokio::task::JoinHandle<()>>>>,
     /// Set when the first emission has been applied.
     ready: Arc<tokio::sync::Notify>,
     /// Root block id, established on the first `ensure_block_watch` call.
-    root_block_id: OnceLock<String>,
+    root_block_id: OnceLock<EntityUri>,
     /// F2: monotonic counter bumped after every emission. Readers snapshot,
     /// trigger a dispatch, then wait until the counter advances past the
     /// snapshot and stabilizes.
@@ -905,7 +982,7 @@ impl HeadlessInputRouter {
         let contents = self.block_contents.lock().unwrap();
         self.root_block_id
             .get()
-            .map(|r| contents.contains_key(r.as_str()))
+            .map(|r| contents.contains_key(r))
             .unwrap_or(false)
     }
 
@@ -981,7 +1058,7 @@ impl HeadlessInputRouter {
                     row_ids_per_widget
                         .entry(name)
                         .or_default()
-                        .push((block_id.clone(), row));
+                        .push((block_id.to_string(), row));
                 }
             });
         }
@@ -1003,17 +1080,17 @@ impl HeadlessInputRouter {
         s
     }
 
-    fn bubble_input(&self, entity_id: &str, input: &WidgetInput) -> Option<InputAction> {
+    fn bubble_input(&self, entity_id: &EntityUri, input: &WidgetInput) -> Option<InputAction> {
         let contents = self.block_contents.lock().unwrap();
         let root_id = self.root_block_id.get()?;
-        let root_content = contents.get(root_id.as_str())?;
+        let root_content = contents.get(root_id)?;
         let fp =
             crate::focus_path::build_focus_path_cross_block(root_content, &contents, entity_id)?;
         fp.bubble_input(entity_id, input)
     }
 
-    fn ensure_block_watch(self: &Arc<Self>, block_id: &str) {
-        let _ = self.root_block_id.set(block_id.to_string());
+    fn ensure_block_watch(self: &Arc<Self>, block_id: &EntityUri) {
+        let _ = self.root_block_id.set(block_id.clone());
 
         {
             let watches = self.watches.lock().unwrap();
@@ -1022,12 +1099,11 @@ impl HeadlessInputRouter {
             }
         }
 
-        let block_uri = EntityUri::from_raw(block_id);
-        let stream = self.engine.watch(&block_uri);
+        let stream = self.engine.watch(block_id);
         let router_weak = Arc::downgrade(self);
         let cancel = self.cancel.clone();
         let cancelled = self.cancelled.clone();
-        let bid = block_id.to_string();
+        let bid = block_id.clone();
 
         let handle = tokio::spawn(async move {
             use futures::StreamExt;
@@ -1053,10 +1129,10 @@ impl HeadlessInputRouter {
         self.watches
             .lock()
             .unwrap()
-            .insert(block_id.to_string(), handle);
+            .insert(block_id.clone(), handle);
     }
 
-    fn process_emission(self: &Arc<Self>, block_id: &str, rvm: Arc<ReactiveViewModel>) {
+    fn process_emission(self: &Arc<Self>, block_id: &EntityUri, rvm: Arc<ReactiveViewModel>) {
         let was_first_root = {
             let mut contents = self.block_contents.lock().unwrap();
             let is_root = self
@@ -1067,14 +1143,14 @@ impl HeadlessInputRouter {
 
             if contents.is_empty() && !is_root {
                 tracing::debug!(
-                    block_id,
+                    block_id = %block_id,
                     "process_emission: dropping pre-root nested emission"
                 );
                 return;
             }
 
             let was_empty = contents.is_empty();
-            contents.insert(block_id.to_string(), rvm.clone());
+            contents.insert(block_id.clone(), rvm.clone());
             was_empty
         };
 
@@ -1106,10 +1182,13 @@ impl Drop for HeadlessInputRouter {
 
 /// Walk a `ReactiveViewModel` tree to discover direct `LiveBlock` children
 /// (stops at LiveBlock boundaries — does not recurse into their slots).
-fn collect_nested_block_refs(node: &ReactiveViewModel, out: &mut HashSet<String>) {
+fn collect_nested_block_refs(node: &ReactiveViewModel, out: &mut HashSet<EntityUri>) {
     if node.widget_name().as_deref() == Some("live_block") {
         if let Some(block_id) = node.prop_str("block_id") {
-            out.insert(block_id.to_string());
+            out.insert(
+                EntityUri::parse(&block_id)
+                    .expect("live_block props[\"block_id\"] must be a schemed EntityUri"),
+            );
         }
         return;
     }

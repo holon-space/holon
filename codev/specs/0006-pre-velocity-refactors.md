@@ -34,9 +34,9 @@ Verified by `reactive_view_model::tests::shared_data_cell_updates_propagate_to_s
 
 Both block Phase 5.
 
-### Phase 1 — Extract `FileFormatAdapter` from `OrgSyncController`
+### Phase 1 — Extract `FileFormatAdapter` from `FileSyncController`
 
-Generalize `crates/holon-orgmode/src/org_sync_controller.rs` (971 lines) into a `FileFormatAdapter` trait + adapter use in the controller. Org becomes the first impl, behavior unchanged.
+Generalize `crates/holon-orgmode/src/file_sync_controller.rs` (971 lines) into a `FileFormatAdapter` trait + adapter use in the controller. Org becomes the first impl, behavior unchanged.
 
 #### Step 1.1 — Trait + adapter wrapper [DONE 2026-04-26]
 
@@ -64,14 +64,14 @@ pub trait FileFormatAdapter: Send + Sync {
 
 Differences from the original sketch in this spec: no `watch()` (file watching stays in the controller — it's format-agnostic), no `echo_suppress_origin()` (also generic plumbing), parse takes `&str` not `&[u8]` (matches the existing org parser), render returns `String` not `Result<Vec<u8>>` (matches `OrgRenderer`).
 
-#### Step 1.2 — Refactor `OrgSyncController` to call through the adapter [DONE 2026-04-26]
+#### Step 1.2 — Refactor `FileSyncController` to call through the adapter [DONE 2026-04-26]
 
-`crates/holon-orgmode/src/org_sync_controller.rs` no longer calls `parse_org_file` or `OrgRenderer::*` directly. The controller now holds `format: Arc<dyn FileFormatAdapter>` and delegates parse + render through it.
+`crates/holon-orgmode/src/file_sync_controller.rs` no longer calls `parse_org_file` or `OrgRenderer::*` directly. The controller now holds `format: Arc<dyn FileFormatAdapter>` and delegates parse + render through it.
 
 Changes:
-- `OrgSyncController` gained a `format` field.
-- `OrgSyncController::new(...)` (signature unchanged) now wraps `Self::with_format(..., Arc::new(OrgFormatAdapter::new()))`. `di.rs` and all existing call sites work as-is.
-- `OrgSyncController::with_format(..., Arc<dyn FileFormatAdapter>)` is the new explicit-format constructor — markdown / notion / logseq wirings will use this.
+- `FileSyncController` gained a `format` field.
+- `FileSyncController::new(...)` (signature unchanged) now wraps `Self::with_format(..., Arc::new(OrgFormatAdapter::new()))`. `di.rs` and all existing call sites work as-is.
+- `FileSyncController::with_format(..., Arc<dyn FileFormatAdapter>)` is the new explicit-format constructor — markdown / notion / logseq wirings will use this.
 - 6 call sites swapped: 2 in `initialize`, 2 in `on_file_changed`, 2 in `render_file_by_doc_id`.
 
 Verification:
@@ -82,7 +82,7 @@ Verification:
 
 The image-handling paths (`materialize_images`, `ingest_images`) and the `post_org_write_hook` are arguably format-specific too, but they don't block Phase 1. They can stay where they are or move to optional adapter methods later — **defer that decision until a markdown adapter exists** to inform the right shape.
 
-**Files touched**: `crates/holon-core/src/file_format.rs` (new), `crates/holon-core/src/lib.rs`, `crates/holon-orgmode/Cargo.toml`, `crates/holon-orgmode/src/file_format.rs` (new), `crates/holon-orgmode/src/lib.rs`, `crates/holon-orgmode/src/org_sync_controller.rs`.
+**Files touched**: `crates/holon-core/src/file_format.rs` (new), `crates/holon-core/src/lib.rs`, `crates/holon-orgmode/Cargo.toml`, `crates/holon-orgmode/src/file_format.rs` (new), `crates/holon-orgmode/src/lib.rs`, `crates/holon-orgmode/src/file_sync_controller.rs`.
 
 **Follow-up**: update `docs/Architecture/Sync.md` to document the seam.
 
@@ -106,7 +106,7 @@ Verification: 37 unit tests + 2 integration tests, all green. `cargo check -p ho
 
 **Files touched (step 1.3)**: `crates/holon-markdown/` (new crate, 6 source files), `Cargo.toml` (workspace members + internal deps), `docs/Architecture/Sync.md` (documents the second impl + the deferred-decision verdict).
 
-**Why this lands now (F1)**: per `docs/FIRST_RELEASE_FEATURES.md`, F1 (Obsidian Vault as Data Source) is the single highest-impact tier-1 feature. The adapter is the wedge — once it's in place, vault watching, change detection, and bidirectional write-back all flow through the existing `OrgSyncController::with_format(...)` path with zero controller changes.
+**Why this lands now (F1)**: per `docs/FIRST_RELEASE_FEATURES.md`, F1 (Obsidian Vault as Data Source) is the single highest-impact tier-1 feature. The adapter is the wedge — once it's in place, vault watching, change detection, and bidirectional write-back all flow through the existing `FileSyncController::with_format(...)` path with zero controller changes.
 
 **Why**: F1 (Obsidian), LogSeq, Notion-import, and every Goals.md priority integration (Gmail, Calendar, JIRA, Linear, GitHub, Notion) all need this. Building any of them on a copy-paste of org sync forces a rewrite once the second one arrives.
 

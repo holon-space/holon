@@ -383,5 +383,5 @@ Both fail loudly if anyone adds `#[serde(tag = "…")]` to `Value`.
   history of how this frontend was built, including every bug found and
   fixed during initial bring-up. Read this first if you're picking up
   unfinished work.
-- `docs/ORG_SYNTAX.md` — bare-ID convention used by the parser.
+- `docs/Reference/ORG_SYNTAX.md` — bare-ID convention used by the parser.
 - `wiki/index.md` — Holon-wide architecture overview.

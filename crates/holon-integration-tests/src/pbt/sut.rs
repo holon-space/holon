@@ -3,112 +3,57 @@
 //! Contains the SUT wrapper, mutation application, invariant checking,
 //! and all transition handling for the real system.
 
-// `assert_invariants!` macro moved to `super::sut_macros` so the
-// check-invariants impl block can use it after extraction (Phase D4).
-
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::marker::PhantomData;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::{QueryLanguage, Value};
-
-#[cfg(test)]
-use similar_asserts::assert_eq;
 
 use crate::{DirectUserDriver, TestContext, UserDriver};
 
-use super::loro_sut::LoroSut;
 use super::sut_keybindings::leader_key_for;
-use super::sut_row_parsing::{mutation_expected_properties, row_properties_to_map};
+use super::sut_loro::LoroSut;
 
 use super::reference_state::ReferenceState;
-use super::state_machine::VariantRef;
+
+use super::state_machine::ReferenceMachine;
 use super::types::*;
 
-/// One row of the `focus_roots` matview. Mirrored into a `LiveData<FocusRoot>`
-/// so inv-region-focus-roots-iter/8 can iterate by region in Rust without a per-region SQL query.
-#[derive(Clone, Debug)]
-pub(super) struct FocusRoot {
-    pub(super) region: String,
-    pub(super) root_id: String,
-}
-
-pub struct E2ESut<V: VariantMarker> {
+pub struct E2ESut {
     pub ctx: TestContext,
     /// Maps file-based doc URIs ("file:doc_0.org") to UUID-based URIs
-    /// ("doc:<uuid>") assigned by the real system.
-    pub doc_uri_map: HashMap<EntityUri, EntityUri>,
+    /// ("doc:<uuid>") assigned by the real system. Shared (cloned) into the
+    /// owned `LoroSut` for peer-sync stable-id resolution.
+    pub doc_uri_map: super::types::DocUriMap,
     /// How UI mutations are dispatched. `None` before `start_app` creates the engine.
     /// Backend tests use `DirectUserDriver`; Flutter tests inject their own driver.
     pub driver: Option<Arc<dyn UserDriver>>,
-    /// Reactive engine for root layout — kept alive across transitions.
-    /// Uses RefCell because `check_invariants` receives `&self`.
-    pub(super) reactive_engine: RefCell<Option<Arc<holon_frontend::reactive::ReactiveEngine>>>,
-    /// Every ViewModel emission from the reactive stream, collected by a background task.
-    /// check_invariants drains this and checks each intermediate ViewModel — catches
-    /// transient CDC bugs that are masked by structural re-renders.
-    pub(super) vm_emissions: Arc<std::sync::Mutex<Vec<holon_frontend::ViewModel>>>,
     /// Optional Loro validation — reads blocks from LoroTree and compares against reference.
     /// Active only when Loro is enabled.
     pub(super) loro_sut: Option<LoroSut>,
-    /// Optional external frontend engine (e.g., GPUI's ReactiveEngine).
-    /// When set, inv-frontend-engine checks the frontend's own ViewModel for errors.
-    pub frontend_engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
-    /// When set, inv-frontend-engine also checks that GPUI actually laid out the expected elements.
-    pub frontend_geometry: Option<Box<dyn holon_frontend::geometry::GeometryProvider>>,
-    /// Shared screenshot analysis — the GeometryDriver updates this after each
-    /// screenshot, and inv-frontend-engine reads it to assert that the UI isn't visually empty.
-    pub frontend_visual_state: Option<crate::ui_driver::VisualState>,
-    /// Root layout block ID used by the ReactiveEngine — set during StartApp,
-    /// used by `current_reactive_tree()` and the headless `wait_for_entity_*`
-    /// helpers.
-    pub(super) reactive_root_id: RefCell<Option<EntityUri>>,
-    /// Headless live tree — persistent collection backed by the engine's live
-    /// CDC data. Mirrors what the GPUI frontend sees: the collection driver
-    /// calls `set_data` on existing items when data changes. Compared against
-    /// the fresh tree in check_invariants to catch set_data propagation bugs.
-    pub(super) live_tree: RefCell<Option<holon_layout_testing::live_tree::HeadlessLiveTree>>,
+    /// Render harness — owns the SUT's headless `ReactiveEngine`
+    /// (+ root id + vm-emission collector), the externally-injected GPUI
+    /// frontend surfaces (engine / geometry / visual state), and the headless
+    /// live tree. See [`super::sut_render::RenderSut`].
+    pub(super) render: super::sut_render::RenderSut,
     /// MCP integration for exercising IVM re-evaluation in PBT.
     pub pbt_mcp: Option<crate::pbt_mcp_fake::PbtMcpIntegration>,
-    /// In-memory OTel span collector for non-functional invariants.
-    #[cfg(feature = "otel-testing")]
-    pub span_collector: crate::test_tracing::SpanCollector,
-    /// Wall-clock start of the last transition (for wall-time budget checks).
-    #[cfg(feature = "otel-testing")]
-    pub(super) last_transition_start: Option<Instant>,
     /// The last transition applied (for budget lookup in check_invariants).
     pub(super) last_transition: crate::pbt::transitions::E2ETransition,
-    /// RSS (bytes) captured before the last transition started.
-    #[cfg(feature = "otel-testing")]
-    pub(super) rss_before: usize,
-    /// RSS (bytes) at the very start of the PBT run, for cumulative growth tracking.
-    #[cfg(feature = "otel-testing")]
-    pub(super) rss_baseline: usize,
-    /// Loro-only peer instances for multi-instance sync testing.
-    pub peers: Vec<holon::sync::multi_peer::PeerState<()>>,
-    /// CDC-driven LiveData mirrors used by `check_invariants_async` to read
-    /// authoritative state from in-memory snapshots instead of issuing fresh
-    /// SQL on every check. Initialised lazily on first use because they need
-    /// an async `watch_view` call after the engine has started; `RefCell` so
-    /// `&self` invariant methods can populate them, and `Option` so we don't
-    /// touch them until the first invariant check actually wants them.
-    /// `wait_for_consumers` already gates each check on CDC delivery, so
-    /// reading from these snapshots is delay-free vs the corresponding SQL.
-    pub(super) live_blocks_cell: RefCell<Option<Arc<holon::sync::LiveData<Block>>>>,
-    pub(super) live_focus_roots_cell: RefCell<Option<Arc<holon::sync::LiveData<FocusRoot>>>>,
-    /// Case-level accumulator of `query` span ancestor chains (count, total
-    /// duration). The `SpanCollector` resets at the start of every
-    /// transition (`apply_transition` sync hook), so to get whole-case
-    /// totals we snapshot `queries_by_origin()` before each reset and merge
-    /// here. Used only when `PBT_MATVIEW_METRICS=1`.
-    query_origin_acc: RefCell<std::collections::HashMap<Vec<String>, (usize, std::time::Duration)>>,
+    /// OTel / performance metrics for the SUT — owns the span collector, RSS
+    /// sampling, and the whole-case query-origin accumulator. All raw metric
+    /// state lives here; see [`super::sut_metrics::MetricsSut`].
+    pub(super) metrics: super::sut_metrics::MetricsSut,
+    /// CDC-driven LiveData mirrors (hydrated `block` matview + `focus_roots`)
+    /// the invariant bodies read instead of issuing fresh SQL on every check.
+    /// All mirror state + lazy build logic lives here; see
+    /// [`super::sut_cdc_mirrors::CdcMirrors`].
+    pub(super) cdc: super::sut_cdc_mirrors::CdcMirrors,
     /// Reference state as it stood at the END of the previous transition —
     /// i.e. the state the user CURRENTLY sees rendered in the SUT, before
     /// the in-flight transition is applied. The framework passes the
@@ -119,174 +64,184 @@ pub struct E2ESut<V: VariantMarker> {
     /// during the next call this holds previous-post = current-pre. `None`
     /// for the very first transition — pre-state is effectively empty.
     pub(super) pre_ref_state: Option<ReferenceState>,
-    _marker: PhantomData<V>,
 }
 
-impl<V: VariantMarker> std::ops::Deref for E2ESut<V> {
+impl std::ops::Deref for E2ESut {
     type Target = TestContext;
     fn deref(&self) -> &Self::Target {
         &self.ctx
     }
 }
 
-impl<V: VariantMarker> std::ops::DerefMut for E2ESut<V> {
+impl std::ops::DerefMut for E2ESut {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.ctx
     }
 }
 
-impl<V: VariantMarker> std::fmt::Debug for E2ESut<V> {
+impl std::fmt::Debug for E2ESut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.ctx.fmt(f)
     }
 }
 
-impl<V: VariantMarker> Drop for E2ESut<V> {
+impl Drop for E2ESut {
     fn drop(&mut self) {
-        // Print one-shot matview cache metrics only when explicitly asked
-        // (PBT_MATVIEW_METRICS=1). Default-off so normal test output stays
-        // clean; flip on when profiling cache effectiveness.
-        if std::env::var("PBT_MATVIEW_METRICS").as_deref() != Ok("1") {
-            return;
-        }
-        if self.ctx.is_running() {
-            let (hits, exists, creates) = self.ctx.engine().matview_cache_metrics();
-            let total = hits + exists;
-            let hit_pct = if total == 0 {
-                0.0
-            } else {
-                (hits as f64 / total as f64) * 100.0
-            };
-            eprintln!(
-                "[matview-cache] cache_hits={hits} exists_calls={exists} ddl_creates={creates} \
-                 hit_rate={hit_pct:.1}%"
-            );
-
-            // Per-origin SQL query breakdown — merged across the whole case.
-            // The collector resets per transition, so `query_origin_acc`
-            // accumulates each pre-reset snapshot; here we fold in the final
-            // transition's spans (no reset has fired since) and print the
-            // total. Rows under "<no-parent>" / "<unknown-parent>" are the
-            // prime suspects for the "1600 mystery queries" — they're SQL
-            // fired from a tokio task whose parent span didn't propagate.
-            let mut acc = self.query_origin_acc.borrow_mut();
-            let final_breakdown = self.span_collector.queries_by_origin();
-            for row in final_breakdown.rows {
-                let entry = acc
-                    .entry(row.chain)
-                    .or_insert((0, std::time::Duration::ZERO));
-                entry.0 += row.count;
-                entry.1 += row.total_duration;
-            }
-            let mut rows: Vec<crate::test_tracing::QueryOriginRow> = acc
-                .iter()
-                .map(
-                    |(chain, (count, total_duration))| crate::test_tracing::QueryOriginRow {
-                        chain: chain.clone(),
-                        count: *count,
-                        total_duration: *total_duration,
-                    },
-                )
-                .collect();
-            rows.sort_by(|a, b| {
-                b.total_duration
-                    .cmp(&a.total_duration)
-                    .then(b.count.cmp(&a.count))
-            });
-            let total_queries: usize = rows.iter().map(|r| r.count).sum();
-            let total_duration: std::time::Duration = rows.iter().map(|r| r.total_duration).sum();
-            let breakdown = crate::test_tracing::QueryOriginBreakdown {
-                rows,
-                total_queries,
-                total_duration,
-            };
-            eprintln!("[query-origin]\n{breakdown}");
+        // Print the one-shot whole-case metrics dump only when explicitly
+        // asked (PBT_MATVIEW_METRICS=1). Default-off so normal test output
+        // stays clean; flip on when profiling cache effectiveness. All metric
+        // state + formatting live in `MetricsSut`. The whole thing is
+        // otel-gated since it reads the span collector.
+        #[cfg(feature = "otel-testing")]
+        if std::env::var("PBT_MATVIEW_METRICS").as_deref() == Ok("1") && self.ctx.is_running() {
+            self.metrics.print_drop_report(self.ctx.engine());
         }
     }
 }
 
-impl<V: VariantMarker> E2ESut<V> {
+impl E2ESut {
     /// After a transition that may have produced a new "split-suffix"
     /// block (the SplitBlock chord op, or PressKey(Enter) which
     /// dispatches `split_block` from the editor), associate every
     /// unmapped `block::split-N` synthetic id in `ref_state` with the
-    /// corresponding real UUID surfaced in `db_rows`. Without this the
-    /// post-step `assert_blocks_equivalent` check sees prod-UUID vs
-    /// ref-synthetic-ID and fails on what is logically the same block.
-    pub(super) fn map_unmapped_split_synthetic_ids(
+    /// corresponding real UUID in `block_raw`.
+    ///
+    /// Pairing is **by document position within a parent**: split-created
+    /// blocks appear in the same sibling order on both sides, so for each
+    /// parent we sort the unmapped synthetics by ref `sequence` and the new
+    /// real rows by `sort_key`, then zip. This is deterministic and
+    /// order-preserving — unlike the old global `zip` of HashMap-ordered
+    /// synthetics against db-ordered reals, which mis-paired whenever two
+    /// splits were unmapped at once (e.g. a prior split's mapping had been
+    /// skipped). A per-parent count mismatch is left unmapped and logged
+    /// rather than guessed. Callers must `wait_for_blocks_synced` first so
+    /// `block_raw` has the projected split rows.
+    ///
+    /// Without this the post-step `assert_blocks_equivalent` /
+    /// `inv-backend-blocks-match-ref` checks see prod-UUID vs
+    /// ref-synthetic-ID and fail on what is logically the same block.
+    pub(super) async fn map_unmapped_split_synthetic_ids(
         &mut self,
         ref_state: &ReferenceState,
-        db_rows: &[holon_api::widget_spec::DataRow],
         label: &str,
     ) {
-        let unmapped_synthetic: Vec<EntityUri> = ref_state
-            .block_state
-            .blocks
-            .keys()
-            .filter(|id| id.as_str().contains(":split-") && !self.doc_uri_map.contains_key(*id))
-            .cloned()
-            .collect();
-        if unmapped_synthetic.is_empty() {
+        use holon_orgmode::models::OrgBlockExt;
+
+        // Unmapped synthetic split blocks, grouped by resolved parent and
+        // ordered by ref document position.
+        let mut ref_by_parent: BTreeMap<String, Vec<(EntityUri, i64)>> = BTreeMap::new();
+        for b in ref_state.domain.block_state.blocks.values() {
+            if crate::pbt::is_synthetic_ref_id(&b.id)
+                && !self.doc_uri_map.lock().unwrap().contains_key(&b.id)
+            {
+                let parent = self.resolve_uri(&b.parent_id).to_string();
+                ref_by_parent
+                    .entry(parent)
+                    .or_default()
+                    .push((b.id.clone(), b.sequence() as i64));
+            }
+        }
+        if ref_by_parent.is_empty() {
             return;
         }
 
+        // Real ids already accounted for: mapped values + ref non-split block
+        // ids (content blocks keep their ref id as the real id — no mapping).
         let known_real_ids: HashSet<String> = {
-            let mut ids: HashSet<String> =
-                self.doc_uri_map.values().map(|u| u.to_string()).collect();
-            for ref_id in ref_state.block_state.blocks.keys() {
-                if !self.doc_uri_map.contains_key(ref_id) && !ref_id.as_str().contains(":split-") {
+            let map = self.doc_uri_map.lock().unwrap();
+            let mut ids: HashSet<String> = map.values().map(|u| u.to_string()).collect();
+            for ref_id in ref_state.domain.block_state.blocks.keys() {
+                if !map.contains_key(ref_id) && !crate::pbt::is_synthetic_ref_id(ref_id) {
                     ids.insert(ref_id.to_string());
                 }
             }
             ids
         };
 
-        let new_real_ids: Vec<String> = db_rows
-            .iter()
-            .filter_map(|row| row.get("id")?.as_string().map(|s| s.to_string()))
-            .filter(|id| !known_real_ids.contains(id))
-            .collect();
+        // Candidate (unaccounted) real split rows, grouped by parent and ordered
+        // by `sort_key` (prod document position). Read backend-agnostically so
+        // the {Loro} slice reconciles split ids from the Loro snapshot, not just
+        // Turso's `block_raw`.
+        let rows = self.ctx.non_page_block_rows().await;
+        let mut real_by_parent: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for r in &rows {
+            let Some(id) = r.get("id").and_then(|v| v.as_string()) else {
+                continue;
+            };
+            if known_real_ids.contains(id) {
+                continue;
+            }
+            let parent = r
+                .get("parent_id")
+                .and_then(|v| v.as_string())
+                .unwrap_or("")
+                .to_string();
+            let sort_key = r
+                .get("sort_key")
+                .and_then(|v| v.as_string())
+                .unwrap_or("")
+                .to_string();
+            real_by_parent
+                .entry(parent)
+                .or_default()
+                .push((id.to_string(), sort_key));
+        }
 
-        for (synthetic, real_id_str) in unmapped_synthetic.iter().zip(new_real_ids.iter()) {
-            let real_id = EntityUri::from_raw(real_id_str);
-            eprintln!("{label} Mapped {synthetic} → {real_id}");
-            self.doc_uri_map.insert(synthetic.clone(), real_id);
+        for (parent, mut synths) in ref_by_parent {
+            let Some(reals) = real_by_parent.get_mut(&parent) else {
+                eprintln!(
+                    "{label} split-id pairing: {} unmapped synthetic under parent {parent} \
+                     but no new real rows — skipping",
+                    synths.len()
+                );
+                continue;
+            };
+            if synths.len() != reals.len() {
+                eprintln!(
+                    "{label} split-id pairing ambiguous under parent {parent}: \
+                     {} unmapped synthetic vs {} new real — skipping",
+                    synths.len(),
+                    reals.len()
+                );
+                continue;
+            }
+            synths.sort_by_key(|(_, seq)| *seq);
+            reals.sort_by(|a, b| a.1.cmp(&b.1));
+            for ((synthetic, _), (real_id_str, _)) in synths.into_iter().zip(reals.iter()) {
+                // ALLOW(entity_uri_from_raw): real_id_str id field from non_page_block_rows() snapshot row
+                let real_id = EntityUri::from_raw(real_id_str);
+                eprintln!("{label} Mapped {synthetic} → {real_id}");
+                self.doc_uri_map.lock().unwrap().insert(synthetic, real_id);
+            }
         }
     }
 }
 
-impl<V: VariantMarker> E2ESut<V> {
+impl E2ESut {
     pub fn new(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self> {
+        Self::new_with_backend(runtime, holon::di::StorageSelector::Turso)
+    }
+
+    /// Create an E2ESut with an explicit storage substrate (ADR 0004 Phase 9,
+    /// part (a)). `StorageSelector::Turso` is the historical default;
+    /// `LoroMemory` starts a no-Turso (Loro-only) session at `start_app`.
+    pub fn new_with_backend(
+        runtime: Arc<tokio::runtime::Runtime>,
+        storage: holon::di::StorageSelector,
+    ) -> Result<Self> {
         Ok(Self {
-            ctx: TestContext::new(runtime)?,
-            doc_uri_map: HashMap::new(),
+            ctx: TestContext::new_with_backend(runtime, storage)?,
+            doc_uri_map: Arc::new(std::sync::Mutex::new(HashMap::new())),
             driver: None,
-            reactive_engine: RefCell::new(None),
-            vm_emissions: Arc::new(std::sync::Mutex::new(Vec::new())),
             loro_sut: None,
-            frontend_engine: None,
-            frontend_geometry: None,
-            frontend_visual_state: None,
-            reactive_root_id: RefCell::new(None),
-            live_tree: RefCell::new(None),
+            render: super::sut_render::RenderSut::new(),
             pbt_mcp: None,
-            #[cfg(feature = "otel-testing")]
-            span_collector: crate::test_tracing::SpanCollector::global().clone(),
-            #[cfg(feature = "otel-testing")]
-            last_transition_start: None,
             last_transition: crate::pbt::transitions::E2ETransition::Nothing(
                 crate::pbt::transitions::Nothing,
             ),
-            #[cfg(feature = "otel-testing")]
-            rss_before: 0,
-            #[cfg(feature = "otel-testing")]
-            rss_baseline: 0,
-            peers: Vec::new(),
-            live_blocks_cell: RefCell::new(None),
-            live_focus_roots_cell: RefCell::new(None),
-            query_origin_acc: RefCell::new(std::collections::HashMap::new()),
+            metrics: super::sut_metrics::MetricsSut::new(),
+            cdc: super::sut_cdc_mirrors::CdcMirrors::new(),
             pre_ref_state: None,
-            _marker: PhantomData,
         })
     }
 
@@ -300,34 +255,17 @@ impl<V: VariantMarker> E2ESut<V> {
     ) -> Result<Self> {
         Ok(Self {
             ctx: TestContext::new(runtime)?,
-            doc_uri_map: HashMap::new(),
+            doc_uri_map: Arc::new(std::sync::Mutex::new(HashMap::new())),
             driver: Some(driver),
-            reactive_engine: RefCell::new(None),
-            vm_emissions: Arc::new(std::sync::Mutex::new(Vec::new())),
             loro_sut: None,
-            frontend_engine: None,
-            frontend_geometry: None,
-            frontend_visual_state: None,
-            reactive_root_id: RefCell::new(None),
-            live_tree: RefCell::new(None),
+            render: super::sut_render::RenderSut::new(),
             pbt_mcp: None,
-            #[cfg(feature = "otel-testing")]
-            span_collector: crate::test_tracing::SpanCollector::global().clone(),
-            #[cfg(feature = "otel-testing")]
-            last_transition_start: None,
             last_transition: crate::pbt::transitions::E2ETransition::Nothing(
                 crate::pbt::transitions::Nothing,
             ),
-            #[cfg(feature = "otel-testing")]
-            rss_before: 0,
-            #[cfg(feature = "otel-testing")]
-            rss_baseline: 0,
-            peers: Vec::new(),
-            live_blocks_cell: RefCell::new(None),
-            live_focus_roots_cell: RefCell::new(None),
-            query_origin_acc: RefCell::new(std::collections::HashMap::new()),
+            metrics: super::sut_metrics::MetricsSut::new(),
+            cdc: super::sut_cdc_mirrors::CdcMirrors::new(),
             pre_ref_state: None,
-            _marker: PhantomData,
         })
     }
 
@@ -352,101 +290,22 @@ impl<V: VariantMarker> E2ESut<V> {
         self.driver = Some(driver);
     }
 
-    /// Snapshot the current root layout as a `ReactiveViewModel` — the input
-    /// the trait-level `send_key_chord` / `resolve_key_chord` needs.
+    /// Snapshot the current root layout as a `ReactiveViewModel`.
+    /// Forwards to [`super::sut_render::RenderSut::current_reactive_tree`].
     pub(super) fn current_reactive_tree(
         &self,
     ) -> Option<(holon_api::EntityUri, holon_frontend::ReactiveViewModel)> {
-        let engine = self.reactive_engine.borrow();
-        let engine = engine.as_ref()?;
-        let root_id = self
-            .reactive_root_id
-            .borrow()
-            .clone()
-            .unwrap_or_else(holon_api::root_layout_block_uri);
-        Some((root_id.clone(), engine.snapshot_reactive(&root_id)))
+        self.render.current_reactive_tree()
     }
 
-    /// Walk the live reactive tree from `root` and flip the
-    /// `expanded` Mutable of the `expand_toggle` whose `target_id`
-    /// prop matches `block_id`. Used by `apply_expand_toggle` /
-    /// `apply_collapse_toggle`.
-    ///
-    /// Note on headless persistence: `ReactiveEngine::snapshot_reactive`
-    /// runs `interpret_fn` and returns a freshly-built tree on every
-    /// call, so the `Mutable<bool>` we flip here is reborn on the next
-    /// snapshot unless the GPUI-side `with_update` / `push_down_*`
-    /// machinery is holding a persistent root. This SUT helper is
-    /// correct in either case: the reference-model side already tracks
-    /// the toggle in `state.expanded_toggles`, and the assertion below
-    /// fails loud if the corpus grows an `expand_toggle` render but the
-    /// engine never produces a matching node (the most likely
-    /// regression).
+    /// Flip the `expand_toggle` gate for `block_id` in the reactive tree.
+    /// Forwards to [`super::sut_render::RenderSut::set_expand_toggle_gate`].
     pub(super) async fn set_expand_toggle_gate(
         &self,
         block_id: &holon_api::EntityUri,
         value: bool,
     ) {
-        use holon_frontend::reactive_view_model::ReactiveViewModel;
-
-        let engine = self
-            .reactive_engine
-            .borrow()
-            .clone()
-            .expect("reactive engine not installed — was start_app called?");
-        let root_id = self
-            .reactive_root_id
-            .borrow()
-            .clone()
-            .unwrap_or_else(holon_api::root_layout_block_uri);
-        let root = engine.snapshot_reactive(&root_id);
-
-        fn find_and_flip(node: &ReactiveViewModel, target_id: &str, value: bool) -> bool {
-            let is_toggle = matches!(node.widget_name().as_deref(), Some("expand_toggle"));
-            if is_toggle {
-                let props = node.props.lock_ref();
-                let matches = props
-                    .get("target_id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s == target_id)
-                    .unwrap_or(false);
-                drop(props);
-                if matches && let Some(gate) = node.expanded.as_ref() {
-                    gate.set(value);
-                    return true;
-                }
-            }
-            for child in &node.children {
-                if find_and_flip(child, target_id, value) {
-                    return true;
-                }
-            }
-            if let Some(slot) = node.slot.as_ref() {
-                let content = slot.content.lock_ref();
-                if find_and_flip(&content, target_id, value) {
-                    return true;
-                }
-            }
-            if let Some(lazy) = node.lazy_slot.as_ref()
-                && let Some(materialised) = lazy.cache.get_cloned()
-                && find_and_flip(&materialised, target_id, value)
-            {
-                return true;
-            }
-            false
-        }
-
-        let block_uri = block_id.to_string();
-        let target_id = block_uri.strip_prefix("block:").unwrap_or(&block_uri);
-        assert!(
-            find_and_flip(&root, target_id, value),
-            "set_expand_toggle_gate: no expand_toggle node with \
-             target_id={target_id} in reactive tree under {root_id}. \
-             The fixture grew an expand_toggle render but the engine \
-             didn't produce a matching node — likely a shadow_builder \
-             or interpret regression. See \
-             devlog/2026-05-15-lazy-expand-toggle-plan.md."
-        );
+        self.render.set_expand_toggle_gate(block_id, value).await;
     }
 
     /// Diagnostic probe: dump navigation_history, navigation_cursor, and
@@ -454,6 +313,12 @@ impl<V: VariantMarker> E2ESut<V> {
     /// writes are landing and whether the focus_roots matview has
     /// recomputed by the time the transition's apply() returns.
     pub(super) async fn dump_nav_tables(&self, label: &str) {
+        // The nav tables (`navigation_history`/`cursor`/`focus_roots`) are a
+        // Turso projection; a no-Turso session has none and no SQL engine to
+        // probe. This is diagnostic-only, so skip it rather than panic.
+        if !matches!(self.ctx.storage(), holon::di::StorageSelector::Turso) {
+            return;
+        }
         let engine = self.engine();
         let probes = [
             (
@@ -563,7 +428,7 @@ impl<V: VariantMarker> E2ESut<V> {
         entity_id: &str,
         timeout: Duration,
     ) -> anyhow::Result<()> {
-        let Some(ref geometry) = self.frontend_geometry else {
+        let Some(ref geometry) = self.render.frontend_geometry else {
             return Ok(());
         };
         // Mirror GpuiUserDriver::element_center: try the canonical
@@ -574,33 +439,71 @@ impl<V: VariantMarker> E2ESut<V> {
         let selectable_id = format!("selectable-{entity_id}");
         let deadline = tokio::time::Instant::now() + timeout;
         // After ~200 ms of polling without bounds, ask the driver to
-        // scroll the entity into view once. Sidebar items in a virtualized
-        // `gpui::list(...)` are not prepaint-ed outside the viewport, so
-        // their bounds never appear until the user scrolls — which under
-        // PBT we have to do explicitly. Block-mode panels prepaint every
-        // child regardless of viewport, so scroll is a no-op there. The
+        // scroll the entity into view once. Rows in a virtualized
+        // `gpui::list(...)` — all collection panels, including the main
+        // panel — are not prepaint-ed outside the viewport, so their
+        // bounds never appear until the user scrolls — which under
+        // PBT we have to do explicitly. The
         // RPC may also fail to find any virtualized list containing the
         // entity (returns Ok(false) on the GPUI side, surfaces here as
         // a benign success). In every case the polling loop is the
         // authoritative failure signal.
-        let scroll_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
-        let mut scrolled = false;
+        // Re-armed after every scroll: the RPC doubles as a frame pump
+        // (its handler calls `window.refresh()`), and an occluded window
+        // commits no frames on its own once the input's single forced
+        // refresh has passed.
+        let mut scroll_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let entry_generation = geometry.generation();
+        // Visible-area gate on every probe: a list-overdraw row just outside
+        // the viewport registers a content-mask-clipped rect (height 0 at the
+        // clip edge). Accepting it hands the click path a center that lands
+        // on a DIFFERENT row (wrong-block click_entity family, 2026-06-11) —
+        // treat degenerate rects as "not rendered" so the scroll branch
+        // reveals the row.
+        let visible = |g: &dyn holon_frontend::geometry::GeometryProvider,
+                       render_id: &str,
+                       selectable_id: &str,
+                       entity_id: &str| {
+            g.element_info(render_id)
+                .is_some_and(|i| i.has_visible_area())
+                || g.element_info(selectable_id)
+                    .is_some_and(|i| i.has_visible_area())
+                || g.find_by_entity_id_visible(entity_id).is_some()
+        };
         loop {
-            if geometry.element_info(&render_id).is_some()
-                || geometry.element_info(&selectable_id).is_some()
-                || geometry.find_by_entity_id(entity_id).is_some()
-            {
+            if visible(geometry.as_ref(), &render_id, &selectable_id, entity_id) {
                 return Ok(());
             }
-            if !scrolled && tokio::time::Instant::now() >= scroll_deadline {
-                scrolled = true;
+            if tokio::time::Instant::now() >= scroll_deadline {
+                scroll_deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+                // `entity_id` may be a non-row UI handle (drawer toggles
+                // etc.) — route through the total boundary helper rather
+                // than the fail-loud parse; the scroll RPC tolerates ids it
+                // can't locate (poll timeout is the real failure signal).
+                let entity_uri = holon_api::entity_uri_from_id_str(entity_id);
                 if let Some(driver) = self.driver.as_ref()
-                    && let Err(e) = driver.scroll_to_entity(entity_id).await
+                    && let Err(e) = driver.scroll_to_entity(&entity_uri).await
                 {
                     tracing::debug!(
                         "wait_for_entity_bounds: scroll_to_entity({entity_id:?}) \
                              returned Err — continuing to poll: {e:#}"
                     );
+                }
+                // Re-check IMMEDIATELY: the scroll RPC's handler pumps a
+                // frame (`window.refresh()`), so the revealed row is often
+                // committed by the time the RPC returns. Falling through to
+                // `changed().await` wakes only on the NEXT commit — which
+                // can have evicted the row again when something (autoscroll,
+                // splice churn) snaps the viewport back. That deterministic
+                // miss masqueraded as "element truly absent" while the
+                // timeout dump (taken right after the final scroll) showed
+                // the element present (2026-06-11 bounds-timeout face).
+                if visible(geometry.as_ref(), &render_id, &selectable_id, entity_id) {
+                    eprintln!(
+                        "[bounds-wait] {entity_id} bounds present immediately \
+                         post-scroll (revealed-by-scroll; absent before)"
+                    );
+                    return Ok(());
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -652,18 +555,43 @@ impl<V: VariantMarker> E2ESut<V> {
                 } else {
                     matching.join("\n")
                 };
+                // Frame-stall detector: if no render pass committed during the
+                // entire wait, the element's absence says nothing about the
+                // render pipeline — the window simply never painted (occluded
+                // macOS windows pause their display link; `cx.notify()` alone
+                // schedules no frame there). See 2026-06-11 missing-row
+                // root-cause: data layers all correct, frames frozen.
+                let exit_generation = geometry.generation();
+                let frame_diag = if exit_generation == entry_generation {
+                    format!(
+                        "NO frame committed during the wait (generation stuck at \
+                         {entry_generation}) — paint pipeline idle/stalled, not a \
+                         missing-row bug"
+                    )
+                } else {
+                    format!(
+                        "{} frame(s) committed during the wait (generation \
+                         {entry_generation} → {exit_generation}) — element truly \
+                         absent from rendered output",
+                        exit_generation - entry_generation
+                    )
+                };
                 anyhow::bail!(
                     "wait_for_entity_bounds: timed out after {timeout:?} waiting for \
                      bounds of entity {entity_id:?} — tried element ids \
                      {render_id:?}, {selectable_id:?}, and entity_id scan; element \
                      was never rendered to BoundsRegistry (post-scroll), or bounds \
                      weren't promoted staged → committed since the last render pass.\n\
+                     Frame diagnosis: {frame_diag}\n\
                      BoundsRegistry total elements: {}\n\
                      Elements mentioning {entity_id:?}:\n{matching_str}",
                     all.len(),
                 );
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            // Wake on the next committed render pass (capped: a commit landing
+            // between the predicate check above and this await would otherwise
+            // be missed, and GPUI only paints on demand).
+            let _ = tokio::time::timeout(Duration::from_millis(50), geometry.changed()).await;
         }
     }
 
@@ -686,21 +614,41 @@ impl<V: VariantMarker> E2ESut<V> {
         accepted: &[&str],
         timeout: Duration,
     ) -> anyhow::Result<String> {
-        let Some(ref geometry) = self.frontend_geometry else {
+        let Some(ref geometry) = self.render.frontend_geometry else {
             return Ok(String::new());
         };
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let mut observed_for_entity: Vec<String> = Vec::new();
-            for (_, info) in geometry.all_elements() {
-                if info.entity_id.as_deref() == Some(entity_id) {
-                    if accepted.iter().any(|a| info.widget_type == *a) {
-                        return Ok(info.widget_type);
+        // Retry until the entity renders as an accepted widget kind; the
+        // success value is the matched widget_type, the `Err` carries the
+        // widget_types actually observed for this entity (for the diagnostic).
+        let driver = self.driver.clone();
+        let result = crate::pbt::retry::retry_until_ok_wake(
+            timeout,
+            Duration::from_millis(50),
+            || geometry.changed(),
+            async || {
+                let mut observed_for_entity: Vec<String> = Vec::new();
+                for (_, info) in geometry.all_elements() {
+                    if info.entity_id.as_deref() == Some(entity_id) {
+                        if accepted.iter().any(|a| info.widget_type.as_ref() == *a) {
+                            return Ok(info.widget_type.to_string());
+                        }
+                        observed_for_entity.push(info.widget_type.to_string());
                     }
-                    observed_for_entity.push(info.widget_type.clone());
                 }
-            }
-            if tokio::time::Instant::now() >= deadline {
+                // Not there yet: reveal-if-off-viewport + frame pump per
+                // retry — see the matching comment in
+                // `wait_for_window_focused_editor`.
+                if let Some(driver) = &driver {
+                    let entity_uri = holon_api::entity_uri_from_id_str(entity_id);
+                    let _ = driver.scroll_to_entity(&entity_uri).await;
+                }
+                Err(observed_for_entity)
+            },
+        )
+        .await;
+        match result {
+            Ok(widget_type) => Ok(widget_type),
+            Err(observed_for_entity) => {
                 let diag = crate::pbt::panic_diag::focus_and_render_dump(
                     self.engine(),
                     self.ctx
@@ -708,7 +656,7 @@ impl<V: VariantMarker> E2ESut<V> {
                         .as_ref()
                         .and_then(|e| e.ui_state().focused_block())
                         .as_ref(),
-                    self.frontend_geometry.as_deref(),
+                    self.render.frontend_geometry.as_deref(),
                     "wait_for_widget_kind",
                 )
                 .await;
@@ -718,7 +666,6 @@ impl<V: VariantMarker> E2ESut<V> {
                      entity_id: {observed_for_entity:?}\n{diag}"
                 );
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -734,7 +681,7 @@ impl<V: VariantMarker> E2ESut<V> {
     ///
     /// Reads `self.ctx.reactive_engine` — the engine instance the GPUI
     /// window's `BuilderServices` uses (via `PbtReadyContext`). The
-    /// local `self.reactive_engine` RefCell is a separate instance
+    /// local `self.render.reactive_engine` RefCell is a separate instance
     /// `ensure_reactive_engine` creates inside the SUT and would not
     /// observe focus writes from the GPUI click handler.
     #[tracing::instrument(skip(self), name = "pbt.wait_for_focus_to_match", fields(%expected_block_id))]
@@ -743,21 +690,43 @@ impl<V: VariantMarker> E2ESut<V> {
         expected_block_id: &str,
         timeout: Duration,
     ) -> anyhow::Result<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let actual = self
-                .ctx
-                .reactive_engine
-                .as_ref()
-                .and_then(|e| e.ui_state().focused_block());
-            if actual.as_ref().map(|u| u.as_str()) == Some(expected_block_id) {
-                return Ok(());
+        // Signal-driven: `signal_cloned().to_stream()` emits the CURRENT value
+        // first and then every change, so there is no check-then-wait gap to
+        // race against — the loop wakes exactly when focus moves.
+        let result: Result<(), Option<EntityUri>> = match self.ctx.reactive_engine.as_ref() {
+            Some(engine) => {
+                use futures::StreamExt;
+                use futures_signals::signal::SignalExt;
+                let mut stream = engine
+                    .ui_state()
+                    .focused_block_mutable()
+                    .signal_cloned()
+                    .to_stream();
+                let deadline = tokio::time::Instant::now() + timeout;
+                let mut last: Option<EntityUri> = None;
+                loop {
+                    match tokio::time::timeout_at(deadline, stream.next()).await {
+                        Ok(Some(actual)) => {
+                            if actual.as_ref().map(|u| u.as_str()) == Some(expected_block_id) {
+                                break Ok(());
+                            }
+                            last = actual;
+                        }
+                        // Stream closed (engine dropped) or deadline hit:
+                        // report the last observed focus.
+                        Ok(None) | Err(_) => break Err(last),
+                    }
+                }
             }
-            if tokio::time::Instant::now() >= deadline {
+            None => Err(None),
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(actual) => {
                 let diag = crate::pbt::panic_diag::focus_and_render_dump(
                     self.engine(),
                     actual.as_ref(),
-                    self.frontend_geometry.as_deref(),
+                    self.render.frontend_geometry.as_deref(),
                     "wait_for_focus_to_match",
                 )
                 .await;
@@ -766,7 +735,6 @@ impl<V: VariantMarker> E2ESut<V> {
                      actual={actual:?} after {timeout:?}\n{diag}"
                 );
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -810,7 +778,7 @@ impl<V: VariantMarker> E2ESut<V> {
         parent_id: &EntityUri,
         timeout: Duration,
     ) -> anyhow::Result<()> {
-        let Some(ref geometry) = self.frontend_geometry else {
+        let Some(ref geometry) = self.render.frontend_geometry else {
             return Ok(());
         };
         let Some(ref pre_state) = self.pre_ref_state else {
@@ -818,6 +786,7 @@ impl<V: VariantMarker> E2ESut<V> {
         };
         let resolved_parent = self.resolve_uri(parent_id);
         let expected_child_ids: HashSet<String> = pre_state
+            .domain
             .block_state
             .blocks
             .values()
@@ -827,83 +796,135 @@ impl<V: VariantMarker> E2ESut<V> {
         if expected_child_ids.is_empty() {
             return Ok(());
         }
+        // The main panel is a virtualized `gpui::list(...)`: only the rows in
+        // the viewport (plus a small overscan cushion) are prepaint-ed into
+        // BoundsRegistry. A document with more children than fit the viewport
+        // therefore NEVER has all of them painted at once — checking for a
+        // single all-painted snapshot would spuriously fail on any tall doc.
+        //
+        // Instead, scroll each not-yet-seen child into view and ACCUMULATE the
+        // set ever painted across scroll positions. Rows that scroll back out
+        // stay in `ever_seen`. A child that still never paints — even after we
+        // explicitly scroll to it — is a genuine failure: it is unreachable /
+        // clipped past the list's scroll extent, the real bug we want to catch,
+        // not a viewport artifact.
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut ever_seen: HashSet<String> = HashSet::new();
         loop {
-            let mut seen: HashSet<String> = HashSet::new();
             for (_, info) in geometry.all_elements() {
-                if info.widget_type != "rendered_text" && info.widget_type != "editable_text" {
+                if info.widget_type.as_ref() != "rendered_text"
+                    && info.widget_type.as_ref() != "editable_text"
+                {
                     continue;
                 }
                 if let Some(eid) = info.entity_id.as_deref()
                     && expected_child_ids.contains(eid)
                 {
-                    seen.insert(eid.to_string());
+                    ever_seen.insert(eid.to_string());
                 }
             }
-            if seen.len() >= expected_child_ids.len() {
+            if ever_seen.len() >= expected_child_ids.len() {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                let missing: Vec<&String> = expected_child_ids.difference(&seen).collect();
-                let diag = crate::pbt::panic_diag::focus_and_render_dump(
-                    self.engine(),
-                    self.ctx
-                        .reactive_engine
-                        .as_ref()
-                        .and_then(|e| e.ui_state().focused_block())
-                        .as_ref(),
-                    self.frontend_geometry.as_deref(),
-                    "wait_for_children_settled",
-                )
-                .await;
-                anyhow::bail!(
-                    "wait_for_children_settled: parent={resolved_parent} expected \
-                     {} child widget(s) (rendered_text/editable_text), saw {} after \
-                     {timeout:?}; missing={missing:?}\n{diag}",
-                    expected_child_ids.len(),
-                    seen.len(),
+                break;
+            }
+            // Reveal an as-yet-unpainted child. Each scroll brings a viewport's
+            // worth into prepaint, so the next scan picks up its neighbours too;
+            // over successive iterations this walks the whole list. Best-effort:
+            // a scroll RPC that can't locate the entity in a virtualized list
+            // returns Ok and the loop just keeps polling until the deadline.
+            if let Some(driver) = self.driver.as_ref()
+                && let Some(target) = expected_child_ids
+                    .iter()
+                    .find(|id| !ever_seen.contains(*id))
+                && let Err(e) = driver
+                    .scroll_to_entity(&holon_api::entity_uri_from_id_str(target))
+                    .await
+            {
+                tracing::debug!(
+                    "wait_for_children_settled: scroll_to_entity({target:?}) \
+                     returned Err — continuing to poll: {e:#}"
                 );
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            // Wake on the next committed render pass (capped — see
+            // wait_for_entity_bounds for the missed-notification rationale).
+            let _ = tokio::time::timeout(Duration::from_millis(50), geometry.changed()).await;
         }
+        // Deadline hit with children still never painted, even after scrolling
+        // to them — genuinely unreachable rows past the list's scroll extent.
+        let missing: Vec<&String> = expected_child_ids.difference(&ever_seen).collect();
+        // Layer attribution for each missing row: present in SQL
+        // (block_raw/matview), present in the interpreted ViewModel tree,
+        // absent only from paint? Pins which layer drops the row.
+        let mut layer_diag = String::new();
+        let vm_tree = holon_pbt_core::capabilities::SutRenderer::widget_tree_snapshot(self).await;
+        for id in &missing {
+            let in_vm: Vec<String> = vm_tree
+                .walk()
+                .filter(|n| n.entity_id.as_deref() == Some(id.as_str()))
+                .map(|n| {
+                    format!(
+                        "kind={} content={:?}",
+                        n.kind,
+                        n.props.get("content").map(|c| c.as_str())
+                    )
+                })
+                .collect();
+            layer_diag.push_str(&format!(
+                "\n--- missing row {id} ---\nViewModel nodes: {}\nSQL state:\n{}",
+                if in_vm.is_empty() {
+                    "<none — dropped at/before the ViewModel layer>".to_string()
+                } else {
+                    in_vm.join("; ")
+                },
+                self.probe_block_sql_state(id).await,
+            ));
+        }
+        let diag = crate::pbt::panic_diag::focus_and_render_dump(
+            self.engine(),
+            self.ctx
+                .reactive_engine
+                .as_ref()
+                .and_then(|e| e.ui_state().focused_block())
+                .as_ref(),
+            self.render.frontend_geometry.as_deref(),
+            "wait_for_children_settled",
+        )
+        .await;
+        anyhow::bail!(
+            "wait_for_children_settled: parent={resolved_parent} expected \
+             {} child widget(s) (rendered_text/editable_text), saw {} after \
+             {timeout:?} (incl. scroll-to-reveal); unreachable={missing:?}\n{diag}",
+            expected_child_ids.len(),
+            ever_seen.len(),
+        );
     }
 
     /// Initialize the ReactiveEngine — the same rendering pipeline GPUI uses.
     /// Must be called during StartApp so all subsequent transitions can read
     /// the reactive tree (ToggleState, EditViaDisplayTree, etc.).
     pub(super) async fn ensure_reactive_engine(&self, root_id: &EntityUri) {
-        if self.reactive_engine.borrow().is_some() {
+        if self.render.reactive_engine.borrow().is_some() {
             return;
         }
-        let engine = self.engine();
-        let session = Arc::new(holon_frontend::FrontendSession::from_engine(Arc::clone(
-            engine,
-        )));
-        let rt = tokio::runtime::Handle::current();
-
-        let services_slot: Arc<
-            std::sync::OnceLock<Arc<dyn holon_frontend::reactive::BuilderServices>>,
-        > = Arc::new(std::sync::OnceLock::new());
-        let slot_clone = services_slot.clone();
-        let reactive = Arc::new(holon_frontend::reactive::ReactiveEngine::new(
-            session,
-            rt,
-            Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
-            move |expr, rows| {
-                let services = match slot_clone.get() {
-                    Some(s) => s.clone(),
-                    None => return holon_frontend::ReactiveViewModel::empty(),
-                };
-                holon_frontend::interpret_pure(expr, rows, &*services)
-            },
-            services_slot.clone(),
-        ));
-        let services: Arc<dyn holon_frontend::reactive::BuilderServices> = reactive.clone();
-        services_slot.set(services).ok();
+        // Reuse the DI/production engine the `ReactiveEngineDriver` dispatches
+        // into (`self.ctx.reactive_engine`) rather than building a SECOND
+        // engine. A separate engine carried its OWN `UiState`, so focus /
+        // viewport writes the driver made were invisible to render observation
+        // — the root cause of the inv-value-fn-provider-arg-variance/vfn11
+        // spurious failure (`focus_chain()` always saw `focused_block = None`)
+        // and the sidebar render-cross-wiring confusion. Both engines were
+        // built with the same `build_shadow_interpreter`, so this is a pure
+        // de-duplication: one engine, one UiState, observation == what the
+        // driver mutates.
+        let reactive = self.ctx.reactive_engine.clone().expect(
+            "ensure_reactive_engine: ctx.reactive_engine is None — StartApp must run first",
+        );
 
         {
             use futures::StreamExt;
-            let collector = self.vm_emissions.clone();
+            let collector = self.render.vm_emissions.clone();
             let mut stream = reactive.watch(root_id);
             tokio::spawn(async move {
                 while let Some(rvm) = stream.next().await {
@@ -913,42 +934,30 @@ impl<V: VariantMarker> E2ESut<V> {
             });
         }
 
-        *self.reactive_root_id.borrow_mut() = Some(root_id.clone());
+        *self.render.reactive_root_id.borrow_mut() = Some(root_id.clone());
 
-        *self.reactive_engine.borrow_mut() = Some(reactive.clone());
+        *self.render.reactive_engine.borrow_mut() = Some(reactive.clone());
 
         // Wire BlockCellRegistry backed by the test's global LoroDoc.
         // Synchronously awaited (this fn is `async`) — the previous
         // `tokio::spawn` left a race where atomic editor primitives ran
         // before the registry landed, making `engine.editable_text(...)`
         // return Err and silently dropping per-keystroke writes (see
-        // `crates/holon-frontend/src/headless_editor_mirror.rs`).
-        //
-        // Both the locally-created `reactive` engine AND the DI engine
-        // (`self.ctx.reactive_engine`, used by `ReactiveEngineDriver`)
-        // need the registry. The driver path is the one keystrokes go
-        // through; without wiring the DI engine, the headless mirror's
-        // `editable_text(...)` lookup returns `Err` and per-keystroke
-        // writes silently drop.
+        // `crates/holon-frontend/src/headless_editor_mirror.rs`). Now that
+        // observation and the driver share one engine, a single wiring covers
+        // both the keystroke path and render observation.
         if let Some(doc_store) = self.ctx.doc_store() {
             let store = doc_store.read().await;
             match store.get_global_doc().await {
                 Ok(collab) => {
-                    let registry = Arc::new(
+                    let registry: Arc<dyn holon_frontend::cell::EntityCellRegistry> = Arc::new(
                         holon::sync::block_cell_registry::BlockCellRegistry::with_loro(collab),
                     );
                     reactive
                         .block_cell_registry
                         .lock()
                         .unwrap()
-                        .replace(registry.clone());
-                    if let Some(di_engine) = self.ctx.reactive_engine.as_ref() {
-                        di_engine
-                            .block_cell_registry
-                            .lock()
-                            .unwrap()
-                            .replace(registry);
-                    }
+                        .replace(registry);
                     eprintln!("[ensure_reactive_engine] BlockCellRegistry wired");
                 }
                 Err(e) => {
@@ -957,7 +966,7 @@ impl<V: VariantMarker> E2ESut<V> {
             }
         }
 
-        eprintln!("[ensure_reactive_engine] Created (data loads in background)");
+        eprintln!("[ensure_reactive_engine] using ctx.reactive_engine (unified)");
     }
 
     /// Send a key chord on a focused entity, going through the full
@@ -986,8 +995,12 @@ impl<V: VariantMarker> E2ESut<V> {
             .driver
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("driver not installed"))?;
+        // Harness ids come from transition-generated rows — schemed; parse
+        // once at the driver boundary (typed end-to-end past this point).
+        let entity_uri = holon_api::EntityUri::parse(entity_id)
+            .with_context(|| format!("send_key_chord: {entity_id:?} is not an EntityUri"))?;
         driver
-            .send_key_chord(root_id.as_str(), &root_tree, entity_id, chord, extra_params)
+            .send_key_chord(&root_id, &root_tree, &entity_uri, chord, extra_params)
             .await
     }
 
@@ -1075,49 +1088,125 @@ impl<V: VariantMarker> E2ESut<V> {
     /// and passes through any URI not in the map unchanged.
     pub fn resolve_uri(&self, parent_id: &EntityUri) -> EntityUri {
         self.doc_uri_map
+            .lock()
+            .unwrap()
             .get(parent_id)
             .cloned()
             .unwrap_or_else(|| parent_id.clone())
     }
 
-    /// Resolve a reference-model stable_id to the actual stable_id used in the Loro tree.
-    /// The reference model uses `b.id.id()` (e.g. "ref-doc-2"), but the actual Loro tree
-    /// uses the resolved UUID path (e.g. "422cf01d-..."). Try doc_uri_map first.
-    pub(super) fn resolve_stable_id(&self, stable_id: &str) -> String {
-        // Try block: prefix first (common for block IDs)
-        let block_uri = EntityUri::from_raw(&format!("block:{}", stable_id));
-        if let Some(resolved) = self.doc_uri_map.get(&block_uri) {
-            return resolved.id().to_string();
+    /// Park the headless editor mirror's caret at the start of the block
+    /// `split_block` just created. Both `SplitBlock` and `PressKey(Enter)`
+    /// dispatch `split_block` through the editor and need this.
+    ///
+    /// Since ADR 0010, `split_block` returns the new focus `{block_id,
+    /// cursor_offset}` in its op response and the frontend dispatch hook sets
+    /// `UiState.focused_block` + the caret seed in-process — so focus no longer
+    /// needs a SUT-side re-dispatch. The headless editor mirror, however,
+    /// tracks the caret in its own per-block map (which lazily defaults to
+    /// end-of-text and doesn't read the gpui caret seed), so we still park its
+    /// caret at 0 with a `home` keystroke to match the split offset; otherwise
+    /// a following `PressKey(Enter)` / `TypeChars` hits the wrong caret (the
+    /// `inv-blocks-match-ref` content divergence).
+    /// Block until `block_id`'s `editable_text` widget reports it holds
+    /// WINDOW focus (`ElementInfo::focused`). Engine `focused_block` moves
+    /// synchronously, but window focus follows via a spawned binding — a key
+    /// dispatched before it lands is consumed by the previously-focused
+    /// editor, which the pump's `handled` flag cannot distinguish. Wakes per
+    /// committed render pass. No-op when no geometry is installed (headless
+    /// drivers dispatch synchronously to the right editor).
+    pub(super) async fn wait_for_window_focused_editor(
+        &self,
+        block_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let Some(ref geometry) = self.render.frontend_geometry else {
+            return Ok(());
+        };
+        let driver = self.driver.clone();
+        crate::pbt::retry::retry_until_ok_wake(
+            timeout,
+            Duration::from_millis(50),
+            || geometry.changed(),
+            async || {
+                let mut observed: Vec<Option<bool>> = Vec::new();
+                for (_, info) in geometry.all_elements() {
+                    if info.entity_id.as_deref() == Some(block_id)
+                        && info.widget_type.as_ref() == "editable_text"
+                    {
+                        if info.focused == Some(true) {
+                            return Ok(());
+                        }
+                        observed.push(info.focused);
+                    }
+                }
+                // Not there yet: pump. The variant swap / editor mount lands
+                // via an async signal AFTER the input's one forced refresh —
+                // on an occluded window no further frame commits on its own,
+                // so the committed registry would stay frozen for the whole
+                // wait. The ScrollEntityIntoView RPC both reveals the row if
+                // it sits outside the virtualized viewport AND forces a
+                // window.refresh() per call. Failure stays loud via the
+                // timeout; pump errors are advisory only.
+                if let Some(driver) = &driver {
+                    let entity_uri = holon_api::entity_uri_from_id_str(block_id);
+                    let _ = driver.scroll_to_entity(&entity_uri).await;
+                }
+                Err(observed)
+            },
+        )
+        .await
+        .map_err(|observed| {
+            anyhow::anyhow!(
+                "wait_for_window_focused_editor: {block_id:?} editable_text never took \
+                 window focus within {timeout:?} (observed focused states: {observed:?})"
+            )
+        })
+    }
+
+    pub(super) async fn sync_caret_to_new_split_block(&self, new_id: &EntityUri) {
+        if let Some(driver) = self.driver.as_ref() {
+            // The split's focus follow-up moves focus to the NEW block, whose
+            // editor mounts (and grabs WINDOW focus) on the next render pass.
+            // A `home` sent earlier is either dropped or — worse — consumed by
+            // the still-focused OLD editor, which "handled" can't distinguish.
+            // So gate structurally: engine focus on the new block, then its
+            // editable variant committed (mount has run), THEN send `home`.
+            // Headless drivers no-op both waits and dispatch synchronously.
+            self.wait_for_focus_to_match(new_id.as_str(), Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("[split] focus never reached new block {new_id}: {e:#}")
+                });
+            self.wait_for_window_focused_editor(new_id.as_str(), Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("[split] new block {new_id} never took window focus: {e:#}")
+                });
+            driver
+                .send_raw_keystroke("home", &[])
+                .await
+                .unwrap_or_else(|e| panic!("[split] home for new block {new_id} failed: {e:#}"));
         }
-        // Try file: prefix (document IDs from pre-startup)
-        let file_uri = EntityUri::from_raw(&format!("file:{}", stable_id));
-        if let Some(resolved) = self.doc_uri_map.get(&file_uri) {
-            return resolved.id().to_string();
-        }
-        // Pass through unchanged
-        stable_id.to_string()
     }
 
     /// Look up the keybinding for an operation name from the reactive engine's registry.
     pub(super) fn find_keybinding_for_op(&self, op_name: &str) -> Option<holon_api::KeyChord> {
-        let engine = self.reactive_engine.borrow();
-        let engine = engine.as_ref()?;
-        engine.key_bindings().lock_ref().get(op_name).cloned()
+        self.render.find_keybinding_for_op(op_name)
     }
 }
 
-impl<V: VariantMarker> StateMachineTest for E2ESut<V> {
+impl StateMachineTest for E2ESut {
     type SystemUnderTest = Self;
-    type Reference = VariantRef<V>;
+    type Reference = ReferenceMachine;
 
     fn init_test(
         ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) -> Self::SystemUnderTest {
         tracing::trace!(
-            "[init_test<{}>] Starting, ref_state has {} blocks, app_started: {}",
-            std::any::type_name::<V>(),
-            ref_state.block_state.blocks.len(),
-            ref_state.app_started
+            "[init_test] Starting, ref_state has {} blocks, app_started: {}",
+            ref_state.domain.block_state.blocks.len(),
+            ref_state.action.app_started
         );
         // Reuse a process-wide tokio runtime across PBT cases. We empirically
         // re-measured the per-case alternative (May 2026): it adds 15s/case
@@ -1140,43 +1229,7 @@ impl<V: VariantMarker> StateMachineTest for E2ESut<V> {
         ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         transition: crate::pbt::transitions::E2ETransition,
     ) -> Self::SystemUnderTest {
-        tracing::trace!(
-            "[apply] ref_state has {} blocks, transition: {}",
-            ref_state.block_state.blocks.len(),
-            transition.variant_name()
-        );
-
-        state.last_transition = transition.clone();
-        #[cfg(feature = "otel-testing")]
-        {
-            // The span collector resets per-transition for budget isolation,
-            // but `Drop` wants whole-case totals. Snapshot the previous
-            // transition's `query` ancestor chains before resetting, and
-            // merge them into the case-level accumulator. Only paid when
-            // PBT_MATVIEW_METRICS=1 so normal runs keep their per-transition
-            // semantics untouched.
-            if std::env::var("PBT_MATVIEW_METRICS").as_deref() == Ok("1") {
-                let prev = state.span_collector.queries_by_origin();
-                let mut acc = state.query_origin_acc.borrow_mut();
-                for row in prev.rows {
-                    let entry = acc
-                        .entry(row.chain)
-                        .or_insert((0, std::time::Duration::ZERO));
-                    entry.0 += row.count;
-                    entry.1 += row.total_duration;
-                }
-            }
-            state.span_collector.reset();
-            state.last_transition_start = Some(Instant::now());
-            let rss_now = crate::test_tracing::current_rss_bytes();
-            state.rss_before = rss_now;
-            if state.rss_baseline == 0 {
-                state.rss_baseline = rss_now;
-            }
-        }
-
-        let runtime = state.runtime.clone();
-        runtime.block_on(state.apply_transition_async(ref_state, &transition));
+        state.drive_transition(ref_state, &transition);
         state
     }
 
@@ -1185,15 +1238,49 @@ impl<V: VariantMarker> StateMachineTest for E2ESut<V> {
         ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
         let runtime = state.runtime.clone();
-        runtime.block_on(state.check_invariants_async(ref_state));
+        runtime.block_on(state.run_invariant_registry(ref_state));
+    }
+
+    /// End-of-case sweep: a sequence ending in nav-only transitions would
+    /// otherwise finish without the `NotNavOnly`-gated structural invariants
+    /// ever seeing its final state (the nav gate is a per-tick perf
+    /// optimisation, not a correctness claim).
+    fn teardown(
+        state: Self::SystemUnderTest,
+        ref_state: <Self::Reference as ReferenceStateMachine>::State,
+    ) {
+        let runtime = state.runtime.clone();
+        runtime.block_on(state.run_invariant_registry_end_of_case(&ref_state));
     }
 }
 
-impl<V: VariantMarker> E2ESut<V> {
+impl E2ESut {
+    /// Drive one transition the way the native `StateMachineTest::apply`
+    /// does: record it for budget lookup, reset per-transition metrics
+    /// (no-op without `otel-testing`), then apply it on the SUT's runtime.
+    /// Shared by `E2ESut`'s own `StateMachineTest` impl (the GPUI replay
+    /// path) and the `declare_pbt_slice!` full-coverage wrapper.
+    pub fn drive_transition(
+        &mut self,
+        ref_state: &ReferenceState,
+        transition: &crate::pbt::transitions::E2ETransition,
+    ) {
+        tracing::trace!(
+            "[apply] ref_state has {} blocks, transition: {}",
+            ref_state.domain.block_state.blocks.len(),
+            transition.variant_name()
+        );
+        self.last_transition = transition.clone();
+        self.metrics.on_transition_start();
+        let runtime = self.runtime.clone();
+        runtime.block_on(self.apply_transition_async(ref_state, transition));
+    }
+
     /// Number of content blocks (excludes document blocks, which are created
-    /// asynchronously by OrgSyncController and may lag behind content blocks).
+    /// asynchronously by FileSyncController and may lag behind content blocks).
     pub(super) fn expected_content_block_count(ref_state: &ReferenceState) -> usize {
         ref_state
+            .domain
             .block_state
             .blocks
             .values()
@@ -1208,6 +1295,7 @@ impl<V: VariantMarker> E2ESut<V> {
     /// CDC accumulator before the wait succeeds.
     pub(crate) fn expected_block_ids(&self, ref_state: &ReferenceState) -> HashSet<EntityUri> {
         ref_state
+            .domain
             .block_state
             .blocks
             .values()
@@ -1224,13 +1312,20 @@ impl<V: VariantMarker> E2ESut<V> {
         resolve_id: bool,
     ) -> Vec<Block> {
         ref_state
+            .domain
             .block_state
             .blocks
             .values()
             .map(|b| {
                 let mut b = b.clone();
                 if resolve_id {
-                    b.id = self.doc_uri_map.get(&b.id).cloned().unwrap_or(b.id);
+                    b.id = self
+                        .doc_uri_map
+                        .lock()
+                        .unwrap()
+                        .get(&b.id)
+                        .cloned()
+                        .unwrap_or(b.id);
                 }
                 b.parent_id = self.resolve_uri(&b.parent_id);
                 b
@@ -1268,73 +1363,14 @@ impl<V: VariantMarker> E2ESut<V> {
         }
     }
 
-    /// Compare every parent's live `block_raw` children order (sorted
-    /// by `sort_key`, the projector's authoritative ordering) against
-    /// the reference model's predicted children list. This is the
-    /// encoding-free equivalent of `assert_block_order` — both sides
-    /// produce a `Vec<EntityUri>` per parent, no `sort_key` /
-    /// `sequence` strings cross the boundary.
-    ///
-    /// Mirrors `BlockOrdering::children(parent_id)` semantically;
-    /// queries `block_raw` directly because the test doesn't hold a
-    /// `dyn BlockOrdering` (the trait lives in the holon backend, not
-    /// the engine surface). When/if a `BlockOrdering` is exposed via
-    /// `BlockDomain`, swap the SQL out for the trait call.
-    pub(super) async fn assert_live_children_match_ref(&self, ref_state: &ReferenceState) {
-        let parents: std::collections::BTreeSet<EntityUri> = ref_state
-            .block_state
-            .blocks
-            .values()
-            .map(|b| b.parent_id.clone())
-            .collect();
-        let engine = self.engine();
-        for parent in parents {
-            if !parent.is_block() {
-                continue;
-            }
-            let resolved_parent = self.resolve_uri(&parent);
-            let sql = format!(
-                "SELECT id FROM block_raw WHERE parent_id = '{}' ORDER BY sort_key, id",
-                resolved_parent.as_str().replace('\'', "''")
-            );
-            let rows = match engine.execute_query(sql, HashMap::new(), None).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    panic!(
-                        "[inv-live-children-match-ref] block_raw query failed for parent {}: {e:#}",
-                        resolved_parent
-                    );
-                }
-            };
-            let live_ids: Vec<String> = rows
-                .iter()
-                .filter_map(|row| row.get("id").and_then(|v| v.as_string()).map(String::from))
-                .collect();
-            // Resolve ref ids the same way the rest of the test does so
-            // synthetic split / doc URIs line up with their real UUIDs.
-            let ref_ids: Vec<String> = ref_state
-                .children_of(&parent)
-                .into_iter()
-                .map(|uri| self.resolve_uri(&uri).as_str().to_string())
-                .collect();
-            if live_ids != ref_ids {
-                panic!(
-                    "[inv-live-children-match-ref] children of {} disagree:\n  \
-                     live  (block_raw ORDER BY sort_key): {:?}\n  \
-                     ref   (sorted_children_of):          {:?}",
-                    resolved_parent, live_ids, ref_ids
-                );
-            }
-        }
-    }
-
-    /// Wait for the org-file projection to match `expected_blocks` and then
-    /// stabilise (no more writes for one quiescence window).
-    pub(super) async fn await_org_file_convergence(&self, expected_blocks: &[Block]) {
-        let org_timeout = Duration::from_millis(5000);
-        self.ctx
-            .wait_for_org_file_sync(expected_blocks, org_timeout)
-            .await;
+    /// Wait for the org-file projection to stabilise (no more controller
+    /// activity for one quiescence window). The in-memory FileSystem (ADR
+    /// 0011) delivers each write's change event synchronously, so by the
+    /// time the idle signal quiesces the controller has processed every
+    /// pending change — the old content-hash poll (`wait_for_org_file_sync`)
+    /// added only its false 5 s timeouts on top of this and was deleted.
+    /// Content correctness is asserted by inv-org-roundtrip-blocks-equal.
+    pub(super) async fn await_org_file_convergence(&self) {
         self.ctx
             .wait_for_org_files_stable(25, Duration::from_millis(5000))
             .await;
@@ -1342,280 +1378,18 @@ impl<V: VariantMarker> E2ESut<V> {
 
     /// Apply a mutation (UI or External) and wait for sync to complete.
     ///
-    /// This method delegates to TestContext methods for the actual work,
-    /// keeping the PBT layer thin.
+    /// Body lives in [`crate::pbt::transitions::apply_mutation::apply_apply_mutation_to_sut`];
+    /// this method is a thin forwarder so callers that still spell
+    /// `self.apply_mutation(...)` keep working.
     pub(super) async fn apply_mutation(
         &mut self,
         event: MutationEvent,
         ref_state: &ReferenceState,
     ) {
-        match event.source {
-            MutationSource::UI => {
-                let (entity, op, mut params) = event.mutation.to_operation();
-
-                // The reference model uses file-based document URIs (e.g. "file:doc_0.org")
-                // but the real system assigns UUID-based IDs. Resolve before executing.
-                if let Some(Value::String(pid)) = params.get("parent_id") {
-                    let pid = EntityUri::parse(pid).expect("Unable to parse parent_id");
-                    let resolved = self.resolve_uri(&pid);
-                    params.insert("parent_id".to_string(), resolved.clone().into());
-                }
-
-                // Try keychord path first: if the operation has a keybinding, dispatch
-                // via send_key_chord → shadow index → bubble_input. This exercises the
-                // full keybinding pipeline, same as pressing Cmd+Enter in GPUI.
-                let dispatched_via_keychord = if let Some(block_id) =
-                    params.get("id").and_then(|v| v.as_string())
-                {
-                    if let Some(chord) = self.find_keybinding_for_op(&op) {
-                        eprintln!(
-                            "[E2ESut::apply_mutation] Trying keychord {:?} for op '{}' on block '{}'",
-                            chord, op, block_id
-                        );
-                        match self.send_key_chord(block_id, &chord, HashMap::new()).await {
-                            Ok(true) => {
-                                eprintln!("[E2ESut::apply_mutation] Dispatched via keychord");
-                                true
-                            }
-                            Ok(false) => {
-                                eprintln!(
-                                    "[E2ESut::apply_mutation] Keychord did NOT match — falling back to direct dispatch"
-                                );
-                                false
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[E2ESut::apply_mutation] Keychord dispatch error: {:?} — falling back",
-                                    e
-                                );
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !dispatched_via_keychord {
-                    // TODO(simulate-real-input): this fallback bypasses the user-input
-                    // layer. The legitimate UI mutations that hit it (block::set_field
-                    // content edits) need a UserDriver `replace_text(entity_id, text)`
-                    // verb — click + Cmd+A + type_text + click-elsewhere-to-blur — so
-                    // the editor controller, InputState, and on_text_changed pipeline
-                    // are exercised end-to-end.
-                    //
-                    // SYNTHETIC: the keychord path above handles ops that have a
-                    // keybinding (cycle_task_state, indent, split_block, ...). This
-                    // branch fires when the ref-model generated an abstract mutation
-                    // with no corresponding user gesture — e.g., a direct `block::update`
-                    // that a real user would produce by clicking into an editor and
-                    // typing. Burn-down for these lives in Step known-widget-type of plan
-                    // `deep-humming-crane.md`: once `click_entity` + `type_text` cover
-                    // the full editor flow, this fallback can be deleted.
-                    eprintln!(
-                        "[E2ESut::apply_mutation] Direct dispatch: entity={}, op={}",
-                        entity, op
-                    );
-                    let driver = self
-                        .driver
-                        .as_ref()
-                        .expect("driver not installed — was start_app called?");
-                    match driver.synthetic_dispatch(&entity, &op, params).await {
-                        Ok(()) => {
-                            eprintln!("[E2ESut::apply_mutation] synthetic_dispatch returned Ok")
-                        }
-                        Err(e) => panic!("Operation {}.{} failed: {:?}", entity, op, e),
-                    }
-                }
-            }
-
-            MutationSource::External => {
-                // Resolve file-based doc URIs to UUID-based (ctx.documents is re-keyed
-                // to UUID after start_app). Block-to-block parent_ids pass through unchanged.
-                eprintln!("[E2ESut::apply_mutation] External mutation - writing to Org file");
-                let expected_blocks = self.resolve_ref_blocks(ref_state, true);
-                if let Err(e) = self.ctx.apply_external_mutation(&expected_blocks).await {
-                    eprintln!("[E2ESut::apply_mutation] External mutation failed: {:?}", e);
-                } else {
-                    eprintln!(
-                        "[E2ESut::apply_mutation] External mutation wrote to file, waiting for file watcher"
-                    );
-                }
-            }
-
-            MutationSource::Action => {
-                // Action-sourced mutations are autonomous: the action watcher
-                // observes a query result and calls `engine.execute_operation`
-                // directly (see `action_watcher.rs::run_discovery_loop`).
-                // There is no user keystroke or click to simulate here, so
-                // routing through `send_key_chord` / `click_entity` would
-                // *invent* a gesture the production code path never makes.
-                // `synthetic_dispatch` is the faithful mirror of what the
-                // action watcher actually does in production.
-                let (entity, op, mut params) = event.mutation.to_operation();
-
-                if let Some(Value::String(pid)) = params.get("parent_id") {
-                    let pid = EntityUri::parse(pid).expect("Unable to parse parent_id");
-                    let resolved = self.resolve_uri(&pid);
-                    params.insert("parent_id".to_string(), resolved.clone().into());
-                }
-
-                eprintln!(
-                    "[E2ESut::apply_mutation] Action dispatch: entity={}, op={}",
-                    entity, op
-                );
-                let driver = self
-                    .driver
-                    .as_ref()
-                    .expect("driver not installed — was start_app called?");
-                match driver.synthetic_dispatch(&entity, &op, params).await {
-                    Ok(()) => {
-                        eprintln!("[E2ESut::apply_mutation] Action synthetic_dispatch returned Ok")
-                    }
-                    Err(e) => panic!("Action operation {}.{} failed: {:?}", entity, op, e),
-                }
-            }
-        }
-
-        // Wait until block count matches expected (with timeout).
-        let expected_count = Self::expected_content_block_count(ref_state);
-        let expected_ids = self.expected_block_ids(ref_state);
-        self.await_block_count_or_panic(
-            &expected_ids,
-            expected_count,
-            Duration::from_millis(10000),
-            "E2ESut::apply_mutation",
+        crate::pbt::transitions::apply_mutation::apply_apply_mutation_to_sut(
+            self, event, ref_state,
         )
         .await;
-
-        // Spot-check: verify the mutated block has correct data in the DB.
-        // Only for UI mutations — External mutations write to org files and need the file
-        // watcher to propagate changes to SQL (checked later in check_invariants).
-        if event.source == MutationSource::UI
-            && let Some(block_id) = event.mutation.target_block_id()
-            && let Some(expected_block) = ref_state.block_state.blocks.get(&block_id)
-        {
-            // Map synthetic split ids (`block::split-N`) to the real DB id
-            // via doc_uri_map. Without this, blocks created by SplitBlock
-            // are queried by their reference-state placeholder id and never
-            // found in SQL.
-            let resolved_block_id = self.resolve_uri(&block_id);
-            // Read from block_raw — post-mutation spot-check needs synchronous
-            // visibility (same matview-CDC race fix as inv-viewmodel-root-matches-render-expr / #13).
-            let prql = format!(
-                "from block_raw | filter id == \"{}\" | select {{id, content, content_type, parent_id}}",
-                resolved_block_id
-            );
-            let spec = self
-                .test_ctx()
-                .query(prql, QueryLanguage::HolonPrql, HashMap::new())
-                .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "Post-mutation spot-check query failed for block '{}': {:?}",
-                        block_id, e
-                    )
-                });
-            let resolved_row = spec.first().unwrap_or_else(|| {
-                panic!(
-                    "Post-mutation spot-check: no row returned for block '{}'",
-                    block_id
-                )
-            });
-            let actual_content = resolved_row
-                .get("content")
-                .and_then(|v| v.as_string())
-                .unwrap_or("")
-                .trim();
-            let expected_content = expected_block.content.trim();
-            assert_eq!(
-                actual_content, expected_content,
-                "Post-mutation spot-check: content mismatch for block '{}'",
-                block_id
-            );
-            let actual_ct = resolved_row
-                .get("content_type")
-                .and_then(|v| v.as_string())
-                .unwrap_or("");
-            assert_eq!(
-                actual_ct,
-                expected_block.content_type.to_string().as_str(),
-                "Post-mutation spot-check: content_type mismatch for block '{}'",
-                block_id
-            );
-        } // UI mutations only
-
-        // Wait for org files to match expected state, then stabilize (no more writes).
-        // Resolve both id and parent_id so document blocks match UUID-keyed documents.
-        let expected_blocks = self.resolve_ref_blocks(ref_state, true);
-        self.await_org_file_convergence(&expected_blocks).await;
-
-        // External mutations write to disk; the file watcher asynchronously
-        // delivers the change to the backend. `await_org_file_convergence` only
-        // waits for the file itself to match, not for the backend to catch up.
-        // For content or property updates (no count change), this can cause the
-        // invariant check to run before the backend has the new state.
-        //
-        // Spot-check the mutated block's content AND properties in the backend,
-        // polling until they match or the timeout fires. Properties are checked
-        // against `event.mutation.fields` so custom-property updates like
-        // `{effort: "7yzXz"}` also wait for SQL to catch up.
-        if event.source == MutationSource::External
-            && let Some(block_id) = event.mutation.target_block_id()
-        {
-            let resolved_id = self.resolve_uri(&block_id);
-            if let Some(expected_block) = ref_state.block_state.blocks.get(&block_id) {
-                let expected_content = expected_block.content.trim().to_string();
-                let expected_properties: HashMap<String, Value> =
-                    mutation_expected_properties(&event.mutation);
-                let deadline = Instant::now() + Duration::from_millis(5000);
-                loop {
-                    let prql = format!(
-                        "from block_raw | filter id == \"{}\" | select {{content, properties}}",
-                        resolved_id
-                    );
-                    let rows = self
-                        .test_ctx()
-                        .query(prql, QueryLanguage::HolonPrql, HashMap::new())
-                        .await
-                        .unwrap_or_default();
-                    let row = rows.first();
-                    let actual_content = row
-                        .and_then(|r| r.get("content"))
-                        .and_then(|v| v.as_string())
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    let actual_properties = row
-                        .and_then(|r| r.get("properties"))
-                        .map(row_properties_to_map)
-                        .unwrap_or_default();
-                    let content_match = actual_content == expected_content;
-                    let properties_match = expected_properties
-                        .iter()
-                        .all(|(k, v)| actual_properties.get(k) == Some(v));
-                    if content_match && properties_match {
-                        break;
-                    }
-                    if Instant::now() >= deadline {
-                        eprintln!(
-                            "[E2ESut::apply_mutation] External sync timeout for \
-                                 block '{}': content actual={:?} expected={:?}; \
-                                 properties actual={:?} expected={:?}",
-                            resolved_id,
-                            actual_content,
-                            expected_content,
-                            actual_properties,
-                            expected_properties
-                        );
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            }
-        }
     }
 
     // ── Phase 7 accessors for capability-trait impls ───────────────────────
@@ -1623,9 +1397,9 @@ impl<V: VariantMarker> E2ESut<V> {
     // DO NOT use from transitions — the proxy semantics are invariant-only.
 
     /// Drain all pending ViewModel emissions since the last drain.
-    /// Production path: sut.rs:5846 `std::mem::take(&mut *self.vm_emissions.lock().unwrap())`.
+    /// Production path: sut.rs:5846 `std::mem::take(&mut *self.render.vm_emissions.lock().unwrap())`.
     pub(super) fn vm_emissions_drain(&mut self) -> Vec<holon_frontend::ViewModel> {
-        std::mem::take(&mut *self.vm_emissions.lock().unwrap())
+        self.render.vm_emissions_drain()
     }
 
     /// True if the `live_blocks` CDC mirror has not yet caught up to the
@@ -1633,16 +1407,10 @@ impl<V: VariantMarker> E2ESut<V> {
     /// `db_handle().cdc_emitted_watermark()`. Returns `false` when the app
     /// is not running or the mirror has not been initialised yet.
     pub(super) fn live_blocks_cdc_stale(&self) -> bool {
+        // Pre-startup: no engine, no mirror. Guard before touching the engine.
         if !self.ctx.is_running() {
             return false;
         }
-        let target = self.ctx.engine().db_handle().cdc_emitted_watermark();
-        if target == 0 {
-            return false;
-        }
-        let Some(live) = self.live_blocks_cell.borrow().clone() else {
-            return false;
-        };
-        live.consumed_seq() < target
+        self.cdc.blocks_cdc_stale(self.ctx.engine())
     }
 }

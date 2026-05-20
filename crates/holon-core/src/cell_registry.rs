@@ -85,6 +85,22 @@ pub trait EntityCellRegistry: Send + Sync {
     ) -> Result<bool> {
         Ok(false)
     }
+
+    /// Delete an entity authoritatively through this registry's backing
+    /// store (e.g. `LoroBackend::delete_block`); the outbound projector then
+    /// emits the SQL DELETE tagged `EventOrigin::Loro`. Mirrors
+    /// [`create_entity`](Self::create_entity): deleting only from SQL leaves
+    /// the still-present Loro node alive (observed: `join_block` merged the
+    /// content via cells but the SQL-direct delete left the joined-away
+    /// block in the Loro tree).
+    ///
+    /// Returns `Ok(true)` when the delete landed via the cell route;
+    /// `Ok(false)` when this registry has no cell-routed delete path
+    /// (SqlOnly mode, synthetic test stores). Callers fall back to the
+    /// SQL delete on `Ok(false)`.
+    async fn delete_entity(&self, _: &EntityUri) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Extension trait providing the typed `live_field<T>` surface on top of

@@ -28,12 +28,16 @@ pub struct PeerEdit {
 
 impl TransitionFactory<ReferenceState> for PeerEdit {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
+    }
+
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Early gate: app started, Loro enabled, peers available.
         // `preconditions` checks peer_idx bounds and op validity.
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
-            check(state.variant.enable_loro, Reason::LoroRequiredForPeers),
+            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.enable_loro(), Reason::LoroRequiredForPeers),
             check(!state.peers.is_empty(), Reason::NoPeersAvailable),
         ];
         let merged: Validated<Vec<()>, Reason> = checks.into_iter().collect();
@@ -43,7 +47,7 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
 
         (|| {
             let peer_count = state.peers.len();
-            let seq = state.block_state.next_id;
+            let seq = state.domain.block_state.next_id;
 
             let mut arms: Vec<(u32, BoxedStrategy<PeerEdit>)> = Vec::new();
 
@@ -56,7 +60,7 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
                     .collect();
 
                 let pc = peer_count;
-                let create = (0..pc, "[a-z]{4,8}")
+                let create = (0..pc, crate::pbt::generators::peer_content_strategy())
                     .prop_flat_map(move |(peer_idx, content)| {
                         let has_blocks = !peer_blocks_per_idx[peer_idx].is_empty();
                         let parent_strat = if has_blocks {
@@ -104,7 +108,11 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
                 if !all_peers.is_empty() {
                     let update = proptest::sample::select(all_peers)
                         .prop_flat_map(|(peer_idx, ids)| {
-                            (Just(peer_idx), proptest::sample::select(ids), "[a-z]{4,8}")
+                            (
+                                Just(peer_idx),
+                                proptest::sample::select(ids),
+                                crate::pbt::generators::peer_content_strategy(),
+                            )
                         })
                         .prop_map(|(peer_idx, stable_id, content)| PeerEdit {
                             peer_idx,
@@ -130,7 +138,7 @@ impl TransitionRef<ReferenceState> for PeerEdit {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
+            check(state.action.app_started, Reason::AppNotStarted),
             check(
                 self.peer_idx < state.peers.len(),
                 Reason::PeerIndexOutOfBounds,

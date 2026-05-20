@@ -1,6 +1,5 @@
-//! Phase 7 — `inv-focus-matches-ref`.
+//! `inv-focus-matches-ref`.
 //!
-//! Inline body lives at `sut.rs:6709–6773`.
 //!
 //! Checks that the reactive/frontend engine's global `focused_block`
 //! matches the reference model's global focus after every focus-changing
@@ -15,8 +14,10 @@
 //!
 //! Status: functional.
 
-use holon_pbt_core::capabilities::{RefEditorMirror, RefGlobalFocus, SutDriver};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::capabilities::{EngineFocus, RefEditorMirror, RefGlobalFocus, SutDriver};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
+
+use crate::pbt::retry::retry_until_ok;
 
 pub struct InvFocusMatchesRef;
 
@@ -34,49 +35,57 @@ where
         Self::ID
     }
 
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
-    }
-
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
-        // Skipped when no global focus is set in the reference model.
         let Some(ref_focused) = ref_.global_focused_block() else {
-            return InvariantResult::Ok;
+            return InvariantResult::Skipped("no global focus in reference model".into());
         };
-        // Skipped while an editor is open — engine focus may not have
-        // updated yet relative to the click handler.
+        // Engine focus may not have updated yet relative to the click handler.
         if ref_.active_editor_block().is_some() {
-            return InvariantResult::Ok;
+            return InvariantResult::Skipped(
+                "editor open — editor focus is source of truth".into(),
+            );
         }
 
         let resolved_ref = sut.resolve_ref_block_id(&ref_focused);
 
-        // Poll up to 1 s: chord ops (SplitBlock, JoinBlock) fire
-        // editor_focus(new_block) as a follow-up that propagates through
-        // SQL → watch_editor_cursor → window.focus → InputEvent::Focus →
-        // set_focus. The new block's EditorView may not have mounted yet.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
-        loop {
-            let actual = sut.engine_focused_block().await;
-            match &actual {
-                None => {
-                    // No frontend engine installed — skip (SqlOnly mode).
-                    return InvariantResult::Ok;
+        // No frontend engine (SqlOnly headless): focus is unobservable —
+        // a visible Skip, not a silent Ok. Checked once up front; engine
+        // presence cannot change mid-poll.
+        if sut.engine_focused_block().await == EngineFocus::NoEngine {
+            return InvariantResult::Skipped("no frontend engine (SqlOnly)".into());
+        }
+
+        // Poll up to 1 s: chord ops (SplitBlock, JoinBlock) move focus to the
+        // new block via their op response, applied in-process (ADR 0010);
+        // window focus then follows the `focused_block` signal. The new
+        // block's EditorView may not have mounted yet. `Unfocused` keeps
+        // polling and FAILS on timeout — the ref expects focus here, so a
+        // focus-less engine is the steal-back/lost-focus bug, not a skip.
+        let result = retry_until_ok(
+            std::time::Duration::from_millis(1000),
+            std::time::Duration::from_millis(20),
+            async || match sut.engine_focused_block().await {
+                EngineFocus::NoEngine => {
+                    unreachable!("engine presence cannot change mid-poll")
                 }
-                Some(actual_id) => {
-                    if actual_id == &resolved_ref {
-                        return InvariantResult::Ok;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return InvariantResult::Fail(format!(
-                            "[inv-focus-matches-ref] Global focus mismatch: \
-                             reference model has {ref_focused} (resolved: {resolved_ref}), \
-                             but engine.focused_block() has {actual_id} (polled 1s)"
-                        ));
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                EngineFocus::Focused(actual_id) if actual_id == resolved_ref => Ok(()),
+                EngineFocus::Focused(actual_id) => Err(Some(actual_id)),
+                EngineFocus::Unfocused => Err(None),
+            },
+        )
+        .await;
+        match result {
+            Ok(()) => InvariantResult::Ok,
+            Err(Some(actual_id)) => InvariantResult::Fail(format!(
+                "[inv-focus-matches-ref] Global focus mismatch: \
+                 reference model has {ref_focused} (resolved: {resolved_ref}), \
+                 but engine.focused_block() has {actual_id} (polled 1s)"
+            )),
+            Err(None) => InvariantResult::Fail(format!(
+                "[inv-focus-matches-ref] Global focus LOST: \
+                 reference model has {ref_focused} (resolved: {resolved_ref}), \
+                 but engine.focused_block() is None (polled 1s)"
+            )),
         }
     }
 }

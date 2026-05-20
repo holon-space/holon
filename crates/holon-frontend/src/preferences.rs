@@ -152,7 +152,7 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
         PreferenceDef {
             key: PrefKey::new("todoist.api_key"),
             label: "Todoist API Key".into(),
-            description: "Enter your Todoist API key to sync tasks. Find it in Todoist Settings > Integrations.".into(),
+            description: "Enter your Todoist API key to sync tasks (find it in Todoist Settings > Integrations). The TODOIST_API_KEY environment variable overrides this if set.".into(),
             section: integrations,
             pref_type: PrefType::Secret,
             default: toml::Value::String(String::new()),

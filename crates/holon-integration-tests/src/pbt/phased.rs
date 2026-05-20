@@ -12,8 +12,9 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use proptest_state_machine::ReferenceStateMachine;
 
 use super::E2ETransition;
-use super::types::{Full, MutationSource};
-use super::{E2ESut, VariantRef};
+use super::reference_state::ReferenceState;
+use super::types::MutationSource;
+use super::{E2ESut, ReferenceMachine};
 use crate::DirectUserDriver;
 
 // ──── Public types ────
@@ -78,16 +79,16 @@ pub struct PbtUiOperation {
 /// Sync function so non-Send `BoxedStrategy` doesn't live across `.await`.
 fn generate_transition(
     runner: &mut TestRunner,
-    ref_state: &VariantRef<Full>,
+    ref_state: &ReferenceState,
     step: u32,
 ) -> anyhow::Result<Option<E2ETransition>> {
-    let strategy = <VariantRef<Full> as ReferenceStateMachine>::transitions(ref_state);
+    let strategy = <ReferenceMachine as ReferenceStateMachine>::transitions(ref_state);
     let transition = strategy
         .new_tree(runner)
         .map_err(|e| anyhow::anyhow!("Failed to generate transition at step {step}: {e}"))?
         .current();
 
-    if !<VariantRef<Full> as ReferenceStateMachine>::preconditions(ref_state, &transition) {
+    if !<ReferenceMachine as ReferenceStateMachine>::preconditions(ref_state, &transition) {
         return Ok(None);
     }
 
@@ -123,8 +124,8 @@ pub fn create_runner() -> anyhow::Result<TestRunner> {
     Ok(TestRunner::new_with_rng(config, rng))
 }
 
-pub fn create_initial_ref_state(runner: &mut TestRunner) -> anyhow::Result<VariantRef<Full>> {
-    let init_strategy = <VariantRef<Full> as ReferenceStateMachine>::init_state();
+pub fn create_initial_ref_state(runner: &mut TestRunner) -> anyhow::Result<ReferenceState> {
+    let init_strategy = <ReferenceMachine as ReferenceStateMachine>::init_state();
     init_strategy
         .new_tree(runner)
         .map_err(|e| anyhow::anyhow!("Failed to generate initial state: {e}"))
@@ -134,9 +135,9 @@ pub fn create_initial_ref_state(runner: &mut TestRunner) -> anyhow::Result<Varia
 /// Resolve a UI mutation's parameters (parent_id URIs) from a transition.
 ///
 /// Returns `Some((entity, op, resolved_params))` for UI mutations, `None` otherwise.
-fn resolve_ui_operation(
+pub(crate) fn resolve_ui_operation(
     transition: &E2ETransition,
-    sut: &E2ESut<Full>,
+    sut: &E2ESut,
 ) -> Option<(String, String, HashMap<String, Value>)> {
     match transition {
         E2ETransition::ApplyMutation(am) if am.event.source == MutationSource::UI => {
@@ -160,11 +161,11 @@ fn resolve_ui_operation(
 fn run_pre_startup_loop(
     runtime: &tokio::runtime::Runtime,
     runner: &mut TestRunner,
-    sut: &mut E2ESut<Full>,
-    mut ref_state: VariantRef<Full>,
+    sut: &mut E2ESut,
+    mut ref_state: ReferenceState,
     num_steps: u32,
     label: &str,
-) -> anyhow::Result<(VariantRef<Full>, u32, u32)> {
+) -> anyhow::Result<(ReferenceState, u32, u32)> {
     let mut current_step = 0u32;
     let mut actual_steps = 0u32;
     let mut start_app_done = false;
@@ -178,14 +179,19 @@ fn run_pre_startup_loop(
             }
         };
 
+        // Record before apply so a panicking step's own transition is in the
+        // capture. No-op unless the caller armed capture via `reset_capture`
+        // (only the GPUI entry does — `run_pbt_with_driver_sync_callback`).
+        crate::pbt::slice::record_transition(&transition);
+
         let is_start_app = matches!(&transition, E2ETransition::StartApp(_));
-        ref_state = <VariantRef<Full> as ReferenceStateMachine>::apply(ref_state, &transition);
+        ref_state = <ReferenceMachine as ReferenceStateMachine>::apply(ref_state, &transition);
 
         runtime.block_on(sut.apply_transition_async(&ref_state, &transition));
         if is_start_app {
             start_app_done = true;
         }
-        runtime.block_on(sut.check_invariants_async(&ref_state));
+        runtime.block_on(sut.run_invariant_registry(&ref_state));
         actual_steps += 1;
         current_step += 1;
         eprintln!(
@@ -210,8 +216,8 @@ fn run_pre_startup_loop(
 fn run_driver_step(
     runtime: &tokio::runtime::Runtime,
     runner: &mut TestRunner,
-    sut: &mut E2ESut<Full>,
-    ref_state: &mut VariantRef<Full>,
+    sut: &mut E2ESut,
+    ref_state: &mut ReferenceState,
     current_step: u32,
     num_steps: u32,
     driver: &mut dyn crate::UiDriver,
@@ -224,20 +230,16 @@ fn run_driver_step(
     let transition_name = transition.variant_name();
     let ui_op = resolve_ui_operation(&transition, sut);
 
-    *ref_state = <VariantRef<Full> as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
+    // Record before apply so a panicking step's own transition is captured.
+    // No-op unless capture was armed by the GPUI entry's `reset_capture`.
+    crate::pbt::slice::record_transition(&transition);
 
-    // Reset OTel span collector so we get per-transition metrics.
-    #[cfg(feature = "otel-testing")]
-    {
-        sut.span_collector.reset();
-        sut.last_transition_start = Some(std::time::Instant::now());
-        sut.last_transition = transition.clone();
-        let rss_now = crate::test_tracing::current_rss_bytes();
-        sut.rss_before = rss_now;
-        if sut.rss_baseline == 0 {
-            sut.rss_baseline = rss_now;
-        }
-    }
+    *ref_state = <ReferenceMachine as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
+
+    // Reset per-transition metrics so budgets are scoped per transition.
+    // No-op without `otel-testing`.
+    sut.last_transition = transition.clone();
+    sut.metrics.on_transition_start();
 
     crate::debug_pause::pause_before_step(current_step + 1, transition_name);
 
@@ -282,6 +284,21 @@ fn run_driver_step(
 
     crate::debug_pause::pause_after_step(current_step + 1, transition_name);
 
+    // Fault injection for capture/bisection tooling: panic *after* step N's
+    // transition is applied + recorded, so the GPUI capture-on-panic path writes
+    // a `tests/.captures/*.json` with a known prefix on demand. Used to exercise
+    // the capture→headless-bisect pipeline without hunting for a flaky failing
+    // seed (ADR 0009 step 3/4). No effect unless `HOLON_PBT_FORCE_FAIL_AT_STEP`
+    // is set to this 1-based step number.
+    if let Ok(n) = std::env::var("HOLON_PBT_FORCE_FAIL_AT_STEP") {
+        if n.parse::<u32>().ok() == Some(current_step + 1) {
+            panic!(
+                "HOLON_PBT_FORCE_FAIL_AT_STEP={n}: forced failure after step {} ({transition_name})",
+                current_step + 1
+            );
+        }
+    }
+
     Ok(true)
 }
 
@@ -292,8 +309,8 @@ struct StepOutcome {
 #[allow(clippy::too_many_arguments)]
 fn run_step_body_with_post_overlay(
     runtime: &tokio::runtime::Runtime,
-    sut: &mut E2ESut<Full>,
-    ref_state: &VariantRef<Full>,
+    sut: &mut E2ESut,
+    ref_state: &ReferenceState,
     driver: &mut dyn crate::UiDriver,
     transition_name: &str,
     action_banner: &str,
@@ -332,6 +349,7 @@ fn run_step_body_with_post_overlay(
                 }
                 driver.settle().await;
                 let expected_count = ref_state
+                    .domain
                     .block_state
                     .blocks
                     .values()
@@ -347,12 +365,14 @@ fn run_step_body_with_post_overlay(
                         rows.len()
                     );
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                sut.check_invariants_async(ref_state).await;
+                // No settle sleep: `wait_for_blocks_synced` above is the
+                // data barrier and every invariant body polls internally
+                // (retry_until_ok), so a fixed pause only added wall time.
+                sut.run_invariant_registry(ref_state).await;
                 Ok(StepOutcome { via_ui: true })
             } else {
                 sut.apply_transition_async(ref_state, transition).await;
-                sut.check_invariants_async(ref_state).await;
+                sut.run_invariant_registry(ref_state).await;
                 Ok(StepOutcome { via_ui: false })
             }
         })
@@ -414,46 +434,6 @@ fn format_action_banner(
     }
 }
 
-/// Run `check_invariants_async` and capture a `Post` screenshot with a
-/// pass/fail overlay. On panic, captures `Fail { assertion: <panic msg> }`
-/// then resumes the unwind so proptest still sees the failure.
-fn run_invariants_with_post_overlay(
-    runtime: &tokio::runtime::Runtime,
-    sut: &E2ESut<Full>,
-    ref_state: &VariantRef<Full>,
-    driver: &mut dyn crate::UiDriver,
-    transition_name: &str,
-    action_banner: &str,
-    highlight: Option<&str>,
-) {
-    use futures::FutureExt;
-    use std::panic::AssertUnwindSafe;
-
-    let result =
-        runtime.block_on(AssertUnwindSafe(sut.check_invariants_async(ref_state)).catch_unwind());
-
-    match result {
-        Ok(()) => {
-            driver.screenshot_overlay(
-                transition_name,
-                crate::Phase::Post,
-                highlight,
-                &crate::Overlay::pass(action_banner),
-            );
-        }
-        Err(payload) => {
-            let msg = panic_payload_message(&payload);
-            driver.screenshot_overlay(
-                transition_name,
-                crate::Phase::Post,
-                highlight,
-                &crate::Overlay::fail(action_banner, msg),
-            );
-            std::panic::resume_unwind(payload);
-        }
-    }
-}
-
 fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         return (*s).to_string();
@@ -470,8 +450,8 @@ fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 fn run_post_startup_driver_loop(
     runtime: &tokio::runtime::Runtime,
     runner: &mut TestRunner,
-    sut: &mut E2ESut<Full>,
-    ref_state: &mut VariantRef<Full>,
+    sut: &mut E2ESut,
+    ref_state: &mut ReferenceState,
     mut current_step: u32,
     mut actual_steps: u32,
     num_steps: u32,
@@ -496,7 +476,7 @@ fn run_post_startup_driver_loop(
 }
 
 /// Tear down the SUT on a non-async thread.
-fn teardown_sut(sut: E2ESut<Full>) {
+fn teardown_sut(sut: E2ESut) {
     std::thread::spawn(move || drop(sut))
         .join()
         .expect("PBT teardown thread panicked");
@@ -506,8 +486,8 @@ fn teardown_sut(sut: E2ESut<Full>) {
 
 /// Persistent state across pbt_setup/pbt_step/pbt_teardown calls.
 pub struct PbtPhaseState {
-    pub sut: E2ESut<Full>,
-    pub ref_state: VariantRef<Full>,
+    pub sut: E2ESut,
+    pub ref_state: ReferenceState,
     pub runner: TestRunner,
     pub num_steps: u32,
     pub current_step: u32,
@@ -555,7 +535,7 @@ async fn pbt_setup_with_runtime(
     num_steps: u32,
     runtime: Arc<tokio::runtime::Runtime>,
 ) -> anyhow::Result<String> {
-    let mut sut = E2ESut::<Full>::new(runtime)?;
+    let mut sut = E2ESut::new(runtime)?;
     let mut runner = create_runner()?;
     let mut ref_state = create_initial_ref_state(&mut runner)?;
 
@@ -574,14 +554,14 @@ async fn pbt_setup_with_runtime(
 
         let is_start_app = matches!(&transition, E2ETransition::StartApp(_));
 
-        ref_state = <VariantRef<Full> as ReferenceStateMachine>::apply(ref_state, &transition);
+        ref_state = <ReferenceMachine as ReferenceStateMachine>::apply(ref_state, &transition);
         sut.apply_transition_async(&ref_state, &transition).await;
 
         if is_start_app {
             start_app_done = true;
         }
 
-        sut.check_invariants_async(&ref_state).await;
+        sut.run_invariant_registry(&ref_state).await;
         actual_steps += 1;
         current_step += 1;
 
@@ -685,7 +665,7 @@ async fn pbt_step_inner(state: &mut PbtPhaseState) -> anyhow::Result<PbtStepResu
 
     // Always update reference model
     state.ref_state =
-        <VariantRef<Full> as ReferenceStateMachine>::apply(state.ref_state.clone(), &transition);
+        <ReferenceMachine as ReferenceStateMachine>::apply(state.ref_state.clone(), &transition);
 
     if ui_op.is_some() {
         state.current_step += 1;
@@ -705,7 +685,7 @@ async fn pbt_step_inner(state: &mut PbtPhaseState) -> anyhow::Result<PbtStepResu
             .sut
             .apply_transition_async(&state.ref_state, &transition)
             .await;
-        state.sut.check_invariants_async(&state.ref_state).await;
+        state.sut.run_invariant_registry(&state.ref_state).await;
         state.actual_steps += 1;
         state.current_step += 1;
 
@@ -730,6 +710,7 @@ pub async fn pbt_step_confirm() -> anyhow::Result<()> {
 
     let expected_count = state
         .ref_state
+        .domain
         .block_state
         .blocks
         .values()
@@ -749,9 +730,9 @@ pub async fn pbt_step_confirm() -> anyhow::Result<()> {
         );
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    state.sut.check_invariants_async(&state.ref_state).await;
+    // No settle sleep: `wait_for_blocks_synced` above is the data barrier and
+    // every invariant body polls internally (retry_until_ok).
+    state.sut.run_invariant_registry(&state.ref_state).await;
     state.actual_steps += 1;
 
     eprintln!("[pbt_step_confirm] Invariants passed ✓");
@@ -784,43 +765,6 @@ pub async fn pbt_teardown() -> anyhow::Result<String> {
     .expect("PBT teardown thread panicked");
 
     Ok(summary)
-}
-
-/// Run the full phased PBT cycle with an optional UiDriver.
-///
-/// This is the main entry point for headless (FFI-only) cross-frontend testing.
-/// When `execute_op` is None, UI operations fall back to direct FFI execution.
-pub async fn run_phased_pbt(
-    num_steps: u32,
-    execute_op: Option<
-        &dyn Fn(&PbtUiOperation) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + '_>>,
-    >,
-) -> anyhow::Result<String> {
-    let setup_summary = pbt_setup(num_steps).await?;
-    eprintln!("[run_phased_pbt] {setup_summary}");
-
-    loop {
-        let step_result = pbt_step().await?;
-        if step_result.done {
-            break;
-        }
-
-        if let Some(ui_op) = &step_result.ui_operation {
-            let handled = match execute_op {
-                Some(f) => f(ui_op).await,
-                None => false,
-            };
-
-            if !handled {
-                // FFI fallback: execute directly via the SUT's mutation driver
-                pbt_execute_operation(&ui_op.entity, &ui_op.op, &ui_op.params).await?;
-            }
-
-            pbt_step_confirm().await?;
-        }
-    }
-
-    pbt_teardown().await
 }
 
 /// Run the phased PBT with a `UiDriver` that attempts UI interactions.
@@ -866,27 +810,20 @@ pub async fn run_pbt_with_driver(
     pbt_teardown().await
 }
 
-/// Run the phased PBT synchronously with a `UiDriver`.
-///
-/// Same runtime-safe pattern as `run_phased_pbt_sync` but routes UI mutations
-/// through the driver before falling back to FFI.
-///
-/// If the driver is a `GeometryDriver` with screenshots enabled, a screenshot
-/// is captured after every step (with the interacted element highlighted for
-/// UI mutations).
-pub fn run_pbt_with_driver_sync(
-    num_steps: u32,
-    driver: &mut dyn crate::UiDriver,
-) -> anyhow::Result<String> {
-    run_pbt_with_driver_sync_callback(num_steps, driver, |_| None)
-}
-
-/// Like `run_pbt_with_driver_sync`, but calls `on_ready` after StartApp completes.
+/// Run the phased PBT synchronously with a `UiDriver`, calling `on_ready`
+/// after StartApp completes.
 ///
 /// The callback receives a `PbtReadyContext` with the BackendEngine, FrontendSession,
 /// ReactiveEngine, and runtime handle — everything needed to launch a frontend window
 /// sharing the PBT's state (same DB, same DI singletons).
+///
+/// `wiring` selects the SUT configuration: `Wiring::full()` for the
+/// Loro-enabled variant, `Wiring::sql_only()` for the no-Loro / Turso-only
+/// one (where editor content is persisted ONLY by the on-blur `set_field`).
+/// Each variant is its own test target so both run automatically — see
+/// `gpui_ui_pbt` / `gpui_ui_pbt_no_loro` and the TUI twins.
 pub fn run_pbt_with_driver_sync_callback(
+    wiring: holon_pbt_core::Wiring,
     num_steps: u32,
     driver: &mut dyn crate::UiDriver,
     on_ready: impl FnOnce(&PbtReadyContext) -> Option<PbtReadyResult>,
@@ -904,13 +841,45 @@ pub fn run_pbt_with_driver_sync_callback(
     }
     let _histogram_guard = PrintHistogramOnDrop;
 
+    // Capture-on-failure (ADR 0009 step 3 net-new #3): the phased GPUI loop has
+    // no `declare_pbt_slice!` wrapper, so it never wrote the JSON capture a
+    // headless lattice bisection replays. Arm the same thread-local capture the
+    // slice wrapper uses and write it on a panicking unwind, so a UI-observed
+    // failure becomes a `tests/.captures/<name>.captured.json` the fast headless
+    // bisector can localize. Name overridable via `HOLON_PBT_CAPTURE_NAME`
+    // (default `gpui_ui_pbt`).
+    let capture_name =
+        std::env::var("HOLON_PBT_CAPTURE_NAME").unwrap_or_else(|_| "gpui_ui_pbt".to_string());
+    crate::pbt::slice::reset_capture("gpui");
+    struct CaptureOnPanic(String);
+    impl Drop for CaptureOnPanic {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                crate::pbt::slice::write_captured_fixture(&self.0);
+            }
+        }
+    }
+    let _capture_guard = CaptureOnPanic(capture_name);
+
     crate::debug_pause::install_panic_pause_hook();
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
 
+    // This is the REAL-editor harness — a GPUI/TUI `UserDriver` drives a live
+    // `InputState`, not the headless `HeadlessEditorMirror`. Mark it so the
+    // atomic-editor transitions accept SqlOnly runs and the reference commits
+    // editor content on blur, mirroring prod's `on_blur` → `set_field`
+    // (see `ReferenceState::real_editor_enabled`). SAFETY: set before any
+    // transition is generated; the env is process-global and a real-editor
+    // PBT binary runs a single mode per process.
+    unsafe { std::env::set_var("PBT_REAL_EDITOR", "1") };
+
+    crate::pbt::slice::record_capture_wiring(&wiring);
+    eprintln!("[pbt_wiring] {wiring:?}");
+
     let mut runner = create_runner()?;
-    let ref_state = create_initial_ref_state(&mut runner)?;
-    let mut sut = E2ESut::<Full>::new(runtime.clone())?;
+    let ref_state = super::fresh_reference_state(wiring);
+    let mut sut = E2ESut::new(runtime.clone())?;
 
     let (mut ref_state, current_step, mut actual_steps) = run_pre_startup_loop(
         &runtime,
@@ -960,9 +929,8 @@ pub fn run_pbt_with_driver_sync_callback(
         },
     };
     sut.driver = Some(user_driver);
-    sut.frontend_engine = frontend_engine;
-    sut.frontend_geometry = frontend_geometry;
-    sut.frontend_visual_state = frontend_visual_state;
+    sut.render
+        .install_frontend(frontend_engine, frontend_geometry, frontend_visual_state);
 
     eprintln!(
         "[run_pbt_with_driver_sync_callback] setup complete: {actual_steps} pre-startup steps"
@@ -993,9 +961,14 @@ pub fn run_pbt_with_driver_sync_callback(
 /// fires immediately after the StartApp transition is applied (when the
 /// `ReactiveEngine` exists), so the caller can launch a window and inject a
 /// real driver (e.g. `GpuiUserDriver`) — exactly as the random GPUI PBT does.
+/// The reference `wiring` must match what the sequence was generated under,
+/// or wiring-gated invariants mis-fire. Captures record their wiring in
+/// `Fixture.environment.wiring` — replayers pass that through here.
 pub fn replay_fixture_with_driver_sync_callback(
+    wiring: holon_pbt_core::Wiring,
     steps: Vec<crate::pbt::fixtures::FixtureStep>,
     on_ready: impl FnOnce(&PbtReadyContext) -> Option<PbtReadyResult>,
+    seen_counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
 ) -> anyhow::Result<String> {
     struct PrintHistogramOnDrop;
     impl Drop for PrintHistogramOnDrop {
@@ -1007,9 +980,8 @@ pub fn replay_fixture_with_driver_sync_callback(
     crate::debug_pause::install_panic_pause_hook();
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
-    let mut runner = create_runner()?;
-    let ref_state = create_initial_ref_state(&mut runner)?;
-    let sut = E2ESut::<Full>::new(runtime.clone())?;
+    let ref_state = super::fresh_reference_state(wiring);
+    let sut = E2ESut::new(runtime.clone())?;
 
     let total = steps.len();
     let runtime_for_hook = runtime.clone();
@@ -1020,7 +992,7 @@ pub fn replay_fixture_with_driver_sync_callback(
     // StartApp it assembles the launch context, lets the caller open a window
     // and return a real `GpuiUserDriver`, and installs it into the SUT. Every
     // post-StartApp transition then dispatches through that driver.
-    let sut = crate::pbt::fixtures::replay_steps::<VariantRef<Full>, E2ESut<Full>, Full>(
+    let sut = crate::pbt::fixtures::replay_steps::<ReferenceMachine, E2ESut>(
         "gpui-replay",
         &steps,
         ref_state,
@@ -1048,11 +1020,14 @@ pub fn replay_fixture_with_driver_sync_callback(
                 if let Some(driver) = result.driver {
                     sut.driver = Some(driver);
                 }
-                sut.frontend_engine = result.frontend_engine;
-                sut.frontend_geometry = result.frontend_geometry;
-                sut.frontend_visual_state = result.frontend_visual_state;
+                sut.render.install_frontend(
+                    result.frontend_engine,
+                    result.frontend_geometry,
+                    result.frontend_visual_state,
+                );
             }
         },
+        seen_counter,
     );
 
     let summary = format!("replayed {total} fixture steps");
@@ -1071,7 +1046,7 @@ pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
 
     let mut runner = create_runner()?;
     let ref_state = create_initial_ref_state(&mut runner)?;
-    let mut sut = E2ESut::<Full>::new(runtime.clone())?;
+    let mut sut = E2ESut::new(runtime.clone())?;
 
     let (mut ref_state, mut current_step, mut actual_steps) = run_pre_startup_loop(
         &runtime,
@@ -1103,13 +1078,13 @@ pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
         };
 
         ref_state =
-            <VariantRef<Full> as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
+            <ReferenceMachine as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
 
         let transition_label = transition.variant_name().to_string();
         crate::debug_pause::pause_before_step(current_step + 1, &transition_label);
 
         runtime.block_on(sut.apply_transition_async(&ref_state, &transition));
-        runtime.block_on(sut.check_invariants_async(&ref_state));
+        runtime.block_on(sut.run_invariant_registry(&ref_state));
         actual_steps += 1;
         current_step += 1;
         eprintln!(

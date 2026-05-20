@@ -1,1 +1,0 @@
-UPDATE events SET speculative_id = ? WHERE id = ?

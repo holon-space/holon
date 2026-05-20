@@ -9,8 +9,10 @@ use gpui_component::input::{
 };
 use gpui_component::menu::PopupMenuItem;
 use holon_api::widget_spec::DataRow;
-use holon_frontend::cell::{CursorBias, DeltaOp, TextDelta, TextOp};
-use holon_frontend::editor_view_model::{EditorAction, EditorKey, EditorViewModel};
+use holon_frontend::cell::{compute_text_delta, CursorBias, DeltaOp, TextDelta};
+use holon_frontend::editor_view_model::{
+    structural_block_action, EditorAction, EditorKey, EditorViewModel,
+};
 use holon_frontend::input::{InputAction, WidgetInput};
 use holon_frontend::navigation::{Boundary, CursorHint, NavDirection};
 use holon_frontend::popup_menu::PopupState;
@@ -39,11 +41,10 @@ pub struct EditorView {
     /// truncations) without polling on every render. The render path no
     /// longer touches `set_value`.
     _data_subscription: Option<Task<()>>,
-    /// Cancelled on drop. Subscribes to the engine-shared
-    /// `watch_editor_cursor` signal and applies focus + cursor offset
-    /// when its `block_id` matches `self.row_id`. Replaces the central
-    /// cursor-signal handler that used to live in `lib.rs`.
-    _cursor_subscription: Option<Task<()>>,
+    /// Cancelled on drop. Subscribes to the in-memory `focused_block` signal
+    /// and grabs window focus when focus becomes this editor's `row_id`
+    /// (ADR 0010: window focus follows the signal, never a Turso matview).
+    _focus_subscription: Option<Task<()>>,
     /// Snapshot of the text after the last local or remote change.
     /// Used to compute the delta on `InputEvent::Change`. The
     /// `MutableText` itself lives on the `EditorViewModel`.
@@ -56,6 +57,13 @@ pub struct EditorView {
     /// driver observe the popup state via `wait_for_widget_kind` instead
     /// of poking the EditorViewModel directly.
     bounds_registry: BoundsRegistry,
+    /// Last window-focus state observed by the render-path reconcile gate
+    /// (`focus_arrived`). Used to detect the frame where focus first arrives
+    /// (false→true) so the builder can re-sync a stale `InputState` from the
+    /// live backend content *once*, before the user has typed — the backstop
+    /// for the editor's data-sync subscription being orphaned by a row-set
+    /// rebuild (split/join/navigation replaces the per-row `Mutable` cell).
+    prev_focused: std::cell::Cell<bool>,
 }
 
 impl EditorView {
@@ -104,7 +112,9 @@ impl EditorView {
         // Attach a `Cell<String>` if the cell registry can resolve one.
         // Headless / stub / test paths leave it unattached and the VM's
         // pass-through CRDT methods become no-ops.
-        if let Ok(cell) = services.editable_text(&row_id, &field_for_subscription) {
+        // ALLOW(entity_uri_from_raw): boundary — `row_id` is the render-spec row id (a `String`); parse once here before handing a typed URI to the cell registry.
+        let row_uri = holon_api::EntityUri::from_raw(&row_id);
+        if let Ok(cell) = services.editable_text(&row_uri, &field_for_subscription) {
             controller.attach_cell(cell);
         }
         let controller = Arc::new(Mutex::new(controller));
@@ -130,8 +140,16 @@ impl EditorView {
                         // GeometryDriver read the focus from the engine's
                         // `focused_block_mutable()` Mutable, so this single write
                         // is the only update needed.
+                        // ALLOW(entity_uri_from_raw): EditorView.row_id from render-spec node.row_id() (parsed on Focus/Blur)
                         let my_uri = holon_api::EntityUri::from_raw(&row_id_for_blur);
                         if services_clone.focused_block().as_ref() != Some(&my_uri) {
+                            if caret_probe() {
+                                eprintln!(
+                                    "[focus-promote] gpui Focus event on row={my_uri} STEALS \
+                                     focused_block from {:?}",
+                                    services_clone.focused_block()
+                                );
+                            }
                             services_clone.set_focus(Some(my_uri));
                         }
                         let _ = (this, entity, cx);
@@ -143,45 +161,33 @@ impl EditorView {
                         let value = entity.read(cx).value().to_string();
                         let action = ctrl.lock().unwrap().on_blur(&value);
                         execute_action(action, &services_clone, this.input.entity_id(), cx);
-
-                        // Persist cursor position on blur — but only if focus
-                        // is still on this block. During cross-block arrow-key
-                        // navigation, set_focus() already moved to the new
-                        // block before on_blur fires. Persisting the OLD
-                        // block's cursor would trigger watch_editor_cursor →
-                        // window.focus(old) → stealing focus back.
-                        let my_uri = holon_api::EntityUri::from_raw(&row_id_for_blur);
-                        let still_mine = services_clone.focused_block().as_ref() == Some(&my_uri);
-                        if still_mine {
-                            let cursor_byte = entity.read(cx).cursor();
-                            let mut params = std::collections::HashMap::new();
-                            params.insert("region".into(), holon_api::Value::String("main".into()));
-                            params.insert(
-                                "block_id".into(),
-                                holon_api::Value::String(row_id_for_blur.clone()),
-                            );
-                            params.insert(
-                                "cursor_offset".into(),
-                                holon_api::Value::Integer(cursor_byte as i64),
-                            );
-                            services_clone.dispatch_intent(holon_frontend::OperationIntent::new(
-                                "navigation".into(),
-                                "editor_focus".into(),
-                                params,
-                            ));
-                        }
+                        // Cursor position is no longer persisted on blur: editor
+                        // focus + caret are pure in-memory UI state (ADR 0010),
+                        // not round-tripped through the Turso `editor_cursor`
+                        // matview. The old persist-on-blur existed only to feed
+                        // that matview's CDC back into window focus, which is
+                        // exactly the steal-back path this removes.
                     }
                     InputEvent::Change => {
                         let text = entity.read(cx).value().to_string();
                         let cursor_pos = entity.read(cx).cursor_position();
                         let cursor_line = cursor_pos.line as usize;
                         let current_line = text.lines().nth(cursor_line).unwrap_or("");
+                        // `cursor_position().character` is a CHARACTER column;
+                        // `on_text_changed` (→ `check_triggers`) slices the
+                        // line by BYTE offset — convert here or multibyte
+                        // content panics on a non-char-boundary slice.
                         let cursor_column = cursor_pos.character as usize;
+                        let cursor_byte = current_line
+                            .char_indices()
+                            .nth(cursor_column)
+                            .map(|(b, _)| b)
+                            .unwrap_or(current_line.len());
 
                         let action = ctrl
                             .lock()
                             .unwrap()
-                            .on_text_changed(current_line, cursor_column);
+                            .on_text_changed(current_line, cursor_byte);
                         execute_action(action, &services_clone, this.input.entity_id(), cx);
 
                         // CRDT: compute local delta and apply through the
@@ -191,9 +197,26 @@ impl EditorView {
                         if vm.has_cell() {
                             let prev = this.previous_text.clone();
                             if text != prev {
-                                let op = compute_text_delta(&prev, &text);
-                                if let Err(e) = vm.apply_local(op) {
-                                    tracing::error!("apply_local failed: {}", e);
+                                // Only write to the cell when it is actually
+                                // behind `text`. A genuine keystroke leaves the
+                                // cell lagging `InputState` (the cell is written
+                                // only here), so the delta lands. But a
+                                // backend-originated change — e.g. a split
+                                // truncation projected back through the data
+                                // subscription's `set_value` — already wrote the
+                                // new content to the cell; re-deriving
+                                // `compute_text_delta(prev, text)` against the
+                                // stale `prev` and applying it would double-apply
+                                // (for a truncation, delete past the new end,
+                                // which Loro rejects out-of-bounds). Re-baseline
+                                // `previous_text` either way so the next genuine
+                                // keystroke diffs from the correct anchor.
+                                if vm.current_text().as_deref() != Some(text.as_str()) {
+                                    for op in compute_text_delta(&prev, &text) {
+                                        if let Err(e) = vm.apply_local(op) {
+                                            tracing::error!("apply_local failed: {}", e);
+                                        }
+                                    }
                                 }
                                 this.previous_text = text;
                             }
@@ -307,7 +330,20 @@ impl EditorView {
                                         // not advanced; we'll catch up on
                                         // the next emission once the user
                                         // commits or the values reconverge.
+                                        if caret_probe() {
+                                            eprintln!(
+                                                "[data-sync] SKIP (focused, not idle) \
+                                                 current={current:?} new={new_value:?} \
+                                                 prev_synced={prev_synced:?}"
+                                            );
+                                        }
                                         return;
+                                    }
+                                    if caret_probe() {
+                                        eprintln!(
+                                            "[data-sync] apply current={current:?} \
+                                             new={new_value:?}"
+                                        );
                                     }
                                     state.set_value(&new_value, window, cx);
                                     applied = true;
@@ -322,50 +358,15 @@ impl EditorView {
             })
         });
 
-        // Editor cursor signal — fires whenever `current_editor_focus`
-        // changes (after blur, split_block, cross-block-nav, etc.). Each
-        // editor filters on its own `row_id` so only the targeted block
-        // grabs focus.
-        let _cursor_subscription: Option<Task<()>> = services.watch_editor_cursor().map(|signal| {
-            let row_id_for_cursor = row_id.clone();
-            cx.spawn(async move |this, cx| {
-                use futures::StreamExt;
-                let mut stream = signal.to_stream();
-                while let Some(event) = stream.next().await {
-                    let Some((block_id, cursor_offset)) = event else {
-                        continue;
-                    };
-                    if block_id != row_id_for_cursor {
-                        continue;
-                    }
-                    if this.upgrade().is_none() {
-                        break;
-                    }
-                    cx.update(|cx| {
-                        let Some(view) = this.upgrade() else {
-                            return;
-                        };
-                        let input = view.read(cx).input.clone();
-                        for window_handle in cx.windows() {
-                            let _ = window_handle.update(cx, |_, window, cx| {
-                                let already_focused =
-                                    input.read(cx).focus_handle(cx).is_focused(window);
-                                let pos = input
-                                    .read(cx)
-                                    .text()
-                                    .offset_to_position(cursor_offset as usize);
-                                input.update(cx, |state, cx| {
-                                    state.set_cursor_position(pos, window, cx);
-                                });
-                                if !already_focused {
-                                    window.focus(&input.read(cx).focus_handle(cx), cx);
-                                }
-                            });
-                        }
-                    });
-                }
-            })
-        });
+        // Window focus follows the in-memory `focused_block` authority
+        // (ADR 0010): grab window focus whenever focus becomes this row.
+        // Editor focus is never read back from Turso, so a late SQL
+        // re-emission can't steal focus. Handles focus arriving at an
+        // already-mounted (cache-reused) editor; the synchronous first-mount
+        // grab below covers the fast path. RAII-scoped to this EditorView.
+        // ALLOW(entity_uri_from_raw): render-spec row_id parsed once to match the focus signal
+        let row_uri_for_focus = holon_api::EntityUri::from_raw(&row_id);
+        let _focus_subscription = spawn_focus_binding(cx, services.clone(), row_uri_for_focus);
 
         // ── CRDT-backed remote delta subscription ──────
         //
@@ -433,45 +434,23 @@ impl EditorView {
         // First-mount focus grab. The block_profile.yaml variant switch
         // ("editing" vs "default") mounts this editor only when
         // `is_focused == true`, so by the time we're constructed the
-        // intended-focused block is already this one. Wait for the cursor
-        // signal's CDC echo is too slow for the PBT click-then-keystroke
-        // pipeline (`SplitBlock` sends `home` immediately after
-        // `wait_for_focus_to_match`, which only polls the matview, not
-        // window focus). Check `UiState.focused_block` synchronously and
-        // grab `window.focus(focus_handle)` if it matches — no CDC
-        // dependency for the variant-switch case.
-        let focused_block_now = services.focused_block();
+        // intended-focused block is already this one. The async focus
+        // subscription is too slow for the PBT click-then-keystroke pipeline
+        // (`SplitBlock` sends `home` immediately after focus matches), so
+        // grab synchronously here when `focused_block` already matches. The
+        // caret seed (split → 0, join → boundary, nav → placement) is applied
+        // by the shared helper; with no armed seed, a genuinely fresh editor
+        // has no meaningful caret and defaults to end-of-text. Keystrokes the
+        // driver/user pressed before this mount cannot have landed in this
+        // editor: blur-on-focus-leave releases the stale editor's window
+        // focus, so pre-mount keys are dropped (and retried by the driver),
+        // never consumed at the wrong caret — the end default cannot yank a
+        // caret the user already placed, because no user interaction can have
+        // reached a not-yet-mounted InputState.
+        // ALLOW(entity_uri_from_raw): render-spec row_id parsed vs focused_block() on mount
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
-        if focused_block_now.as_ref() == Some(&row_uri) {
-            window.focus(&input.read(cx).focus_handle(cx), cx);
-            // Place the cursor at end-of-text on first mount and force
-            // the blink cursor visible in one go.
-            //
-            // Two problems being solved here:
-            //   1. Initial offset: the click handler in
-            //      `rendered_text` dispatches `editor_focus` with
-            //      `cursor_offset = content.len()`, but the SQL write
-            //      → CDC echo only reaches the
-            //      `watch_editor_cursor` subscription a frame or two
-            //      after the editor mounts. The editor's first paint
-            //      would otherwise show the cursor at `InputState`'s
-            //      default offset 0 (before the first character) and
-            //      jump to the end once the CDC echo lands.
-            //   2. Blink visibility: `BlinkCursor::new` starts with
-            //      `visible: false`; the `on_focus` observer toggles
-            //      to true but only on the next frame, so the first
-            //      paint renders an invisible cursor that pops in
-            //      after 500 ms.
-            //
-            // `set_cursor_position` → `move_to` calls
-            // `pause_blink_cursor` (sets `visible = true; paused = true`
-            // synchronously) AND moves the cursor — both in one call.
-            // If the eventual CDC echo carries a different offset, the
-            // `_cursor_subscription` handler corrects it.
-            input.update(cx, |state, cx| {
-                let end = state.text().offset_to_position(state.text().len());
-                state.set_cursor_position(end, window, cx);
-            });
+        if services.focused_block().as_ref() == Some(&row_uri) {
+            grab_focus_and_seed_caret(&input, window, cx, services.as_ref(), &row_uri, true);
         }
 
         Self {
@@ -482,11 +461,206 @@ impl EditorView {
             nav,
             bounds_registry,
             _data_subscription,
-            _cursor_subscription,
+            _focus_subscription,
             previous_text,
             _remote_delta_subscription,
+            prev_focused: std::cell::Cell::new(false),
         }
     }
+
+    /// Update the render-path focus-transition tracker and report whether
+    /// window focus *just arrived* this frame (false→true). The builder uses
+    /// this to allow a one-time external-content reconcile into a
+    /// freshly-focused editor (e.g. click-to-edit) before any keystroke,
+    /// without clobbering text a continuously-focused user is mid-typing.
+    pub fn focus_arrived(&self, is_focused: bool) -> bool {
+        let just = is_focused && !self.prev_focused.get();
+        self.prev_focused.set(is_focused);
+        just
+    }
+}
+
+/// Bind this editor's window focus to the in-memory `focused_block` signal:
+/// whenever focus becomes `row`, grab window focus and seed the caret. This is
+/// the single place the signal→`window.focus` bridge lives — gpui has no
+/// declarative focus binding, so the spawn is irreducible, but it is contained
+/// here. Returns `None` when there is no focus authority (headless/stub
+/// services). The returned `Task` is RAII-scoped to the storing `EditorView`
+/// and cancels on drop, so there is no manual unsubscribe.
+fn spawn_focus_binding(
+    cx: &mut Context<EditorView>,
+    services: Arc<dyn BuilderServices>,
+    row: holon_api::EntityUri,
+) -> Option<Task<()>> {
+    use futures_signals::signal::SignalExt;
+    let focus_mutable = services.focused_block_mutable()?;
+    // Reduce the focus signal to a deduped "am I focused?" boolean so the
+    // effect only fires when focus actually arrives at (or leaves) this row —
+    // never on unrelated focus churn, and never mid-typing.
+    let row_for_signal = row.clone();
+    let is_focused = focus_mutable
+        .signal_cloned()
+        .map(move |f| f.as_ref() == Some(&row_for_signal))
+        .dedupe();
+    Some(cx.spawn(async move |this, cx| {
+        use futures::StreamExt;
+        let mut stream = is_focused.to_stream();
+        while let Some(focused) = stream.next().await {
+            if this.upgrade().is_none() {
+                break;
+            }
+            let _ = cx.update(|cx| {
+                let Some(view) = this.upgrade() else {
+                    return;
+                };
+                let input = view.read(cx).input.clone();
+                if !focused {
+                    // The focus authority left this editor: commit its
+                    // user-authored pending text NOW. gpui's on_blur event
+                    // only fires reliably when the window is key/active — in
+                    // a non-key window pending SqlOnly text otherwise stays
+                    // uncommitted indefinitely (activation-dependent data
+                    // loss, 2026-06-11). The authority move is the
+                    // deterministic commit boundary; the gpui blur event is
+                    // just a hint (docs/Architecture/UI.md). Idempotent with
+                    // the on_blur path: whichever runs first re-baselines,
+                    // the second sees no pending change.
+                    let live_text = input.read(cx).value().to_string();
+                    let ctrl = view.read(cx).controller.clone();
+                    let commit = ctrl.lock().unwrap().pending_commit_intent(&live_text);
+                    if let Some(commit) = commit {
+                        services.dispatch_intent(commit);
+                    }
+                }
+                for window_handle in cx.windows() {
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        if focused {
+                            // Fires on every focus arrival, including after the
+                            // user/driver already positioned the caret — applies
+                            // only an armed seed, never resets an unseeded caret.
+                            grab_focus_and_seed_caret(
+                                &input,
+                                window,
+                                cx,
+                                services.as_ref(),
+                                &row,
+                                false,
+                            );
+                        } else if blur_on_focus_leave()
+                            && input.read(cx).focus_handle(cx).is_focused(window)
+                        {
+                            // The authority moved away (split/join op response,
+                            // navigation) but this editor still holds WINDOW
+                            // focus — the new block's editor may not have
+                            // mounted yet, so its grab can't have happened. A
+                            // keystroke landing in this gap would be consumed
+                            // by the stale editor and mutate the WRONG block
+                            // (the zombie-editor race). Releasing focus now
+                            // means such a keystroke is dropped, not
+                            // misdelivered; the new editor's first-mount grab /
+                            // focus binding picks focus up.
+                            //
+                            window.blur();
+                        }
+                    });
+                }
+            });
+        }
+    }))
+}
+
+/// Blur the window when the focus authority leaves a still-window-focused
+/// editor (the zombie-editor fix; see the call site in
+/// [`spawn_focus_binding`]). Default ON; `HOLON_GPUI_BLUR_ON_FOCUS_LEAVE=0`
+/// is the kill-switch (used to A/B the behavior under PBT — the 2026-06-10
+/// causality test showed the PBT gate failures occur identically with it
+/// off, exonerating this fix).
+fn blur_on_focus_leave() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("HOLON_GPUI_BLUR_ON_FOCUS_LEAVE").as_deref() != Ok("0"))
+}
+
+/// `HOLON_GPUI_CARET_PROBE=1` logs every caret-seed decision (armed seed vs
+/// end-default vs leave-alone) with the editor text and window activation
+/// state — the discriminator for split-at-wrong-position divergences.
+fn caret_probe() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("HOLON_GPUI_CARET_PROBE").as_deref() == Ok("1"))
+}
+
+/// "Structural ops are commit points" (docs/Architecture/UI.md): flush any
+/// pending editor text, then run the structural op, as ONE ordered dispatch
+/// chain. The op must compute against the authority's current content — a
+/// split against backend content with the editor's cursor byte fails on (or
+/// silently mis-splits) text that is still pending in the editor ("Split
+/// position 8 exceeds content length 3", 2026-06-11). When Loro's
+/// per-keystroke writer is active or the text is unchanged the commit is
+/// `None` and this degenerates to a plain dispatch.
+fn dispatch_structural_as_commit_point(
+    ctrl: &Arc<Mutex<EditorViewModel>>,
+    services: &Arc<dyn BuilderServices>,
+    live_text: &str,
+    structural: holon_frontend::operations::OperationIntent,
+) {
+    let commit = ctrl.lock().unwrap().pending_commit_intent(live_text);
+    let intents: Vec<_> = commit
+        .into_iter()
+        .chain(std::iter::once(structural))
+        .collect();
+    holon_frontend::reactive::dispatch_intent_chain(services, intents);
+}
+
+/// Grab window keyboard focus for `input` (if it doesn't already own it) and
+/// place the caret at the pending seed offset armed for `row`.
+///
+/// An explicitly armed seed (split → 0, join → boundary, nav → placement)
+/// always wins. With no seed, the caret's owner depends on the caller:
+///
+/// - `default_caret_to_end = true` — the synchronous first-mount grab. A
+///   genuinely fresh editor has no meaningful caret, so default end-of-text
+///   (matches the PBT ref's `model_chord_click_focus` and the headless
+///   mirror's `seed_for_click`). Pre-mount keystrokes can't have placed a
+///   caret here: blur-on-focus-leave drops them and the driver retries, so
+///   nothing user-placed exists to be yanked.
+/// - `default_caret_to_end = false` — the async focus subscription, which
+///   re-fires on every focus arrival, *after* `home`+arrow keys may already
+///   have moved the caret. An end-default there yanked the caret back to
+///   the end, so `Enter` split at the end (source kept its full content,
+///   new block empty — the SplitBlock-at-wrong-position bug). Leave an
+///   unseeded caret alone.
+///
+/// `peek_caret_seed` is non-destructive, so applying an armed seed from
+/// both callers is idempotent.
+fn grab_focus_and_seed_caret(
+    input: &Entity<InputState>,
+    window: &mut Window,
+    cx: &mut App,
+    services: &dyn BuilderServices,
+    row: &holon_api::EntityUri,
+    default_caret_to_end: bool,
+) {
+    if !input.read(cx).focus_handle(cx).is_focused(window) {
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+    }
+    let seed = services.peek_caret_seed(row);
+    input.update(cx, |state, cx| {
+        if caret_probe() {
+            eprintln!(
+                "[caret-seed] row={row} seed={seed:?} default_end={default_caret_to_end} \
+                 text={:?} window_active={}",
+                state.text().to_string(),
+                window.is_window_active(),
+            );
+        }
+        if let Some(offset) = seed {
+            let pos = state.text().offset_to_position(offset);
+            state.set_cursor_position(pos, window, cx);
+        } else if default_caret_to_end {
+            let end = state.text().len();
+            let pos = state.text().offset_to_position(end);
+            state.set_cursor_position(pos, window, cx);
+        }
+    });
 }
 
 impl EditorView {
@@ -614,6 +788,49 @@ impl Render for EditorView {
                             cx.stop_propagation();
                             cx.notify(editor_entity_id);
                         }
+                        EditorAction::ExecuteAndStripCommand {
+                            intent,
+                            strip_prefix_start,
+                        } => {
+                            // Remove the typed slash-command text ("/delete")
+                            // before dispatching — same span arithmetic as the
+                            // InsertText arm, with an empty replacement.
+                            // Without this the command text stays in the
+                            // editor and is committed to the block at the
+                            // next commit point (Loro-twin PBT face,
+                            // 2026-06-11: ref "😀" vs SUT "😀/delete").
+                            let text = input.read(cx).value().to_string();
+                            let cursor = input.read(cx).cursor();
+                            // BYTE offset of line start (cursor_position().
+                            // character is a CHAR column — subtracting it from
+                            // the byte cursor breaks on multibyte content).
+                            let line_start = text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                            let abs_start = line_start + strip_prefix_start;
+                            if caret_probe() {
+                                eprintln!(
+                                    "[slash-strip] windowed arm: text={text:?} cursor={cursor} \
+                                     abs_start={abs_start}"
+                                );
+                            }
+                            let mut new_text = String::with_capacity(text.len());
+                            new_text.push_str(&text[..abs_start]);
+                            new_text.push_str(&text[cursor..]);
+
+                            let input = input.clone();
+                            cx.spawn(async move |cx| {
+                                let _ = cx.update_window(window_handle, |_, window, cx| {
+                                    input.update(cx, |state, cx| {
+                                        state.set_value(&new_text, window, cx);
+                                        let pos = state.text().offset_to_position(abs_start);
+                                        state.set_cursor_position(pos, window, cx);
+                                    });
+                                });
+                            })
+                            .detach();
+                            services.dispatch_intent(intent);
+                            cx.stop_propagation();
+                            cx.notify(editor_entity_id);
+                        }
                         EditorAction::PopupDismissed | EditorAction::UpdatePopup => {
                             cx.stop_propagation();
                             cx.notify(editor_entity_id);
@@ -624,23 +841,25 @@ impl Render for EditorView {
                             // resolver: gpui-component's InputState consumes
                             // Enter for multi-line newline insertion (auto_grow
                             // sets max_rows > 1, making is_multi_line() true),
-                            // so the bubble-phase on_action never fires.
-                            // Dispatch split_block directly, matching the
-                            // Tab → indent / Shift+Tab → outdent pattern below.
+                            // so the bubble-phase on_action never fires. The
+                            // Enter→split decision is shared with the headless
+                            // test mirror via `structural_block_action`.
                             let cursor_byte = input.read(cx).cursor();
-                            let mut params = std::collections::HashMap::new();
-                            params.insert("id".into(), holon_api::Value::String(target_id.clone()));
-                            params.insert(
-                                "position".into(),
-                                holon_api::Value::Integer(cursor_byte as i64),
-                            );
-                            services.dispatch_intent(
-                                holon_frontend::operations::OperationIntent::new(
-                                    "block".into(),
-                                    "split_block".into(),
-                                    params,
-                                ),
-                            );
+                            if caret_probe() {
+                                eprintln!(
+                                    "[split-dispatch] target={target_id} cursor={cursor_byte} \
+                                     editor_text={:?}",
+                                    input.read(cx).value().to_string()
+                                );
+                            }
+                            if let Some(intent) =
+                                structural_block_action(EditorKey::Enter, &target_id, cursor_byte)
+                            {
+                                let live_text = input.read(cx).value().to_string();
+                                dispatch_structural_as_commit_point(
+                                    &ctrl, &services, &live_text, intent,
+                                );
+                            }
                             cx.stop_propagation();
                         }
                         EditorAction::Propagate => {
@@ -674,20 +893,20 @@ impl Render for EditorView {
                 let services = self.services.clone();
                 let row_id = self.row_id.clone();
                 let input = self.input.clone();
+                let ctrl = self.controller.clone();
                 move |_: &Backspace, _window, cx: &mut App| {
                     let cursor_byte = input.read(cx).cursor();
                     if cursor_byte != 0 {
                         // Not at start — let InputState handle char delete.
                         return;
                     }
-                    let mut params = std::collections::HashMap::new();
-                    params.insert("id".into(), holon_api::Value::String(row_id.clone()));
-                    params.insert("position".into(), holon_api::Value::Integer(0));
-                    services.dispatch_intent(holon_frontend::operations::OperationIntent::new(
-                        "block".into(),
-                        "join_block".into(),
-                        params,
-                    ));
+                    // Backspace-at-0 → join. Decision shared with the headless
+                    // mirror via `structural_block_action`.
+                    if let Some(intent) = structural_block_action(EditorKey::Backspace, &row_id, 0)
+                    {
+                        let live_text = input.read(cx).value().to_string();
+                        dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                    }
                     cx.stop_propagation();
                 }
             })
@@ -697,28 +916,26 @@ impl Render for EditorView {
             .capture_action({
                 let services = self.services.clone();
                 let row_id = self.row_id.clone();
+                let input = self.input.clone();
+                let ctrl = self.controller.clone();
                 move |_: &IndentInline, _window, cx: &mut App| {
-                    let mut params = std::collections::HashMap::new();
-                    params.insert("id".into(), holon_api::Value::String(row_id.clone()));
-                    services.dispatch_intent(holon_frontend::operations::OperationIntent::new(
-                        "block".into(),
-                        "indent".into(),
-                        params,
-                    ));
+                    if let Some(intent) = structural_block_action(EditorKey::Tab, &row_id, 0) {
+                        let live_text = input.read(cx).value().to_string();
+                        dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                    }
                     cx.stop_propagation();
                 }
             })
             .capture_action({
                 let services = self.services.clone();
                 let row_id = self.row_id.clone();
+                let input = self.input.clone();
+                let ctrl = self.controller.clone();
                 move |_: &OutdentInline, _window, cx: &mut App| {
-                    let mut params = std::collections::HashMap::new();
-                    params.insert("id".into(), holon_api::Value::String(row_id.clone()));
-                    services.dispatch_intent(holon_frontend::operations::OperationIntent::new(
-                        "block".into(),
-                        "outdent".into(),
-                        params,
-                    ));
+                    if let Some(intent) = structural_block_action(EditorKey::BackTab, &row_id, 0) {
+                        let live_text = input.read(cx).value().to_string();
+                        dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                    }
                     cx.stop_propagation();
                 }
             })
@@ -843,7 +1060,11 @@ fn handle_cross_block_nav(
     let hint = CursorHint { column, boundary };
     let widget_input = WidgetInput::Navigate { direction, hint };
 
-    match nav.bubble_input(row_id, &widget_input) {
+    // Editor row ids are schemed (set from the rendered row's `id`) — a
+    // non-URI here is a programming error, fail loud.
+    let row_uri =
+        holon_api::EntityUri::parse(row_id).expect("editor row_id must be a schemed EntityUri");
+    match nav.bubble_input(&row_uri, &widget_input) {
         Some(InputAction::Focus {
             block_id,
             placement,
@@ -853,7 +1074,7 @@ fn handle_cross_block_nav(
             // target's `InputState`. Content in the matview is the same
             // text the target editor renders (it propagates via the
             // per-editor data subscription on every `Change`).
-            let target_uri = holon_api::EntityUri::from_raw(&block_id);
+            let target_uri = block_id;
             let (_render, rows) = services.get_block_data(&target_uri);
             let target_text = rows
                 .first()
@@ -863,24 +1084,12 @@ fn handle_cross_block_nav(
                 .to_string();
             let offset = holon_frontend::navigation::placement_to_offset(&target_text, placement);
 
-            let mut params = std::collections::HashMap::new();
-            params.insert("region".into(), holon_api::Value::String("main".into()));
-            params.insert(
-                "block_id".into(),
-                holon_api::Value::String(block_id.clone()),
-            );
-            params.insert(
-                "cursor_offset".into(),
-                holon_api::Value::Integer(offset as i64),
-            );
-            services.dispatch_intent(holon_frontend::OperationIntent::new(
-                "navigation".into(),
-                "editor_focus".into(),
-                params,
-            ));
-            // Mirror UiState.focused_block synchronously so chord routing
-            // sees the new focus before the CDC round-trip completes.
-            services.set_focus(Some(target_uri));
+            // Move focus to the target at the placement offset, in memory
+            // (ADR 0010). `set_focus_with_caret` arms the caret seed the
+            // target editor reads on mount — no `editor_cursor` write, no CDC
+            // round-trip. The target may be a cache-reused editor, so the
+            // async focus subscription (not the first-mount grab) applies it.
+            services.set_focus_with_caret(target_uri, offset);
             cx.stop_propagation();
         }
         Some(other) => {
@@ -967,14 +1176,22 @@ fn render_popup(state: &PopupState, bounds_registry: &BoundsRegistry, cx: &App) 
             } else {
                 "popup_item"
             };
+            // Canonicalize through the same total boundary helper the PBT
+            // driver uses: `PopupItem.id` is a raw token (op name for slash
+            // commands, bare block id for link candidates), but waits compare
+            // against schemed `EntityUri` strings — registering the raw token
+            // made `wait_for_widget_kind(EntityUri::block("delete"), ...)`
+            // unable to ever match ("delete" vs "block:delete", 4/4
+            // deterministic Loro-twin red, 2026-06-11).
+            let entity_uri = holon_api::entity_uri_from_id_str(&item.id);
             let tracked = crate::geometry::tracked(
                 format!("popup-item-{}", item.id),
                 row.into_any_element(),
                 bounds_registry,
                 widget_type,
-                Some(item.id.as_str()),
+                Some(entity_uri.as_str()),
                 true,
-                Some(item.label.clone()),
+                Some(std::sync::Arc::from(item.label.as_str())),
             );
             container = container.child(tracked);
         }
@@ -1042,46 +1259,19 @@ fn execute_action<T: 'static>(
         EditorAction::Execute(intent) => {
             services.dispatch_intent(intent);
         }
+        EditorAction::ExecuteAndStripCommand { intent, .. } => {
+            // No-window context: dispatch only; the strip (if any) is handled
+            // by the windowed Enter arm, which is where popup Enter arrives.
+            // If this probe fires, popup Enter took THIS path and the strip
+            // was skipped — that's the bug to chase.
+            if caret_probe() {
+                eprintln!("[slash-strip] NO-WINDOW arm hit — strip SKIPPED");
+            }
+            services.dispatch_intent(intent);
+        }
         // UpdatePopup, Dismissed, InsertText, None, Propagate — no action needed
         // in the no-window context (subscribe callbacks). The caller handles cx.notify().
         _ => {}
-    }
-}
-
-/// Compute the `TextOp` needed to transform `old_text` into `new_text`.
-///
-/// Uses common-prefix / common-suffix diff to produce a single insert+delete
-/// pair. This matches the single-keystroke editing model: one contiguous change
-/// per `InputEvent::Change`.
-fn compute_text_delta(old: &str, new: &str) -> TextOp {
-    let prefix_len = old
-        .chars()
-        .zip(new.chars())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let old_suffix_start = old[prefix_len..]
-        .char_indices()
-        .rev()
-        .zip(new[prefix_len..].chars().rev())
-        .take_while(|((_, a), b)| a == b)
-        .last()
-        .map(|((i, _), _)| prefix_len + old[prefix_len..].len() - i)
-        .unwrap_or(prefix_len);
-    let old_mid_len = old_suffix_start - prefix_len;
-    let new_mid: String = new[prefix_len..new.len() - (old.len() - old_suffix_start)]
-        .chars()
-        .collect();
-
-    if old_mid_len > 0 {
-        TextOp::Delete {
-            pos_codepoint: prefix_len,
-            len_codepoint: old_mid_len,
-        }
-    } else {
-        TextOp::Insert {
-            pos_codepoint: prefix_len,
-            text: new_mid,
-        }
     }
 }
 

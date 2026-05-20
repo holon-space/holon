@@ -152,11 +152,27 @@ FILTER_MAP_OK_UNIVERSAL_FILE_MARKERS = ("build.rs", "holon-macros/")
 
 
 def matches_glob(rel: str, pattern: str) -> bool:
-    if fnmatch(rel, pattern):
-        return True
-    if pattern.startswith("**/") and fnmatch(rel, pattern[3:]):
-        return True
-    return False
+    # fnmatch has no `**` semantics: `src/**/*.rs` forces at least one
+    # directory between src/ and the file, silently exempting top-level
+    # files (e.g. crates/holon-orgmode/src/di.rs). Expand variants where
+    # each `**/` also matches zero directories.
+    variants = {pattern}
+    queue = [pattern]
+    while queue:
+        p = queue.pop()
+        if p.startswith("**/"):
+            v = p[3:]
+            if v not in variants:
+                variants.add(v)
+                queue.append(v)
+        idx = p.find("/**/")
+        while idx != -1:
+            v = p[:idx] + p[idx + 3:]  # collapse "/**/" to "/"
+            if v not in variants:
+                variants.add(v)
+                queue.append(v)
+            idx = p.find("/**/", idx + 1)
+    return any(fnmatch(rel, v) for v in variants)
 
 
 def matches_any(rel: str, patterns: list[str]) -> bool:

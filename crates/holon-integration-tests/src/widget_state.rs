@@ -7,7 +7,6 @@ use std::collections::HashMap;
 
 use holon::api::{ChangeData, RowChange};
 use holon_api::Value;
-use holon_api::widget_spec::DataRow;
 use indexmap::IndexMap;
 
 /// Apply a CDC event to a Vec-based row collection.
@@ -20,7 +19,7 @@ use indexmap::IndexMap;
 /// - Deleted: removes the row with matching entity ID
 ///
 /// Rows are matched by their "id" field.
-pub fn apply_cdc_event_to_vec(rows: &mut Vec<HashMap<String, Value>>, event: &RowChange) {
+pub fn apply_cdc_event_to_vec(rows: &mut Vec<holon_api::StorageEntity>, event: &RowChange) {
     match &event.change {
         ChangeData::Created { data, .. } => {
             rows.push(data.clone());
@@ -49,7 +48,7 @@ pub fn apply_cdc_event_to_vec(rows: &mut Vec<HashMap<String, Value>>, event: &Ro
                     .unwrap_or(false)
             }) {
                 for (field_name, _old_value, new_value) in fields {
-                    row.insert(field_name.clone(), new_value.clone());
+                    row.insert(field_name.as_str().into(), new_value.clone());
                 }
             }
         }
@@ -104,12 +103,12 @@ impl WidgetLocator {
 /// provides text extraction for assertions.
 pub struct WidgetStateModel {
     /// Current data rows keyed by entity ID, preserving insertion order
-    rows: IndexMap<String, HashMap<String, Value>>,
+    rows: IndexMap<String, holon_api::StorageEntity>,
 }
 
 impl WidgetStateModel {
     /// Create a new WidgetStateModel from initial data rows.
-    pub fn from_data(data: &[DataRow]) -> Self {
+    pub fn from_data(data: &[holon_api::StorageEntity]) -> Self {
         let mut rows = IndexMap::new();
         for row in data {
             if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
@@ -140,7 +139,7 @@ impl WidgetStateModel {
             } => {
                 if let Some(row) = self.rows.get_mut(entity_id) {
                     for (field, _old, new) in fields {
-                        row.insert(field.clone(), new.clone());
+                        row.insert(field.as_str().into(), new.clone());
                     }
                 }
             }
@@ -192,7 +191,7 @@ impl WidgetStateModel {
         self.rows_to_text(self.rows.values().collect())
     }
 
-    fn rows_to_text(&self, rows: Vec<&HashMap<String, Value>>) -> String {
+    fn rows_to_text(&self, rows: Vec<&holon_api::StorageEntity>) -> String {
         rows.iter()
             .flat_map(|row| {
                 row.values()
@@ -219,10 +218,10 @@ impl std::fmt::Debug for WidgetStateModel {
 mod tests {
     use super::*;
 
-    fn make_row(id: &str, content: &str) -> HashMap<String, Value> {
-        let mut row = HashMap::new();
-        row.insert("id".to_string(), Value::String(id.to_string()));
-        row.insert("content".to_string(), Value::String(content.to_string()));
+    fn make_row(id: &str, content: &str) -> holon_api::StorageEntity {
+        let mut row = holon_api::StorageEntity::new();
+        row.insert("id".into(), Value::String(id.to_string()));
+        row.insert("content".into(), Value::String(content.to_string()));
         row
     }
 

@@ -1,16 +1,12 @@
-//! Phase 7 — first migrated invariant: `inv-loro-no-errors`.
+//! `inv-loro-no-errors`.
 //!
-//! Proof point for the `Invariant<R, S>` trait + capability-bound
-//! evaluation. The body comes verbatim from `sut.rs:4099-4113`; the
-//! difference is now any slice whose SUT implements `SutLoroLog`
-//! gets this invariant for free, with no inline closure in
-//! `check_invariants_async`.
+//! Any slice whose SUT implements `SutLoroLog` gets this invariant.
 //!
 //! 1-subsystem invariant — touches only the Loro log; not gated by
 //! the CDC-lag classifier.
 
 use holon_pbt_core::capabilities::SutLoroLog;
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvLoroNoErrors;
 
@@ -25,10 +21,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

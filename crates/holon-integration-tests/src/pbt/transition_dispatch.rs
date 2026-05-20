@@ -135,6 +135,7 @@ fn parse_weight_env() -> Vec<(WeightPattern, u32)> {
     rules
 }
 
+// TODO- Split this up into smaller Sut structs. Some of these might already exist
 /// Coarse SUT capability bundle for the E2E PBT. Transitions are
 /// dispatched generically over `S: SutHandle` (concrete-`S` dispatch,
 /// no `dyn`), so the trait uses **native `async fn`** rather than
@@ -157,6 +158,7 @@ fn parse_weight_env() -> Vec<(WeightPattern, u32)> {
 pub trait SutHandle:
     ::holon_pbt_core::capabilities::SutEditorMirrorWrite
     + ::holon_pbt_core::capabilities::SutBlockTreeWrite
+    + ::holon_pbt_core::capabilities::SutLoro
 {
     /// Shared-PBT capability: synthesize a click on a UI element by
     /// its bounds-registry id. Used by `holon_layout_testing`'s shared
@@ -214,7 +216,7 @@ pub trait SutHandle:
         &mut self,
         ref_state: &ReferenceState,
         wait_for_ready: bool,
-        enable_todoist: bool,
+        enable_fake_mcp: bool,
         enable_loro: bool,
     );
 
@@ -255,21 +257,17 @@ pub trait SutHandle:
     );
 
     /// Post-startup: toggle a block's task state via the StateToggle widget path.
-    async fn apply_toggle_state(&mut self, block_id: &holon_api::EntityUri, new_state: &str);
+    async fn apply_toggle_state(
+        &mut self,
+        block_id: &holon_api::EntityUri,
+        new_state: crate::pbt::transitions::toggle_state::CycleTarget,
+    );
 
     /// Post-startup: bulk add blocks to a document by writing an org file.
     async fn apply_bulk_external_add(
         &mut self,
         doc_uri: &holon_api::EntityUri,
         blocks: &[holon_api::block::Block],
-        ref_state: &ReferenceState,
-    );
-
-    /// Post-startup: concurrent UI + external mutations.
-    async fn apply_concurrent_mutations(
-        &mut self,
-        ui_mutation: crate::pbt::types::MutationEvent,
-        external_mutation: crate::pbt::types::MutationEvent,
         ref_state: &ReferenceState,
     );
 
@@ -337,26 +335,6 @@ pub trait SutHandle:
         direction: holon_frontend::navigation::NavDirection,
         steps: u8,
         ref_state: &ReferenceState,
-    );
-
-    /// Post-startup: add a Loro-only peer instance sharing the primary's state.
-    async fn apply_add_peer(&mut self);
-
-    /// Post-startup: edit a block on a peer's LoroDoc directly.
-    async fn apply_peer_edit(&mut self, peer_idx: usize, op: &crate::pbt::transitions::PeerEditOp);
-
-    /// Post-startup: bidirectional sync between primary's LoroDoc and a peer.
-    async fn apply_sync_with_peer(&mut self, peer_idx: usize);
-
-    /// Post-startup: one-directional merge — peer's changes into primary.
-    async fn apply_merge_from_peer(&mut self, peer_idx: usize);
-
-    /// Post-startup: edit a block's LoroText container on a peer at character level.
-    async fn apply_peer_char_edit(
-        &mut self,
-        peer_idx: usize,
-        block_id: &str,
-        op: &crate::pbt::transitions::TextOp,
     );
 
     /// Post-startup: pin a block to a sidebar (`focus_pin` op — LogSeq-style
@@ -491,6 +469,20 @@ macro_rules! declare_e2e_transitions {
                     $( Self::$variant(_) => stringify!($variant), )*
                 }
             }
+
+            /// Value-level mirror of the type-level `TransitionFactory::required_wiring`
+            /// gate used in `aggregate_transitions`. Needed at replay time so the
+            /// shared engine (`stepper::run_sequence`) can decide, per concrete
+            /// transition, whether a subset's wiring gates it out — turning it into
+            /// a deterministic `SkippedByGating` no-op rather than re-deriving the
+            /// alphabet (ADR 0009 §4).
+            pub fn required_wiring(&self) -> ::holon_pbt_core::RequiredWiring {
+                match self {
+                    $( Self::$variant(_) => <$ty as ::holon_pbt_core::TransitionFactory<
+                        $crate::pbt::reference_state::ReferenceState,
+                    >>::required_wiring(), )*
+                }
+            }
         }
 
         $vis fn aggregate_transitions(
@@ -502,26 +494,35 @@ macro_rules! declare_e2e_transitions {
             let mut arms: Vec<(u32, ::proptest::strategy::BoxedStrategy<$enum_name>)> = Vec::new();
 
             $(
-                match <$ty as ::holon_pbt_core::TransitionFactory<
+                // ADR 0007 item 3: derive the alphabet from the manifest.
+                // A variant whose `RequiredWiring` the active wiring doesn't
+                // satisfy is structurally absent — not even offered to the
+                // generator (the dynamic `weighted_generator` would Fail it
+                // anyway, but the manifest gate makes the exclusion explicit
+                // and reason-free).
+                if <$ty as ::holon_pbt_core::TransitionFactory<
                     $crate::pbt::reference_state::ReferenceState,
-                >>::weighted_generator(state) {
-                    ::validated::Validated::Good((w, s)) => {
-                        // Apply the per-variant `HOLON_PBT_WEIGHTS` multiplier
-                        // here so individual transitions don't have to wire it.
-                        // `0` is a legal multiplier — it removes the variant
-                        // from the strategy; `Union::new_weighted` ignores
-                        // zero-weight arms.
-                        let multiplier = variant_weight_multiplier(stringify!($variant));
-                        let final_weight = w.saturating_mul(multiplier);
-                        if final_weight > 0 {
-                            arms.push((final_weight, s.prop_map($enum_name::from).boxed()));
+                >>::required_wiring()
+                    .satisfied_by(&state.wiring)
+                {
+                    // Per-variant arm built by the shared `holon_pbt_core::weighted_arm`
+                    // helper (one aggregation path across every PBT). The
+                    // `HOLON_PBT_WEIGHTS` multiplier is applied there; `0` removes
+                    // the variant (`Good(None)`), and rejections come back as
+                    // `Fail(reasons)` for `record_rejection` to account.
+                    match ::holon_pbt_core::weighted_arm::<_, $ty, $enum_name>(
+                        state,
+                        variant_weight_multiplier(stringify!($variant)),
+                        |v| $enum_name::from(v),
+                    ) {
+                        ::validated::Validated::Good(Some(arm)) => arms.push(arm),
+                        ::validated::Validated::Good(None) => {}
+                        ::validated::Validated::Fail(reasons) => {
+                            $crate::pbt::validation::record_rejection(
+                                stringify!($variant),
+                                &reasons,
+                            );
                         }
-                    }
-                    ::validated::Validated::Fail(reasons) => {
-                        $crate::pbt::validation::record_rejection(
-                            stringify!($variant),
-                            &reasons,
-                        );
                     }
                 }
             )*

@@ -25,7 +25,7 @@ One-way sync to frontends: The reactive ViewModel is shared by all UIs (GPUI, Di
 
 Minimal change propagation: Any change to one of the inputs triggers only the minimal changes throughout the computation DAG — computed columns, profile selection, per-row interpretation. Not a global re-interpretation of all blocks.
 
-Change sources: Cell signals (entity field state, sourced from CDC + projector), per-VM Mutables (UI interactions), and possibly the event bus in the future. All flow through the same signal-based reactive graph.
+Change sources: Cell signals (entity field state, sourced from CDC + projector) and per-VM Mutables (UI interactions). Block changes reach the UI through the `LiveData<Block>` feed (CDC off the block matview). All flow through the same signal-based reactive graph.
 
 Shared Mutables for broadcast: A collection's item template is a `Mutable<RenderExpr>` cloned into each child ItemNode. Setting it once propagates to all items — each self-reinterprets via `map_ref!` on its (data, template) signals.
 
@@ -47,3 +47,25 @@ Text-editing widgets (`editable_text` builder, `EditorView`, etc.) consume `Cell
 Chord ops (split, join, embed) read from the cell (`current()`) and write through the cell (`set(new_string)`); they never read the SQL projection directly for content. This dissolves the `BlockContentResolver` hatch from Phase 0+1 — cells ARE the live text source by construction.
 
 See [Storage](Storage.md) for cell internals and [Operations](Operations.md) for the cells-vs-reflective-ops cut.
+
+## Field authority and intent capture
+
+> **The UI is responsible for displaying fields and capturing intent on them — not for their values.**
+
+Ownership of values sits with the entity's authority, because display is many-to-one but authority can't be: two views showing the same block would otherwise both "own" its content. The editor is structurally just another replica with uncommitted local changes — same as a peer, a webhook, or a file reload. Its only legitimate privilege is the **optimistic fast path**: its changes apply locally without a round-trip because the user is watching. The moment an op signature accepts the UI's view of a field as truth-by-assertion (e.g. "split, and here is the full content"), the UI becomes a special replica whose changes overwrite instead of merge — and the asymmetry bites as soon as a second change source exists. Under Loro it is strictly worse: whole-content writes convert a CRDT merge into last-writer-wins.
+
+A structural op decomposes into three responsibilities with three owners (worked example: splitting a Todoist task into two):
+
+| Responsibility | Owner | Todoist-split example |
+|---|---|---|
+| **Intent capture** — live text deltas, caret, "split here" | UI | only the editor knows the caret and the in-flight keystrokes |
+| **Distribution policy** — what the op does to each field | domain op on the **local authority** | new task inherits priority, status resets to open, subtasks stay |
+| **Remote materialization** — turning the result into API calls | connector | `POST /tasks` + `PATCH /tasks/:id`, rate limits, retries |
+
+Two contracts follow:
+
+1. **Structural ops are commit points.** Any pending editor state flushes through the normal merge path *before* the op executes, in one ordered dispatch (a single task awaiting commit then op — two fire-and-forget dispatches can reorder). The op then always computes against the authority's current state. Canonical failure from violating this: `Split position 8 exceeds content length 3` (2026-06-11) — `split_block` computed against backend content (`"797"`) using the editor's cursor byte into its pending text (`"ßñ😀中797"`); SqlOnly's commit-on-blur left the two permanently divergent until a blur happened to fire.
+
+2. **Sync-boundary batching lives in connectors, not widgets.** Batching keystrokes inside the editor until blur (SqlOnly today) implements a sync-boundary transaction inside a UI widget — the cursor then indexes a revision the authority has never seen. The transaction belongs at the authority↔external boundary (the Todoist connector batches toward the API; Loro batches via the CRDT), while UI→local-authority stays per-keystroke (debounce is a write-path detail, not an ownership change). Blur becomes a flush *hint*, not the commit mechanism.
+
+Intents that reference positions should carry an **anchor** (the revision the position was measured against, or a CRDT cursor via `anchor_cursor`), so the authority can transform the position if a merge landed in between — a bare byte offset is the same stale-pointer bug in miniature.

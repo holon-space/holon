@@ -158,6 +158,26 @@ pub enum ContentType {
     Image,
 }
 
+impl ContentType {
+    /// Sibling-ordering group for the canonical child list (ADR 0005).
+    ///
+    /// Non-heading "section content" (`Source`/`Image`) sorts **before** heading
+    /// content (`Text`). This is not an aesthetic preference — it is a structural
+    /// requirement of outline formats (org-mode, Markdown): a heading captures
+    /// everything after it until the next heading, so any non-heading child must
+    /// precede the parent's child headings or it would re-parent under the first
+    /// heading on the next read. The domain therefore *defines* the ordered child
+    /// list as "section content first, then headings", insertion/`after` order
+    /// preserved within each group. Every renderer and the reference oracle order
+    /// siblings through this one rule.
+    pub fn sibling_order_group(self) -> u8 {
+        match self {
+            ContentType::Source | ContentType::Image => 0,
+            ContentType::Text => 1,
+        }
+    }
+}
+
 impl fmt::Display for ContentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

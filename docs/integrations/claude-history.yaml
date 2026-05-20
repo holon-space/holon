@@ -1,0 +1,142 @@
+transport:
+  child_process:
+    command: /Users/martin/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp
+    env:
+      CLAUDE_DATA_DIR: "/Users/martin/.claude"
+entity_prefix: "cc_"
+entities:
+  session:
+    profile_variants:
+      - name: default
+        render: >-
+          expand_toggle(#{
+            header: row(text(col("first_prompt")), spacer(8), text(col("message_count"))),
+            content: live_query(#{
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+            })
+          })
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: project_id
+        sql_type: TEXT
+      - name: first_prompt
+        sql_type: TEXT
+        nullable: true
+      - name: summary
+        sql_type: TEXT
+        nullable: true
+      - name: message_count
+        sql_type: INTEGER
+        nullable: true
+      - name: created
+        sql_type: TEXT
+        nullable: true
+      - name: modified
+        sql_type: TEXT
+        nullable: true
+      - name: git_branch
+        sql_type: TEXT
+        nullable: true
+      - name: project_path
+        sql_type: TEXT
+        nullable: true
+      - name: model
+        sql_type: TEXT
+        nullable: true
+      - name: is_sidechain
+        sql_type: INTEGER
+        nullable: true
+    sync:
+      list_resource: "claude-history://projects/{project_id}/sessions"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+    vtable:
+      list_resource: "claude-history://projects/{project_id}/sessions"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+      write_through: true
+
+  task:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("subject")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        nullable: true
+      - name: local_id
+        sql_type: TEXT
+        nullable: true
+      - name: subject
+        sql_type: TEXT
+        nullable: true
+      - name: description
+        sql_type: TEXT
+        nullable: true
+      - name: status
+        sql_type: TEXT
+        nullable: true
+      - name: created_at
+        sql_type: TEXT
+        nullable: true
+      - name: completed_at
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_resource: "claude-history://projects/{project_id}/tasks"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+    vtable:
+      list_resource: "claude-history://projects/{project_id}/tasks"
+      uri_params:
+        project_id: "-Users-martin-Workspaces-pkm-holon"
+      write_through: true
+
+  message:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("content")))'
+    schema:
+      - name: uuid
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        nullable: true
+      - name: parent_uuid
+        sql_type: TEXT
+        nullable: true
+      - name: type
+        sql_type: TEXT
+        nullable: true
+      - name: timestamp
+        sql_type: TEXT
+        nullable: true
+      - name: role
+        sql_type: TEXT
+        nullable: true
+      - name: model
+        sql_type: TEXT
+        nullable: true
+      - name: content
+        sql_type: TEXT
+        nullable: true
+      - name: git_branch
+        sql_type: TEXT
+        nullable: true
+      - name: cwd
+        sql_type: TEXT
+        nullable: true
+    vtable:
+      list_resource: "claude-history://sessions/{session_id}/messages"
+      uri_params:
+        session_id: ""
+      write_through: true
+
+tools: {}

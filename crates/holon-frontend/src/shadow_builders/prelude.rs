@@ -7,13 +7,13 @@ pub(crate) use holon_api::Value;
 pub(crate) type BA<'a> = BuilderArgs<'a, crate::reactive_view_model::ReactiveViewModel>;
 
 /// Compute the `VirtualChildSlot` from a `virtual_parent` arg string or
-/// context fallback.
+/// context default.
 ///
 /// When `virtual_parent` is an explicit string arg (resolved from the
 /// `Bool(true)` sentinel by `resolve_virtual_parent`), use it. Otherwise,
 /// fall back to the context row's `id` column — which is the surrounding
 /// entity when a tree collection is being built inside a `render_entity` or
-/// `live_block` render. This fallback lets the PBT's explicit render-source
+/// `live_block` render. This default lets the PBT's explicit render-source
 /// expressions (which have no sentinel resolution) still produce a slot.
 pub(crate) fn virtual_child_slot_from_arg(
     ba: &BA<'_>,
@@ -40,12 +40,13 @@ pub(crate) fn virtual_child_slot_from_arg(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
         })?;
+    // ALLOW(entity_uri_from_raw): viewport arg or data row 'parent_id' field (render-spec/row boundary)
     let uri = holon_api::EntityUri::from_raw(&vp);
     let entity_name = uri.scheme().to_string();
     let config = ba.services.virtual_child_config(&entity_name)?;
     Some(crate::reactive_view::VirtualChildSlot {
         defaults: config.defaults,
-        parent_id: vp.to_string(),
+        parent_id: uri,
     })
 }
 
@@ -63,13 +64,13 @@ pub(crate) fn virtual_child_slot_from_arg(
 pub(crate) fn virtual_child_row(
     slot: &crate::reactive_view::VirtualChildSlot,
 ) -> Arc<holon_api::widget_spec::DataRow> {
-    let parent_uri = holon_api::EntityUri::from_raw(&slot.parent_id);
+    let parent_uri = &slot.parent_id;
     let virtual_key = format!("{}:__virtual:{}", parent_uri.scheme(), parent_uri.id());
     let mut row = std::collections::HashMap::new();
     row.insert("id".to_string(), Value::String(virtual_key));
     row.insert(
         "parent_id".to_string(),
-        Value::String(slot.parent_id.clone()),
+        Value::String(slot.parent_id.as_str().to_string()),
     );
     row.insert("sort_key".to_string(), Value::Float(f64::MAX));
     for (k, v) in &slot.defaults {

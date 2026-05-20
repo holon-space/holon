@@ -29,7 +29,7 @@ Severity: **High** = architectural confusion / likely source of bugs. **Medium**
 
 `crates/holon-frontend/src/reactive.rs::ReactiveEngine` simultaneously:
 - Implements `BuilderServices` (service locator for all builders)
-- Manages watcher lifecycle (`HashMap<EntityUri, ReactiveQueryResults>`)
+- Manages watcher lifecycle (`HashMap<EntityUri, ReactiveRenderedRows>`)
 - Acts as top-level reactive coordinator
 
 **Fix direction**: extract `WatcherRegistry` (lifecycle management) and keep `ReactiveEngine` as the `BuilderServices` impl. The registry becomes an internal dependency.
@@ -74,7 +74,7 @@ The snapshot `ViewModel` is used by MCP's `get_display_tree` and GPUI's render p
 ### 6. `reactive.rs` appears in two crates with the same name, different concerns
 
 - `crates/holon-api/src/reactive.rs` — generic stream utilities: `CdcAccumulator`, `ReactiveStreamExt`, `coalesce`, `materialize_map`
-- `crates/holon-frontend/src/reactive.rs` — application coordinator: `ReactiveEngine`, `ReactiveQueryResults`
+- `crates/holon-frontend/src/reactive.rs` — application coordinator: `ReactiveEngine`, `ReactiveRenderedRows`
 
 **Fix direction**: rename one. The `holon-api` file could become `stream_utils.rs` or `cdc_utils.rs`.
 

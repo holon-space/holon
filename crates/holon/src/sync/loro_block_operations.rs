@@ -21,33 +21,32 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use holon_api::block::{Block, BlockContent};
-use holon_api::{ContentType, EntityName, Value};
+use holon_api::{ContentType, EntityName, EntityUri, Operation, Value};
 
+use crate::api::types::Traversal;
 use crate::api::{CoreOperations, LoroBackend};
 use crate::core::datasource::{
     BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
-    CompletionStateInfo, CrudOperations, DataSource, HasCache, MarkOperations, OperationDescriptor,
+    CompletionStateInfo, CrudOperations, DataSource, MarkOperations, OperationDescriptor,
     OperationProvider, OperationRegistry, OperationResult, Result, TaskOperations, TextOperations,
     UnknownOperationError,
 };
-use crate::core::queryable_cache::QueryableCache;
 use crate::storage::types::StorageEntity;
 use crate::sync::LoroDocumentStore;
+use holon_api::ApiError;
 
 /// Generic operations on Loro blocks.
 ///
-/// Implements standard operation traits, delegating to `LoroBackend`.
+/// Implements standard operation traits, delegating to `LoroBackend`. Reads go
+/// straight to the Loro tree (the source of truth per ADR 0005), so this
+/// provider needs no Turso-fed `QueryableCache` and works in no-Turso sessions.
 pub struct LoroBlockOperations {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
-    cache: Arc<QueryableCache<Block>>,
 }
 
 impl LoroBlockOperations {
-    pub fn new(
-        doc_store: Arc<RwLock<LoroDocumentStore>>,
-        cache: Arc<QueryableCache<Block>>,
-    ) -> Self {
-        Self { doc_store, cache }
+    pub fn new(doc_store: Arc<RwLock<LoroDocumentStore>>) -> Self {
+        Self { doc_store }
     }
 
     /// Get the shared doc store (same instance used for writes).
@@ -82,30 +81,65 @@ impl LoroBlockOperations {
 #[async_trait]
 impl DataSource<Block> for LoroBlockOperations {
     async fn get_all(&self) -> Result<Vec<Block>> {
-        self.cache.get_all().await
+        let backend = self.get_backend("").await?;
+        Ok(backend.get_all_blocks(Traversal::ALL_BUT_ROOT).await?)
     }
 
     async fn get_by_id(&self, id: &str) -> Result<Option<Block>> {
-        self.cache.get_by_id(id).await
+        let backend = self.get_backend("").await?;
+        match backend.get_block(id).await {
+            Ok(block) => Ok(Some(block)),
+            Err(ApiError::BlockNotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
 #[async_trait]
-impl HasCache<Block> for LoroBlockOperations {
-    fn get_cache(&self) -> &QueryableCache<Block> {
-        &self.cache
+impl BlockQueryHelpers<Block> for LoroBlockOperations {
+    async fn children_ordered(&self, parent_id: &EntityUri) -> Result<Vec<Block>> {
+        // Read child order straight from the Loro tree — its fractional index is
+        // the source of truth for sibling order (ADR 0005), even when Turso is
+        // also wired (the Turso `sort_key` column is only a projection of it).
+        // `list_children` returns child URIs in tree order; `get_blocks`
+        // preserves that input order.
+        let backend = self.get_backend("").await?;
+        let child_ids = backend.list_children(parent_id.as_str()).await?;
+        let blocks = backend.get_blocks(child_ids).await?;
+        Ok(blocks)
     }
 }
-
-impl BlockQueryHelpers<Block> for LoroBlockOperations {}
 impl BlockMaintenanceHelpers<Block> for LoroBlockOperations {}
 impl BlockDataSourceHelpers<Block> for LoroBlockOperations {}
 impl BlockOperations<Block> for LoroBlockOperations {}
+
+/// Build a `block` operation for an undo inverse (no display name needed —
+/// inverses are executed by the undo stack, not surfaced as user actions).
+fn block_op(op_name: &str, params: HashMap<String, Value>) -> Operation {
+    Operation::new(EntityName::from("block"), op_name, "", params)
+}
 
 #[async_trait]
 impl CrudOperations<Block> for LoroBlockOperations {
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult> {
         let (doc_path, backend) = self.find_doc_for_block(id).await?;
+
+        // Capture a provably-correct inverse for the plain-string content edit
+        // (restore the prior text). Rich content (with marks), mark-only edits,
+        // and property writes stay irreversible until their inverses exist.
+        let undo: Option<Operation> = if field == "content" && matches!(value, Value::String(_)) {
+            let prior = backend
+                .get_block(id)
+                .await
+                .map_err(|e| format!("set_field('content'): capture prior content: {e}"))?;
+            let mut params = HashMap::new();
+            params.insert("id".to_string(), Value::String(id.to_string()));
+            params.insert("field".to_string(), Value::String("content".to_string()));
+            params.insert("value".to_string(), Value::String(prior.content));
+            Some(block_op("set_field", params))
+        } else {
+            None
+        };
 
         match field {
             "content" => {
@@ -170,6 +204,35 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .await
                     .map_err(|e| format!("Failed to update marks: {}", e))?;
             }
+            "sort_key" => {
+                // Sibling order is owned by `place()`/`tree.mov_after` and
+                // projected to SQL from the Loro fractional index — a block's
+                // `sort_key` is never written through `set_field`. Routing it to
+                // the meta `properties` map would silently drop it: the
+                // Loro→SQL projector derives `sort_key` from
+                // `tree.fractional_index(node)` and ignores properties. Mirror
+                // `BlockCellRegistry::write_field`: fail loud so a positional
+                // write surfaces as a bug instead of vanishing.
+                return Err(format!(
+                    "set_field(\"sort_key\") is unsupported on LoroBlockOperations: order is \
+                     owned by place()/mov_after and projected from the fractional index; a \
+                     set_field(\"sort_key\") reached the Loro CRUD provider for {id} — bug"
+                )
+                .into());
+            }
+            "parent_id" => {
+                // Reparenting is a structural tree move, not a meta property.
+                // The projector reads the parent from the tree (not properties),
+                // so a property write would be silently lost. Route to the
+                // backend's `tree.mov`, mirroring `BlockCellRegistry::write_field`.
+                let new_parent = value.as_string().map(String::from).ok_or_else(|| {
+                    format!("set_field(\"parent_id\"): expected String, got {value:?}")
+                })?;
+                backend
+                    .update_parent_id(id, new_parent)
+                    .await
+                    .map_err(|e| format!("set_field(\"parent_id\") for {id}: {e}"))?;
+            }
             _ => {
                 // Store in properties
                 let mut props = HashMap::new();
@@ -185,10 +248,13 @@ impl CrudOperations<Block> for LoroBlockOperations {
 
         // Propagation to downstream consumers is handled by `LoroSyncController`
         // via `doc.subscribe_root`.
-        Ok(OperationResult::irreversible(vec![]))
+        Ok(undo.map_or_else(
+            || OperationResult::irreversible(vec![]),
+            |op| OperationResult::new(vec![], op),
+        ))
     }
 
-    async fn create(&self, fields: HashMap<String, Value>) -> Result<(String, OperationResult)> {
+    async fn create(&self, fields: holon_api::StorageEntity) -> Result<(String, OperationResult)> {
         // parent_id is required - it's either a document URI or a block ID
         let parent_id = fields
             .get("parent_id")
@@ -248,6 +314,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
             None
         };
 
+        // Only a genuine create has a clean inverse (delete the new block); an
+        // upsert that updates an existing block is left irreversible.
+        let is_new = existing_block.is_none();
+
         let block = if let Some(existing) = existing_block {
             // Block exists - update it instead of creating
             tracing::debug!(
@@ -256,10 +326,11 @@ impl CrudOperations<Block> for LoroBlockOperations {
             );
 
             // If parent changed, move the block in the tree
+            // ALLOW(entity_uri_from_raw): parent_id from operation params dict
             let new_parent_ref = holon_api::EntityUri::from_raw(&parent_id);
             if existing.parent_id != new_parent_ref {
                 backend
-                    .move_block(existing.id.as_str(), new_parent_ref.clone(), None)
+                    .move_block(&existing.id, new_parent_ref.clone(), None)
                     .await
                     .map_err(|e| format!("Failed to move block to new parent: {}", e))?;
             }
@@ -274,7 +345,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("Failed to get updated block: {}", e))?
         } else {
             // Block doesn't exist - create it
+            // ALLOW(entity_uri_from_raw): parent_id from operation params dict
             let parent_uri = holon_api::EntityUri::from_raw(&parent_id);
+            // ALLOW(entity_uri_from_raw): block_id from operation params 'id' field
             let block_uri = block_id.map(|id| holon_api::EntityUri::from_raw(&id));
             backend
                 .create_block(parent_uri, block_content, block_uri)
@@ -295,8 +368,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "source_results",
         ];
         for (key, value) in &fields {
-            if !handled_fields.contains(&key.as_str()) {
-                props.insert(key.clone(), value.clone());
+            if !handled_fields.contains(&key.as_ref()) {
+                props.insert(key.to_string(), value.clone());
             }
         }
         if !props.is_empty() {
@@ -315,10 +388,18 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .await
             .map_err(|e| format!("Failed to get block after property update: {}", e))?;
 
-        Ok((
-            block_with_props.id.to_string(),
-            OperationResult::irreversible(vec![]),
-        ))
+        let result = if is_new {
+            let mut params = HashMap::new();
+            params.insert(
+                "id".to_string(),
+                Value::String(block_with_props.id.to_string()),
+            );
+            OperationResult::new(vec![], block_op("delete", params))
+        } else {
+            OperationResult::irreversible(vec![])
+        };
+
+        Ok((block_with_props.id.to_string(), result))
     }
 
     async fn delete(&self, id: &str) -> Result<OperationResult> {
@@ -339,7 +420,7 @@ impl LoroBlockOperations {
     /// Update a block with the given fields.
     ///
     /// Forwards to `create` which does upsert (create if not exists, update if exists).
-    async fn update_block(&self, fields: HashMap<String, Value>) -> Result<OperationResult> {
+    async fn update_block(&self, fields: holon_api::StorageEntity) -> Result<OperationResult> {
         let (_block_id, result) = self.create(fields).await?;
         Ok(result)
     }
@@ -349,18 +430,16 @@ impl LoroBlockOperations {
 impl TaskOperations<Block> for LoroBlockOperations {
     async fn set_title(&self, id: &str, title: &str) -> Result<OperationResult> {
         // Get current content, replace first line
-        if let Some(block) = self.cache.get_by_id(id).await? {
-            let body: String = block.content.lines().skip(1).collect::<Vec<_>>().join("\n");
-            let new_content = if body.is_empty() {
-                title.to_string()
-            } else {
-                format!("{}\n{}", title, body)
-            };
-            self.set_field(id, "content", Value::String(new_content))
-                .await
+        let backend = self.get_backend("").await?;
+        let block = backend.get_block(id).await?;
+        let body: String = block.content.lines().skip(1).collect::<Vec<_>>().join("\n");
+        let new_content = if body.is_empty() {
+            title.to_string()
         } else {
-            Err(format!("Block not found: {}", id).into())
-        }
+            format!("{}\n{}", title, body)
+        };
+        self.set_field(id, "content", Value::String(new_content))
+            .await
     }
 
     fn completion_states_with_progress(&self) -> Vec<CompletionStateInfo> {
@@ -391,11 +470,8 @@ impl TaskOperations<Block> for LoroBlockOperations {
     }
 
     async fn cycle_task_state(&self, id: &str) -> Result<OperationResult> {
-        let block = self
-            .cache
-            .get_by_id(id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Block not found: {id}"))?;
+        let backend = self.get_backend("").await?;
+        let block = backend.get_block(id).await?;
         let current = block.get_property_str("task_state").unwrap_or_default();
         let states: Vec<String> = std::iter::once(String::new())
             .chain(
@@ -527,7 +603,6 @@ impl TextOperations<Block> for LoroBlockOperations {
 #[async_trait]
 impl OperationProvider for LoroBlockOperations {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        use crate::__operations_has_cache;
         use crate::core::datasource::{
             __operations_block_operations, __operations_crud_operations,
             __operations_mark_operations, __operations_task_operations,
@@ -572,12 +647,6 @@ impl OperationProvider for LoroBlockOperations {
             entity_name,
             id_column,
         ));
-        ops.extend(__operations_has_cache::has_cache(
-            entity_name,
-            short_name,
-            entity_name,
-            id_column,
-        ));
 
         ops
     }
@@ -588,7 +657,6 @@ impl OperationProvider for LoroBlockOperations {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<OperationResult> {
-        use crate::__operations_has_cache;
         use crate::core::datasource::{
             __operations_block_operations, __operations_crud_operations,
             __operations_mark_operations, __operations_task_operations,
@@ -603,24 +671,6 @@ impl OperationProvider for LoroBlockOperations {
 
         if entity_name != "block" {
             return Err(format!("Expected entity_name 'block', got '{}'", entity_name).into());
-        }
-
-        // Try HasCache operations (clear_cache)
-        tracing::debug!("[LoroBlockOperations::execute_operation] Trying HasCache operations");
-        match __operations_has_cache::dispatch_operation::<_, Block>(self, op_name, &params).await {
-            Ok(op) => {
-                tracing::debug!("[LoroBlockOperations::execute_operation] HasCache matched!");
-                return Ok(op);
-            }
-            Err(err) => {
-                if !UnknownOperationError::is_unknown(err.as_ref()) {
-                    tracing::debug!(
-                        "[LoroBlockOperations::execute_operation] HasCache error: {}",
-                        err
-                    );
-                    return Err(err);
-                }
-            }
         }
 
         // Try CRUD operations

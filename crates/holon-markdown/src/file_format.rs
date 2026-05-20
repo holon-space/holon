@@ -3,7 +3,7 @@
 //!
 //! Stateless wrapper around `parse_markdown_file` and `MarkdownRenderer`,
 //! analogous to `holon_orgmode::OrgFormatAdapter`. Plug into
-//! `OrgSyncController::with_format(...)` to drive an Obsidian-style vault
+//! `FileSyncController::with_format(...)` to drive an Obsidian-style vault
 //! through the same controller used for org files.
 
 use anyhow::Result;

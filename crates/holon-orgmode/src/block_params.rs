@@ -8,35 +8,32 @@ use crate::models::OrgBlockExt;
 
 /// Build command parameters for a block create/update operation.
 ///
-/// Converts a parsed `Block` into a flat `HashMap<String, Value>` suitable
+/// Converts a parsed `Block` into a flat `StorageEntity` suitable
 /// for passing to `OperationProvider::execute_operation` (create/update).
 ///
 /// The `document_uri` is inserted under `ROUTING_DOC_URI_KEY` as the
 /// param-side routing hint. `SqlOperationProvider` lifts the value onto
 /// the typed `Event::routing_doc_uri` field at its boundary; the consumer
-/// (`OrgSyncController`) reads the typed field, so it can route the
+/// (`FileSyncController`) reads the typed field, so it can route the
 /// operation to the correct document regardless of where `parent_id`
 /// points.
 pub fn build_block_params(
     block: &Block,
     parent_id: &EntityUri,
     document_uri: &EntityUri,
-) -> HashMap<String, Value> {
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(block.id.to_string()));
-    params.insert(
-        "parent_id".to_string(),
-        Value::String(parent_id.to_string()),
-    );
-    // Routing metadata: tells OrgSyncController which document this block
+) -> holon_api::StorageEntity {
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(block.id.to_string()));
+    params.insert("parent_id".into(), Value::String(parent_id.to_string()));
+    // Routing metadata: tells FileSyncController which document this block
     // belongs to, even when parent_id is another block (not a document).
     params.insert(
-        holon::sync::event_bus::ROUTING_DOC_URI_KEY.to_string(),
+        holon::sync::event_bus::ROUTING_DOC_URI_KEY.into(),
         Value::String(document_uri.to_string()),
     );
-    params.insert("content".to_string(), Value::String(block.content.clone()));
+    params.insert("content".into(), Value::String(block.content.clone()));
     params.insert(
-        "content_type".to_string(),
+        "content_type".into(),
         Value::String(block.content_type.to_string()),
     );
 
@@ -50,8 +47,8 @@ pub fn build_block_params(
     } else {
         now
     };
-    params.insert("created_at".to_string(), Value::Integer(created));
-    params.insert("updated_at".to_string(), Value::Integer(now));
+    params.insert("created_at".into(), Value::Integer(created));
+    params.insert("updated_at".into(), Value::Integer(now));
 
     if !block.tags.is_empty() {
         let arr: Vec<Value> = block
@@ -59,7 +56,7 @@ pub fn build_block_params(
             .iter()
             .map(|t| Value::String(t.clone()))
             .collect();
-        params.insert("tags".to_string(), Value::Array(arr));
+        params.insert("tags".into(), Value::Array(arr));
     }
 
     // Edge-typed field — `SqlOperationProvider`'s edge partition routes this
@@ -71,70 +68,57 @@ pub fn build_block_params(
         .iter()
         .map(|r| Value::String(r.clone()))
         .collect();
-    params.insert("requires".to_string(), Value::Array(arr));
+    params.insert("requires".into(), Value::Array(arr));
 
     if block.content_type == ContentType::Source {
         if let Some(ref lang) = block.source_language {
-            params.insert(
-                "source_language".to_string(),
-                Value::String(lang.to_string()),
-            );
+            params.insert("source_language".into(), Value::String(lang.to_string()));
         }
         if let Some(ref name) = block.source_name {
-            params.insert("source_name".to_string(), Value::String(name.clone()));
+            params.insert("source_name".into(), Value::String(name.clone()));
         }
         let header_args = block.get_source_header_args();
         if !header_args.is_empty() {
             if let Ok(json) = serde_json::to_string(&header_args) {
-                params.insert("source_header_args".to_string(), Value::String(json));
+                params.insert("source_header_args".into(), Value::String(json));
             }
         }
     }
 
     if let Some(task_state) = block.task_state() {
-        params.insert(
-            "task_state".to_string(),
-            Value::String(task_state.to_string()),
-        );
+        params.insert("task_state".into(), Value::String(task_state.to_string()));
     }
     if let Some(priority) = block.priority() {
-        params.insert(
-            "priority".to_string(),
-            Value::Integer(priority.to_int() as i64),
-        );
+        params.insert("priority".into(), Value::Integer(priority.to_int() as i64));
     }
     // Tags are already serialized into the `tags` JSON-array param above
     // (lines 53-57); the legacy CSV-via-properties shape is gone. Skip the
     // OrgBlockExt::tags() shim here so we don't overwrite the JSON list with
     // a comma-separated string.
     if let Some(scheduled) = block.scheduled() {
-        params.insert(
-            "scheduled".to_string(),
-            Value::String(scheduled.to_string()),
-        );
+        params.insert("scheduled".into(), Value::String(scheduled.to_string()));
     }
     if let Some(deadline) = block.deadline() {
-        params.insert("deadline".to_string(), Value::String(deadline.to_string()));
+        params.insert("deadline".into(), Value::String(deadline.to_string()));
     }
 
-    params.insert("sequence".to_string(), Value::Integer(block.sequence()));
+    params.insert("sequence".into(), Value::Integer(block.sequence()));
 
     // sort_key is intentionally NOT emitted here. The org parser's
-    // `gen_n_keys` value used to land in SQL via this map and competed
-    // with Loro's auto-assigned fractional index — two generators in
+    // `gen_n_keys` value used to land in the sink via this map and competed
+    // with the consolidator's auto-assigned order key — two generators in
     // disjoint string spaces, producing the seed=42 SplitBlock ordering
-    // panic (devlog 2026-05-14). The single authoritative writer is
-    // now `LoroSyncController::on_loro_changed`, which projects
-    // `tree.fractional_index(node)` to SQL via the UPSERT in
-    // `SqlOperationProvider::prepare_create`. Position intent enters
-    // the system via `after_block_id` (lifted to `Event::position_after_block_id`
-    // by the SQL provider boundary) and drives `tree.mov_after`.
+    // panic (devlog 2026-05-14). The single authoritative order writer is
+    // the consolidator's outbound projection, which materializes its order
+    // key into the sink's `sort_key` column. Position intent enters the
+    // system via `after_block_id` (lifted to `Event::position_after_block_id`
+    // at the provider boundary) and drives the consolidator's move op.
 
     // Include org drawer properties (flat in block.properties)
     let id = block
         .get_block_id()
         .unwrap_or_else(|| block.id.id().to_string());
-    params.insert("ID".to_string(), Value::String(id));
+    params.insert("ID".into(), Value::String(id));
 
     for (k, v) in block.drawer_properties() {
         // `drawer_properties()` emits `REQUIRES` for org *rendering* (the
@@ -146,7 +130,7 @@ pub fn build_block_params(
         if k.eq_ignore_ascii_case("requires") {
             continue;
         }
-        params.insert(k, Value::String(v));
+        params.insert(k.into(), Value::String(v));
     }
 
     params

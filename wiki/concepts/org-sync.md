@@ -9,7 +9,7 @@ related_files:
   - crates/holon-orgmode/src/parser.rs
   - crates/holon-orgmode/src/org_renderer.rs
   - crates/holon-orgmode/src/traits.rs
-  - docs/ORG_SYNTAX.md
+  - docs/Reference/ORG_SYNTAX.md
 ---
 
 # Org-Mode Bidirectional Sync
@@ -61,7 +61,7 @@ On file change:
 
 ## Org File Format Conventions
 
-From `docs/ORG_SYNTAX.md`:
+From `docs/Reference/ORG_SYNTAX.md`:
 
 **Bare ID convention**: Org files store IDs WITHOUT scheme prefixes.
 - `#+PROPERTIES:ID: abc123` — not `block:abc123`

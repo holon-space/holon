@@ -109,6 +109,55 @@ pub enum TextOp {
     },
 }
 
+/// Compute the [`TextOp`]s needed to transform `old` into `new`.
+///
+/// Uses a common-prefix / common-suffix diff over **codepoints** (the unit
+/// `TextOp` positions are expressed in) to isolate the single contiguous
+/// region that changed. A mid-edit that both removes and adds text (e.g.
+/// typing over a selection, autocomplete) yields a `Delete` followed by an
+/// `Insert`, both anchored at the prefix boundary; a pure insert or pure
+/// delete yields a single op. Returns an empty `Vec` when `old == new`.
+pub fn compute_text_delta(old: &str, new: &str) -> Vec<TextOp> {
+    let old_chars: Vec<char> = old.chars().collect();
+    let new_chars: Vec<char> = new.chars().collect();
+
+    let prefix = old_chars
+        .iter()
+        .zip(new_chars.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Common suffix length, clamped so it never overlaps the prefix on the
+    // shorter string. `prefix <= min(old, new)` always holds, so this never
+    // underflows.
+    let max_suffix = old_chars.len().min(new_chars.len()) - prefix;
+    let suffix = old_chars
+        .iter()
+        .rev()
+        .zip(new_chars.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(max_suffix);
+
+    let old_mid_len = old_chars.len() - prefix - suffix;
+    let new_mid: String = new_chars[prefix..new_chars.len() - suffix].iter().collect();
+
+    let mut ops = Vec::new();
+    if old_mid_len > 0 {
+        ops.push(TextOp::Delete {
+            pos_codepoint: prefix,
+            len_codepoint: old_mid_len,
+        });
+    }
+    if !new_mid.is_empty() {
+        ops.push(TextOp::Insert {
+            pos_codepoint: prefix,
+            text: new_mid,
+        });
+    }
+    ops
+}
+
 #[derive(Clone, Debug)]
 pub struct TextDelta {
     pub ops: Vec<DeltaOp>,
@@ -292,5 +341,88 @@ mod tests {
         let mut stream = cell.remote_deltas();
         // empty stream completes immediately
         assert!(stream.next().await.is_none());
+    }
+
+    /// Apply computed ops to `old` (in codepoint space) and assert we
+    /// reconstruct `new` — the property `compute_text_delta` must hold.
+    fn apply_delta(old: &str, ops: &[TextOp]) -> String {
+        let mut chars: Vec<char> = old.chars().collect();
+        for op in ops {
+            match op {
+                TextOp::Delete {
+                    pos_codepoint,
+                    len_codepoint,
+                } => {
+                    chars.drain(*pos_codepoint..*pos_codepoint + *len_codepoint);
+                }
+                TextOp::Insert {
+                    pos_codepoint,
+                    text,
+                } => {
+                    chars.splice(*pos_codepoint..*pos_codepoint, text.chars());
+                }
+            }
+        }
+        chars.into_iter().collect()
+    }
+
+    fn check_delta(old: &str, new: &str) {
+        let ops = compute_text_delta(old, new);
+        assert_eq!(
+            apply_delta(old, &ops),
+            new,
+            "old={old:?} new={new:?} ops={ops:?}"
+        );
+    }
+
+    #[test]
+    fn delta_insert_only() {
+        check_delta("abc", "abXc");
+        check_delta("", "hello");
+        check_delta("abc", "abcdef");
+        check_delta("abc", "Xabc");
+    }
+
+    #[test]
+    fn delta_delete_only() {
+        check_delta("abXc", "abc");
+        check_delta("hello", "");
+        check_delta("abcdef", "abc");
+        check_delta("Xabc", "abc");
+    }
+
+    #[test]
+    fn delta_replace_in_middle() {
+        check_delta("abcdef", "abXYZef");
+        check_delta("hello world", "hello there");
+        // A replace yields both a Delete and an Insert.
+        let ops = compute_text_delta("abcdef", "abXYZef");
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], TextOp::Delete { .. }));
+        assert!(matches!(ops[1], TextOp::Insert { .. }));
+    }
+
+    #[test]
+    fn delta_overlapping_prefix_and_suffix() {
+        // The crash case: prefix and suffix regions would overlap.
+        check_delta("aaa", "aa");
+        check_delta("aa", "aaa");
+        check_delta("ababab", "abab");
+        check_delta("xxxx", "xx");
+    }
+
+    #[test]
+    fn delta_empty_and_identical() {
+        assert!(compute_text_delta("same", "same").is_empty());
+        check_delta("", "");
+    }
+
+    #[test]
+    fn delta_multibyte_and_emoji() {
+        check_delta("café", "cafés");
+        check_delta("héllo", "hllo");
+        check_delta("a😀b", "a😀😀b");
+        check_delta("foo😀bar", "foobar");
+        check_delta("naïve", "native");
     }
 }

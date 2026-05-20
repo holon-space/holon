@@ -124,6 +124,74 @@ impl NormalizedDocument {
             blocks: normalized_blocks,
         }
     }
+
+    /// Build a normalized document from a [`BlockSnapshot`] capture — the shape
+    /// every [`BlockQuerySource`] produces. This is the bridge for round-trip
+    /// PBTs that read a backend through `BlockQuerySource::snapshot()` (Turso's
+    /// CDC mirrors, a Loro reader, an in-memory reference) and compare it,
+    /// field-for-field and id-keyed, against the generated blocks.
+    ///
+    /// [`BlockSnapshot`]: holon_core::storage::BlockSnapshot
+    /// [`BlockQuerySource`]: holon_core::storage::BlockQuerySource
+    pub fn from_block_snapshot(
+        title: Option<String>,
+        snapshot: &holon_core::storage::BlockSnapshot,
+    ) -> Self {
+        let blocks: Vec<Block> = snapshot.iter_blocks().cloned().collect();
+        Self::from_blocks(title, &blocks)
+    }
+}
+
+/// Build a reference [`BlockSnapshot`] from generated blocks (in their
+/// document/`sequence` order) plus focus-roots, for `reference == actual`
+/// comparison against a backend's `BlockQuerySource::snapshot()`.
+///
+/// [`BlockSnapshot`]: holon_core::storage::BlockSnapshot
+pub fn reference_block_snapshot(
+    blocks: &[Block],
+    focus_roots: Vec<holon_core::storage::FocusRoot>,
+) -> holon_core::storage::BlockSnapshot {
+    holon_core::storage::BlockSnapshot::from_ordered(blocks.iter().cloned(), focus_roots)
+}
+
+/// Assert that every parent's children appear in the same order in `actual`
+/// (a backend capture) as in the generated `blocks` (document order).
+///
+/// `NormalizedDocument` equality is id-keyed and order-independent — it locks
+/// *fields*. This locks *sibling order*: for each parent, the sequence of child
+/// ids `actual.children_ordered(parent)` must equal the order the generator
+/// emitted them.
+pub fn assert_sibling_order_matches(
+    blocks: &[Block],
+    actual: &holon_core::storage::BlockSnapshot,
+    context: &str,
+) -> Result<(), TestCaseError> {
+    use holon_core::storage::BlockQuery;
+
+    // Expected per-parent child order from the generated (document-order) blocks.
+    let mut expected_children: BTreeMap<EntityUri, Vec<EntityUri>> = BTreeMap::new();
+    for b in blocks {
+        expected_children
+            .entry(b.parent_id.clone())
+            .or_default()
+            .push(b.id.clone());
+    }
+
+    for (parent, expected_ids) in &expected_children {
+        let actual_ids: Vec<EntityUri> = actual
+            .children_ordered(parent)
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        prop_assert_eq!(
+            expected_ids,
+            &actual_ids,
+            "[{}] sibling order under parent '{}'",
+            context,
+            parent.as_str()
+        );
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -564,7 +632,7 @@ pub fn assert_normalized_docs_equal(
                     .into(),
                 )
             })?;
-
+        // TODO: Can we compare the entire struct?
         prop_assert_eq!(
             &exp.content_type,
             &act.content_type,
@@ -655,9 +723,7 @@ pub fn assert_normalized_docs_equal(
     Ok(())
 }
 
-// ============================================================================
 // Helpers
-// ============================================================================
 
 /// Recursively collect explicit :ID: values from headline specs.
 pub fn collect_explicit_ids(headline: &HeadlineSpec) -> Vec<String> {

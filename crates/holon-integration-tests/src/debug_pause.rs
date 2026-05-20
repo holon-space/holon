@@ -40,7 +40,11 @@ pub fn pause_enabled() -> bool {
 
 /// Pause duration. Returns `None` when the master switch is off.
 pub fn pause_seconds() -> Option<u64> {
-    std::env::var("PBT_PAUSE_SECONDS").ok()?.parse::<u64>().ok()
+    let raw = std::env::var("PBT_PAUSE_SECONDS").ok()?;
+    Some(
+        raw.parse::<u64>()
+            .expect("PBT_PAUSE_SECONDS must be a non-negative integer (seconds)"),
+    )
 }
 
 fn sleep_with_banner(header: &str, body: &str) {

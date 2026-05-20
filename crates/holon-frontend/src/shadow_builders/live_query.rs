@@ -6,7 +6,9 @@ holon_macros::widget_builder! {
         match shared_live_query_build(&ba) {
             Ok(result) => {
                 let mut __props = std::collections::HashMap::new();
-                __props.insert("compiled_sql".to_string(), Value::String(result.compiled_sql));
+                __props.insert("query".to_string(), Value::String(result.query));
+                __props.insert("query_lang".to_string(),
+                    Value::String(result.query_lang.to_string()));
                 if let Some(ref ctx_id) = result.query_context_id {
                     __props.insert("query_context_id".to_string(), Value::String(ctx_id.clone()));
                 }

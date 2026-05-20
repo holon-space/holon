@@ -9,14 +9,15 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::api::backend_engine::{BackendEngine, QueryContext};
+use crate::api::backend_engine::BackendEngine;
 use crate::storage::turso::RowChangeStream;
 use crate::storage::types::StorageEntity;
+use holon_api::QueryContext;
 use holon_api::{EntityName, EntityUri, OperationDescriptor, QueryLanguage, Value};
 
 /// Result of a query execution, including timing.
 pub struct QueryResult {
-    pub rows: Vec<HashMap<String, Value>>,
+    pub rows: Vec<holon_api::StorageEntity>,
     pub duration: std::time::Duration,
 }
 

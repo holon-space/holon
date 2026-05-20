@@ -88,7 +88,7 @@ node.get_meta().insert("name", "my-new-page");
 
 **Eliminated:** `document` table, `EntityUri` scheme switching (`block:`/`doc:`/`holon-doc://`), `doc_uri_map`, alias registration, `is_document_uri()` checks.
 
-**Org sync:** OrgSyncController walks the tree. When it encounters `is_document: true`, it starts a new `.org` file. Children become headings. Nested documents create directory structure.
+**Org sync:** FileSyncController walks the tree. When it encounters `is_document: true`, it starts a new `.org` file. Children become headings. Nested documents create directory structure.
 
 ## Collaboration Model
 

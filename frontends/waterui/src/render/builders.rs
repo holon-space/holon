@@ -316,7 +316,13 @@ fn build_live_query(args: &ResolvedArgs, ctx: &RenderContext) -> AnyView {
     };
 
     let query = if language != QueryLanguage::HolonPrql {
-        match ctx.session.engine().compile_to_sql(&query, language) {
+        let compiled = match ctx.session.query_engine() {
+            Some(qe) => qe.compile_to_sql(&query, language),
+            None => Err(anyhow::anyhow!(
+                "query requires the Turso query engine, which is not wired in this (no-Turso) session"
+            )),
+        };
+        match compiled {
             Ok(sql) => sql,
             Err(e) => {
                 return AnyView::new(
@@ -418,13 +424,28 @@ fn render_entity_by_id(block_id: &str, ctx: &RenderContext) -> AnyView {
     let bid = block_id.to_string();
 
     let result = std::thread::scope(|s| {
-        s.spawn(|| handle.block_on(session.engine().blocks().render_entity(&bid, &None)))
-            .join()
-            .unwrap()
+        s.spawn(|| {
+            handle.block_on(async {
+                let mut watch = session
+                    // ALLOW(entity_uri_from_raw): render-spec build_live_block(block_id:&str) node value
+                    .watch_ui(&holon_api::EntityUri::from_raw(&bid))
+                    .await?;
+                loop {
+                    let event = watch.recv().await.ok_or_else(|| {
+                        anyhow::anyhow!("watch_ui stream closed before Structure event")
+                    })?;
+                    if let holon_api::UiEvent::Structure { render_expr, .. } = event {
+                        return Ok::<RenderExpr, anyhow::Error>(render_expr);
+                    }
+                }
+            })
+        })
+        .join()
+        .unwrap()
     });
 
     match result {
-        Ok((render_expr, _stream)) => {
+        Ok(render_expr) => {
             let child_ctx = deeper.with_data_rows(vec![]);
             interpret(&render_expr, &child_ctx)
         }
@@ -463,6 +484,7 @@ fn build_prql_query(prql: String, context_id: Option<String>, ctx: &RenderContex
     }
 
     let query_context = context_id.map(|id| {
+        // ALLOW(entity_uri_from_raw): render-spec live_query context_id arg
         let uri = holon_api::EntityUri::from_raw(&id);
         holon_frontend::QueryContext {
             current_block_id: Some(uri.clone()),
@@ -472,13 +494,11 @@ fn build_prql_query(prql: String, context_id: Option<String>, ctx: &RenderContex
         }
     });
 
-    let sql = match ctx
-        .session
-        .engine()
-        .compile_to_sql(&prql, QueryLanguage::HolonPrql)
-    {
-        Ok(sql) => sql,
-        Err(_) => prql.clone(),
+    let sql = match ctx.session.query_engine() {
+        Some(qe) => qe
+            .compile_to_sql(&prql, QueryLanguage::HolonPrql)
+            .unwrap_or_else(|_| prql.clone()),
+        None => prql.clone(),
     };
 
     let session = ctx.session.clone();

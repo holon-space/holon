@@ -17,7 +17,6 @@ use std::sync::Arc;
 use holon_integration_tests::pbt::layout_bridge::SutClickAdapter;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
 use holon_integration_tests::pbt::transition_dispatch::SutHandle;
-use holon_integration_tests::pbt::types::TestVariant;
 use holon_layout_testing::{LayoutRef, LayoutRefState, LayoutSut};
 use holon_pbt_core::{SwitchViewMode, TransitionImpl};
 
@@ -55,18 +54,22 @@ async fn _shared_apply_drives_sut_handle<H: SutHandle>(
 #[test]
 fn default_layout_surfaces_two_drawer_handles_after_start_app() {
     let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
-    let mut state = ReferenceState::new(TestVariant::full(), interp);
+    let mut state = ReferenceState::new(holon_pbt_core::Wiring::full(), interp);
 
     assert!(
         state.drawer_handles().is_empty(),
         "pre-startup: no drawers rendered yet"
     );
 
-    state.app_started = true;
+    state.action.app_started = true;
     state
+        .ui
+        .tab
         .drawer_open
         .insert("block:default-left-sidebar".to_string(), true);
     state
+        .ui
+        .tab
         .drawer_open
         .insert("block:default-right-sidebar".to_string(), true);
 

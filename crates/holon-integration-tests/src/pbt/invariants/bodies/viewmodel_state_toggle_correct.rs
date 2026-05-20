@@ -1,20 +1,20 @@
-//! Phase 7 — `inv-viewmodel-state-toggle-correct` (FUNCTIONAL).
+//! `inv-viewmodel-state-toggle-correct`.
 //!
-//! Body originally inline at `sut.rs:5191-5271`. Now expressed against
-//! the frontend-agnostic `WidgetSnapshot` IR so it runs in any slice
-//! whose SUT implements `SutRenderer` — wide PBT today, hypothetical
-//! Phase 9 in-memory + GPUI slice tomorrow.
+//! Expressed against the frontend-agnostic `WidgetSnapshot` IR so it runs in
+//! any slice whose SUT implements `SutRenderer`.
 //!
 //! Asserts, for every `state_toggle` widget in the snapshot whose
 //! `entity_id` matches a block in the reference model:
 //! - `props["field"]` == "task_state"
 //! - `props["current"]` matches the reference block's task_state
+//! - `props["label"]` == `state_display(current).0` (displayed label
+//!   matches the state-display of the current value)
 //! - For task blocks (those with a non-empty task_state): a
 //!   `set_field:task_state:` operation is bound
 //! - States list is non-empty for task blocks
 
 use holon_pbt_core::capabilities::{EntityUri, RefBlockTree, RefTaskState, SutRenderer};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelStateToggleCorrect;
 
@@ -30,10 +30,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
@@ -59,8 +55,7 @@ where
                 .expect("StateToggle entity_id must be a valid EntityUri");
 
             // Skip widgets for blocks not in the ref model (transient
-            // pre-merge peer rows, etc.). Inline check at sut.rs:5220
-            // uses the same gate.
+            // pre-merge peer rows, etc.).
             if ref_.block_content(&cap_id).is_none() {
                 continue;
             }
@@ -72,6 +67,20 @@ where
                 return InvariantResult::Fail(format!(
                     "[inv-viewmodel-state-toggle-correct] StateToggle current '{current}' != \
                      reference '{expected_state}' for block {block_id}"
+                ));
+            }
+
+            // Displayed label must match the state-display of the current
+            // value: `let (expected_label, _) = state_display(current); label
+            // == expected_label`. Applies to all ref blocks (task or not).
+            // The label is carried in `props["label"]`, populated by
+            // `view_model_to_snapshot` from `ViewKind::StateToggle.label`.
+            let label = node.props.get("label").map(String::as_str).unwrap_or("");
+            let (expected_label, _) = holon_api::render_eval::state_display(current);
+            if label != expected_label {
+                return InvariantResult::Fail(format!(
+                    "[inv-viewmodel-state-toggle-correct] StateToggle label '{label}' != \
+                     expected '{expected_label}' for block {block_id}"
                 ));
             }
 

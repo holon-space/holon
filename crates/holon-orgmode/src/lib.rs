@@ -17,6 +17,7 @@
 // Format modules — re-exported from holon-org-format for backward compat.
 // Internal code can use `crate::models::`, `crate::parser::`, etc. as before.
 pub use holon_org_format::block_diff;
+pub use holon_org_format::inline_marks;
 pub use holon_org_format::link_parser;
 pub use holon_org_format::models;
 pub use holon_org_format::org_renderer;
@@ -28,11 +29,9 @@ pub mod block_params;
 pub mod di;
 pub mod file_format;
 pub mod file_io;
-pub mod file_utils;
-pub mod file_watcher;
 #[cfg(feature = "di")]
-pub mod org_sync_controller;
-pub mod orgmode_event_adapter;
+pub mod file_sync_controller;
+pub mod file_watcher;
 pub mod orgmode_sync_provider;
 pub mod traits;
 
@@ -63,7 +62,6 @@ pub use file_format::OrgFormatAdapter;
 pub use file_watcher::OrgFileWatcher;
 pub use holon_filesystem::directory::DirectoryDataSource;
 pub use org_renderer::OrgRenderer;
-pub use orgmode_event_adapter::OrgModeEventAdapter;
 pub use orgmode_sync_provider::OrgModeSyncProvider;
 pub use parser::{parse_org_file, ParseResult};
 

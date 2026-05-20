@@ -1,6 +1,5 @@
 //! `inv-org-render-fixed-point`.
 //!
-//! Body derived from `sut.rs:4288–4305` (the inline version this replaces).
 //! Re-renders every tracked org file from the current SQL state and asserts
 //! the output equals the bytes already on disk — guards against the
 //! echo-suppression loop spin where `render(SQL) != disk` would force
@@ -18,7 +17,7 @@
 //! `(path, disk, rendered)` triples.
 
 use holon_pbt_core::capabilities::SutOrgRender;
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvOrgRenderFixedPoint;
 
@@ -33,10 +32,6 @@ where
 {
     fn id(&self) -> InvariantId {
         Self::ID
-    }
-
-    fn mode(&self) -> RunMode {
-        RunMode::Strict
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {

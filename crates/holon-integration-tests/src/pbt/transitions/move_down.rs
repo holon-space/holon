@@ -7,7 +7,8 @@
 //! `transition_budgets.rs:298-302` (expected SQL).
 
 use holon_pbt_core::capabilities::{
-    CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefLifecycle, SutBlockTreeWrite,
+    CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirrorMut, RefFocus, RefFocusMut,
+    RefLifecycle, SutBlockTreeWrite,
 };
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
@@ -38,6 +39,14 @@ pub fn move_down_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
     let mut checks: Vec<Validated<(), Reason>> = vec![
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
+        // Block-interaction transitions need the block to render as an
+        // interactive widget (ops/draggable) reactively over the navigated
+        // focus. Only the default layout does; custom `index.org` query
+        // layouts don't (see RefLifecycle::renders_block_interactively).
+        check(
+            state.renders_block_interactively(block_id),
+            Reason::BlocksNotInteractiveUnderLayout,
+        ),
     ];
 
     let focus = state.current_focus(CapRegion::Main);
@@ -92,10 +101,14 @@ pub fn move_down_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
     })
 }
 
-pub fn move_down_apply_to_ref<R: RefBlockTree + RefBlockTreeMut>(
+pub fn move_down_apply_to_ref<
+    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut,
+>(
     block_id: &EntityUri,
     state: &mut R,
 ) {
+    // Model the chord-dispatch click (see mod.rs::model_chord_click_focus).
+    super::model_chord_click_focus(block_id, state);
     state.push_undo_snapshot();
     let next_id = state
         .next_sibling(block_id)
@@ -105,21 +118,23 @@ pub fn move_down_apply_to_ref<R: RefBlockTree + RefBlockTreeMut>(
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl TransitionFactory<ReferenceState> for MoveDown {
+impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for MoveDown {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         move_down_weighted_generator(state)
     }
 }
 
-impl TransitionRef<ReferenceState> for MoveDown {
+impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut + RefLifecycle>
+    TransitionRef<R> for MoveDown
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         move_down_preconditions(&self.block_id, state)
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         move_down_apply_to_ref(&self.block_id, state);
     }
 }
@@ -136,9 +151,9 @@ impl crate::pbt::transition_budgets::SqlBudget for MoveDown {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.active_watches.len(),
-            state.block_state.blocks.len(),
-            state.documents.len(),
+            state.mcp.active_watches.len(),
+            state.domain.block_state.blocks.len(),
+            state.files.documents.len(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

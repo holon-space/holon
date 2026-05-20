@@ -12,6 +12,7 @@
 //! `holon-core::traits` — chord ops are purely positional.
 
 use async_trait::async_trait;
+use holon_api::capability::Consolidator;
 use holon_api::{BlockContent, EntityUri, Tags};
 
 use crate::traits::Result;
@@ -32,7 +33,38 @@ use crate::traits::Result;
 pub trait BlockOrdering: Send + Sync {
     /// Place `uri` under `parent_id` immediately after `after_id` (or
     /// first when `None`).
-    async fn place(&self, uri: &EntityUri, parent_id: &str, after_id: Option<&str>) -> Result<()>;
+    async fn place(
+        &self,
+        uri: &EntityUri,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+    ) -> Result<()>;
+
+    /// Realize the **total** sibling order of `parent_id` as exactly
+    /// `ordered_ids` (already children of `parent_id`, in the intended
+    /// document order). The order owner mints a fresh, gap-free key
+    /// sequence so every sink stores it verbatim — closing the
+    /// projection-totality gap that incremental [`place`](Self::place)
+    /// leaves when an owner is handed a *full reorder* (the org re-ingest
+    /// case: the file's line order is a complete order, and one-at-a-time
+    /// `after_sibling` inserts against a mutating store don't reliably
+    /// converge to it). See `Replication.md` §5/§11 (one owner, fractional
+    /// index, projected verbatim).
+    ///
+    /// Default: incremental `place` of each id after its predecessor —
+    /// correct for tree-backed owners (Loro) where `place` is idempotent
+    /// and reads live neighbors. The SQL (no-Loro) order owner overrides
+    /// this with a single positional `gen_n_keys` assignment, which is
+    /// total by construction. Does not re-parent beyond setting
+    /// `parent_id` to `parent_id` (the position write `place` already does).
+    async fn place_all(&self, parent_id: &EntityUri, ordered_ids: &[EntityUri]) -> Result<()> {
+        let mut prev: Option<&EntityUri> = None;
+        for id in ordered_ids {
+            self.place(id, parent_id, prev).await?;
+            prev = Some(id);
+        }
+        Ok(())
+    }
 
     /// Compute the sort_key value for a NEW block being created under
     /// `parent_id`, immediately after `after_id`. In Loro mode this
@@ -40,25 +72,29 @@ pub trait BlockOrdering: Send + Sync {
     /// `Event::position_after_block_id`); in SqlOnly mode this returns
     /// the `gen_key_between` value to persist verbatim in
     /// `block.sort_key`.
-    async fn new_child_anchor(&self, parent_id: &str, after_id: Option<&str>) -> Result<String>;
+    async fn new_child_anchor(
+        &self,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+    ) -> Result<String>;
 
     /// Block id immediately preceding `id` among its siblings (same
     /// parent, strictly-lower sort_key, maximal under that constraint).
     /// `None` when `id` is the first child or has no block parent.
-    async fn prev_sibling(&self, id: &str) -> Result<Option<String>>;
+    async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>>;
 
     /// Block id immediately following `id` among its siblings (same
     /// parent, strictly-higher sort_key, minimal under that constraint).
     /// `None` when `id` is the last child or has no block parent.
-    async fn next_sibling(&self, id: &str) -> Result<Option<String>>;
+    async fn next_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>>;
 
     /// Block id of the first child of `parent_id` (lowest sort_key).
     /// `None` when `parent_id` has no children.
-    async fn first_child(&self, parent_id: &str) -> Result<Option<String>>;
+    async fn first_child(&self, parent_id: &EntityUri) -> Result<Option<EntityUri>>;
 
     /// Block id of the last child of `parent_id` (highest sort_key).
     /// `None` when `parent_id` has no children.
-    async fn last_child(&self, parent_id: &str) -> Result<Option<String>>;
+    async fn last_child(&self, parent_id: &EntityUri) -> Result<Option<EntityUri>>;
 
     /// Synchronously create `new_id` in the authoritative tree as a child of
     /// `parent_id`, positioned after `after_id` (or first when `None`).
@@ -93,15 +129,43 @@ pub trait BlockOrdering: Send + Sync {
         Ok(false)
     }
 
-    /// True when block writes are Loro-authoritative — i.e. the outbound
-    /// projector (`LoroSyncController::on_loro_changed`) is the sole writer of
-    /// the SQL `block_raw` row. False in SqlOnly mode, where the org reconciler
-    /// must create rows directly via the command bus. Org ingestion uses this
-    /// to skip the redundant command-bus block *create* in Loro mode: the
-    /// block lands in Loro via `create_in_tree` and the projector writes the
-    /// row, eliminating the dual-writer race on `sort_key`/`properties`.
-    fn is_loro_backed(&self) -> bool {
+    /// Whether `id` has a node in the separate authoritative tree.
+    /// `Ok(None)` (default) when there is no separate tree — SqlOnly mode,
+    /// or a backing where the store IS the tree — so the question doesn't
+    /// apply. `Ok(Some(false))` is the pre-Loro-vault upgrade signal: the
+    /// block exists in the SQL store but the Loro tree never adopted it
+    /// (no seed pass ran when `[loro] enabled` flipped on). The org-scan
+    /// reconciler uses this to re-seed such blocks via
+    /// [`create_in_tree`](Self::create_in_tree).
+    async fn in_tree(&self, _: &EntityUri) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// True when a separate upstream consolidator owns block writes — i.e. the
+    /// outbound projector (`LoroSyncController::on_loro_changed`) is the sole
+    /// writer of the SQL `block_raw` row. False in the direct-store mode, where
+    /// the org reconciler must create rows directly via the command bus. Org
+    /// ingestion uses this to skip the redundant command-bus block *create*
+    /// when projected: the block lands upstream via `create_in_tree` and the
+    /// projector writes the row, eliminating the dual-writer race on
+    /// `sort_key`/`properties`. (Loro is the only upstream consolidator today.)
+    fn has_upstream_consolidator(&self) -> bool {
         false
+    }
+
+    /// Which consolidator owns sibling order under the active session
+    /// capability profile (`docs/Architecture/Replication.md` §2). This is the
+    /// capability-typed successor to the raw
+    /// [`has_upstream_consolidator`](Self::has_upstream_consolidator) boolean:
+    /// order-decision call sites should branch on this, not on the bool, so
+    /// widening the capability detection (D slice 2 — the full axes table) is a
+    /// one-place change.
+    fn consolidator(&self) -> Consolidator {
+        if self.has_upstream_consolidator() {
+            Consolidator::Upstream
+        } else {
+            Consolidator::Store
+        }
     }
 
     /// Apply a block **update** intent against the authoritative tree.
@@ -119,10 +183,7 @@ pub trait BlockOrdering: Send + Sync {
     ///
     /// This is the single org→block write seam for mutations — there is no
     /// command bus behind it.
-    async fn update_in_tree(
-        &self,
-        params: std::collections::HashMap<String, holon_api::Value>,
-    ) -> Result<()>;
+    async fn update_in_tree(&self, params: holon_api::StorageEntity) -> Result<()>;
 
     /// Apply a block **delete** intent against the authoritative tree.
     ///
@@ -130,10 +191,7 @@ pub trait BlockOrdering: Send + Sync {
     /// SQL `prepare_delete` can skip the recursive document walk). Loro-backed
     /// impls delete from Loro (the outbound projector emits the SQL delete);
     /// SqlOnly impls delete the SQL row directly.
-    async fn delete_in_tree(
-        &self,
-        params: std::collections::HashMap<String, holon_api::Value>,
-    ) -> Result<()>;
+    async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> Result<()>;
 
     /// All children of `parent_id` in positional order (low → high
     /// sort_key in SqlOnly mode; Loro tree order in Loro mode).
@@ -143,7 +201,7 @@ pub trait BlockOrdering: Send + Sync {
     /// projects from. Use it as the live-side ground truth in
     /// assertions instead of computing order from a `Block`'s
     /// `sort_key` / `sequence` field — those are encoding-specific.
-    async fn children(&self, parent_id: &str) -> Result<Vec<String>>;
+    async fn children(&self, parent_id: &EntityUri) -> Result<Vec<EntityUri>>;
 
     /// Project the authoritative order key (Loro fractional index) to the
     /// SQL `sort_key` sink for `ids`. A block created but never repositioned
@@ -152,7 +210,7 @@ pub trait BlockOrdering: Send + Sync {
     /// siblings (real fi). The org-scan reconciler calls this after its place
     /// loop so freshly-created-but-unmoved blocks get a real `sort_key`.
     /// Default + SqlOnly: no-op (SQL itself owns `sort_key` there).
-    async fn project_sort_keys(&self, _: &[&str]) -> Result<()> {
+    async fn project_sort_keys(&self, _: &[EntityUri]) -> Result<()> {
         Ok(())
     }
 }

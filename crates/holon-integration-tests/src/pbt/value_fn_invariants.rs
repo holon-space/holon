@@ -3,7 +3,7 @@
 //! Walks a `ReactiveViewModel` and surfaces every `Reactive` node that is
 //! backed by a live `ReactiveRowProvider` — the providers produced by
 //! value functions like `focus_chain()`, `ops_of(uri)`, `chain_ops(level)`
-//! (or by data-bound `ReactiveQueryResults`). The downstream invariants
+//! (or by data-bound `ReactiveRenderedRows`). The downstream invariants
 //! use the collected `ProviderEntry` list to check identity stability,
 //! arg variance, and flicker resistance.
 

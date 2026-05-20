@@ -26,3 +26,26 @@ pub(crate) fn hashed_id(s: &str) -> ElementId {
     s.hash(&mut hasher);
     ElementId::Integer(hasher.finish())
 }
+
+/// Wrap `child` in a left-click-to-focus `div`. Clicking sets the in-memory
+/// focus authority directly (ADR 0010: editor focus is pure in-memory UI
+/// state) — the focused block's editor mounts and grabs window focus off the
+/// `focused_block` signal, with no `editor_cursor` write or CDC round-trip.
+///
+/// Shared by the read-only render paths (`rendered_text` builder,
+/// `render_entity_view`); each caller adds its own outer wrapping (e.g. bounds
+/// tracking). The caret defaults to end-of-text on mount ("add to this block").
+pub(crate) fn click_to_focus(
+    el_id: &str,
+    child: AnyElement,
+    block: holon_api::EntityUri,
+    services: std::sync::Arc<dyn holon_frontend::reactive::BuilderServices>,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(hashed_id(el_id))
+        .cursor_pointer()
+        .child(child)
+        .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
+            services.set_focus(Some(block.clone()));
+        })
+}

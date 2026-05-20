@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
+// TODO: Why is this in holon-frontend? Memory-monitoring is not frontend-specific.
 
 static MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 

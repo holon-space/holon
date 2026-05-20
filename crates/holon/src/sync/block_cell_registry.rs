@@ -88,26 +88,6 @@ impl BlockCellRegistry {
         }
     }
 
-    /// Thin wrapper over the shared [`find_position_for_sort_key_hint`]
-    /// helper that pulls a tree from the registry's `LoroDoc` and runs the
-    /// sibling scan inline (no async lock — the write_field call site
-    /// follows up with `update_block_position`, which takes its own lock).
-    fn compute_position_for_sort_key(
-        &self,
-        doc: &Arc<LoroDoc>,
-        target_bare_id: &str,
-        new_key: &str,
-    ) -> Result<(String, Option<String>)> {
-        let tree = doc.get_tree(TREE_NAME);
-        crate::api::loro_backend::find_position_for_sort_key_hint(&tree, target_bare_id, new_key)
-            .ok_or_else(|| {
-                anyhow!(
-                    "compute_position_for_sort_key: target {target_bare_id} \
-                     not in Loro tree"
-                )
-            })
-    }
-
     fn resolve_loro_text_container(&self, block_id: &str) -> Result<(Arc<LoroDoc>, LoroText)> {
         let doc = match &self.backing_source {
             BackingSource::Loro { doc, .. } => doc.clone(),
@@ -138,10 +118,25 @@ impl BlockCellRegistry {
                 _ => false,
             };
             if stable_id_matches {
+                // Source blocks keep their content in the SOURCE_CODE
+                // container (`write_content_to_meta`), text blocks in
+                // CONTENT_RAW. Binding CONTENT_RAW unconditionally silently
+                // forked source-block content: `set_field("content")` (org
+                // re-ingest of an index.org swap) wrote a container that
+                // `read_content_from_meta` never reads — the update was lost
+                // and Loro kept serving the stale source text.
+                let content_key = match meta.get(crate::api::loro_backend::CONTENT_TYPE) {
+                    Some(loro::ValueOrContainer::Value(v))
+                        if v.as_string().is_some_and(|s| s.as_str() == "source") =>
+                    {
+                        crate::api::loro_backend::SOURCE_CODE
+                    }
+                    _ => CONTENT_RAW,
+                };
                 let text = meta
-                    .get_or_create_container(CONTENT_RAW, LoroText::new())
+                    .get_or_create_container(content_key, LoroText::new())
                     .map_err(|e| {
-                        anyhow!("get_or_create_container({CONTENT_RAW}) for {block_id}: {e:?}")
+                        anyhow!("get_or_create_container({content_key}) for {block_id}: {e:?}")
                     })?;
                 return Ok((doc, text));
             }
@@ -180,13 +175,13 @@ impl BlockCellRegistry {
         // CDC event) reflects them back into Loro where applicable.
         // - `id`: the row's primary key, never reassigned
         // - `depth`: derived from the tree structure on snapshot
-        // - `content_type`, `source_language`, `source_name`: stored in
-        //   Loro but written by `update_block_text` / chord-time content
-        //   create paths, not by `set_field` callers
-        if matches!(
-            field,
-            "id" | "depth" | "content_type" | "source_language" | "source_name"
-        ) {
+        // - `content_type`, `source_name`: stored in Loro but written by
+        //   `update_block_text` / chord-time content create paths, not by
+        //   `set_field` callers
+        // (`source_language` IS handled below: the org re-ingest of an
+        // `index.org` swap legitimately changes a src block's language via
+        // `set_field`, and an SQL-direct write would fork the authority.)
+        if matches!(field, "id" | "depth" | "content_type" | "source_name") {
             return Ok(false);
         }
 
@@ -196,9 +191,45 @@ impl BlockCellRegistry {
                 let s = value.as_string().map(String::from).ok_or_else(|| {
                     anyhow!("write_field(content): expected String, got {value:?}")
                 })?;
+                // A block with no Loro tree node has its content authority in
+                // SQL (unseeded vault, SQL-origin block the inbound consumer
+                // hasn't mirrored). Fall through to the direct SQL write the
+                // `set_field` contract documents instead of erroring — the
+                // inbound consumer reflects the SQL CDC event into Loro when
+                // the block eventually exists there. ALLOW(fallback):
+                // disclosed degraded mode, same rationale as `create_entity`'s
+                // anchor guard.
+                if backend.resolve_to_tree_id(uri.id()).await.is_none() {
+                    tracing::warn!(
+                        "write_field(content) for {uri}: no Loro tree node — \
+                         writing through the SQL path (Loro authority missing or \
+                         unseeded for this block)"
+                    );
+                    return Ok(false);
+                }
                 let cell =
                     (self as &dyn EntityCellRegistry).live_field::<String>(uri, "content")?;
-                cell.set(s).await?;
+                let debug = std::env::var("HOLON_CELL_WRITE_DEBUG").is_ok();
+                let before = debug.then(|| cell.current());
+                cell.set(s.clone()).await?;
+                if debug {
+                    tracing::warn!(
+                        "[CELL_WRITE] content {uri}: {:?} -> {:?} (now {:?})",
+                        before,
+                        s,
+                        cell.current()
+                    );
+                }
+                Ok(true)
+            }
+            "source_language" => {
+                let s = value.as_string().map(String::from).ok_or_else(|| {
+                    anyhow!("write_field(source_language): expected String, got {value:?}")
+                })?;
+                backend
+                    .set_source_language(&id, &s)
+                    .await
+                    .map_err(|e| anyhow!("set_source_language({id}): {e:#}"))?;
                 Ok(true)
             }
             "parent_id" => {
@@ -233,30 +264,21 @@ impl BlockCellRegistry {
                 Ok(true)
             }
             "sort_key" => {
-                // Phase 3.4: a sort_key write is interpreted as a positional
-                // intent — "place me where this fractional-index would sort
-                // among my siblings". We scan the target's current siblings,
-                // find the largest fractional_index strictly less than the
-                // incoming value, and call `tree.mov_after(target, that)`
-                // (or `mov_to(parent, 0)` if no sibling is smaller). Loro
-                // generates the actual fractional index for the resulting
-                // position; `read_block_from_tree` projects it as
-                // `Block.sort_key`. The caller's computed key is discarded
-                // — it carried order info, not lasting value.
-                let new_key = value.as_string().map(String::from).ok_or_else(|| {
-                    anyhow!("write_field(sort_key): expected String, got {value:?}")
-                })?;
-                let doc = match &self.backing_source {
-                    BackingSource::Loro { doc, .. } => doc.clone(),
-                    BackingSource::SqlOnly => return Ok(false),
-                };
-                let (parent_id_str, predecessor_uri) =
-                    self.compute_position_for_sort_key(&doc, uri.id(), &new_key)?;
-                backend
-                    .update_block_position(&id, &parent_id_str, predecessor_uri.as_deref())
-                    .await
-                    .map_err(|e| anyhow!("update_block_position({id}): {e:#}"))?;
-                Ok(true)
+                // Sibling order is owned by `place()`/`tree.mov_after` and
+                // projected to SQL from the Loro fractional index — a block's
+                // `sort_key` is never written through `set_field`. The org sync
+                // path explicitly omits it (`build_block_params`), and
+                // `project_sort_keys` writes the projected key straight to SQL
+                // (bypassing this registry). A `set_field("sort_key")` reaching
+                // here is a bug, not a positional intent — fail loud rather than
+                // silently mis-route it to the meta `properties` map (which
+                // `read_block_from_tree` ignores in favour of the fractional
+                // index).
+                Err(anyhow!(
+                    "write_field(sort_key) is unsupported: order is owned by \
+                     place()/mov_after and projected from the fractional index; \
+                     a set_field(\"sort_key\") reached the cell registry for {id} — bug"
+                ))
             }
             "marks" => {
                 // Phase 3.2: marks go through the Peritext write path
@@ -349,6 +371,17 @@ impl EntityCellRegistry for BlockCellRegistry {
             BackingSource::Loro { backend, .. } => backend.clone(),
             BackingSource::SqlOnly => return Ok(false),
         };
+        // Synthetic SQL-only blocks (render artifacts like `<parent>::src::0` /
+        // `::render::0`) have no Loro node — their order lives only in SQL. Fall
+        // through to the SQL sort_key path (`Ok(false)`) instead of letting
+        // `update_block_position` error "Block not found", which propagated up
+        // through `update_in_tree` and aborted the org scan's update pass
+        // *before* the place loop ran — scrambling sibling order
+        // (`inv-live-children-match-ref`). Mirrors the resolve-first guard in
+        // `create_entity`.
+        if backend.resolve_to_tree_id(uri.id()).await.is_none() {
+            return Ok(false);
+        }
         backend
             .update_block_position(uri.id(), parent_id, after_id)
             .await
@@ -377,6 +410,26 @@ impl EntityCellRegistry for BlockCellRegistry {
             BackingSource::Loro { backend, .. } => backend.clone(),
             BackingSource::SqlOnly => return Ok(false),
         };
+        // The positional anchor must already be under Loro authority. When
+        // the after-block has no tree node (unseeded vault, synthetic
+        // SQL-only row), positioning through Loro is impossible — fall
+        // through to the SQL path BEFORE touching the tree. The pre-guard
+        // order matters: erroring after `create_block` poisoned the tree
+        // with placeholder roots + empty-text nodes whose "" content then
+        // shadowed the real SQL content on later reads ("Split position N
+        // exceeds content length 0"). Mirrors the resolve-first guard in
+        // `write_position`. ALLOW(fallback): disclosed degraded mode — the
+        // new block stays in the same (SQL-only) store as its anchor.
+        if let Some(after) = after_id {
+            if backend.resolve_to_tree_id(after.id()).await.is_none() {
+                tracing::warn!(
+                    "create_entity({new_id}): after-block {after} has no Loro tree node — \
+                     falling back to the SQL create path (Loro authority missing or \
+                     unseeded for this block family)"
+                );
+                return Ok(false);
+            }
+        }
         // Idempotent: if the node already exists in the tree (e.g. the org
         // initial scan calls this for a block a prior scan/seed already
         // placed), skip the create — `create_block` would mint a duplicate
@@ -426,6 +479,7 @@ impl EntityCellRegistry for BlockCellRegistry {
                 .create_placeholder_root(parent_id.id())
                 .await
                 .map_err(|e| anyhow!("create_placeholder_root({parent_id}): {e:#}"))?;
+            // ALLOW(entity_uri_from_raw): placeholder id String from backend.create_placeholder_root() (Loro adapter output)
             EntityUri::from_raw(&placeholder)
         };
         backend
@@ -447,44 +501,45 @@ impl EntityCellRegistry for BlockCellRegistry {
         }
         Ok(true)
     }
-}
 
-impl BlockCellRegistry {
-    /// True when this registry is Loro-backed (the outbound projector owns the
-    /// SQL `block_raw` row). False in SqlOnly mode.
-    pub fn is_loro_backed(&self) -> bool {
-        matches!(self.backing_source, BackingSource::Loro { .. })
-    }
-
-    /// Delete a block from the Loro tree (the authority) so the outbound
-    /// projector emits the SQL DELETE. Returns `Ok(true)` when Loro-backed
-    /// (the delete was applied, or the node was already absent — delete is
-    /// idempotent), `Ok(false)` in SqlOnly mode where the caller deletes from
-    /// SQL directly.
-    ///
-    /// Authority-first is essential: deleting only from SQL and relying on the
-    /// SQL→Loro mirror to catch up races the armed Loro→SQL projection, which
-    /// re-creates the still-present Loro node back into SQL — the block
-    /// resurrects. Deleting from Loro first makes the projection propagate the
-    /// delete the same way `create_entity` makes it propagate creates.
-    pub async fn delete_entity(&self, uri: &EntityUri) -> Result<bool> {
+    /// Authoritative block delete through `LoroBackend::delete_block`. Mirrors
+    /// [`create_entity`](EntityCellRegistry::create_entity): the block leaves
+    /// the Loro tree first and the outbound projector emits the SQL DELETE.
+    /// Drivers: the org reconciler and `join_block`'s merged-away-block
+    /// delete. SqlOnly mode returns `Ok(false)` so the caller falls back to
+    /// the direct SQL delete path. Loro mode: checks tree membership first
+    /// and returns `Ok(false)` for unseeded blocks (caller falls through to
+    /// SQL fallback — transitional; after sole-writer all blocks originate in
+    /// Loro). `delete_block` is idempotent on the tree side, so the TOCTOU
+    /// between the resolve_ check and the call is harmless.
+    async fn delete_entity(&self, uri: &EntityUri) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
             BackingSource::SqlOnly => return Ok(false),
         };
-        // `tree.delete` removes the whole subtree, so a block may already be
-        // gone (deleted as part of an ancestor's delete). Deleting an absent
-        // node is success, not an error.
-        if backend.resolve_to_tree_id(uri.as_str()).await.is_none() {
-            return Ok(true);
+        let in_tree = backend.resolve_to_tree_id(uri.id()).await.is_some();
+        if in_tree {
+            backend
+                .delete_block(uri.id())
+                .await
+                .map_err(|e| anyhow!("delete_block({uri}): {e:#}"))?;
+            self.cache.evict_uri(uri);
         }
-        backend
-            .delete_block(uri.as_str())
-            .await
-            .map_err(|e| anyhow!("delete_block({uri}): {e:#}"))?;
-        Ok(true)
+        Ok(in_tree)
     }
+}
 
+impl BlockCellRegistry {
+    /// True when this registry is backed by a Loro doc (the outbound projector
+    /// owns the SQL `block_raw` row). This is the concrete capability-detection
+    /// boundary: the composition root feeds it to
+    /// [`CapabilityProfile::detect`](holon_api::capability::CapabilityProfile::detect)
+    /// to resolve the mechanism profile. The one place "Loro" is named in the
+    /// order/consolidator axis — everything downstream branches on
+    /// `Consolidator`. False in the direct-store mode.
+    pub fn has_loro_backing(&self) -> bool {
+        matches!(self.backing_source, BackingSource::Loro { .. })
+    }
     /// Read a block's authoritative Loro fractional index — the value the
     /// outbound projector writes to SQL `sort_key`. Returns `None` in SqlOnly
     /// mode, where SQL itself owns `sort_key`. Used by the org-scan order
@@ -497,13 +552,11 @@ impl BlockCellRegistry {
             BackingSource::Loro { backend, .. } => backend.clone(),
             BackingSource::SqlOnly => return Ok(None),
         };
-        let block = backend
-            .get_block(id)
+        backend
+            .block_sort_key(id)
             .await
-            .map_err(|e| anyhow!("live_sort_key({id}): {e:#}"))?;
-        Ok(Some(block.sort_key))
+            .map_err(|e| anyhow!("live_sort_key({id}): {e:#}"))
     }
-
     /// Children of `parent_id` in authoritative Loro tree order (full-URI
     /// form, e.g. `"block:foo"`). Returns `None` in SqlOnly mode, where the
     /// SQL cache is the order authority. Used by `BlockOrdering::children`
@@ -511,11 +564,44 @@ impl BlockCellRegistry {
     /// the Loro tree via `create_in_tree` — during the initial scan the
     /// outbound projector is not running yet, so the SQL cache is empty for
     /// freshly-created blocks and a cache read would spuriously time out.
+    /// Whether `id` has a node in the authoritative Loro tree. `None` in
+    /// SqlOnly mode (no separate tree to ask). `Some(false)` is the
+    /// pre-Loro-vault upgrade signal consumed by `BlockOrdering::in_tree`.
+    pub async fn live_in_tree(&self, id: &str) -> Result<Option<bool>> {
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly => return Ok(None),
+        };
+        Ok(Some(backend.resolve_to_tree_id(id).await.is_some()))
+    }
+
     pub async fn live_children(&self, parent_id: &str) -> Result<Option<Vec<String>>> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
             BackingSource::SqlOnly => return Ok(None),
         };
+        // Unseeded-vault guard (same family as the `create_entity`
+        // after-anchor and `write_field` guards): a parent present in SQL but
+        // absent from the Loro tree is a pre-Loro vault opened without a seed
+        // pass. Loro has no opinion on that subtree's order, so answer `None`
+        // and let the SQL cache own it — ALLOW(fallback): disclosed via warn;
+        // erroring here aborted the whole OrgMode initial scan ("Cannot
+        // resolve parent_id to TreeID") and the app never started on
+        // upgraded vaults. Sentinel/no-parent parents read `tree.roots()`
+        // and need no node, so they go straight through.
+        // ALLOW(entity_uri_from_raw): parent_id &str backend API param (accepts both id formats)
+        let parent_uri = EntityUri::from_raw(parent_id);
+        if !parent_uri.is_no_parent()
+            && !parent_uri.is_sentinel()
+            && backend.resolve_to_tree_id(parent_id).await.is_none()
+        {
+            tracing::warn!(
+                parent_id,
+                "live_children: parent has no Loro tree node (unseeded vault) — \
+                 SQL cache owns this subtree's order"
+            );
+            return Ok(None);
+        }
         let kids = backend
             .list_children(parent_id)
             .await
@@ -570,6 +656,39 @@ mod tests {
         let uri = EntityUri::block("abc");
         let res = registry.as_ref().live_field::<String>(&uri, "content");
         assert!(res.is_err());
+    }
+
+    /// Splitting a block that has no Loro tree node (unseeded vault, synthetic
+    /// SQL-only row) must fall back to the SQL create path WITHOUT mutating
+    /// the tree. The pre-guard regression: `create_entity` used to mint a
+    /// placeholder parent + the new node first and only then fail on the
+    /// unresolvable after-anchor — poisoning the tree with empty-text nodes
+    /// whose "" content shadowed the real SQL content on later reads.
+    #[test]
+    fn create_entity_missing_after_anchor_falls_back_without_tree_mutation() -> Result<()> {
+        let doc = make_loro_doc_with_block("parent");
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let rt = tokio::runtime::Runtime::new()?;
+        let wrote = rt.block_on(registry.create_entity(
+            &EntityUri::block("parent"),
+            Some(&EntityUri::block("missing-after")),
+            &EntityUri::block("new-block"),
+            holon_api::BlockContent::text("x"),
+            &std::collections::HashMap::new(),
+            &Tags::default(),
+            &[],
+        ))?;
+        assert!(
+            !wrote,
+            "expected Ok(false) — the disclosed SQL route for an anchor outside Loro authority"
+        );
+        let tree = doc.get_tree(TREE_NAME);
+        assert_eq!(
+            tree.get_nodes(false).len(),
+            1,
+            "tree must be untouched — no placeholder root or new node minted"
+        );
+        Ok(())
     }
 
     #[test]

@@ -515,36 +515,14 @@ proptest! {
         );
     }
 
-    /// Simulates blocks arriving from Loro in arbitrary order.
-    /// The renderer must produce identical output regardless of input block order.
-    #[test]
-    fn test_render_order_independent(mut complete_doc in complete_document_strategy(), seed in any::<u64>()) {
-        ensure_todo_keywords_configured(&mut complete_doc);
-
-        let blocks = complete_doc.all_blocks();
-        let file_path = PathBuf::from("/test/test.org");
-        let render_canonical = OrgRenderer::render_entitys(&blocks, &file_path, &complete_doc.document.id);
-
-        // Deterministic Fisher-Yates shuffle
-        let mut shuffled = blocks.clone();
-        let len = shuffled.len();
-        let mut s = seed;
-        for i in (1..len).rev() {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let j = (s >> 33) as usize % (i + 1);
-            shuffled.swap(i, j);
-        }
-
-        let render_shuffled = OrgRenderer::render_entitys(&shuffled, &file_path, &complete_doc.document.id);
-
-        prop_assert_eq!(
-            &render_canonical,
-            &render_shuffled,
-            "\n=== CANONICAL ===\n{}\n=== SHUFFLED ===\n{}",
-            render_canonical,
-            render_shuffled,
-        );
-    }
+    // NOTE: the former `test_render_order_independent` (render(shuffled) ==
+    // render(canonical)) was retired in Phase 8 (ADR 0005). The renderer is now
+    // *order-trusting*: sibling order is the authoritative adapter's
+    // responsibility (the ordered read), no longer re-derived from a per-block
+    // `sort_key`. Order-independence is therefore no longer a property — the
+    // caller must supply blocks in sibling order. Cross-backend order agreement
+    // is covered by the `children_of`/`sorted_children` position-equality
+    // invariants in the integration-test PBT.
 
     /// Tags — including hyphenated ones (`:G1:edge-abstraction:`) — must
     /// survive a render → parse round-trip.

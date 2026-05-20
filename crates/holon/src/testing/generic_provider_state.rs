@@ -254,17 +254,18 @@ fn combine_params(
     let (first_name, first_strategy) = strategies.next().unwrap();
 
     let initial = first_strategy.prop_map({
-        let first_name = first_name.clone();
+        let first_name: Arc<str> = Arc::from(first_name);
         move |value| {
-            let mut map = HashMap::new();
+            let mut map: StorageEntity = StorageEntity::new();
             map.insert(first_name.clone(), value);
             map
         }
     });
 
     strategies.fold(initial.boxed(), |acc, (name, value_strategy)| {
+        let name: Arc<str> = Arc::from(name);
         (acc, value_strategy)
-            .prop_map(move |(mut entity, value)| {
+            .prop_map(move |(mut entity, value): (StorageEntity, Value)| {
                 entity.insert(name.clone(), value);
                 entity
             })

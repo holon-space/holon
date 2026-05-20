@@ -35,6 +35,10 @@ pub const CELL_H: f32 = 16.0;
 #[derive(Clone, Default)]
 pub struct TuiGeometry {
     inner: Arc<Mutex<RenderRegistry>>,
+    /// Woken on every [`install`](Self::install) — i.e. whenever a render
+    /// pass committed a fresh registry. Backs [`GeometryProvider::changed`]
+    /// so test wait-loops wake per frame instead of the 20 ms default tick.
+    install_notify: Arc<tokio::sync::Notify>,
 }
 
 impl TuiGeometry {
@@ -46,19 +50,30 @@ impl TuiGeometry {
     /// into the same `Arc<Mutex<_>>` (e.g. `state.last_registry` in
     /// `AppMain`).
     pub fn from_shared(inner: Arc<Mutex<RenderRegistry>>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            install_notify: Arc::new(tokio::sync::Notify::new()),
+        }
     }
 
     /// Replace the wrapped registry's contents in-place. Called by the
     /// renderer at the end of each render pass.
     pub fn install(&self, registry: RenderRegistry) {
         *self.inner.lock().unwrap() = registry;
+        self.install_notify.notify_waiters();
     }
 
     /// Borrow access to the underlying shared registry. The renderer uses this
     /// to wire `state.last_registry` and `TuiGeometry` to the same allocation.
     pub fn shared(&self) -> Arc<Mutex<RenderRegistry>> {
         self.inner.clone()
+    }
+
+    /// Lock the current registry for reading (keyboard handler, focus
+    /// reconciliation). Writers must go through [`install`](Self::install)
+    /// so `changed()` waiters wake.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, RenderRegistry> {
+        self.inner.lock().unwrap()
     }
 }
 
@@ -70,8 +85,8 @@ fn to_element_info(region: &SelectableRegion) -> ElementInfo {
         y: region.start_row as f32 * CELL_H,
         width: cols as f32 * CELL_W,
         height: rows as f32 * CELL_H,
-        widget_type: region.widget_type.clone(),
-        entity_id: Some(region.entity_id.clone()),
+        widget_type: std::sync::Arc::from(region.widget_type.as_str()),
+        entity_id: Some(std::sync::Arc::from(region.entity_id.as_str())),
         // `has_content` mirrors GPUI's "this tracked element actually got laid
         // out" semantic: any region that completed a render pass with non-zero
         // dimensions is content-bearing. The readiness gate combines this with
@@ -81,7 +96,8 @@ fn to_element_info(region: &SelectableRegion) -> ElementInfo {
         // `displayed_text` directly, separate from this flag.
         has_content: region.rows > 0 && region.cols > 0,
         parent_id: None,
-        displayed_text: region.displayed_text.clone(),
+        displayed_text: region.displayed_text.as_deref().map(std::sync::Arc::from),
+        focused: None,
         expected_size: holon_frontend::size_expectation::SizeBounds::default(),
     }
 }
@@ -105,6 +121,14 @@ impl GeometryProvider for TuiGeometry {
             .iter()
             .map(|r| (r.entity_id.clone(), to_element_info(r)))
             .collect()
+    }
+
+    /// Wakes on the next [`TuiGeometry::install`] (a fresh frame's registry is
+    /// readable). Callers must wrap in a timeout: a notification can land
+    /// between their predicate check and this await.
+    fn changed(&self) -> futures::future::BoxFuture<'static, ()> {
+        let notify = self.install_notify.clone();
+        Box::pin(async move { notify.notified().await })
     }
 }
 
@@ -155,7 +179,7 @@ mod tests {
         assert_eq!(alpha.y, 0.0);
         assert_eq!(alpha.width, 20.0 * CELL_W);
         assert_eq!(alpha.height, CELL_H);
-        assert_eq!(alpha.widget_type, "selectable");
+        assert_eq!(alpha.widget_type.as_ref(), "selectable");
         assert_eq!(alpha.entity_id.as_deref(), Some("alpha"));
         assert!(alpha.has_content);
 

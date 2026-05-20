@@ -2,12 +2,37 @@
 //!
 //! This module provides utilities for generating fractional index keys
 //! used for maintaining block order in hierarchical structures.
+//!
+//! # Why `loro_fractional_index` is allowed in `holon-core`
+//!
+//! `loro_fractional_index` is a **pure-math utility crate** (fractional
+//! indexing over byte strings) published from the Loro workspace — it is NOT
+//! the `loro` CRDT crate and pulls in no storage, no documents, no sync.
+//! Depending on it here keeps the sort-key math identical between the Loro
+//! order-owner and the SqlOnly order-owner, which is exactly the invariant
+//! ADR 0005 needs. Reviewed and deliberately KEPT during the storage de-leak
+//! pass (plan quirky-dazzling-map, Stage 8) — do not "clean this up" into a
+//! hand-rolled reimplementation.
 
 use anyhow::{Context, Result};
 use loro_fractional_index::FractionalIndex;
 
 /// Maximum length for sort_key before triggering rebalancing
 pub const MAX_SORT_KEY_LENGTH: usize = 32;
+
+/// Default fractional-index key for a not-yet-positioned block, matching the
+/// SQL column default. Upper-case so lexicographic order agrees with
+/// `FractionalIndex::to_string()` output (which uses upper-case hex). This is
+/// the single owner of the default value — the SqlOnly order owner mints from
+/// it and the `block` table column defaults to it; it is the adapter's
+/// internal ordering encoding and never appears on the domain `Block` (ADR
+/// 0005).
+pub const DEFAULT_SORT_KEY: &str = "A0";
+
+/// The [`DEFAULT_SORT_KEY`] as an owned `String`.
+pub fn default_sort_key() -> String {
+    DEFAULT_SORT_KEY.to_string()
+}
 
 /// Generate a fractional index between two optional keys
 ///

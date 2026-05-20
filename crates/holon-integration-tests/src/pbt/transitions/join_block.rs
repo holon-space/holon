@@ -42,6 +42,14 @@ pub fn join_block_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
     let mut checks: Vec<Validated<(), Reason>> = vec![
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
+        // Block-interaction transitions need the block to render as an
+        // interactive widget (ops/draggable) reactively over the navigated
+        // focus. Only the default layout does; custom `index.org` query
+        // layouts don't (see RefLifecycle::renders_block_interactively).
+        check(
+            state.renders_block_interactively(block_id),
+            Reason::BlocksNotInteractiveUnderLayout,
+        ),
     ];
     checks.push(check(
         focused.as_ref() == Some(block_id),
@@ -52,6 +60,13 @@ pub fn join_block_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
         Reason::FocusedBlockMissing,
     ));
     checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
+    // A page (e.g. `block:journals`) is never backspace-joinable: it is the
+    // root of its view, so the editor's `join_block` op finds no merge target
+    // and the chord doesn't match — the SUT refuses to dispatch. The ref model
+    // would otherwise allow it whenever the page has a previous *sibling* page
+    // (`prev_text` true), diverging from the SUT. `move_up`/`move_down` exclude
+    // pages the same way (`Reason::FocusedIsPage`).
+    checks.push(check(!state.is_page_block(block_id), Reason::FocusedIsPage));
     checks.push(check(
         !state.is_layout_block(block_id),
         Reason::FocusedInLayoutBlocks,
@@ -119,21 +134,23 @@ pub fn join_block_apply_to_ref<R: RefBlockTree + RefBlockTreeMut + RefFocusMut>(
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl TransitionFactory<ReferenceState> for JoinBlock {
+impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for JoinBlock {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         join_block_weighted_generator(state)
     }
 }
 
-impl TransitionRef<ReferenceState> for JoinBlock {
+impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefLifecycle> TransitionRef<R>
+    for JoinBlock
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         join_block_preconditions(&self.block_id, state)
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         join_block_apply_to_ref(&self.block_id, state);
     }
 }
@@ -148,9 +165,9 @@ impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for JoinBlock {
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for JoinBlock {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.active_watches.len();
-        let blocks = state.block_state.blocks.len();
-        let docs = state.documents.len();
+        let watches = state.mcp.active_watches.len();
+        let blocks = state.domain.block_state.blocks.len();
+        let docs = state.files.documents.len();
         let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         let delete = expected_sql_for_kind(MutationKind::Delete, watches, blocks, docs);
         ExpectedSql {

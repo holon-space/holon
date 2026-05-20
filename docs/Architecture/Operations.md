@@ -43,9 +43,9 @@ pub struct OperationDispatcher {
 }
 
 // Routes by entity_name to appropriate provider:
-// "block"        → LoroOperationProvider  (authority for blocks; SqlOperationProvider in SqlOnly mode)
-// "todoist-task" → TodoistOperationProvider
-// "org-headline" → OrgModeOperationProvider
+// "block"          → LoroOperationProvider  (authority for blocks; SqlOperationProvider in SqlOnly mode)
+// "todoist-tasks"  → McpOperationProvider   (via RegistryOperationProxy for the todoist integration)
+// "org-headline"   → OrgModeOperationProvider
 ```
 
 ### Operation Metadata via Macros
@@ -304,7 +304,7 @@ block.create(#{parent_id: "block:journals", name: col("name")})
 #+END_SRC
 ```
 
-On startup: trigger query fires (initial batch) → action creates a document block with `name = "2026-04-20"` under `block:journals` → `INSERT OR IGNORE` makes it idempotent → EventBus fires → OrgSyncController writes `Journals/2026-04-20.org`.
+On startup: trigger query fires (initial batch) → action creates a document block with `name = "2026-04-20"` under `block:journals` → `INSERT OR IGNORE` makes it idempotent → the `LiveData<Block>` feed notifies FileSyncController → it writes `Journals/2026-04-20.org`.
 
 #### Security & Sync Model
 
@@ -555,14 +555,16 @@ pub async fn dispatch_operation<DS, E>(
 ### Usage in Operation Providers
 
 ```rust
-impl OperationProvider for TodoistOperationProvider {
+// Example: hand-written OperationProvider using macro-generated dispatch helpers.
+// (MCP integrations use McpOperationProvider instead — no macros needed there.)
+impl OperationProvider for OrgModeOperationProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
         let mut ops = vec![];
         // Aggregate from all applicable traits
         ops.extend(__operations_crud_operations::crud_operations(
-            "todoist-task", "task", "todoist_tasks", "id"));
+            "org-headline", "headline", "org_headlines", "id"));
         ops.extend(__operations_task_operations::task_operations(
-            "todoist-task", "task", "todoist_tasks", "id"));
+            "org-headline", "headline", "org_headlines", "id"));
         ops
     }
 

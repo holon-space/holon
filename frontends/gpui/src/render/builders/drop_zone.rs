@@ -29,9 +29,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .clone()
                 .unwrap_or_else(|| holon_api::EntityName::new("block"));
 
+            // Drag state + row ids come from rendered rows — schemed by the
+            // matview pipeline. Parse once at this boundary, fail loud.
+            let source = holon_api::entity_uri_from_id_str(&dragged.block_id);
+            let target = holon_api::entity_uri_from_id_str(target);
             services.dispatch_intent(build_drop_intent(
-                &dragged.block_id,
-                target,
+                &source,
+                &target,
                 entity_name,
                 &op_name,
             ));

@@ -13,7 +13,12 @@ async-trait.workspace = true
 futures.workspace = true
 tokio-stream.workspace = true
 serde.workspace = true
-holon.workspace = true
+holon-core.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
+ignore.workspace = true
+notify = "8.0"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+tempfile.workspace = true

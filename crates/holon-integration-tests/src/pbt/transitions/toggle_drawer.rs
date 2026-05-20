@@ -42,7 +42,7 @@ impl TransitionRef<ReferenceState> for ToggleDrawer {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        if !state.app_started {
+        if !state.action.app_started {
             return Validated::fail(Reason::AppNotStarted);
         }
         let ref_view = LayoutRef::new(state);
@@ -58,7 +58,11 @@ impl TransitionRef<ReferenceState> for ToggleDrawer {
         // Flip the recorded open/closed bit; default-true so unknown
         // ids start open.
         let current = state.drawer_is_open(&self.block_id);
-        state.drawer_open.insert(self.block_id.clone(), !current);
+        state
+            .ui
+            .tab
+            .drawer_open
+            .insert(self.block_id.clone(), !current);
     }
 }
 

@@ -52,13 +52,14 @@ pub enum InvariantResult {
 ///
 /// impl<R: RefBlockTree, S: SutSqlProjection> Invariant<R, S> for InvBlockIdsMatchRef {
 ///     fn id(&self) -> InvariantId { InvariantId("inv-block-ids-match-ref") }
-///     fn mode(&self) -> RunMode { RunMode::Strict }
 ///     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult { … }
 /// }
 /// ```
+///
+/// Run mode (Strict/Warn) lives on the registry's `InvariantSpec` — the
+/// single source of truth — not on the body.
 #[allow(async_fn_in_trait)]
 pub trait Invariant<R, S> {
     fn id(&self) -> InvariantId;
-    fn mode(&self) -> RunMode;
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult;
 }

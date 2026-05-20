@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::turso::TursoBackend;
 use tempfile::TempDir;
 
-fn ids_from_rows(rows: &[HashMap<String, holon_api::Value>], col: &str) -> BTreeSet<String> {
+fn ids_from_rows(rows: &[holon_api::StorageEntity], col: &str) -> BTreeSet<String> {
     rows.iter()
         .filter_map(|r| {
             r.get(col)

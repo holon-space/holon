@@ -53,7 +53,7 @@ impl TransitionRef<ReferenceState> for NavigateHome {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.app_started, Reason::AppNotStarted)];
+            vec![check(state.action.app_started, Reason::AppNotStarted)];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
@@ -61,7 +61,12 @@ impl TransitionRef<ReferenceState> for NavigateHome {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        let history = state.navigation_history.entry(self.region).or_default();
+        let history = state
+            .ui
+            .tab
+            .navigation_history
+            .entry(self.region)
+            .or_default();
 
         history.entries.truncate(history.cursor + 1);
         history.entries.push(None);
@@ -71,11 +76,11 @@ impl TransitionRef<ReferenceState> for NavigateHome {
         // insert a new open row with block_id NULL. The home row is kept in
         // `open_pins` so `next_history_id` aligns with SQLite's AUTOINCREMENT,
         // but it's filtered out of `expected_focus_root_ids` (None block_id).
-        let history_id = state.next_history_id;
-        state.next_history_id += 1;
-        let added_ts_logical = state.next_pin_ts;
-        state.next_pin_ts += 1;
-        let pins = state.open_pins.entry(self.region).or_default();
+        let history_id = state.ui.tab.next_history_id;
+        state.ui.tab.next_history_id += 1;
+        let added_ts_logical = state.ui.user.next_pin_ts;
+        state.ui.user.next_pin_ts += 1;
+        let pins = state.ui.user.open_pins.entry(self.region).or_default();
         pins.clear();
         pins.push(OpenPinEntry {
             history_id,
@@ -83,18 +88,18 @@ impl TransitionRef<ReferenceState> for NavigateHome {
             added_ts_logical,
         });
 
-        state.focused_entity_id.remove(&self.region);
-        state.focused_cursor.remove(&self.region);
+        state.ui.tab.focused_entity_id.remove(&self.region);
+        state.ui.tab.focused_cursor.remove(&self.region);
 
         // Mirror production: `maybe_mirror_navigation_focus` clears
         // UiState.focused_block globally on "go_home", regardless of
         // which region triggered it. See reactive.rs:1824.
-        state.focused_block = None;
+        state.ui.tab.focused_block = None;
 
         // Same blur-on-click rationale as `navigate_focus.rs`: clear
-        // `active_editor` (verified) but not `block.content` (separate
-        // assumption left to invariants).
-        state.active_editor = None;
+        // `active_editor` (verified); `blur_active_editor` commits the pending
+        // text only under a real editor (matching prod's `on_blur`).
+        state.blur_active_editor();
     }
 }
 

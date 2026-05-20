@@ -12,7 +12,7 @@
 //! This test collapses the 25-min Full PBT to seconds for the
 //! bulk-create case specifically. It uses the production
 //! `TestEnvironmentBuilder` (which wires `OrgFileWatcher` +
-//! `OrgSyncController` + `LoroSyncController` end-to-end) and writes a
+//! `FileSyncController` + `LoroSyncController` end-to-end) and writes a
 //! 5-block bulk add under one parent. The instrumentation added in the
 //! handoff (search for `[PHANTOM-LORO-TRACE]`) fires:
 //!

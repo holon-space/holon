@@ -36,6 +36,7 @@ pub struct InteractionCommand {
 /// scrubbing, multi-step pointer sequences — use `MouseDown` /
 /// `MouseUp` separately and emit `MouseMove` events with
 /// `pressed_button = Some("left")` between them.
+#[derive(Debug)]
 pub enum InteractionEvent {
     MouseClick {
         position: (f32, f32),
@@ -122,6 +123,23 @@ pub struct DebugServices {
     /// window creation; MCP tools read it to stay decoupled from the
     /// concrete frontend.
     pub user_driver: std::sync::OnceLock<Arc<dyn UserDriver>>,
+    /// FileSystem port for org-file reads (ADR 0011). Populated from DI by
+    /// `DebugServicesPopulatorModule` so inspection tools see the same vault
+    /// the session uses (in tests: the in-memory filesystem).
+    pub org_fs: std::sync::OnceLock<Arc<dyn holon_filesystem::FileSystem>>,
+}
+
+impl DebugServices {
+    /// The session's org filesystem. When no DI binding was populated
+    /// (standalone usage without orgmode), reads the real disk — identical
+    /// to the pre-port behaviour; that degraded mode is the disclosed
+    /// default here, not a hidden swallow.
+    pub fn org_filesystem(&self) -> Arc<dyn holon_filesystem::FileSystem> {
+        self.org_fs
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(holon_filesystem::RealFileSystem))
+    }
 }
 
 /// Snapshot of cross-block navigation state for MCP inspection.
@@ -147,6 +165,7 @@ impl Default for DebugServices {
             input_router: Arc::new(InputRouter::new()),
             interaction_tx: std::sync::OnceLock::new(),
             user_driver: std::sync::OnceLock::new(),
+            org_fs: std::sync::OnceLock::new(),
         }
     }
 }

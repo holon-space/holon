@@ -25,6 +25,12 @@ pub struct EmitMcpData;
 
 impl TransitionFactory<ReferenceState> for EmitMcpData {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // Turso-only: the navigation / CDC-watch / MCP providers this transition
+        // dispatches have no Loro-native source in the no-Turso wiring
+        // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+    }
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Delegate all validation to preconditions — single source of truth.
         EmitMcpData
@@ -38,7 +44,7 @@ impl TransitionRef<ReferenceState> for EmitMcpData {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.app_started, Reason::AppNotStarted)];
+            vec![check(state.action.app_started, Reason::AppNotStarted)];
 
         checks
             .into_iter()
@@ -61,7 +67,7 @@ impl<S: SutHandle> TransitionImpl<ReferenceState, S> for EmitMcpData {
 #[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for EmitMcpData {
     fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let blocks = state.block_state.blocks.len();
+        let blocks = state.domain.block_state.blocks.len();
         ExpectedSql {
             reads: 4,
             writes: 2,

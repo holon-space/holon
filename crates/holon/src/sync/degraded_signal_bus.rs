@@ -1,9 +1,9 @@
 //! Broadcast channel for surfacing share-persistence degradation to
 //! frontends (snapshot save/load failures, rehydration errors).
 //!
-//! This is intentionally separate from [`event_bus::EventBus`], whose
-//! [`EventKind`] enum is closed on block-level operations. Frontends
-//! subscribe via [`DegradedSignalBus::subscribe`] and render banners.
+//! This is a dedicated broadcast for degradation signals, unrelated to the
+//! block write path. Frontends subscribe via [`DegradedSignalBus::subscribe`]
+//! and render banners.
 //!
 //! Producers emit and ignore lagged receivers — we prefer dropping
 //! stale notifications over blocking the save worker.

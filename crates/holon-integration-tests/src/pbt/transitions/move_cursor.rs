@@ -34,7 +34,10 @@ pub fn move_cursor_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
 ) -> Validated<(), Reason> {
     let checks: Vec<Validated<(), Reason>> = vec![
         check(R::atomic_editor_enabled(), Reason::AtomicEditorDisabled),
-        check(state.enable_loro(), Reason::LoroRequiredForAtomicEditor),
+        check(
+            state.enable_loro() || ReferenceState::real_editor_enabled(),
+            Reason::LoroRequiredForAtomicEditor,
+        ),
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
         check(
@@ -56,13 +59,23 @@ pub fn move_cursor_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecyc
     state: &R,
 ) -> Validated<(u32, BoxedStrategy<MoveCursor>), Reason> {
     move_cursor_preconditions(state).map(|_| {
-        let in_memory_len = state.active_editor_text().map(|t| t.len()).unwrap_or(0);
+        // Char-boundary byte offsets only — a caret can't sit mid-codepoint,
+        // and both the ref mirror and prod slice at this offset.
+        let boundaries: Vec<usize> = state
+            .active_editor_text()
+            .map(|t| {
+                t.char_indices()
+                    .map(|(i, _)| i)
+                    .chain(std::iter::once(t.len()))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![0]);
         let last = state.last_transition_kind();
         let mc_weight = match last {
             Some("FocusEditableText") => 4,
             _ => 1,
         };
-        let strat = (0..=in_memory_len)
+        let strat = prop::sample::select(boundaries)
             .prop_map(|byte_position| MoveCursor { byte_position })
             .boxed();
         (mc_weight, strat)
@@ -75,21 +88,35 @@ pub fn move_cursor_apply_to_ref<R: RefEditorMirrorMut>(byte_position: usize, sta
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl TransitionFactory<ReferenceState> for MoveCursor {
+impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for MoveCursor {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        // ADR 0009 asymmetry #1 (same as TypeChars/PressKey): editor primitives
+        // work on any block store, so gate to AnyStorageOf({Loro, Turso}) —
+        // without this, `active_editor` is never set under Turso-only and the
+        // widened TypeChars/PressKey gates are unreachable in exactly the
+        // configuration they were widened for.
+        ::holon_pbt_core::RequiredWiring::any_storage_of([
+            ::holon_pbt_core::StorageAdapter::Loro,
+            ::holon_pbt_core::StorageAdapter::Turso,
+        ])
+    }
+
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         move_cursor_weighted_generator(state)
     }
 }
 
-impl TransitionRef<ReferenceState> for MoveCursor {
+impl<R: RefEditorMirror + RefEditorMirrorMut + RefFocus + RefLifecycle> TransitionRef<R>
+    for MoveCursor
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         move_cursor_preconditions(state)
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         move_cursor_apply_to_ref(self.byte_position, state);
     }
 }

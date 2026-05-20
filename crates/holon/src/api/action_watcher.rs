@@ -22,26 +22,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use holon_api::action_dsl::parse_action_dsl;
 use holon_api::render_eval::{CORE_VALUE_FN_LOOKUP, resolve_args_with};
-use holon_api::render_types::Arg;
 use holon_api::{EntityName, Value};
-use rhai::{Dynamic, Engine as RhaiEngine, Map as RhaiMap, Scope};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::api::backend_engine::BackendEngine;
-use crate::render_dsl::{create_render_engine, dynamic_to_render_expr};
 use crate::storage::types::StorageEntity;
 use holon_api::streaming::Change;
 
 const DISCOVERY_SQL: &str = include_str!("../../../../assets/queries/action_discovery.sql");
-
-struct ParsedAction {
-    entity: String,
-    operation: String,
-    params: Vec<Arg>,
-}
 
 #[tracing::instrument(skip(engine), name = "action_watcher.start")]
 pub async fn start_action_watchers(engine: Arc<BackendEngine>) -> Result<()> {
@@ -194,7 +186,11 @@ async fn run_pair_watcher_inner(
                 let resolved =
                     resolve_args_with(&parsed_action.params, &data, &CORE_VALUE_FN_LOOKUP);
 
-                let params: StorageEntity = resolved.named;
+                let params: StorageEntity = resolved
+                    .named
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v))
+                    .collect();
 
                 info!(
                     "[action_watcher] executing {}.{} with params={params:?}",
@@ -216,105 +212,11 @@ async fn run_pair_watcher_inner(
     Ok(())
 }
 
-fn parse_action_dsl(source: &str) -> Result<ParsedAction> {
-    let trimmed = source.trim();
-
-    let engine = build_action_engine();
-    let mut scope = Scope::new();
-    scope.push("block", EntityRef("block".to_string()));
-    let result = engine
-        .eval_expression_with_scope::<Dynamic>(&mut scope, trimmed)
-        .map_err(|e| anyhow::anyhow!("Rhai eval failed for action DSL '{trimmed}': {e}"))?;
-
-    let map = result
-        .clone()
-        .try_cast::<RhaiMap>()
-        .ok_or_else(|| anyhow::anyhow!("Action DSL did not return a map, got: {result:?}"))?;
-
-    let entity = map
-        .get("_action_entity")
-        .and_then(|v| v.clone().into_string().ok()) // ALLOW(ok): Rhai value type mismatch → None
-        .ok_or_else(|| anyhow::anyhow!("Action DSL result missing _action_entity"))?;
-    let operation = map
-        .get("_action_op")
-        .and_then(|v| v.clone().into_string().ok()) // ALLOW(ok): Rhai value type mismatch → None
-        .ok_or_else(|| anyhow::anyhow!("Action DSL result missing _action_op"))?;
-
-    let params_map = map
-        .get("_action_params")
-        .and_then(|v| v.clone().try_cast::<RhaiMap>())
-        .unwrap_or_default();
-
-    let mut params: Vec<Arg> = Vec::new();
-    for (k, v) in &params_map {
-        let expr = dynamic_to_render_expr(v)
-            .with_context(|| format!("Failed to convert param '{k}' to RenderExpr"))?;
-        params.push(Arg {
-            name: Some(k.to_string()),
-            value: expr,
-        });
-    }
-
-    Ok(ParsedAction {
-        entity,
-        operation,
-        params,
-    })
-}
-
-fn build_action_engine() -> RhaiEngine {
-    let mut engine = create_render_engine();
-
-    engine.register_type_with_name::<EntityRef>("EntityRef");
-
-    for op in &[
-        "create",
-        "set_field",
-        "update",
-        "delete",
-        "cycle_task_state",
-    ] {
-        let op_str = op.to_string();
-        engine.register_fn(
-            *op,
-            move |entity: &mut EntityRef, params: Dynamic| -> Dynamic {
-                make_action_node(&entity.0, &op_str, params)
-            },
-        );
-    }
-
-    engine
-}
-
-fn make_action_node(entity: &str, operation: &str, params: Dynamic) -> Dynamic {
-    let params_map = if params.is_map() {
-        params.cast::<RhaiMap>()
-    } else {
-        RhaiMap::new()
-    };
-
-    let mut map = RhaiMap::new();
-    map.insert("_action_entity".into(), Dynamic::from(entity.to_string()));
-    map.insert("_action_op".into(), Dynamic::from(operation.to_string()));
-    map.insert("_action_params".into(), Dynamic::from(params_map));
-    Dynamic::from(map)
-}
-
 fn extract_string(row: &StorageEntity, key: &str) -> Option<String> {
     match row.get(key)? {
         Value::String(s) => Some(s.clone()),
         Value::Integer(i) => Some(i.to_string()),
         Value::Float(f) => Some(f.to_string()),
         other => Some(format!("{other:?}")),
-    }
-}
-
-// Rhai custom type for dot-notation: block.create(#{...})
-#[derive(Clone, Debug)]
-struct EntityRef(String);
-
-impl std::fmt::Display for EntityRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "EntityRef({})", self.0)
     }
 }

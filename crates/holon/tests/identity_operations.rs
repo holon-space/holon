@@ -40,15 +40,12 @@ async fn seed_alias(
 ) {
     let mut params = HashMap::new();
     params.insert(
-        "canonical_id".to_string(),
+        "canonical_id".into(),
         Value::String(canonical_id.to_string()),
     );
-    params.insert("system".to_string(), Value::String(system.to_string()));
-    params.insert(
-        "foreign_id".to_string(),
-        Value::String(foreign_id.to_string()),
-    );
-    params.insert("confidence".to_string(), Value::Float(confidence));
+    params.insert("system".into(), Value::String(system.to_string()));
+    params.insert("foreign_id".into(), Value::String(foreign_id.to_string()));
+    params.insert("confidence".into(), Value::Float(confidence));
     handle
         .query(
             "INSERT INTO entity_alias (canonical_id, system, foreign_id, confidence) \
@@ -113,7 +110,10 @@ async fn snapshot(
 }
 
 fn op_to_params(op: &Operation) -> StorageEntity {
-    op.params.clone()
+    op.params
+        .iter()
+        .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v.clone()))
+        .collect()
 }
 
 #[tokio::test]
@@ -141,8 +141,8 @@ async fn merge_entities_rewrites_aliases_and_deletes_a() {
     let provider = IdentityProvider::new(handle.clone());
 
     let mut params = StorageEntity::new();
-    params.insert("canonical_a".to_string(), Value::String("a".to_string()));
-    params.insert("canonical_b".to_string(), Value::String("b".to_string()));
+    params.insert("canonical_a".into(), Value::String("a".to_string()));
+    params.insert("canonical_b".into(), Value::String("b".to_string()));
     let result = provider
         .execute_operation(&ENTITY_NAME.into(), "merge_entities", params)
         .await
@@ -209,8 +209,8 @@ async fn merge_then_undo_restores_state_exactly() {
 
     // Forward: merge a -> b.
     let mut params = StorageEntity::new();
-    params.insert("canonical_a".to_string(), Value::String("a".to_string()));
-    params.insert("canonical_b".to_string(), Value::String("b".to_string()));
+    params.insert("canonical_a".into(), Value::String("a".to_string()));
+    params.insert("canonical_b".into(), Value::String("b".to_string()));
     let merge_result = provider
         .execute_operation(&ENTITY_NAME.into(), "merge_entities", params.clone())
         .await
@@ -270,13 +270,13 @@ async fn merge_then_undo_restores_state_exactly() {
 async fn propose_merge_then_undo_round_trips() {
     let (_temp, provider) = make_provider().await;
     let mut params = StorageEntity::new();
-    params.insert("id".to_string(), Value::Integer(42));
-    params.insert("kind".to_string(), Value::String("merge".to_string()));
+    params.insert("id".into(), Value::Integer(42));
+    params.insert("kind".into(), Value::String("merge".to_string()));
     params.insert(
-        "evidence_json".to_string(),
+        "evidence_json".into(),
         Value::String(r#"{"a":"x"}"#.to_string()),
     );
-    params.insert("created_at".to_string(), Value::Integer(123));
+    params.insert("created_at".into(), Value::Integer(123));
 
     let result = provider
         .execute_operation(&ENTITY_NAME.into(), "propose_merge", params)
@@ -304,17 +304,17 @@ async fn propose_merge_then_undo_round_trips() {
 async fn accept_proposal_undo_restores_pending_status() {
     let (_temp, provider) = make_provider().await;
     let mut params = StorageEntity::new();
-    params.insert("id".to_string(), Value::Integer(7));
-    params.insert("kind".to_string(), Value::String("merge".to_string()));
-    params.insert("evidence_json".to_string(), Value::String("{}".to_string()));
-    params.insert("created_at".to_string(), Value::Integer(1));
+    params.insert("id".into(), Value::Integer(7));
+    params.insert("kind".into(), Value::String("merge".to_string()));
+    params.insert("evidence_json".into(), Value::String("{}".to_string()));
+    params.insert("created_at".into(), Value::Integer(1));
     provider
         .execute_operation(&ENTITY_NAME.into(), "propose_merge", params)
         .await
         .unwrap();
 
     let mut accept_params = StorageEntity::new();
-    accept_params.insert("id".to_string(), Value::Integer(7));
+    accept_params.insert("id".into(), Value::Integer(7));
     let result = provider
         .execute_operation(&ENTITY_NAME.into(), "accept_proposal", accept_params)
         .await
@@ -364,8 +364,8 @@ async fn merge_with_no_aliases_round_trips() {
     let provider = IdentityProvider::new(handle.clone());
 
     let mut params = StorageEntity::new();
-    params.insert("canonical_a".to_string(), Value::String("a".to_string()));
-    params.insert("canonical_b".to_string(), Value::String("b".to_string()));
+    params.insert("canonical_a".into(), Value::String("a".to_string()));
+    params.insert("canonical_b".into(), Value::String("b".to_string()));
     let result = provider
         .execute_operation(&ENTITY_NAME.into(), "merge_entities", params)
         .await
@@ -497,8 +497,8 @@ proptest! {
 
             let provider = IdentityProvider::new(handle.clone());
             let mut params = StorageEntity::new();
-            params.insert("canonical_a".to_string(), Value::String(a.clone()));
-            params.insert("canonical_b".to_string(), Value::String(b.clone()));
+            params.insert("canonical_a".into(), Value::String(a.clone()));
+            params.insert("canonical_b".into(), Value::String(b.clone()));
             let result = provider
                 .execute_operation(&ENTITY_NAME.into(), "merge_entities", params)
                 .await
@@ -520,7 +520,7 @@ proptest! {
                 _ => panic!("expected reversible"),
             };
             provider
-                .execute_operation(&inverse.entity_name, &inverse.op_name, inverse.params.clone())
+                .execute_operation(&inverse.entity_name, &inverse.op_name, op_to_params(&inverse))
                 .await
                 .expect("undo");
 

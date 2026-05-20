@@ -2,14 +2,20 @@
 //!
 //! This crate provides filesystem operations and utilities used by other Holon crates.
 
+pub mod change_source;
 pub mod directory;
 pub mod error;
 pub mod file;
+pub mod fs_port;
+pub mod in_memory;
 
+pub use change_source::{FileChange, FileChangeKind, FileChangeSource, NotifyWatcher};
 pub use directory::{ChangesWithMetadata, DirectoryChangeProvider, DirectoryDataSource};
 pub use directory::{Directory, ROOT_ID};
 pub use error::FilesystemError;
 pub use file::File;
+pub use fs_port::{FileMeta, FileSystem, RealFileSystem, ScannedEntries};
+pub use in_memory::InMemoryFileSystem;
 
 use std::path::Path;
 

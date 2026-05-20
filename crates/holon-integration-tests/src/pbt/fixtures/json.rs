@@ -28,6 +28,25 @@ impl FixtureSource for JsonFixtureSource {
     }
 }
 
+/// Load a single `Fixture<E2ETransition>` JSON file (the capture-on-panic
+/// format) into a [`NamedFixture`] of `Action` steps. Shared by the directory
+/// source and by single-file consumers (e.g. the windowed capture-replay test).
+pub fn load_file(path: &Path) -> NamedFixture {
+    let fixture: Fixture<E2ETransition, ()> =
+        Fixture::load(path).unwrap_or_else(|e| panic!("[json] load {path:?}: {e}"));
+    NamedFixture {
+        name: fixture.name,
+        description: fixture.description,
+        wiring: fixture.environment.wiring,
+        env_flags: fixture.environment.env_flags,
+        steps: fixture
+            .transitions
+            .into_iter()
+            .map(FixtureStep::Action)
+            .collect(),
+    }
+}
+
 fn load_dir(dir: &Path) -> Vec<NamedFixture> {
     if !dir.exists() {
         eprintln!("[json] {dir:?} does not exist — no fixtures to replay");
@@ -40,17 +59,7 @@ fn load_dir(dir: &Path) -> Vec<NamedFixture> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let fixture: Fixture<E2ETransition, ()> =
-            Fixture::load(&path).unwrap_or_else(|e| panic!("[json] load {path:?}: {e}"));
-        out.push(NamedFixture {
-            name: fixture.name,
-            description: fixture.description,
-            steps: fixture
-                .transitions
-                .into_iter()
-                .map(FixtureStep::Action)
-                .collect(),
-        });
+        out.push(load_file(&path));
     }
     out
 }

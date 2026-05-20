@@ -343,7 +343,10 @@ impl GeometryDriver {
                 .geometry
                 .all_elements()
                 .into_iter()
-                .filter_map(|(_, info)| info.entity_id.map(|eid| (eid, info.widget_type)))
+                .filter_map(|(_, info)| {
+                    info.entity_id
+                        .map(|eid| (eid.to_string(), info.widget_type.to_string()))
+                })
                 .collect();
             let phase_str = phase.map(|p| p.as_str()).unwrap_or("solo");
             let entities_json: String = entities

@@ -19,7 +19,7 @@ use uuid::Uuid;
 async fn extract_context_from_params(
     service: &HolonService,
     params: &HashMap<String, serde_json::Value>,
-) -> Option<holon::api::backend_engine::QueryContext> {
+) -> Option<holon_api::QueryContext> {
     let context_id = params.get("context_id").and_then(|v| v.as_str());
     let context_parent_id = params.get("context_parent_id").and_then(|v| v.as_str());
     service.build_context(context_id, context_parent_id).await
@@ -117,9 +117,9 @@ async fn set_field(
     value: Value,
 ) -> Result<(), rmcp::ErrorData> {
     let mut storage: StorageEntity = HashMap::new();
-    storage.insert("id".to_string(), Value::String(id.to_string()));
-    storage.insert("field".to_string(), Value::String(field.to_string()));
-    storage.insert("value".to_string(), value);
+    storage.insert("id".into(), Value::String(id.to_string()));
+    storage.insert("field".into(), Value::String(field.to_string()));
+    storage.insert("value".into(), value);
     service
         .execute_operation(&EntityName::new("block"), "set_field", storage)
         .await
@@ -152,7 +152,7 @@ async fn read_assigned_to(
 
 fn json_map_to_storage_entity(map: HashMap<String, serde_json::Value>) -> StorageEntity {
     map.into_iter()
-        .map(|(k, v)| (k, json_to_holon_value(v)))
+        .map(|(k, v)| (std::sync::Arc::from(k.as_str()), json_to_holon_value(v)))
         .collect()
 }
 
@@ -364,6 +364,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<ExecuteSourceBlockParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // ALLOW(entity_uri_from_raw): MCP tool param ExecuteSourceBlockParams.block_id
         let block_id = EntityUri::from_raw(&params.block_id).to_string();
         let lookup_sql = format!(
             "SELECT content, source_language FROM block_raw WHERE id = '{}'",
@@ -472,7 +473,7 @@ impl HolonMcpServer {
             })?;
 
         // Collect initial data from the first batch (Change::Created items)
-        let mut initial_rows: Vec<HashMap<String, holon_api::Value>> = Vec::new();
+        let mut initial_rows: Vec<holon_api::StorageEntity> = Vec::new();
         if let Some(first_batch) = stream.next().await {
             for row_change in first_batch.inner.items {
                 if let holon_api::Change::Created { data, .. } = row_change.change {
@@ -485,7 +486,7 @@ impl HolonMcpServer {
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|(k, v): (&String, &holon_api::Value)| (k.clone(), holon_to_json_value(v)))
+                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
                     .collect()
             })
             .collect();
@@ -503,8 +504,7 @@ impl HolonMcpServer {
             while let Some(batch) = stream.next().await {
                 let mut changes = pending_changes_clone.lock().await;
                 for row_change in batch.inner.items {
-                    let change: &holon_api::Change<HashMap<String, holon_api::Value>> =
-                        &row_change.change;
+                    let change: &holon_api::Change<holon_api::StorageEntity> = &row_change.change;
                     let change_json = RowChangeJson {
                         change_type: match change {
                             Change::Created { .. } => "Created".to_string(),
@@ -523,16 +523,12 @@ impl HolonMcpServer {
                         data: match change {
                             Change::Created { data, .. } => Some(
                                 data.iter()
-                                    .map(|(k, v): (&String, &holon_api::Value)| {
-                                        (k.clone(), holon_to_json_value(v))
-                                    })
+                                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
                                     .collect(),
                             ),
                             Change::Updated { data, .. } => Some(
                                 data.iter()
-                                    .map(|(k, v): (&String, &holon_api::Value)| {
-                                        (k.clone(), holon_to_json_value(v))
-                                    })
+                                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
                                     .collect(),
                             ),
                             Change::Deleted { .. } => None,
@@ -982,14 +978,17 @@ impl HolonMcpServer {
         let mut context_params: HashMap<String, Value> = HashMap::new();
         if let Some(row) = block_result.rows.first() {
             for (k, v) in row {
-                context_params.insert(k.clone(), v.clone());
+                context_params.insert(k.to_string(), v.clone());
             }
         }
 
-        let profile = block_result
-            .rows
-            .first()
-            .map(|row| self.engine().profile_resolver().resolve(row));
+        let profile = block_result.rows.first().map(|row| {
+            let row_string_keyed: HashMap<String, Value> = row
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect();
+            self.engine().profile_resolver().resolve(&row_string_keyed)
+        });
 
         let entity_name = profile
             .as_ref()
@@ -1041,7 +1040,7 @@ impl HolonMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut storage_entity = json_map_to_storage_entity(params.params);
         storage_entity
-            .entry("id".to_string())
+            .entry("id".into())
             .or_insert_with(|| holon_api::Value::String(params.block_id.clone()));
 
         let response = self
@@ -1247,19 +1246,16 @@ impl HolonMcpServer {
             .unwrap_or_else(|| "G1".to_string());
 
         let mut storage: StorageEntity = HashMap::new();
-        storage.insert("id".to_string(), Value::String(new_id.clone()));
-        storage.insert("parent_id".to_string(), Value::String(parent_id.clone()));
-        storage.insert("content".to_string(), Value::String(content.clone()));
-        storage.insert(
-            "content_type".to_string(),
-            Value::String("text".to_string()),
-        );
-        storage.insert("task_state".to_string(), Value::String(task_state.clone()));
-        storage.insert("gate".to_string(), Value::String(gate.clone()));
+        storage.insert("id".into(), Value::String(new_id.clone()));
+        storage.insert("parent_id".into(), Value::String(parent_id.clone()));
+        storage.insert("content".into(), Value::String(content.clone()));
+        storage.insert("content_type".into(), Value::String("text".to_string()));
+        storage.insert("task_state".into(), Value::String(task_state.clone()));
+        storage.insert("gate".into(), Value::String(gate.clone()));
         // ID property mirrors the bare id so org-rendered :PROPERTIES: blocks stay round-trip stable.
-        storage.insert("ID".to_string(), Value::String(new_id_bare.clone()));
+        storage.insert("ID".into(), Value::String(new_id_bare.clone()));
         for (k, v) in params.properties.into_iter() {
-            storage.insert(k, json_to_holon_value(v));
+            storage.insert(std::sync::Arc::from(k.as_str()), json_to_holon_value(v));
         }
 
         // block.create returns response = None on successful INSERT,
@@ -1502,7 +1498,7 @@ impl HolonMcpServer {
             })?;
 
         // Build SQL block map by ID
-        let mut sql_map: HashMap<String, &HashMap<String, Value>> = HashMap::new();
+        let mut sql_map: HashMap<String, &holon_api::StorageEntity> = HashMap::new();
         for row in &sql_rows {
             if let Some(Value::String(id)) = row.get("id") {
                 sql_map.insert(id.clone(), row);
@@ -1593,12 +1589,17 @@ impl HolonMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let file_path = self.resolve_to_file_path(&params.doc_id).await?;
 
-        let content = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-            rmcp::ErrorData::internal_error(
-                format!("Failed to read file '{}': {}", file_path.display(), e),
-                None,
-            )
-        })?;
+        let content = self
+            .debug
+            .org_filesystem()
+            .read_to_string(&file_path)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Failed to read file '{}': {}", file_path.display(), e),
+                    None,
+                )
+            })?;
 
         let result = serde_json::json!({
             "doc_id": params.doc_id,
@@ -1630,8 +1631,12 @@ impl HolonMcpServer {
             .await
             .unwrap_or_else(|_| std::path::PathBuf::from("unknown.org"));
 
-        let doc_uri =
-            EntityUri::parse(&params.doc_id).unwrap_or_else(|_| EntityUri::block(&params.doc_id));
+        let doc_uri = EntityUri::parse(&params.doc_id).map_err(|e| {
+            rmcp::ErrorData::invalid_params(
+                format!("invalid doc_id `{}`: {e}", params.doc_id),
+                None,
+            )
+        })?;
         let rendered = OrgRenderer::render_entitys(&blocks, &file_path, &doc_uri);
 
         let result = serde_json::json!({
@@ -1787,17 +1792,23 @@ impl HolonMcpServer {
         };
         let input = WidgetInput::Navigate { direction, hint };
 
+        let from_entity_uri = holon_api::EntityUri::parse(&params.from_entity_id).map_err(|e| {
+            rmcp::ErrorData::invalid_params(
+                format!("from_entity_id is not a valid EntityUri: {e}"),
+                None,
+            )
+        })?;
         match self
             .debug
             .input_router
-            .bubble_input(&params.from_entity_id, &input)
+            .bubble_input(&from_entity_uri, &input)
         {
             Some(holon_frontend::input::InputAction::Focus {
                 block_id,
                 placement,
             }) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::json!({
-                    "target_block_id": block_id,
+                    "target_block_id": block_id.as_str(),
                     "placement": format!("{:?}", placement),
                 })
                 .to_string(),
@@ -1836,21 +1847,20 @@ impl HolonMcpServer {
 
         let input = WidgetInput::KeyChord { keys };
 
-        match self
-            .debug
-            .input_router
-            .bubble_input(&params.entity_id, &input)
-        {
+        let entity_uri = holon_api::EntityUri::parse(&params.entity_id).map_err(|e| {
+            rmcp::ErrorData::invalid_params(
+                format!("entity_id is not a valid EntityUri: {e}"),
+                None,
+            )
+        })?;
+        match self.debug.input_router.bubble_input(&entity_uri, &input) {
             Some(holon_frontend::input::InputAction::ExecuteOperation {
                 entity_name,
                 operation,
                 entity_id,
             }) => {
-                let mut op_params = HashMap::new();
-                op_params.insert(
-                    "id".to_string(),
-                    holon_api::Value::String(entity_id.clone()),
-                );
+                let mut op_params: holon_api::StorageEntity = HashMap::new();
+                op_params.insert("id".into(), holon_api::Value::String(entity_id.to_string()));
 
                 let entity_name_typed = EntityName::new(&entity_name);
                 let response = self
@@ -1882,7 +1892,7 @@ impl HolonMcpServer {
             }) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::json!({
                     "action": "focus",
-                    "target_block_id": block_id,
+                    "target_block_id": block_id.as_str(),
                     "placement": format!("{:?}", placement),
                 })
                 .to_string(),
@@ -1905,12 +1915,45 @@ impl HolonMcpServer {
     // ── UI interaction tools (raw input level) ─────────────────────────
 
     #[tool(
-        description = "Send a mouse click at pixel coordinates in the GPUI window. Use describe_ui with format='json' to find element positions. Dispatches MouseDown+MouseUp events."
+        description = "Click an element in the GPUI window. Prefer `entity_id` (a block id from \
+                       describe_ui): the click is dispatched at the element's center via the same \
+                       entity-addressed UserDriver path the E2E tests use — it resolves the \
+                       element bounds, hit-tests the point, warns if a different element is on \
+                       top, and survives scroll/relayout. Falls back to raw `x`/`y` pixel \
+                       coordinates when `entity_id` is omitted. Dispatches MouseDown+MouseUp events."
     )]
     async fn click(
         &self,
         Parameters(params): Parameters<ClickParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(entity_id) = &params.entity_id {
+            let driver = self.debug.user_driver.get().ok_or_else(|| {
+                rmcp::ErrorData::internal_error(
+                    "No UserDriver installed — the frontend has not registered one yet",
+                    None,
+                )
+            })?;
+            let entity_uri = holon_api::EntityUri::parse(entity_id).map_err(|e| {
+                rmcp::ErrorData::invalid_params(
+                    format!("entity_id is not a valid EntityUri: {e}"),
+                    None,
+                )
+            })?;
+            driver
+                .click_entity(&entity_uri, &params.region)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("click_entity failed: {e}"), None)
+                })?;
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({
+                    "clicked_entity": entity_id,
+                    "region": params.region,
+                })
+                .to_string(),
+            )]));
+        }
+
         let tx = self.debug.interaction_tx.get().ok_or_else(|| {
             rmcp::ErrorData::internal_error(
                 "No GPUI window connected (interaction channel not set up)",
@@ -1965,8 +2008,14 @@ impl HolonMcpServer {
 
         match &params.entity_id {
             Some(entity_id) => {
+                let entity_uri = holon_api::EntityUri::parse(entity_id).map_err(|e| {
+                    rmcp::ErrorData::invalid_params(
+                        format!("entity_id is not a valid EntityUri: {e}"),
+                        None,
+                    )
+                })?;
                 driver
-                    .scroll_entity(entity_id, params.dx, params.dy)
+                    .scroll_entity(&entity_uri, params.dx, params.dy)
                     .await
                     .map_err(|e| {
                         rmcp::ErrorData::internal_error(format!("scroll_entity failed: {e}"), None)
@@ -2175,7 +2224,7 @@ impl HolonMcpServer {
     /// optionally annotating each row with profile metadata.
     fn finalize_query_response(
         &self,
-        rows: &[HashMap<String, Value>],
+        rows: &[holon_api::StorageEntity],
         duration_ms: Option<f64>,
         include_profile: bool,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -2184,11 +2233,15 @@ impl HolonMcpServer {
             .map(|row| {
                 let mut json_row: HashMap<String, serde_json::Value> = row
                     .iter()
-                    .map(|(k, v)| (k.clone(), holon_to_json_value(v)))
+                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
                     .collect();
 
                 if include_profile {
-                    let profile = self.engine().profile_resolver().resolve(row);
+                    let row_string_keyed: HashMap<String, Value> = row
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.clone()))
+                        .collect();
+                    let profile = self.engine().profile_resolver().resolve(&row_string_keyed);
                     json_row.insert(
                         "_profile".to_string(),
                         serde_json::json!({
@@ -2248,6 +2301,7 @@ impl HolonMcpServer {
 
     /// Resolve a doc_id to its block URI.
     async fn resolve_doc_uri(&self, doc_id: &str) -> Result<String, rmcp::ErrorData> {
+        // ALLOW(entity_uri_from_raw): resolve_doc_uri raw MCP arg before sentinel check
         let uri = holon_api::EntityUri::from_raw(doc_id);
         if uri.is_sentinel() {
             return Ok(uri.to_string());
@@ -2262,14 +2316,15 @@ impl HolonMcpServer {
     ) -> Result<std::path::PathBuf, rmcp::ErrorData> {
         // If it looks like a file path already, use it directly
         if doc_id.contains('/') || doc_id.ends_with(".org") {
+            let fs = self.debug.org_filesystem();
             let path = std::path::PathBuf::from(doc_id);
-            if path.exists() {
+            if fs.exists(&path) {
                 return Ok(path);
             }
             // Try under orgmode_root
             if let Some(root) = self.debug.orgmode_root.get() {
                 let full = root.join(doc_id);
-                if full.exists() {
+                if fs.exists(&full) {
                     return Ok(full);
                 }
             }

@@ -60,6 +60,7 @@ pub fn build_prql(prql: String, args: &ResolvedArgs, ctx: &RenderContext) -> Ply
         });
 
     let query_context = context_id.map(|id| {
+        // ALLOW(entity_uri_from_raw): render-spec context arg or query row 'id'
         let uri = holon_api::EntityUri::from_raw(&id);
         holon_frontend::QueryContext {
             current_block_id: Some(uri.clone()),

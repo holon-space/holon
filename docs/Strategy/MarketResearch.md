@@ -80,8 +80,8 @@ This is exactly the fragmentation Holon solves by being one system that handles 
 ### Detailed Feature Comparisons
 
 Full feature-by-feature analysis including built-in features and plugin ecosystems:
-- [docs/OBSIDIAN_COMPARISON.md](docs/OBSIDIAN_COMPARISON.md) — 30 core plugins + 2,749 community plugins weighted by download stats
-- [docs/LOGSEQ_COMPARISON.md](docs/LOGSEQ_COMPARISON.md) — built-in features + 486 marketplace plugins
+- [docs/Comparisons/OBSIDIAN_COMPARISON.md](docs/Comparisons/OBSIDIAN_COMPARISON.md) — 30 core plugins + 2,749 community plugins weighted by download stats
+- [docs/Comparisons/LOGSEQ_COMPARISON.md](docs/Comparisons/LOGSEQ_COMPARISON.md) — built-in features + 486 marketplace plugins
 
 ### What the Plugin Data Tells Us (March 2026)
 
@@ -179,7 +179,7 @@ vault/
 ```
 
 - Parse Markdown + YAML frontmatter → Block entities in Turso cache
-- Watch folder for changes (like OrgSyncController)
+- Watch folder for changes (like FileSyncController)
 - Bidirectional: write back Markdown from block mutations
 - Works offline, no Obsidian app needed
 - **Handles**: notes, properties, tags, tasks, links, attachments
@@ -202,7 +202,7 @@ Auth: Bearer token over HTTPS (self-signed cert), port 27124.
 
 Additionally, several [MCP servers for Obsidian](https://github.com/cyanheads/obsidian-mcp-server) exist that bridge the REST API to MCP, which Holon's `holon-mcp-client` could consume directly.
 
-**Recommendation:** Start with **Path A** (file-level). It works without requiring users to install a plugin, covers 90% of the data, and the architecture (`holon-filesystem` + `OrgSyncController` pattern) already exists. Path B adds live search and command execution for power users.
+**Recommendation:** Start with **Path A** (file-level). It works without requiring users to install a plugin, covers 90% of the data, and the architecture (`holon-filesystem` + `FileSyncController` pattern) already exists. Path B adds live search and command execution for power users.
 
 ### LogSeq Integration Surface
 
@@ -222,7 +222,7 @@ graph/
 
 - LogSeq Markdown has some extensions (block UUIDs as `id:: uuid`, properties as `key:: value`)
 - A `holon-logseq` parser would handle these extensions
-- Same bidirectional file watching pattern as OrgSyncController
+- Same bidirectional file watching pattern as FileSyncController
 - **Handles**: blocks, properties, tasks (TODO/DOING/DONE), priorities, tags, page links
 - **Doesn't handle**: Datalog queries, whiteboards, flashcard state
 
@@ -903,6 +903,6 @@ Holon's architecture is the moat—not features that can be copied.
 - [docs/Vision/UI.md](docs/Vision/UI.md) - UI/UX vision
 - [docs/Vision/AI.md](docs/Vision/AI.md) - AI integration vision
 - [docs/Architecture.md](docs/Architecture.md) - Technical architecture
-- [docs/OBSIDIAN_COMPARISON.md](docs/OBSIDIAN_COMPARISON.md) - Obsidian feature & plugin analysis (30 core + 2,749 community, weighted by downloads)
-- [docs/LOGSEQ_COMPARISON.md](docs/LOGSEQ_COMPARISON.md) - LogSeq feature & plugin analysis (built-in + 486 marketplace)
-- [docs/FIRST_RELEASE_FEATURES.md](docs/FIRST_RELEASE_FEATURES.md) - First release feature set, priority matrix, and launch strategy
+- [docs/Comparisons/OBSIDIAN_COMPARISON.md](docs/Comparisons/OBSIDIAN_COMPARISON.md) - Obsidian feature & plugin analysis (30 core + 2,749 community, weighted by downloads)
+- [docs/Comparisons/LOGSEQ_COMPARISON.md](docs/Comparisons/LOGSEQ_COMPARISON.md) - LogSeq feature & plugin analysis (built-in + 486 marketplace)
+- [docs/Strategy/FIRST_RELEASE_FEATURES.md](docs/Strategy/FIRST_RELEASE_FEATURES.md) - First release feature set, priority matrix, and launch strategy

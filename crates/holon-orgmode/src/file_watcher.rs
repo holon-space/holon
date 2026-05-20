@@ -1,57 +1,33 @@
 //! File watcher for Org files
 //!
-//! Watches for changes to .org files and notifies the OrgSyncController.
-//! Respects .gitignore (including nested and global gitignore files) and
-//! always skips .git/ and .jj/ directories.
+//! Bridges the injected [`FileChangeSource`] port (ADR 0011) to the org sync
+//! loop: subscribes to raw file-change events, filters to `.org` files that
+//! are not gitignored (including always skipping `.git/` and `.jj/`), and
+//! forwards the paths on an unbounded mpsc channel.
+//!
+//! Echo suppression lives in `FileSyncController::last_projection`, not here.
 
-use anyhow::Result;
 use holon::sync::CanonicalPath;
+use holon_filesystem::FileChangeSource;
 use ignore::gitignore::Gitignore;
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
 
-/// Filesystem entries found by scanning a directory, respecting .gitignore.
-pub struct ScannedEntries {
-    pub directories: Vec<PathBuf>,
-    pub files: Vec<PathBuf>,
-}
+use holon_filesystem::FileSystem;
+pub use holon_filesystem::ScannedEntries;
 
-/// Scan a directory using the `ignore` crate's WalkBuilder.
+/// Scan a directory for `.org` files through the `FileSystem` port (ADR 0011).
 ///
-/// Respects .gitignore files and skips hidden directories (.git, .jj, etc.).
-/// This is the single source of truth for directory walking in holon-orgmode.
-#[tracing::instrument(name = "scan_directory", fields(root = %root.display()))]
-pub fn scan_directory(root: &Path) -> ScannedEntries {
-    let mut directories = Vec::new();
-    let mut files = Vec::new();
-
-    if !root.exists() {
-        return ScannedEntries { directories, files };
-    }
-
-    for entry in ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .build()
-        .flatten()
-    {
-        let path = entry.into_path();
-        if path == root {
-            continue;
-        }
-        if path.is_dir() {
-            directories.push(path);
-        } else if path.extension().is_some_and(|e| e == "org") {
-            files.push(path);
-        }
-    }
-
-    ScannedEntries { directories, files }
+/// The gitignore-aware recursive walk lives in the port
+/// (`holon_filesystem::fs_port::walk_directory` for the real adapter); this
+/// wrapper applies the org-format extension filter.
+pub async fn scan_directory(fs: &dyn FileSystem, root: &Path) -> std::io::Result<ScannedEntries> {
+    let mut scanned = fs.scan_directory(root).await?;
+    scanned
+        .files
+        .retain(|p| p.extension().is_some_and(|e| e == "org"));
+    Ok(scanned)
 }
 
 #[tracing::instrument(name = "build_gitignore", fields(root = %root.display()))]
@@ -72,184 +48,116 @@ fn is_ignored(path: &Path, gitignore: &Gitignore) -> bool {
         }
     }
     let is_dir = path.is_dir();
-    gitignore.matched(path, is_dir).is_ignore()
+    // `matched` alone never consults parent dirs, so a `vendor/` pattern
+    // would not ignore `vendor/dep.org`.
+    gitignore
+        .matched_path_or_any_parents(path, is_dir)
+        .is_ignore()
 }
 
-/// File watcher for Org files
+/// File watcher for Org files: the org-side consumer of a [`FileChangeSource`].
+///
+/// The channel carries `(Option<PathBuf>, seq)`: `Some(path)` for org-relevant
+/// changes the sync loop must ingest, `None` for filtered ones (non-`.org`,
+/// gitignored). Filtered events still flow through the SAME channel so the
+/// consumer can advance its processed-seq watermark strictly in delivery
+/// order — advancing for a filtered event from the bridge directly could
+/// overtake an unprocessed earlier forwarded event.
 pub struct OrgFileWatcher {
-    watcher: RecommendedWatcher,
-    /// Channel sender for file change events
-    #[allow(dead_code)]
-    change_tx: mpsc::UnboundedSender<PathBuf>,
-    /// Channel receiver for file change events
-    change_rx: mpsc::UnboundedReceiver<PathBuf>,
-    /// Known file hashes for content-based change detection
-    known_hashes: Arc<RwLock<HashMap<CanonicalPath, String>>>,
+    change_rx: mpsc::UnboundedReceiver<(Option<PathBuf>, u64)>,
 }
 
 impl OrgFileWatcher {
-    /// Create a new file watcher
-    pub fn new(watch_dir: &Path) -> Result<Self> {
-        Self::with_hashes(watch_dir, Arc::new(RwLock::new(HashMap::new())))
-    }
-
-    /// Create a new file watcher with shared hash tracking — fully armed.
-    #[tracing::instrument(skip(known_hashes), name = "OrgFileWatcher.with_hashes", fields(watch_dir = %watch_dir.display()))]
-    pub fn with_hashes(
-        watch_dir: &Path,
-        known_hashes: Arc<RwLock<HashMap<CanonicalPath, String>>>,
-    ) -> Result<Self> {
-        let mut this = Self::with_hashes_unarmed(watch_dir, known_hashes)?;
-        this.arm(watch_dir)?;
-        Ok(this)
-    }
-
-    /// Build the watcher infrastructure (channels, callback) without registering
-    /// the recursive watch yet. Caller MUST call `arm()` before file events
-    /// will arrive on the receiver.
+    /// Subscribe to `source` and spawn the filter bridge. Subscribing happens
+    /// here — before the caller arms the source — so no event is missed.
     ///
-    /// `notify::watch(dir, RecursiveMode::Recursive)` can take 9+ seconds on
-    /// macOS (FSEvents tree registration). Splitting it out lets startup paths
-    /// signal "ready" on the cheap construction and run `arm` in the background
-    /// via `spawn_blocking`, overlapping the FS scan with the rest of init.
-    pub fn new_unarmed(watch_dir: &Path) -> Result<Self> {
-        Self::with_hashes_unarmed(watch_dir, Arc::new(RwLock::new(HashMap::new())))
-    }
-
-    fn with_hashes_unarmed(
-        watch_dir: &Path,
-        known_hashes: Arc<RwLock<HashMap<CanonicalPath, String>>>,
-    ) -> Result<Self> {
-        let (change_tx, change_rx) = mpsc::unbounded_channel();
-        let change_tx_clone = change_tx.clone();
+    /// The gitignore root is canonicalized so it matches the canonical paths
+    /// fs event backends report (macOS: `/var` → `/private/var`).
+    pub fn new(source: &dyn FileChangeSource, watch_dir: &Path) -> Self {
         let gitignore = tracing::info_span!("OrgFileWatcher.build_gitignore")
-            .in_scope(|| build_gitignore(watch_dir));
+            .in_scope(|| build_gitignore(&CanonicalPath::new(watch_dir).into_path_buf()));
+        let (change_tx, change_rx) = mpsc::unbounded_channel();
+        let mut source_rx = source.subscribe();
 
-        let watcher = tracing::info_span!("OrgFileWatcher.recommended_watcher").in_scope(|| {
-            notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-                if let Ok(event) = res {
-                    match event.kind {
-                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
-                            for path in event.paths {
-                                if path.extension().map(|e| e == "org").unwrap_or(false)
-                                    && !is_ignored(&path, &gitignore)
-                                {
-                                    debug!("File change detected: {}", path.display());
-                                    if let Err(e) = change_tx_clone.send(path) {
-                                        warn!("Failed to send file change event: {}", e);
-                                    }
-                                }
-                            }
+        tokio::spawn(async move {
+            loop {
+                match source_rx.recv().await {
+                    Ok(change) => {
+                        let path = change.path;
+                        let relevant = path.extension().map(|e| e == "org").unwrap_or(false)
+                            && !is_ignored(&path, &gitignore);
+                        if relevant {
+                            debug!("File change detected: {}", path.display());
                         }
-                        _ => {}
+                        let msg = if relevant { Some(path) } else { None };
+                        if change_tx.send((msg, change.seq)).is_err() {
+                            // Receiver dropped — sync loop is gone.
+                            return;
+                        }
                     }
-                } else if let Err(e) = res {
-                    error!("File watcher error: {}", e);
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Dropped raw events are repaired by the controller's
+                        // poll backstops (poll_tracked_files / poll_new_files).
+                        warn!("[OrgFileWatcher] lagged behind change source by {n} events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 }
-            })
-        })?;
+            }
+        });
 
-        Ok(Self {
-            watcher,
-            change_tx,
-            change_rx,
-            known_hashes,
-        })
-    }
-
-    /// Register the recursive watch on `watch_dir`. Slow step on macOS
-    /// (9+ s for populated trees). Call from `spawn_blocking` after
-    /// `signal_ready` to overlap with the rest of startup.
-    #[tracing::instrument(skip(self), name = "OrgFileWatcher.arm", fields(watch_dir = %watch_dir.display()))]
-    pub fn arm(&mut self, watch_dir: &Path) -> Result<()> {
-        tracing::info_span!("OrgFileWatcher.watch_recursive")
-            .in_scope(|| self.watcher.watch(watch_dir, RecursiveMode::Recursive))?;
-        info!("Started watching Org files in: {}", watch_dir.display());
-        Ok(())
-    }
-
-    /// Compute SHA256 hash of file contents.
-    pub fn hash_file(path: &Path) -> std::io::Result<String> {
-        crate::file_utils::hash_file(path)
-    }
-
-    /// Check if file content actually changed (not just metadata/touch).
-    pub async fn content_changed(&self, path: &Path) -> bool {
-        let current_hash = match Self::hash_file(path) {
-            Ok(h) => h,
-            Err(_) => return true, // Assume changed if we can't read
-        };
-
-        let canonical_path = CanonicalPath::new(path);
-        let known = self.known_hashes.read().await.get(&canonical_path).cloned();
-
-        if Some(&current_hash) != known.as_ref() {
-            self.known_hashes
-                .write()
-                .await
-                .insert(canonical_path, current_hash);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Update known hash after writing a file (to prevent echo events).
-    pub async fn update_hash(&self, path: &Path) -> std::io::Result<()> {
-        let hash = Self::hash_file(path)?;
-        let canonical_path = CanonicalPath::new(path);
-        self.known_hashes.write().await.insert(canonical_path, hash);
-        Ok(())
+        Self { change_rx }
     }
 
     /// Get a receiver for file change events
-    pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<PathBuf> {
+    pub fn receiver(&mut self) -> &mut mpsc::UnboundedReceiver<(Option<PathBuf>, u64)> {
         &mut self.change_rx
     }
 
-    /// Consume the watcher and return the receiver
-    #[deprecated(note = "This drops the watcher. Use into_parts() instead.")]
-    pub fn into_receiver(self) -> mpsc::UnboundedReceiver<PathBuf> {
+    /// Consume the watcher and return the filtered-path receiver.
+    pub fn into_receiver(self) -> mpsc::UnboundedReceiver<(Option<PathBuf>, u64)> {
         self.change_rx
-    }
-
-    /// Consume the watcher and return both the watcher and receiver.
-    ///
-    /// The caller MUST keep the watcher alive for file watching to work.
-    #[allow(clippy::type_complexity)] // 3-tuple of (watcher, channel, hash map) is the public ownership surface
-    pub fn into_parts(
-        self,
-    ) -> (
-        RecommendedWatcher,
-        mpsc::UnboundedReceiver<PathBuf>,
-        Arc<RwLock<HashMap<CanonicalPath, String>>>,
-    ) {
-        (self.watcher, self.change_rx, self.known_hashes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use holon_filesystem::NotifyWatcher;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::time::{sleep, Duration};
+
+    /// These tests drive the REAL `NotifyWatcher` (fsevents on macOS) end to
+    /// end through the org filter bridge — the dedicated real-watcher coverage
+    /// ADR 0011 requires once the PBT harness runs on the in-memory adapter.
+    fn armed_watcher(dir: &Path) -> OrgFileWatcher {
+        let source = Arc::new(NotifyWatcher::new_unarmed().unwrap());
+        let watcher = OrgFileWatcher::new(source.as_ref(), dir);
+        source.arm(dir).unwrap();
+        // Leak the source so the notify watcher outlives this helper —
+        // dropping it stops event delivery. Test-scoped only.
+        std::mem::forget(source);
+        watcher
+    }
 
     #[tokio::test]
     async fn test_file_watcher_detects_changes() {
         let temp_dir = TempDir::new().unwrap();
         let test_file = temp_dir.path().join("test.org");
 
-        let watcher = OrgFileWatcher::new(temp_dir.path()).unwrap();
+        let watcher = armed_watcher(temp_dir.path());
 
         sleep(Duration::from_millis(100)).await;
 
         tokio::fs::write(&test_file, "* Test").await.unwrap();
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(500)).await;
 
-        #[allow(deprecated)]
         let mut receiver = watcher.into_receiver();
-        let received = receiver.try_recv();
-        assert!(received.is_ok(), "Should receive file change event");
+        let mut saw_org_change = false;
+        while let Ok((msg, _seq)) = receiver.try_recv() {
+            saw_org_change |= msg.is_some();
+        }
+        assert!(saw_org_change, "Should receive file change event");
     }
 
     #[tokio::test]
@@ -259,14 +167,18 @@ mod tests {
         std::fs::create_dir_all(&git_dir).unwrap();
         let git_file = git_dir.join("test.org");
 
-        let mut watcher = OrgFileWatcher::new(temp_dir.path()).unwrap();
+        let mut watcher = armed_watcher(temp_dir.path());
         sleep(Duration::from_millis(100)).await;
 
         tokio::fs::write(&git_file, "* Hidden").await.unwrap();
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(500)).await;
 
-        let received = watcher.receiver().try_recv();
-        assert!(received.is_err(), "Should NOT receive events from .git/");
+        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
+            assert!(
+                msg.is_none(),
+                "Should NOT receive events from .git/: {msg:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -281,19 +193,20 @@ mod tests {
         let vendor_dir = temp_dir.path().join("vendor");
         std::fs::create_dir_all(&vendor_dir).unwrap();
 
-        let mut watcher = OrgFileWatcher::new(temp_dir.path()).unwrap();
+        let mut watcher = armed_watcher(temp_dir.path());
         sleep(Duration::from_millis(100)).await;
 
         // Write to ignored path
         tokio::fs::write(vendor_dir.join("dep.org"), "* Vendor dep")
             .await
             .unwrap();
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(500)).await;
 
-        let received = watcher.receiver().try_recv();
-        assert!(
-            received.is_err(),
-            "Should NOT receive events from gitignored paths"
-        );
+        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
+            assert!(
+                msg.is_none(),
+                "Should NOT receive events from gitignored paths: {msg:?}"
+            );
+        }
     }
 }

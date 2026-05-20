@@ -1,29 +1,49 @@
-//! Phase 7 — `inv-viewmodel-snapshot` (DEFERRED).
+//! `inv-viewmodel-snapshot`.
 //!
-//! Inline body lives at `sut.rs:4892–4991` (the large ReactiveEngine snapshot
-//! setup block — root stream drain, loading/spacer gate, interpret_pure call).
+//! Asserts the root widget of the headless ViewModel snapshot is not an
+//! `error` widget.
 //!
-//! # Why deferred
+//! ## Bound
 //!
-//! The entire ReactiveEngine snapshot lifecycle (watch drain, first-emission
-//! wait, loading/spacer guard, `interpret_pure` call) lives in
-//! `check_invariants_async` and uses private fields:
-//! - `self.reactive_engine` (private `Rc<RefCell<Option<Arc<ReactiveEngine>>>>`)
-//! - `self.ensure_reactive_engine` (private method)
-//! - `self.engine()` (private accessor)
-//! - `holon_frontend::reactive::HeadlessBuilderServices` — frontend crate type
-//! - `holon_frontend::interpret_pure` — frontend crate function
-//!
-//! None of these are reachable via `SutViewModel` today. The entire snapshot
-//! block is the pre-requisite machinery that all 10a–10j sub-checks depend on.
-//! Wire all ReactiveEngine-snapshot-gated invariants together in the phase that
-//! exposes the headless interpretation pipeline via a `SutViewModel` capability.
+//! `S: SutRenderer`. `widget_tree_snapshot()` runs the headless
+//! `interpret_pure` pipeline; an empty/placeholder/loading snapshot surfaces
+//! as kind `"empty"`, which is not `"error"` → `Ok`.
+
+use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelSnapshot;
 
 impl InvViewmodelSnapshot {
-    pub const ID: holon_pbt_core::invariant::InvariantId =
-        holon_pbt_core::invariant::InvariantId("inv-viewmodel-snapshot");
+    pub const ID: InvariantId = InvariantId("inv-viewmodel-snapshot");
 }
 
-// `Invariant` impl intentionally omitted — body migration deferred.
+#[allow(async_fn_in_trait)]
+impl<R, S> Invariant<R, S> for InvViewmodelSnapshot
+where
+    S: SutRenderer,
+{
+    fn id(&self) -> InvariantId {
+        Self::ID
+    }
+
+    async fn check(&self, _: &R, sut: &S) -> InvariantResult {
+        let root = sut.widget_tree_snapshot().await;
+
+        // Log-only: entity-id count.
+        tracing::debug!(
+            target: "pbt_invariant",
+            "[inv-viewmodel-snapshot] root='{}', {} entity IDs",
+            root.kind,
+            root.collect_entity_ids().len(),
+        );
+
+        if root.kind == "error" {
+            InvariantResult::Fail(
+                "[inv-viewmodel-snapshot] Root layout rendered as error widget".into(),
+            )
+        } else {
+            InvariantResult::Ok
+        }
+    }
+}

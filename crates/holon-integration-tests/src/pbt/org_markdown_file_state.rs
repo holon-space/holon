@@ -1,0 +1,37 @@
+//! Org/Markdown adapter file-state fragment of the PBT reference model
+//! (ADR 0004 Phase 5).
+//!
+//! `OrgMarkdownFileState` holds the doc_uri → filename mapping owned by the
+//! Org/Markdown file adapter. Per ADR 0004 this is an adapter concern, not
+//! domain: filenames are how the org/markdown backends persist a document on
+//! disk, distinct from the document's domain identity (its `EntityUri`, which
+//! is simply the keyset of this map). Isolating it here lets a wiring without
+//! the org/markdown adapter drop the fragment.
+//!
+//! H10 note: `documents` historically tangled three concerns — doc identity
+//! (the `EntityUri` keys), the filename mapping (the values), and
+//! persists-across-delete-for-undo. Identity is the keyset (no separate
+//! structure — a single source of truth); the undo-persistence concern is
+//! moot while the undo subsystem is dormant (see `push_undo_snapshot`). The
+//! `Document.filename` semantics themselves are pending ADR 0009.
+
+use std::collections::BTreeMap;
+
+use holon_api::entity_uri::EntityUri;
+
+/// Org/Markdown adapter file-state extracted from `ReferenceState`
+/// (ADR 0004 Phase 5).
+#[derive(Debug, Clone, Default)]
+pub struct OrgMarkdownFileState {
+    /// Created documents (doc_uri -> file_name).
+    /// `BTreeMap` for deterministic iteration (see `BlockState::blocks`).
+    pub documents: BTreeMap<EntityUri, String>,
+}
+
+impl OrgMarkdownFileState {
+    pub fn new() -> Self {
+        Self {
+            documents: BTreeMap::new(),
+        }
+    }
+}

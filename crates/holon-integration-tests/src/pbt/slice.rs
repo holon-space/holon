@@ -129,7 +129,13 @@ macro_rules! __build_invariant_arms {
             use ::holon_pbt_core::invariant::{Invariant, InvariantResult};
             match Invariant::check(&$invariant, $ref_inner, $sut).await {
                 InvariantResult::Ok => {}
-                InvariantResult::Skipped(_) => {}
+                InvariantResult::Skipped(reason) => {
+                    ::tracing::info!(
+                        invariant = ::std::any::type_name_of_val(&$invariant),
+                        %reason,
+                        "slice invariant skipped"
+                    );
+                }
                 InvariantResult::Fail(msg) => panic!("{msg}"),
             }
         }
@@ -147,29 +153,45 @@ macro_rules! __declare_pbt_slice_arm {
     // Filtered: paren-wrapped (Type, "reason", filter_closure).
     ($arms:ident, $state:expr, ($ty:path, $reason:expr, $filter:expr $(,)?)) => {{
         use ::proptest::strategy::Strategy;
-        if let ::validated::Validated::Good((w, s)) = <$ty as ::holon_pbt_core::TransitionFactory<
+        // ADR 0007 item 3: manifest gate (necessary, not sufficient).
+        if <$ty as ::holon_pbt_core::TransitionFactory<
             $crate::pbt::reference_state::ReferenceState,
-        >>::weighted_generator($state)
+        >>::required_wiring()
+        .satisfied_by(&$state.wiring)
         {
-            let filtered = s
-                .prop_filter($reason, $filter)
-                .prop_map($crate::pbt::transitions::E2ETransition::from)
-                .boxed();
-            $arms.push((w, filtered));
+            if let ::validated::Validated::Good((w, s)) =
+                <$ty as ::holon_pbt_core::TransitionFactory<
+                    $crate::pbt::reference_state::ReferenceState,
+                >>::weighted_generator($state)
+            {
+                let filtered = s
+                    .prop_filter($reason, $filter)
+                    .prop_map($crate::pbt::transitions::E2ETransition::from)
+                    .boxed();
+                $arms.push((w, filtered));
+            }
         }
     }};
-    // Plain: bare type path, no filter.
+    // Plain: bare type path, no filter. Routes through the shared
+    // `holon_pbt_core::weighted_arm` helper (same aggregation path as
+    // `aggregate_transitions`); slice generators discard rejection
+    // reasons — `preconditions` records them on its own pass.
     ($arms:ident, $state:expr, $ty:path) => {{
-        use ::proptest::strategy::Strategy;
-        if let ::validated::Validated::Good((w, s)) = <$ty as ::holon_pbt_core::TransitionFactory<
+        // ADR 0007 item 3: manifest gate (necessary, not sufficient).
+        if <$ty as ::holon_pbt_core::TransitionFactory<
             $crate::pbt::reference_state::ReferenceState,
-        >>::weighted_generator($state)
+        >>::required_wiring()
+        .satisfied_by(&$state.wiring)
         {
-            $arms.push((
-                w,
-                s.prop_map($crate::pbt::transitions::E2ETransition::from)
-                    .boxed(),
-            ));
+            if let ::validated::Validated::Good(Some(arm)) =
+                ::holon_pbt_core::weighted_arm::<_, $ty, $crate::pbt::transitions::E2ETransition>(
+                    $state,
+                    1,
+                    |v| $crate::pbt::transitions::E2ETransition::from(v),
+                )
+            {
+                $arms.push(arm);
+            }
         }
     }};
 }
@@ -179,8 +201,7 @@ macro_rules! __declare_pbt_slice_arm {
 /// ```ignore
 /// declare_pbt_slice! {
 ///     test_fn: my_slice_pbt,
-///     variant_ref: $crate::pbt::VariantRef<$crate::pbt::SqlOnly>,
-///     inner_sut: $crate::pbt::E2ESut<$crate::pbt::SqlOnly>,
+///     wiring: ::holon_pbt_core::Wiring::sql_only(),
 ///     transitions: [
 ///         preset lifecycle,                     // StartApp bootstrap
 ///         preset org_writes,                    // WriteOrgFile, excluding index.org
@@ -223,20 +244,17 @@ macro_rules! __declare_pbt_slice_arm {
 ///
 /// ## Native (full-coverage) mode
 ///
-/// Omit `variant_ref:`, `transitions:`, and `invariants:` to run the
-/// **native** state machine directly: the SUT's own `ReferenceStateMachine`
-/// (`VariantRef<V>`) drives the full transition set and the SUT's own
-/// `check_invariants` runs the full invariant suite. This is the right
-/// mode for broad end-to-end sweeps (cf. `general_e2e_pbt`). No wrapper
-/// types are generated and no capture-on-panic fixture is written, so the
-/// native SUT's `apply` (otel spans, `last_transition`) is used verbatim.
-/// `proptest_config:` is required; optional attributes (e.g.
-/// `#[ignore = "..."]`) may precede `inner_sut:`:
+/// Omit `transitions:` and `invariants:` to run the **full-coverage** mode:
+/// the generated machine drives the full transition alphabet
+/// (`aggregate_transitions`) and the SUT runs the full invariant registry
+/// (`run_invariant_registry`), both seeded from `wiring:`. This is the right
+/// mode for broad end-to-end sweeps (cf. `general_e2e_pbt`).
+/// `proptest_config:` is required:
 ///
 /// ```ignore
 /// declare_pbt_slice! {
 ///     test_fn: general_e2e_pbt,
-///     inner_sut: $crate::pbt::E2ESut<$crate::pbt::Full>,
+///     wiring: ::holon_pbt_core::Wiring::full(),
 ///     proptest_config: pbt_config(),
 ///     steps: 3..20,
 /// }
@@ -244,33 +262,25 @@ macro_rules! __declare_pbt_slice_arm {
 #[macro_export]
 macro_rules! declare_pbt_slice {
     // ── Native (full-coverage) mode ─────────────────────────────────
-    // No wrapper: run `prop_state_machine!` against the SUT directly,
-    // reusing its native `ReferenceStateMachine` + `StateMachineTest`.
-    // `inner_sut` is matched as an ident + optional generic args (not a
-    // `:ty` fragment) because `prop_state_machine!` re-parses the SUT type
-    // as `$test:ident $(<...>)?` — an opaque `:ty` fragment can't satisfy
-    // that. So the SUT here must be a bare type like `E2ESut<Full>`.
+    // Generates a per-manifest wrapper machine + SUT that runs the full
+    // transition alphabet (`aggregate_transitions`) and the full invariant
+    // registry (`run_invariant_registry`), seeded from the slice's `wiring`.
     (
         test_fn: $test_fn:ident,
-        $(#[$attr:meta])*
-        inner_sut: $sut:ident $(< $($ty_param:tt),+ >)?,
+        wiring: $wiring:expr,
         proptest_config: $config:expr,
         steps: $step_lo:tt .. $step_hi:tt
         $(,)?
     ) => {
-        ::proptest_state_machine::prop_state_machine! {
-            #![proptest_config($config)]
-            $(#[$attr])*
-            #[test]
-            fn $test_fn(sequential $step_lo .. $step_hi => $sut $(< $($ty_param),+ >)?);
-        }
+        $crate::__declare_pbt_full_slice!(
+            $test_fn, $wiring, $config, $step_lo, $step_hi
+        );
     };
 
     // ── Slice mode, explicit `proptest_config:` ─────────────────────
     (
         test_fn: $test_fn:ident,
-        variant_ref: $variant_ref:ty,
-        inner_sut: $inner_sut:ty,
+        wiring: $wiring:expr,
         transitions: [ $($transition_tts:tt)* ],
         invariants: [ $($invariant_tts:tt)* ],
         proptest_config: $config:expr,
@@ -279,7 +289,7 @@ macro_rules! declare_pbt_slice {
         $(,)?
     ) => {
         $crate::__declare_pbt_slice_wrapper!(
-            $test_fn, $variant_ref, $inner_sut,
+            $test_fn, $wiring,
             [ $($transition_tts)* ], [ $($invariant_tts)* ],
             $config, $step_lo, $step_hi
             $(, $fixtures_dir)?
@@ -289,8 +299,7 @@ macro_rules! declare_pbt_slice {
     // ── Slice mode, `cases:` + `max_shrink_iters:` ──────────────────
     (
         test_fn: $test_fn:ident,
-        variant_ref: $variant_ref:ty,
-        inner_sut: $inner_sut:ty,
+        wiring: $wiring:expr,
         transitions: [ $($transition_tts:tt)* ],
         invariants: [ $($invariant_tts:tt)* ],
         cases: $cases:expr,
@@ -300,7 +309,7 @@ macro_rules! declare_pbt_slice {
         $(,)?
     ) => {
         $crate::__declare_pbt_slice_wrapper!(
-            $test_fn, $variant_ref, $inner_sut,
+            $test_fn, $wiring,
             [ $($transition_tts)* ], [ $($invariant_tts)* ],
             ::proptest::test_runner::Config {
                 cases: $cases,
@@ -313,6 +322,74 @@ macro_rules! declare_pbt_slice {
     };
 }
 
+/// One-line, `ComponentSet`-driven slice (ADR 0009 Goal 1). A thin sugar over
+/// [`declare_pbt_slice!`]: it lowers a [`ComponentSet`](holon_pbt_core::ComponentSet)
+/// to its `wiring` and delegates. The point is that a slice is named by *what
+/// components it composes*, so widening/narrowing is a one-token edit to the set.
+///
+/// ```ignore
+/// use holon_pbt_core::ComponentSet;
+/// use holon_pbt_core::component_set::Component::*;
+/// use holon_pbt_core::StorageAdapter::Loro;
+///
+/// component_pbt! {
+///     test_fn: loro_vm_fast_pbt,
+///     set: ComponentSet::loro_vm_fast(),       // or `ComponentSet::of([Loro.into(), ViewModel.into()])`
+///     proptest_config: pbt_config(),
+///     steps: 3..20,
+/// }
+/// ```
+///
+/// The **projection axis** of the set (`ViewModel`/`EditorState`) is a
+/// *bisection* concept — the invariant runner always observes both at runtime
+/// (`run_invariant_registry` builds the live set from `wiring` + both
+/// projections). A single slice's faithful knob is therefore the wiring, which
+/// the set carries; dropping a projection only changes which lattice node a
+/// bisection oracle builds, not which invariants a standalone slice runs. So
+/// lowering `set` → `set.wiring` loses nothing a slice could express.
+#[macro_export]
+macro_rules! component_pbt {
+    // ── Native (full-coverage) mode ─────────────────────────────────
+    (
+        test_fn: $test_fn:ident,
+        set: $set:expr,
+        proptest_config: $config:expr,
+        steps: $step_lo:tt .. $step_hi:tt
+        $(,)?
+    ) => {
+        $crate::declare_pbt_slice! {
+            test_fn: $test_fn,
+            wiring: ($set).wiring,
+            proptest_config: $config,
+            steps: $step_lo .. $step_hi
+        }
+    };
+
+    // ── Slice mode (explicit transitions/invariants), cases-based ───
+    (
+        test_fn: $test_fn:ident,
+        set: $set:expr,
+        transitions: [ $($transition_tts:tt)* ],
+        invariants: [ $($invariant_tts:tt)* ],
+        cases: $cases:expr,
+        max_shrink_iters: $max_shrink_iters:expr,
+        steps: $step_lo:tt .. $step_hi:tt
+        $(, fixtures_dir: $fixtures_dir:literal)?
+        $(,)?
+    ) => {
+        $crate::declare_pbt_slice! {
+            test_fn: $test_fn,
+            wiring: ($set).wiring,
+            transitions: [ $($transition_tts)* ],
+            invariants: [ $($invariant_tts)* ],
+            cases: $cases,
+            max_shrink_iters: $max_shrink_iters,
+            steps: $step_lo .. $step_hi
+            $(, fixtures_dir: $fixtures_dir)?
+        }
+    };
+}
+
 /// Internal: the wrapper-mode body shared by both slice arms. Takes a
 /// fully-resolved `$config:expr` so the public arms only differ in how
 /// they construct the `ProptestConfig`.
@@ -320,7 +397,7 @@ macro_rules! declare_pbt_slice {
 #[macro_export]
 macro_rules! __declare_pbt_slice_wrapper {
     (
-        $test_fn:ident, $variant_ref:ty, $inner_sut:ty,
+        $test_fn:ident, $wiring:expr,
         [ $($transition_tts:tt)* ], [ $($invariant_tts:tt)* ],
         $config:expr, $step_lo:tt, $step_hi:tt
         $(, $fixtures_dir:literal)?
@@ -331,11 +408,13 @@ macro_rules! __declare_pbt_slice_wrapper {
             impl ::proptest_state_machine::ReferenceStateMachine
                 for [<$test_fn:camel Machine>]
             {
-                type State = $variant_ref;
+                type State = $crate::pbt::ReferenceState;
                 type Transition = $crate::pbt::transitions::E2ETransition;
 
                 fn init_state() -> ::proptest::strategy::BoxedStrategy<Self::State> {
-                    <$variant_ref as ::proptest_state_machine::ReferenceStateMachine>::init_state()
+                    ::proptest::strategy::Strategy::boxed(::proptest::strategy::Just(
+                        $crate::pbt::fresh_reference_state($wiring),
+                    ))
                 }
 
                 fn transitions(state: &Self::State) -> ::proptest::strategy::BoxedStrategy<Self::Transition> {
@@ -343,7 +422,7 @@ macro_rules! __declare_pbt_slice_wrapper {
                     use $crate::pbt::transitions::E2ETransition;
                     let mut arms: Vec<(u32, ::proptest::strategy::BoxedStrategy<E2ETransition>)>
                         = Vec::new();
-                    $crate::__build_transition_arms!(arms, &**state, $($transition_tts)*);
+                    $crate::__build_transition_arms!(arms, state, $($transition_tts)*);
                     assert!(
                         !arms.is_empty(),
                         concat!(stringify!($test_fn), ": no transition applicable")
@@ -355,7 +434,7 @@ macro_rules! __declare_pbt_slice_wrapper {
                     use ::holon_pbt_core::TransitionRef;
                     use $crate::pbt::validation::record_rejection;
                     use ::validated::Validated;
-                    match transition.preconditions(&**state) {
+                    match transition.preconditions(state) {
                         Validated::Good(()) => true,
                         Validated::Fail(reasons) => {
                             record_rejection(transition.variant_name(), &reasons);
@@ -366,14 +445,14 @@ macro_rules! __declare_pbt_slice_wrapper {
 
                 fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
                     use ::holon_pbt_core::TransitionRef;
-                    transition.apply_to_ref(&mut *state);
-                    state.last_transition_kind = Some(transition.variant_name());
+                    transition.apply_to_ref(&mut state);
+                    state.action.last_transition_kind = Some(transition.variant_name());
                     state
                 }
             }
 
             pub struct [<$test_fn:camel Sut>] {
-                inner: $inner_sut,
+                inner: $crate::pbt::E2ESut,
             }
 
             impl ::std::ops::Drop for [<$test_fn:camel Sut>] {
@@ -395,7 +474,7 @@ macro_rules! __declare_pbt_slice_wrapper {
                 type Reference = [<$test_fn:camel Machine>];
 
                 fn init_test(
-                    _: &<Self::Reference as ::proptest_state_machine::ReferenceStateMachine>::State,
+                    ref_state: &<Self::Reference as ::proptest_state_machine::ReferenceStateMachine>::State,
                 ) -> Self::SystemUnderTest {
                     static SHARED_RUNTIME: ::std::sync::OnceLock<
                         ::std::sync::Arc<::tokio::runtime::Runtime>,
@@ -406,8 +485,13 @@ macro_rules! __declare_pbt_slice_wrapper {
                         })
                         .clone();
                     $crate::pbt::slice::reset_capture(stringify!($test_fn));
+                    $crate::pbt::slice::record_capture_wiring(&ref_state.wiring);
+                    // The slice's `wiring:` selects the SUT backend (ADR 0004
+                    // Phase 9, part (a)): a Loro-only manifest builds the no-Turso
+                    // `LoroMemory` SUT, anything with Turso builds the Turso SUT.
+                    let storage = $crate::pbt::storage_selector_for_wiring(&ref_state.wiring);
                     [<$test_fn:camel Sut>] {
-                        inner: <$inner_sut>::new(runtime).unwrap(),
+                        inner: $crate::pbt::E2ESut::new_with_backend(runtime, storage).unwrap(),
                     }
                 }
 
@@ -434,11 +518,29 @@ macro_rules! __declare_pbt_slice_wrapper {
                         return;
                     }
                     let runtime = sut.inner.runtime.clone();
-                    let ref_inner: &$crate::pbt::ReferenceState = &**ref_state;
+                    let ref_inner: &$crate::pbt::ReferenceState = ref_state;
                     let sut_inner = &sut.inner;
                     runtime.block_on(async {
                         $crate::__build_invariant_arms!(ref_inner, sut_inner, $($invariant_tts)*);
                     });
+                }
+
+                // Route the per-case loop through the shared engine
+                // (`stepper::run_sequence`) instead of the library default, so
+                // the headless and GPUI runners share one loop body (ADR 0009
+                // §5). Generation/shrinking/regression replay are unchanged —
+                // they live in `sequential_strategy`, above this call.
+                fn test_sequential(
+                    _config: ::proptest::test_runner::Config,
+                    ref_state: $crate::pbt::ReferenceState,
+                    transitions: ::std::vec::Vec<$crate::pbt::transitions::E2ETransition>,
+                    seen_counter: ::std::option::Option<
+                        ::std::sync::Arc<::std::sync::atomic::AtomicUsize>,
+                    >,
+                ) {
+                    $crate::pbt::stepper::run_via_state_machine_test::<Self>(
+                        ref_state, transitions, seen_counter,
+                    );
                 }
             }
 
@@ -487,10 +589,170 @@ macro_rules! __declare_pbt_slice_wrapper {
                     $crate::pbt::fixtures::run_fixtures::<
                         [<$test_fn:camel Machine>],
                         [<$test_fn:camel Sut>],
-                        _,
                     >(&sources);
                 }
             )?
+        }
+    };
+}
+
+/// Internal: full-coverage (native) slice. Generates a per-manifest machine
+/// (`aggregate_transitions` alphabet, seeded from `$wiring`) and a SUT wrapper
+/// that runs the full invariant registry (`run_invariant_registry`) — the
+/// behavior of the old bare-`E2ESut` native mode, now wiring-parameterized.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declare_pbt_full_slice {
+    (
+        $test_fn:ident, $wiring:expr,
+        $config:expr, $step_lo:tt, $step_hi:tt
+    ) => {
+        ::paste::paste! {
+            pub struct [<$test_fn:camel Machine>];
+
+            impl ::proptest_state_machine::ReferenceStateMachine
+                for [<$test_fn:camel Machine>]
+            {
+                type State = $crate::pbt::ReferenceState;
+                type Transition = $crate::pbt::transitions::E2ETransition;
+
+                fn init_state() -> ::proptest::strategy::BoxedStrategy<Self::State> {
+                    ::proptest::strategy::Strategy::boxed(::proptest::strategy::Just(
+                        $crate::pbt::fresh_reference_state($wiring),
+                    ))
+                }
+
+                fn transitions(state: &Self::State) -> ::proptest::strategy::BoxedStrategy<Self::Transition> {
+                    $crate::pbt::transitions::aggregate_transitions(state)
+                }
+
+                fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+                    use ::holon_pbt_core::TransitionRef;
+                    use $crate::pbt::validation::record_rejection;
+                    use ::validated::Validated;
+                    match transition.preconditions(state) {
+                        Validated::Good(()) => true,
+                        Validated::Fail(reasons) => {
+                            record_rejection(transition.variant_name(), &reasons);
+                            false
+                        }
+                    }
+                }
+
+                fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
+                    use ::holon_pbt_core::TransitionRef;
+                    transition.apply_to_ref(&mut state);
+                    state.action.last_transition_kind = Some(transition.variant_name());
+                    state
+                }
+            }
+
+            pub struct [<$test_fn:camel Sut>] {
+                inner: $crate::pbt::E2ESut,
+            }
+
+            impl ::std::ops::Drop for [<$test_fn:camel Sut>] {
+                fn drop(&mut self) {
+                    if ::std::thread::panicking() {
+                        $crate::pbt::slice::write_captured_fixture(stringify!($test_fn));
+                    }
+                }
+            }
+
+            impl ::proptest_state_machine::StateMachineTest for [<$test_fn:camel Sut>] {
+                type SystemUnderTest = Self;
+                type Reference = [<$test_fn:camel Machine>];
+
+                fn init_test(
+                    ref_state: &<Self::Reference as ::proptest_state_machine::ReferenceStateMachine>::State,
+                ) -> Self::SystemUnderTest {
+                    static SHARED_RUNTIME: ::std::sync::OnceLock<
+                        ::std::sync::Arc<::tokio::runtime::Runtime>,
+                    > = ::std::sync::OnceLock::new();
+                    let runtime = SHARED_RUNTIME
+                        .get_or_init(|| {
+                            ::std::sync::Arc::new(::tokio::runtime::Runtime::new().unwrap())
+                        })
+                        .clone();
+                    $crate::pbt::slice::reset_capture(stringify!($test_fn));
+                    $crate::pbt::slice::record_capture_wiring(&ref_state.wiring);
+                    // The slice's `wiring:` selects the SUT backend (ADR 0004
+                    // Phase 9, part (a)): a Loro-only manifest builds the no-Turso
+                    // `LoroMemory` SUT, anything with Turso builds the Turso SUT.
+                    let storage = $crate::pbt::storage_selector_for_wiring(&ref_state.wiring);
+                    [<$test_fn:camel Sut>] {
+                        inner: $crate::pbt::E2ESut::new_with_backend(runtime, storage).unwrap(),
+                    }
+                }
+
+                fn apply(
+                    mut sut: Self::SystemUnderTest,
+                    ref_state:
+                        &<Self::Reference as ::proptest_state_machine::ReferenceStateMachine>::State,
+                    transition:
+                        <Self::Reference as ::proptest_state_machine::ReferenceStateMachine>::Transition,
+                ) -> Self::SystemUnderTest {
+                    $crate::pbt::slice::record_transition(&transition);
+                    sut.inner.drive_transition(ref_state, &transition);
+                    sut
+                }
+
+                fn check_invariants(
+                    sut: &Self::SystemUnderTest,
+                    ref_state:
+                        &<Self::Reference as ::proptest_state_machine::ReferenceStateMachine>::State,
+                ) {
+                    let runtime = sut.inner.runtime.clone();
+                    runtime.block_on(sut.inner.run_invariant_registry(ref_state));
+                }
+
+                // End-of-case sweep: run the `NotNavOnly`-gated invariants
+                // once against the final state, so a nav-tail sequence
+                // doesn't end unchecked (mirrors the native E2E impl).
+                fn teardown(
+                    sut: Self::SystemUnderTest,
+                    ref_state:
+                        <Self::Reference as ::proptest_state_machine::ReferenceStateMachine>::State,
+                ) {
+                    let runtime = sut.inner.runtime.clone();
+                    runtime.block_on(sut.inner.run_invariant_registry_end_of_case(&ref_state));
+                }
+
+                // Shared-engine loop (ADR 0009 §5); see the selective-slice
+                // macro for rationale.
+                fn test_sequential(
+                    _config: ::proptest::test_runner::Config,
+                    ref_state: $crate::pbt::ReferenceState,
+                    transitions: ::std::vec::Vec<$crate::pbt::transitions::E2ETransition>,
+                    seen_counter: ::std::option::Option<
+                        ::std::sync::Arc<::std::sync::atomic::AtomicUsize>,
+                    >,
+                ) {
+                    $crate::pbt::stepper::run_via_state_machine_test::<Self>(
+                        ref_state, transitions, seen_counter,
+                    );
+                }
+            }
+
+            impl $crate::pbt::fixtures::FixtureAssertable for [<$test_fn:camel Sut>] {
+                fn evaluate_assert(
+                    &self,
+                    assertion: &$crate::pbt::fixtures::assert::Assertion,
+                    ref_state: &$crate::pbt::ReferenceState,
+                ) -> ::std::result::Result<(), ::std::string::String> {
+                    $crate::pbt::fixtures::FixtureAssertable::evaluate_assert(
+                        &self.inner,
+                        assertion,
+                        ref_state,
+                    )
+                }
+            }
+
+            ::proptest_state_machine::prop_state_machine! {
+                #![proptest_config($config)]
+                #[test]
+                fn $test_fn(sequential $step_lo .. $step_hi => [<$test_fn:camel Sut>]);
+            }
         }
     };
 }
@@ -512,6 +774,7 @@ thread_local! {
 
 struct CaptureState {
     transitions: Vec<E2ETransition>,
+    wiring: Option<holon_pbt_core::Wiring>,
     already_written: bool,
 }
 
@@ -519,8 +782,19 @@ pub fn reset_capture(_: &'static str) {
     CAPTURE.with(|c| {
         *c.borrow_mut() = Some(CaptureState {
             transitions: Vec::new(),
+            wiring: None,
             already_written: false,
         });
+    });
+}
+
+/// Record the wiring the capture is being generated under (called once the
+/// run's `Wiring` is known — it may not be at `reset_capture` time).
+pub fn record_capture_wiring(wiring: &holon_pbt_core::Wiring) {
+    CAPTURE.with(|c| {
+        if let Some(state) = c.borrow_mut().as_mut() {
+            state.wiring = Some(wiring.clone());
+        }
     });
 }
 
@@ -536,7 +810,7 @@ pub fn record_transition(t: &E2ETransition) {
 /// `$CARGO_MANIFEST_DIR/tests/.captures/<slice>.captured.json`. Idempotent
 /// per panic (proptest may unwind through multiple Drop sites during
 /// shrink — first writer wins).
-pub fn write_captured_fixture(slice_name: &'static str) {
+pub fn write_captured_fixture(slice_name: &str) {
     CAPTURE.with(|c| {
         let mut borrow = c.borrow_mut();
         let Some(state) = borrow.as_mut() else {
@@ -559,6 +833,10 @@ pub fn write_captured_fixture(slice_name: &'static str) {
             description: "Auto-captured from a panicking proptest case. \
                           Rename + move into the slice's fixtures_dir to lock it."
                 .to_string(),
+            environment: holon_pbt_core::fixture::CaptureEnvironment {
+                wiring: state.wiring.clone(),
+                env_flags: holon_pbt_core::fixture::CaptureEnvironment::current_env_flags(),
+            },
             initial_state: (),
             transitions: state.transitions.clone(),
         };

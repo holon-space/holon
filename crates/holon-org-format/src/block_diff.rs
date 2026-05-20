@@ -132,17 +132,15 @@ fn get_block_content(block: &Block) -> String {
 /// # Returns
 /// Vector of diffs to apply
 pub fn diff_blocks(
-    old_blocks: &HashMap<String, Block>,
-    new_blocks: &HashMap<String, Block>,
+    old_blocks: &HashMap<EntityUri, Block>,
+    new_blocks: &HashMap<EntityUri, Block>,
 ) -> Vec<BlockDiff> {
     let mut diffs = Vec::new();
 
     // Find deleted blocks (in old but not in new)
     for id in old_blocks.keys() {
         if !new_blocks.contains_key(id) {
-            diffs.push(BlockDiff::Deleted {
-                id: EntityUri::from_raw(id),
-            });
+            diffs.push(BlockDiff::Deleted { id: id.clone() });
         }
     }
 
@@ -151,7 +149,7 @@ pub fn diff_blocks(
         match old_blocks.get(id) {
             Some(old_block) => {
                 // Block exists - check for changes
-                let entity_id = EntityUri::from_raw(id);
+                let entity_id = new_block.id.clone();
 
                 // Check content change
                 let old_content = get_block_content(old_block);
@@ -223,14 +221,8 @@ pub fn diff_blocks(
 /// Convert a list of Blocks to a tree-indexed map.
 ///
 /// Returns blocks indexed by their ID for use in diff operations.
-pub fn blocks_to_map(blocks: &[Block]) -> HashMap<String, Block> {
-    blocks
-        .iter()
-        .map(|b| {
-            let id = b.get_block_id().unwrap_or_else(|| b.id.to_string());
-            (id, b.clone())
-        })
-        .collect()
+pub fn blocks_to_map(blocks: &[Block]) -> HashMap<EntityUri, Block> {
+    blocks.iter().map(|b| (b.id.clone(), b.clone())).collect()
 }
 
 #[cfg(test)]
@@ -243,9 +235,11 @@ mod tests {
         let mut properties = HashMap::new();
         properties.insert("ID".to_string(), Value::String("local://test".to_string()));
         Block {
+            // ALLOW(entity_uri_from_raw): test-fixture literal in create_test_block
             id: holon_api::EntityUri::from_raw(id),
+            // ALLOW(entity_uri_from_raw): test-fixture literal in create_test_block
             parent_id: holon_api::EntityUri::from_raw(parent_id),
-            tags: Vec::new(),
+            tags: Vec::new().into(),
             requires: Vec::new(),
             content: content.to_string(),
             content_type: holon_api::types::ContentType::Text,
@@ -255,7 +249,7 @@ mod tests {
             marks: None,
             created_at: now,
             updated_at: now,
-            sort_key: "A0".to_string(),
+            ..Default::default()
         }
     }
 
@@ -265,7 +259,7 @@ mod tests {
         let mut new_blocks = HashMap::new();
 
         let new_block = create_test_block("local://test", "root", "Test");
-        new_blocks.insert("local://test".to_string(), new_block);
+        new_blocks.insert(new_block.id.clone(), new_block);
 
         let diffs = diff_blocks(&old_blocks, &new_blocks);
         assert_eq!(diffs.len(), 1);
@@ -283,7 +277,7 @@ mod tests {
         let new_blocks = HashMap::new();
 
         let old_block = create_test_block("local://test", "root", "Test");
-        old_blocks.insert("local://test".to_string(), old_block);
+        old_blocks.insert(old_block.id.clone(), old_block);
 
         let diffs = diff_blocks(&old_blocks, &new_blocks);
         assert_eq!(diffs.len(), 1);
@@ -301,10 +295,10 @@ mod tests {
         let mut new_blocks = HashMap::new();
 
         let old_block = create_test_block("local://test", "root", "Old");
-        old_blocks.insert("local://test".to_string(), old_block);
+        old_blocks.insert(old_block.id.clone(), old_block);
 
         let new_block = create_test_block("local://test", "root", "New");
-        new_blocks.insert("local://test".to_string(), new_block);
+        new_blocks.insert(new_block.id.clone(), new_block);
 
         let diffs = diff_blocks(&old_blocks, &new_blocks);
         assert_eq!(diffs.len(), 1);

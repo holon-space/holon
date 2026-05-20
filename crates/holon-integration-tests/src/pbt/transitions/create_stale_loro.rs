@@ -30,17 +30,21 @@ pub struct CreateStaleLoro {
 
 impl TransitionFactory<ReferenceState> for CreateStaleLoro {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
+    }
+
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let early_checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.app_started, Reason::AppAlreadyStarted),
-            check(state.variant.enable_loro, Reason::LoroDisabledForCorruption),
+            check(!state.action.app_started, Reason::AppAlreadyStarted),
+            check(state.enable_loro(), Reason::LoroDisabledForCorruption),
         ];
         let checks_result = early_checks.into_iter().collect::<Validated<Vec<()>, _>>();
         if checks_result.is_fail() {
             return checks_result.map(|_| unreachable!());
         }
 
-        let org_filenames: Vec<String> = state.documents.values().cloned().collect();
+        let org_filenames: Vec<String> = state.files.documents.values().cloned().collect();
         if org_filenames.is_empty() {
             return Validated::fail(Reason::NoDocumentsAvailable);
         }
@@ -85,10 +89,14 @@ impl TransitionRef<ReferenceState> for CreateStaleLoro {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.app_started, Reason::AppAlreadyStarted),
-            check(state.variant.enable_loro, Reason::LoroDisabledForCorruption),
+            check(!state.action.app_started, Reason::AppAlreadyStarted),
+            check(state.enable_loro(), Reason::LoroDisabledForCorruption),
             check(
-                state.documents.values().any(|f| f == &self.org_filename),
+                state
+                    .files
+                    .documents
+                    .values()
+                    .any(|f| f == &self.org_filename),
                 Reason::NoDocumentsAvailable,
             ),
         ];

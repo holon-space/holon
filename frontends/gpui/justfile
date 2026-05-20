@@ -82,6 +82,30 @@ deploy profile="release": (build profile) (apk profile) install launch
 desktop *args="":
     cargo run -p holon-gpui {{ args }}
 
+# ── PBT ──────────────────────────────────────────────────────────────────
+# Run the windowed GPUI PBT. Builds from THIS directory and runs the EXACT
+# binary cargo just reported (`--message-format=json` → `.executable`), so
+# the stale-binary trap (workspace-root vs frontends/gpui builds producing
+# two different binary hashes for the same test) cannot bite. Not
+# `cargo test`: its dev-dep feature unification compiles holon's default
+# `iroh-sync` feature, which `cargo build --test` doesn't. The window-host
+# exit path propagates failures, so a non-zero exit is trustworthy.
+# Extra env (HOLON_PBT_INVARIANTS, HOLON_PBT_SUPERHUMAN_INPUT, …) passes
+# through from the caller's environment.
+
+# Run the windowed GPUI PBT (Full wiring; immune to the stale-binary trap)
+pbt target="gpui_ui_pbt" steps="40" cases="1":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BIN=$(cargo build --test {{ target }} --features pbt --message-format=json \
+        | python3 -c 'import json,sys; [print(m["executable"]) for m in map(json.loads, sys.stdin) if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "{{ target }}"]')
+    test -n "$BIN" || { echo "ERROR: no executable for {{ target }}"; exit 1; }
+    echo "Running $BIN"
+    HOLON_PBT_STEP_TIMING=1 PBT_NUM_STEPS={{ steps }} PROPTEST_CASES={{ cases }} "$BIN"
+
+# The SqlOnly (no-Loro) twin
+pbt-no-loro steps="40" cases="1": (pbt "gpui_ui_pbt_no_loro" steps cases)
+
 # Regenerate assets/images/holon.icns from assets/images/holon.png
 icns:
     #!/usr/bin/env bash

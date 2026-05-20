@@ -26,6 +26,10 @@ pub struct MergeFromPeer {
 
 impl TransitionFactory<ReferenceState> for MergeFromPeer {
     type Reason = Reason;
+    fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
+        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
+    }
+
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (peer indices) and let `preconditions` be the
         // single source of truth for which ones are actually mergeable. Avoids
@@ -53,8 +57,8 @@ impl TransitionRef<ReferenceState> for MergeFromPeer {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.app_started, Reason::AppNotStarted),
-            check(state.variant.enable_loro, Reason::LoroRequiredForPeers),
+            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.enable_loro(), Reason::LoroRequiredForPeers),
             check(
                 self.peer_idx < state.peers.len(),
                 Reason::PeerIndexOutOfBounds,

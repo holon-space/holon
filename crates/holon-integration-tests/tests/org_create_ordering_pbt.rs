@@ -27,14 +27,13 @@
 
 #![cfg(feature = "pbt")]
 
-use holon_integration_tests::declare_pbt_slice;
+use holon_integration_tests::component_pbt;
 use holon_integration_tests::pbt::invariants::bodies::live_children_match_ref::InvLiveChildrenMatchRef;
 use holon_integration_tests::pbt::transitions::{BulkExternalAdd, WriteOrgFile};
 
-declare_pbt_slice! {
+component_pbt! {
     test_fn: org_create_ordering_pbt_full,
-    variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::Full>,
-    inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::Full>,
+    set: holon_pbt_core::ComponentSet::full_headless(),
     transitions: [
         preset lifecycle,
         WriteOrgFile,

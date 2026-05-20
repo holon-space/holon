@@ -238,7 +238,7 @@ When modifying the library:
 
 External mutation transitions (simulating Emacs editing an org file) go through the
 full filesystem pipeline: write file to disk → macOS FSEvents notification (50-500ms) →
-file watcher → OrgSyncController reads file back → parse → diff → execute batch →
+file watcher → FileSyncController reads file back → parse → diff → execute batch →
 wait for CDC cache → re-render → test polls for block count + file stability.
 
 Each external mutation step burns 5-15 seconds in polling waits, making PBT runs
@@ -246,9 +246,10 @@ with 8 cases x 10+ steps painfully slow.
 
 ## Solution: `OrgSyncCommandSender`
 
-A command channel injected into OrgSyncController's `tokio::select!` loop alongside
-the file watcher and EventBus receivers. Tests send org content directly to the
-controller via `OrgSyncCommand::ContentChanged`, bypassing the filesystem entirely.
+A command channel injected into FileSyncController's `tokio::select!` loop alongside
+the file watcher and the `LiveData<Block>` block-change receiver. Tests send org
+content directly to the controller via `OrgSyncCommand::ContentChanged`, bypassing
+the filesystem entirely.
 
 The controller's `on_content_changed(path, content)` method contains the core sync
 logic (parse, diff, batch execute, cache wait, re-render) extracted from
@@ -261,7 +262,7 @@ blocks are committed and the cache is up-to-date.
 |---|---|
 | `OrgSyncCommand` enum | `crates/holon-orgmode/src/di.rs` |
 | `OrgSyncCommandSender` | `crates/holon-orgmode/src/di.rs` |
-| `on_content_changed()` | `crates/holon-orgmode/src/org_sync_controller.rs` |
+| `on_content_changed()` | `crates/holon-orgmode/src/file_sync_controller.rs` |
 | `apply_external_mutation_direct()` | `crates/holon-integration-tests/src/test_environment.rs` |
 | `ingest_org_content()` | `crates/holon-integration-tests/src/test_environment.rs` |
 
@@ -316,7 +317,7 @@ This produces a `trace-{timestamp}.json` file viewable in:
 
 Override the output path with `CHROME_TRACE_FILE=/path/to/output.json`.
 
-See `docs/PERFORMANCE_PROFILING.md` for details on instrumented spans.
+See `docs/HowTo/PERFORMANCE_PROFILING.md` for details on instrumented spans.
 
 ---
 
@@ -423,7 +424,6 @@ Core cycle in `crates/holon-integration-tests/src/pbt/phased.rs`:
 4. **`pbt_teardown()`** — cleanup
 
 Convenience runners:
-- `run_phased_pbt(num_steps, execute_op)` — full cycle with optional async callback
 - `run_pbt_with_driver(num_steps, driver)` — full cycle with a `UiDriver`
 
 ## UiDriver Levels
@@ -466,3 +466,183 @@ Each frontend implements `GeometryProvider` (`crates/holon-frontend/src/geometry
 2. Use `self.geometry.element_bounds(id)` to locate the element
 3. Simulate input with `enigo` at the element's center
 4. Return `true` if handled, `false` for FFI fallback
+
+---
+
+# Component Bisection: "the replay panicked" ≠ "the bug reproduced"
+
+> **The single most non-obvious trap in the ADR-0009 component bisector.** Read
+> this before trusting a bisection result, or before writing any code that
+> replays a captured PBT sequence against a different component subset.
+> Deep reference: `docs/Testing/PbtSlicing.md` §13.
+
+## What bisection does
+
+When a wide PBT fails, the slice writes the concrete failing sequence to
+`tests/.captures/<slice>.captured.json` (a `Vec<E2ETransition>`). Component
+bisection **replays that same sequence across a lattice of `ComponentSet`s**
+(drop Turso, drop a projection, …) and reports the smallest set that still
+reproduces — localizing *where* the reference and the enabled projections
+disagree. The node oracle is `bisect_driver::reproduces_under(set, transitions)`.
+
+## The trap
+
+The obvious oracle is **"the replay panicked ⇒ it reproduced."** That is wrong,
+and wrong in a way that silently corrupts the localization.
+
+A sequence captured under one wiring **does not always replay faithfully under
+another**, even after ADR §4's gating (which skips transitions whose
+`required_wiring` the node lacks). Two replay-infidelity failure modes bite even
+*non-gated* transitions:
+
+1. **Storage-coupled SUT paths.** A transition's *domain* is storage-agnostic,
+   but its *SUT apply* reaches a backend-specific path. Real example: replaying a
+   Turso-generated capture under a no-Turso (`loro_backend`) node, `SplitBlock`
+   times out and calls `probe_block_sql_state` — a **Turso-only diagnostic** —
+   which hits `test_ctx()` and panics **`"App not started - call start_app()
+   first"`**. The app *is* started; the message is a red herring from a Turso-only
+   accessor crashing on a no-Turso session.
+
+2. **Settle/timing differences.** Generation settles between steps; a raw replay
+   may not, so an editor keystroke fires before its Loro container exists:
+   **`send_raw_keystroke failed … create intent hasn't landed in the Loro
+   tree`**. This aborts even at the *generating* wiring (`full_headless`).
+
+Neither is the bug being localized. If you count them as reproductions, **every
+no-Turso node "reproduces"** and the downward walk descends into nodes it can't
+even replay — localizing spuriously (this actually produced a bogus
+`DownwardMinimal({Loro})` before the fix).
+
+## The rule: reproduction is a *signature match*
+
+`reproduces_under` counts a panic as a reproduction **iff its message contains
+the reproduction signature**:
+
+- **Default signature** = `trouble begins at:` — the marker that
+  `format_layer_report` (the cross-layer invariant report) emits **iff an
+  invariant actually diverged**. A harness/settle abort never contains it.
+- **Override** = `HOLON_BISECT_SIGNATURE="<exact failure text>"` to pin one
+  specific bug (so ddmin/bisection localize *that* failure, not a different mode
+  the over-shrunk capture happened to hit).
+
+Anything that panics *without* the signature is logged as an **inconclusive
+node** (`[bisect] … replay aborted, NOT a reproduction (inconclusive node)`) and
+**not counted** — so the search never localizes into a node it cannot faithfully
+replay.
+
+Trade-off, stated honestly: a genuine *non-invariant* SUT crash also lacks the
+marker and won't count by default. Bisection localizes **divergence** (its stated
+purpose); pin `HOLON_BISECT_SIGNATURE` if you are chasing a crash instead.
+
+## Debugging a bisection
+
+```bash
+# Does the ceiling even reproduce the real failure? (one SUT, fast)
+HOLON_BISECT_PROBE=1 HOLON_BISECT_SLICE=<slice> scripts/pbt-bisect.sh <slice> --probe
+
+# See the actual panic (message + backtrace) instead of the muted oracle:
+HOLON_BISECT_VERBOSE=1 HOLON_BISECT_PROBE=1 HOLON_BISECT_SLICE=<slice> \
+  cargo test -p holon-integration-tests --features pbt \
+  --test bisection_pbt bisect_capture_from_env -- --nocapture
+
+# Pin an exact failure + measure Heisenbug flakiness over N replays:
+HOLON_BISECT_SIGNATURE="inv-blocks-match-ref" HOLON_BISECT_REPEAT=10 …
+```
+
+If a probe says `reproduces = false` but logs an *inconclusive node*, the capture
+does not faithfully replay at that wiring — that is a finding about replay
+fidelity, **not** evidence the code is clean.
+
+## The deeper lesson
+
+Captures are portable across `ComponentSet`s only as far as every transition's
+**SUT path** is storage-faithful. Gating (`required_wiring`) handles the *alphabet*;
+it does **not** handle a non-gated transition whose apply is secretly
+backend-coupled, nor generation-vs-replay settle timing. GPUI captures are
+additionally **runner-coupled** — they reproduce only on the real window, never
+headless. When in doubt, treat a no-signature replay panic as "could not
+replay," not "reproduced."
+
+---
+
+# Replaying & minimizing a runner-coupled capture (windowed ddmin)
+
+Some failures only diverge when transitions route through the **real GPUI editor
+widget path** (live `InputState`, focus handoff, geometry-driven clicks). Their
+capture never reproduces under the headless `BisectionStepper` lattice — every
+node either runs clean or hits an unrelated abort (0 signature hits across all
+wirings; see the runner-coupled note above). For those, headless minimization is
+useless: the failure-agnostic ddmin oracle collapses into a *different* failure
+(e.g. a reference-model `unwrap` on a block whose creating transition got
+dropped), yielding a bogus 1-transition "minimum". You must replay — and
+minimize — **through a real window**.
+
+## Replaying a capture in a real window
+
+`frontends/gpui/tests/gpui_capture_replay.rs` (`harness = false`) loads a
+`Fixture<E2ETransition>` capture JSON and replays it through a real GPUI window
+via `phased::replay_fixture_with_driver_sync_callback` — the same windowed spine
+`gpui_gherkin_replay` uses, only the loader differs (`fixtures::json::load_file`).
+It reproduces the failure faithfully (same invariant report, same panic).
+
+```bash
+cargo test -p holon-gpui --test gpui_capture_replay --features pbt
+# override the capture (default = the gpui_ui_pbt capture):
+HOLON_CAPTURE=/abs/path.json cargo test -p holon-gpui --test gpui_capture_replay --features pbt
+```
+
+## Minimizing a capture in a *reused* window
+
+`frontends/gpui/tests/gpui_windowed_minimize.rs` (`harness = false`) runs a greedy
+ddmin **through one reused window**, re-pointed at a fresh SUT per candidate —
+not one process per candidate (GPUI owns the main thread; an `Application` is
+per-process, so process-per-candidate re-pays full app+window init every time).
+
+- **bg thread** runs the ddmin loop; each candidate replays via
+  `replay_fixture_with_driver_sync_callback`, whose `on_ready` posts a rebind
+  request to the main thread and blocks until the window has repainted, then
+  injects a `GpuiUserDriver`.
+- **main thread** runs `Application::run`: opens the window for the first
+  candidate, then a `cx.spawn` loop rebinds it for each subsequent one (via
+  `holon_gpui::RebindHandle`) and quits when ddmin is done.
+- **isolation**: every candidate builds its own `E2ESut` (fresh `TempDir` +
+  Turso + Loro, auto-deleted on drop). The window is *re-pointed*, the backend is
+  never reused — no cross-candidate poisoning.
+- **signature guard**: a candidate counts as a reproduction iff the replay panics
+  with `HOLON_MINIMIZE_SIGNATURE` (default `inv-blocks-match-ref/loro`) — same
+  discipline as the bisector, so ddmin can't collapse into a different failure.
+
+```bash
+cargo test -p holon-gpui --test gpui_windowed_minimize --features pbt
+# env: HOLON_CAPTURE=/abs.json, HOLON_MINIMIZE_SIGNATURE=<substr>
+# writes the minimized subsequence to <capture>.min.json
+```
+
+Example: the `gpui_ui_pbt` SplitBlock capture minimizes 9 → 6 transitions
+(`WriteOrgFile, StartApp, CreateDocument, BulkExternalAdd, NavigateFocus,
+SplitBlock{block:bulk-0-7,pos2}`); the two `CreateDirectory`s and `CreateStaleLoro`
+drop out. Per candidate ≈ 25–30 s.
+
+> Headless counterparts live in `bisection_pbt.rs`:
+> `minimize_capture_from_env` (signature-aware ddmin over the cheap in-process
+> oracle — correctly *refuses* and reports "runner-coupled" when the signature
+> never reproduces headlessly) and `replay_capture_verbose_from_env`
+> (`HOLON_BISECT_REPEAT`/`HOLON_BISECT_SIGNATURE` to measure Heisenbug flakiness).
+
+## The re-bindable window (for maintainers)
+
+`RebindHandle::rebind(session, engine, cx)` re-points a live window at a new SUT.
+The window captures the engine in **several** places, each of which must be
+re-pointed or the rebound window reads stale state (a stale-window false oracle):
+
+| Seam | Symptom if left stale | Fix on rebind |
+|---|---|---|
+| Root-layout signal (`spawn_root_layout_signal`) | `if_space` breakpoint never re-evaluates → **left sidebar overlaps main** | re-subscribe to the new engine; stale loops self-suppress via `Arc::ptr_eq(&m.engine, &engine)` |
+| Interaction-pump engine (`LiveEngine` cell) | `scroll_entity_into_view` queries the old engine → `NavigateFocus` 5 s bounds timeout | pump reads the shared `LiveEngine` cell, which rebind updates |
+| `HolonApp.entity_cache` panel shells | keyed by *static* panel ids → render's `or_insert_with` keeps the old engine's `ReactiveShell`s | clear the cache on rebind |
+| `AppModel` viewport | first frame lands on the narrow (overlay) breakpoint | seed the new engine's viewport **before** the rebuilt snapshot |
+
+The harness waits for **paint quiescence** (a `BoundsRegistry::committed_generation()`
+advance *and* a stable element count) before each candidate runs, so deep entity
+bounds are present before `NavigateFocus`. If you add window state that snapshots
+the engine/session at open, it is a new seam — re-point it in `rebind`.

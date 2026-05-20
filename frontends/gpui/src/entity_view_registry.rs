@@ -43,7 +43,7 @@ pub enum CacheKey {
     /// caches) across the parent's structural rebuilds.
     LiveBlock(String),
 
-    /// `LiveQueryView` keyed by `live_query_key(sql, context_id)`.
+    /// query-backed `ReactiveShell` keyed by `live_query_key(sql, context_id)`.
     /// Preserves cached query results.
     LiveQuery(String),
 
@@ -169,6 +169,30 @@ impl LocalEntityScope {
 pub fn wipe_ephemeral(cache: &EntityCache) {
     let mut g = cache.write().unwrap();
     g.retain(|k, _| k.is_state_bearing());
+}
+
+/// Evict `Ephemeral` entries whose key starts with `prefix`, except those the
+/// `keep` predicate vetoes. Returns `true` when no prefix-matching entries
+/// remain afterwards.
+///
+/// Used to drop a row's cached `EditorView` after defocus (the entry would
+/// otherwise live as long as the row — one editor per ever-focused block).
+/// The predicate lets the caller keep an editor whose `InputState` still
+/// holds window focus: on an A→B focus move, A can re-render before B's
+/// editor has mounted and grabbed focus, and dropping A's input at that
+/// moment would blur the window mid-keystroke.
+pub fn evict_ephemeral_with_prefix(
+    cache: &EntityCache,
+    prefix: &str,
+    keep: impl Fn(&AnyEntity) -> bool,
+) -> bool {
+    let mut g = cache.write().unwrap();
+    g.retain(|k, v| match k {
+        CacheKey::Ephemeral(s) if s.starts_with(prefix) => keep(v),
+        _ => true,
+    });
+    !g.keys()
+        .any(|k| matches!(k, CacheKey::Ephemeral(s) if s.starts_with(prefix)))
 }
 
 // ── LiveBlockAncestors ──────────────────────────────────────────────────

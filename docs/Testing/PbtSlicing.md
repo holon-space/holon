@@ -1,420 +1,253 @@
 # PBT Slicing — Capability-Composed Property Tests
 
-**Status**: shipped. Stages A + B + Phase 10 cleanup landed 2026-05-18. **2026-05-19 follow-up**: `declare_pbt_slice!` macro landed — new slices now cost ~15-25 LOC each (down from 250-370 LOC of boilerplate), realising the §5 "slice declaration is the entire spec" vision via a declarative macro instead of the originally-proposed typed-tuple `PbtSlice` trait (which would have tripped Rust's O(N) tuple trait resolution and couldn't express slice-specific `prop_filter` quirks). Phase 9 (in-memory + real GPUI) deferred per H7 audit — see [PHASE_9_H7_AUDIT.md](../PHASE_9_H7_AUDIT.md). The design below is the canonical reference; the [§ "What actually shipped" callout](#-what-actually-shipped) summarises divergences.
+**Audience**: a Claude session asked to add or refactor a property-based test in this repo. Read this *before* writing a new PBT, and prefer reusing the abstractions described here over adding a monolithic per-test ref/SUT struct.
 
-**Audience**: a Claude session asked to add or refactor a property-based test in this repo. Read this *before* writing a new PBT, and prefer reusing the abstractions described here over adding monolithic per-test ref/SUT structs.
+**One-line model**: there is **one** set of transitions, **one** registry of invariants, and **one** runner. A *slice* is a small product struct that composes capability impls; the slice picks which transitions and invariants it can run purely by which capability traits it satisfies. The wide E2E PBT and the fast narrow slices share all of it.
 
-**Sister docs**:
-- [`docs/TESTING_PHASE10_HANDOFF.md`](../TESTING_PHASE10_HANDOFF.md) — final delivery state, what's done, what's left
-- [`docs/PHASE_9_H7_AUDIT.md`](../PHASE_9_H7_AUDIT.md) — why Phase 9 was deferred
-- `docs/TESTING_INVARIANT_AUDIT.md` — invariant ↔ subsystem matrix
-- `docs/TESTING_PATTERNS.md` — fold patterns and pitfalls
-- `crates/holon-integration-tests/src/pbt/invariants/registry.rs` — runtime registry (28 entries) + parity self-tests
-- `crates/holon-pbt-core/src/capabilities.rs` — canonical trait surface (all clusters)
-- `crates/holon-pbt-core/src/invariant.rs` — `Invariant<R,S>` trait + `RunMode` + `InvariantResult`
-- `crates/holon-pbt-core/src/caching_proxy.rs` — per-tick SUT cache (drain-once VM emissions)
-- `crates/holon-integration-tests/src/pbt/slice.rs` — `declare_pbt_slice!` macro (2026-05-19)
-
-## 🚢 What actually shipped
-
-Five slice consumers run today; framework's structural claim — *same transitions + same invariants execute across different SUT compositions* — is empirically validated. **As of 2026-05-19, two of the SqlOnly slices (`cdc_delivery_pbt`, `storage_consistency_pbt`) have been migrated to the `declare_pbt_slice!` macro**, dropping their LoC by 62-71% (262→77 and 370→139). The macro is the recommended way to add new slices; see [§ 10 Adding a new slice](#10-adding-a-new-slice).
-
-| Slice | SUT variant | Renderer | Storage | Cases × Steps | Wall | Bug class targeted |
-|---|---|---|---|---|---|---|
-| `tests/editor_pure_pbt.rs` (Stage A) | `EditorPureSut` | none | in-memory | 1024 × 30 | ~2 s | pure editor state-machine bugs |
-| `tests/storage_consistency_pbt.rs` (Phase 8) | `E2ESut<SqlOnly>` | none | real Turso+Loro | 16 × 1-10 | ~124 s | end-to-end storage consistency |
-| `tests/cdc_delivery_pbt.rs` (Phase B+) | `E2ESut<SqlOnly>` | none | real Turso+Loro | 16 × 1-10 | ~54 s | matview→CDC→watch delivery (MEMORY's Turso IVM bug class) |
-| `tests/general_e2e_pbt.rs` (wide) | `E2ESut<Full>` | ReactiveEngine headless | real Turso+Loro | varies | minutes | full stack |
-| `tests/org_roundtrip_pbt.rs` (Phase B+) | `Vec<Block>` | none | none | 512 × 1 | <1 s | org parser↔renderer fidelity (tag drop, drawer-property drop, TODO keyword loss) |
-
-**Divergences from the original design** (preserved here so future readers know what the doc claimed vs. what we built):
-
-- **`CanonicalEvent` never built.** Section 2.3's bridging enum never materialised because no slice needed cross-medium notification assertions. Per the §9 escape hatch, the variant was killed before it ossified — slice-local event types remain the right granularity for now.
-- **`SutQuiesce` split into `SutCdc` + `CachingProxy` drain.** The original "uniform `quiesce()` future" became two surfaces: per-call CDC drain on the SUT (called by the transition executor) and per-tick eager drain of VM emissions inside the `CachingProxy` (called by invariant evaluation). The split is documented at [`caching_proxy.rs`](../../crates/holon-pbt-core/src/caching_proxy.rs).
-- **`WidgetSnapshot` IR emerged** (not in original doc) as the cross-renderer abstraction for invariants that need a renderer's output. Lives in `holon_pbt_core::capabilities::WidgetSnapshot`. Renderer-required invariants bind on `SutRenderer::widget_tree_snapshot()` returning this IR, so they can run against any UI-bearing slice — not just real GPUI.
-- **Capability clusters expanded to 8** beyond the original 4-6: Loro, Turso/CDC, ViewModel/Renderer, Layout, Driver, OrgRender, QueryCompile, Lifecycle. Trait surface canonicalised at [`capabilities.rs`](../../crates/holon-pbt-core/src/capabilities.rs).
-- **Invariant migration is partial.** 4 of 7 functional invariants migrated to capability-bound `Invariant<R,S>` calls in the wide PBT runner; 3 retained inline because the wide PBT asserts strictly more than the slim migrated impls (richer state-toggle checks, fresh-interp viewmodel path). Documented in `TESTING_PHASE10_HANDOFF.md`.
-- **`E2ETransitionFactory` / `E2ETransitionImpl` NOT retired.** The Stage A/B migration moved transition LOGIC into capability-bound free helpers, but the `declare_e2e_transitions!` macro still generates these traits as the dispatch surface. Audit verdict: not retirable while the macro shape stays. `declare_pbt_slice!` (2026-05-19) builds on top of this surface — it calls `E2ETransitionFactory::weighted_generator` per listed transition type and routes through `E2ETransition::from`, so the union/dispatch infrastructure stays load-bearing.
-
-- **`PbtSlice` trait killed; replaced by `declare_pbt_slice!` macro.** The §5 design proposed a typed-tuple `type TransitionSet = (T1, T2, …)` on a `PbtSlice` trait. Empirical reasons it was wrong: (1) Rust's tuple trait resolution is O(N) per impl, and slices want 8-16 transitions; (2) two of three existing slices need per-transition `prop_filter` (e.g. `WriteOrgFile` skipping `index.org`), which a homogeneous tuple-of-types can't express without per-slice newtype wrappers; (3) invariants need heterogeneous constructors (unit struct vs `PhantomData<R>`-carrying). The macro accepts each `transitions: [...]` entry as either a bare type or `(Type, "reason", filter)`, and each `invariants: [...]` entry as an arbitrary expression — covers all three cases at zero per-slice cost.
-- **Phase 9 deferred** per H7 audit: matview-required count is 3 (>2 gate), a faithful in-memory `BuilderServices` impl estimates at 1600-2950 LOC (>1500 gate). Framework still ships without it.
-
-## 🛡️ Two archlint guardrails enforce the discipline
-
-Both in `archlint/smells/pbt_transitions.toml`:
-
-- `pbt-transition-helper-concrete-ref` — forbids new `pub fn <name>_(apply_to_ref|weighted_generator|preconditions)` helpers from naming `ReferenceState` in their signature. Forward-looking: doesn't punish the ~46 not-yet-migrated transitions because they don't have free-function helpers matching the pattern.
-- `pbt-slice-invariant-foreign-module` — forbids slice test files from importing `Inv*` structs outside `holon_integration_tests::pbt::invariants::bodies::`. Static counterpart to the runtime H11 anti-rubber-stamp test in the registry self-tests.
-
-Plus the registry self-tests in `crates/holon-integration-tests/src/pbt/invariants/registry.rs`:
-- `body_ids_match_registry_ids` — id parity between bodies/ dir and `register_default()` registry
-- `every_registry_id_has_a_body_file` — file-system parity
-- `storage_slice_invariants_are_subset_of_wide_registry` — runtime H11 guard
+**Canonical code references**:
+- `crates/holon-pbt-core/src/capabilities.rs` — the capability trait surface (`Ref*` / `Sut*` clusters).
+- `crates/holon-pbt-core/src/invariant.rs` — `Invariant<R,S>` trait + `InvariantResult` (`Ok`/`Fail`/`Skipped`).
+- `crates/holon-pbt-core/src/caching_proxy.rs` — `CachingProxy<'a,S>`: per-tick SUT memoizer.
+- `crates/holon-integration-tests/src/pbt/invariants/registry.rs` — metadata registry (`InvariantSpec`, `Subsystem`, `RunMode`) + parity self-tests.
+- `crates/holon-integration-tests/src/pbt/invariants/bodies/*.rs` — the executable `Invariant<R,S>` bodies (one per id).
+- `crates/holon-integration-tests/src/pbt/invariant_runner.rs` — `run_invariant_registry`: the **sole** invariant path for every suite.
+- `crates/holon-integration-tests/src/pbt/slice.rs` — the `declare_pbt_slice!` macro.
+- `crates/holon-integration-tests/src/pbt/transition_budgets.rs` — the NFR (non-functional-requirement) budget spine.
 
 ---
 
-## 1. The problem this exists to solve
+## 1. The problem this solves
 
-Today the wide PBT (`general_e2e_pbt.rs`, `gpui_ui_pbt`) is one big monolith: a single `ReferenceState`, a single `Sut`, and a transition set that mixes pure-logic ops (TypeChars, MoveCursor) with full-stack ops (ClickBlock, BulkExternalAdd). Every new PBT today either (a) duplicates that scaffolding for its narrower scope, or (b) joins the monolith and pays the seconds-per-case cost.
+A naive E2E PBT is a monolith: one `ReferenceState`, one `Sut`, and a transition set that mixes pure-logic ops (`TypeChars`, `MoveCursor`) with full-stack ops (`ClickBlock`, `BulkExternalAdd`). Every new PBT then either duplicates that scaffolding for its narrower scope, or joins the monolith and pays seconds-per-case.
 
-We want to be able to **take a slice of our choice through Holon's components** and get a fast PBT for exactly that slice:
-
-- pure in-memory editor + block tree (microsecond-per-case)
-- Turso + Loro + Org without a UI (matview consistency)
-- in-memory blocks + full GPUI (layout-only)
-- the event bus as a notification surface
-- whatever future combination a bug demands
-
-These slices must share **transitions**, **invariants**, and **generators** — otherwise we're back to copy-paste.
+We want to **take a slice through Holon's components** and get a fast PBT for exactly that slice — pure in-memory editor (µs/case), Turso+Loro+Org without a UI (matview consistency), in-memory blocks + real GPUI (layout), or any future combination — while sharing **transitions**, **invariants**, and **generators** across all of them.
 
 ## 2. The core idea — capabilities, not monoliths
 
-Replace the monolithic `ReferenceState` and `Sut` with small, composable **capability traits**. Transitions, invariants, and generators declare which capabilities they need via trait bounds. A concrete PBT picks a *slice*: a struct that implements the capabilities that slice supplies, by composing impls from a menu.
+Replace the monolithic `ReferenceState`/`Sut` with small, composable **capability traits**. Transitions, invariants, and generators declare which capabilities they need via trait bounds. A concrete PBT picks a *slice*: a struct that implements the capabilities that slice supplies by composing impls from a menu. The compiler then determines, for free, which transitions and invariants apply.
 
-The compiler then determines, for free, which transitions and invariants apply to the slice — no runtime filtering needed.
+Capability traits use native `async fn` (no `async_trait`; `#[allow(async_fn_in_trait)]`). **Caps correspond to abstracted system COMPONENTS, never to individual invariants** — this is the load-bearing design rule. If you find yourself adding a cap named after an invariant, find the real component it reads from instead.
 
 ### 2.1 Reference-side capability traits
 
-Split into small read/write pairs. Lean toward more rather than fewer — collapsing a capability is cheap, splitting one is expensive.
+Split into small read/write pairs; lean toward more rather than fewer (collapsing is cheap, splitting later is expensive). Read side first, `Mut`/`Write` suffix for the write side. Representative:
 
 ```rust
-trait RefBlockTree         { /* read structure */ }
-trait RefBlockTreeMut      { /* create / move / delete */ }
-trait RefEditorMirror      { /* read text+cursor */ }
-trait RefEditorMirrorMut   { /* type / delete / move cursor */ }
-trait RefFocus             { /* current focus */ }
-trait RefFocusMut          { /* focus a block */ }
-trait RefEventLog          { /* observed canonical events */ }
-trait RefRenderedBounds    { /* synthetic predicted bounds */ }
+trait RefBlockTree     { /* read structure */ }   trait RefBlockTreeMut    { /* create/move/delete */ }
+trait RefEditorMirror  { /* read text+cursor */ } trait RefEditorMirrorMut { /* type/delete/move cursor */ }
+trait RefFocus         { /* current focus */ }    trait RefFocusMut        { /* focus a block */ }
+trait RefBackend       { /* non-seed blocks */ }  trait RefWatches         { /* expected watch rows */ }
+trait RefRender        { /* expected view/render */ } trait RefLayout       { /* expected layout/geometry */ }
+trait RefLifecycle     { /* app_started */ }      trait RefTaskState / RefPeers / …
 ```
 
-**Why read/write split**: write capabilities are what makes a transition "destructive" against the ref state; many invariants only need the read side. Splitting now avoids re-decomposing once we add a slice where one side is supplied but not the other (e.g. a read-only consistency PBT).
+Write capabilities are what make a transition "destructive" against the ref state; many invariants only need the read side.
 
-### 2.2 SUT-side capability traits
+### 2.2 SUT-side capability traits (component-shaped)
 
-Symmetric, plus async/quiescence concerns and a notification surface:
+Each cap maps to one real Holon component. The current homes:
 
-```rust
-trait SutBlockTree           { /* read */ }
-trait SutBlockTreeWrite      { /* may dispatch async ops */ }
-trait SutEditorMirror        { /* read live editor state */ }
-trait SutEditorMirrorWrite   { /* keystrokes / cursor */ }
-trait SutFocus               { /* current focus */ }
-trait SutFocusWrite          { /* focus a block */ }
-trait SutNotifications       { /* await canonical events */ }
-trait SutLayout              { /* widget bounds + kinds */ }
-trait SutOrgRender           { /* render to org file */ }
-trait SutLoroLog             { /* read Loro sync error log */ }
-trait SutSqlProjection       { /* read matviews / base tables */ }
-trait SutQuiesce             { /* await consistency */ }
-```
+| Component | Cap(s) | Representative methods |
+|---|---|---|
+| Query engine (Turso matviews/base tables) | `SutSqlProjection` | `block_row`, `all_block_ids`, `block_raw_row`, `focus_roots_rows`, `current_focus` |
+| Live CDC mirror | `SutBackend` | `live_block_snapshot() -> Vec<Block>`, `live_focus_root_rows` |
+| Loro store | `SutLoro`, `SutLoroLog`, `SutLoroTaskState` | `loro_block_snapshot`, `loro_children_of`, `loro_had_errors` |
+| UI / ViewModel | `SutViewModel`, `SutRenderer` | `widget_tree_snapshot` (`WidgetSnapshot` IR), `current_view`, `provider_stability_report`, `frontend_root_vm`, `live_vs_fresh_tree_diff`, `drain_vm_emission_toggles` |
+| Geometry (real window) | `SutLayout` | `rendered_elements() -> Vec<RenderedElement>`, `visual_content_fraction` |
+| Org files | `SutOrgRead`, `SutOrgRender` | `org_block_snapshot`, `snapshot_org_render_pairs` |
+| Watches | `SutWatchRows` | watch matview rows |
+| Driver | `SutDriver` | synthesises keystrokes/clicks (non-proxiable — `&mut self`) |
+| Errors / telemetry | `SutErrorLog`, `SutSpanMetrics` | error-source-per-component; OTel span/budget snapshot |
 
-Same capability, multiple impls — the point of the framework:
-
-| Capability | Impl A | Impl B | Impl C |
-|---|---|---|---|
-| `SutBlockTreeWrite` | `MemBlockStore` (mutate Vec) | `TursoBackedSut` (emit `OperationIntent`, await projection) | `GpuiSut` (synth key chord, await rendered row) |
-| `SutNotifications` | `TursoEventBusObserver` (queue events) | `PopupObserver` (poll for popup matching predicate) | `WatchObserver` (subscribe to a watch) |
-| `SutQuiesce` | `NoQuiesce` (no-op for pure slices) | `CdcDrain` (await CDC settle) | `GpuiFramePump` (drive frames until idle) |
-
-### 2.3 The canonical event vocabulary
-
-For `SutNotifications` to be cross-slice, observers translate from their native representation into a shared enum:
-
-```rust
-enum CanonicalEvent {
-    BlockCreated  { id: BlockId, parent: Option<BlockId> },
-    BlockDeleted  { id: BlockId },
-    ContentChanged { id: BlockId, text: String },
-    FocusMoved    { from: Option<BlockId>, to: Option<BlockId> },
-    /* … grow as bugs demand … */
-}
-```
-
-This is the **riskiest** part of the design — it bridges UI popups, event-bus messages, and CDC deltas under one schema. Keep it lean. Add variants only when a slice needs to assert on the new event class; don't pre-build a maximal vocabulary.
+The point of the framework is **same cap, multiple impls**: `SutBackend` is a `Vec`-mutating `MemBlockStore` in a pure slice and a Turso-projection reader in an E2E slice; the invariant body bound on `SutBackend` runs unchanged against both.
 
 ## 3. Transitions, invariants, generators — generic over capabilities
 
-A transition declares what it needs:
+A transition declares what it needs; a slice missing any cap simply can't include it (won't compile):
 
 ```rust
-struct SplitBlock { target: BlockId, at: usize }
-
-impl<R> RefApply<R> for SplitBlock
-where R: RefBlockTreeMut + RefEditorMirror + RefFocusMut { ... }
-
-impl<S> SutApply<S> for SplitBlock
-where S: SutEditorMirrorWrite + SutQuiesce { ... }
+impl<R> TransitionRef<R> for SplitBlock where R: RefBlockTreeMut + RefEditorMirror + RefFocusMut { … }
+impl<S> TransitionImpl<R,S> for SplitBlock where S: SutEditorMirrorWrite { … }
 ```
 
-A slice missing any of those caps simply can't include this transition in its `TransitionSet` (won't compile). That replaces the runtime `min_sut` filtering in today's registry — though the registry stays as a human-readable catalogue.
-
-Invariants identical pattern:
+An invariant body is an `Invariant<R,S>` over its minimum caps. It returns `Ok` / `Fail(msg)` / `Skipped(reason)` and **never panics** (the runner decides what a `Fail` means via `RunMode`). CDC-lag and not-ready conditions return `Skipped`, orthogonal to `RunMode`:
 
 ```rust
-impl<S: SutLoroLog> Invariant<S> for InvLoroNoErrors { ... }
-
-impl<R, S> Invariant2<R, S> for InvOrgRenderFixedPoint
-where R: RefBlockTree, S: SutOrgRender + SutQuiesce { ... }
+impl<R, S: SutLoroLog> Invariant<R,S> for InvLoroNoErrors {
+    fn mode(&self) -> RunMode { RunMode::Strict }
+    async fn check(&self, _ref: &R, sut: &S) -> InvariantResult { … }
+}
 ```
 
-Generators take a reference state by trait bound and produce a transition:
-
-```rust
-fn split_block_gen<R: RefBlockTree + RefEditorMirror + RefFocus>(state: &R)
-    -> BoxedStrategy<SplitBlock>
-```
+Generators take a reference state by trait bound. The single aggregation path is `holon_pbt_core::weighted_arm<R,F,T>` (call factory → apply weight multiplier → drop zero-weight → `prop_map` into the slice's enum); all slices route through it.
 
 ## 4. A slice = an assembly, not an abstraction
 
-Critical convention: **a slice's `Sut` (and `Ref`) type is a plain product struct that holds capability impls and forwards trait methods to whichever field owns them.** Nothing more.
+**A slice's `Sut` (and `Ref`) type is a plain product struct that holds capability impls and forwards trait methods to whichever field owns them. Nothing more.**
 
 ```rust
-struct EditorPureSut {
-    blocks: MemBlockStore,
-    editor: MemEditorMirror,
-    focus:  MemFocusState,
-}
-// trait forwarding — mechanical, candidate for a derive macro once we have >2 slices
-impl SutBlockTree      for EditorPureSut { /* delegate to self.blocks */ }
-impl SutBlockTreeWrite for EditorPureSut { /* delegate to self.blocks */ }
-impl SutEditorMirror   for EditorPureSut { /* delegate to self.editor */ }
-/* … */
-impl SutQuiesce        for EditorPureSut { fn quiesce(&self) -> ... { ready(()) } }
+struct EditorPureSut { blocks: MemBlockStore, editor: MemEditorMirror, focus: MemFocusState }
+impl SutBlockTree    for EditorPureSut { /* delegate to self.blocks */ }
+impl SutEditorMirror for EditorPureSut { /* delegate to self.editor */ }
+/* … pure forwarding … */
 ```
 
-**Smell**: if you find yourself writing logic *inside* the slice struct (beyond forwarding), a capability is missing — push it into a new capability trait instead. Slice structs should be boring.
+**Smell**: if you write logic *inside* a slice struct (beyond forwarding), a capability is missing — push it into a new cap trait. **Anti-pattern**: don't invent named "composite" types like `GpuiWithMemoryBacking`; that's just a slice's `Sut`, named after the slice and local to the test file.
 
-**Anti-pattern**: do not invent named "composite" types like `GpuiWithMemoryBacking`. That's just a slice's `Sut` and should be local to the test file, named after the slice (`MatviewDriftSlice`, `EditorPureSlice`, etc.), and contain only forwarding.
+## 5. Declaring a slice — `declare_pbt_slice!`
 
-## 5. The slice declaration
-
-**Shipped (2026-05-19) as `declare_pbt_slice!` macro** — see `crates/holon-integration-tests/src/pbt/slice.rs`. The typed-tuple form below was the original design; it was abandoned for the reasons listed in "What actually shipped" above (tuple O(N) trait resolution, no `prop_filter`, no heterogeneous invariants). The macro form preserves the spirit — "the slice declaration is the entire spec" — with a syntax that handles every observed slice quirk:
+New slices cost ~15–25 LOC via the macro (`pbt/slice.rs`). It emits the `ReferenceStateMachine`, the SUT wrapper + `StateMachineTest`, the `prop_state_machine!` `#[test]`, and a per-binary shared tokio runtime.
 
 ```rust
 declare_pbt_slice! {
     test_fn: cdc_delivery_pbt,
     machine: CdcDeliveryMachine,
     sut_wrapper: CdcDeliverySut,
-    variant_ref: holon_integration_tests::pbt::VariantRef<holon_integration_tests::pbt::SqlOnly>,
-    inner_sut: holon_integration_tests::pbt::E2ESut<holon_integration_tests::pbt::SqlOnly>,
+    variant_ref: …::VariantRef<…::SqlOnly>,
+    inner_sut:   …::E2ESut<…::SqlOnly>,
     transitions: [
         StartApp,
-        // Filtered: paren-wrapped (Type, "reason", |t: &Type| keep_predicate)
-        (WriteOrgFile, "skip index.org (CDC quiescence race)",
-            |t: &WriteOrgFile| t.filename != "index.org"),
-        BulkExternalAdd,
-        SplitBlock,
-        JoinBlock,
-        TypeChars,
-        SetupWatch,
-        RemoveWatch,
+        (WriteOrgFile, "skip index.org (CDC quiescence race)", |t: &WriteOrgFile| t.filename != "index.org"),
+        BulkExternalAdd, SplitBlock, JoinBlock, TypeChars, SetupWatch, RemoveWatch,
     ],
-    invariants: [
-        InvLoroNoErrors,
-        InvBlockTagsReferencesExist(PhantomData::<holon_integration_tests::pbt::ReferenceState>),
-    ],
-    cases: 16,
-    max_shrink_iters: 20,
-    steps: 1..10,
+    invariants: [ InvLoroNoErrors, InvBlockTagsReferencesExist(PhantomData::<…::ReferenceState>) ],
+    cases: 16, max_shrink_iters: 20, steps: 1..10,
 }
 ```
 
-What the macro emits:
+- `transitions:` entries are a bare type, or `(Type, "reason", filter)` for a per-transition `prop_filter`.
+- `invariants:` entries are arbitrary expressions, so unit structs and `PhantomData<R>`-carrying ones both work.
+- Invariants are skipped pre-startup via `RefLifecycle::app_started`.
 
-- `<machine>` struct + `ReferenceStateMachine` impl (init, transitions, preconditions, apply).
-- `<sut_wrapper>` struct wrapping `<inner_sut>` + `StateMachineTest` impl whose `check_invariants` iterates the listed `invariants` and panics on `Fail`. Invariants are skipped pre-startup via `RefLifecycle::app_started`.
-- A `prop_state_machine!` block emitting `#[test] fn <test_fn>(...)`.
-- A `OnceLock<Arc<tokio::runtime::Runtime>>` shared across cases in the same binary.
+The macro assumes an `E2ESut<V>`-shaped SUT (`new(runtime)` + `apply_transition_async`). A pure, runtime-free SUT (e.g. `EditorPureSut`) hand-writes its `StateMachineTest` impl — see `tests/editor_pure_pbt.rs`.
 
-Per-transition `prop_filter` is supported via the paren-wrapped 3-tuple form; bare types skip filtering. Invariant entries are arbitrary expressions so unit structs (`InvLoroNoErrors`) and `PhantomData<R>`-carrying ones (`InvBlockTagsReferencesExist(PhantomData::<…>)`) both work without a helper.
+### Representative slice consumers
 
-Adopters: `cdc_delivery_pbt.rs` (77 LOC) and `storage_consistency_pbt.rs` (139 LOC) — were 262 and 370 LOC respectively before migration. Marginal cost of a new slice today: **~15-25 LoC**.
+| Slice | SUT | Renderer | Storage | Targeted bug class |
+|---|---|---|---|---|
+| `editor_pure_pbt` | `EditorPureSut` | none | in-memory | pure editor state-machine |
+| `storage_consistency_pbt` | `E2ESut<SqlOnly>` | none | Turso+Loro | end-to-end storage consistency |
+| `cdc_delivery_pbt` | `E2ESut<SqlOnly>` | none | Turso+Loro | matview→CDC→watch delivery |
+| `general_e2e_pbt` | `E2ESut<Full>` | ReactiveEngine (headless) | Turso+Loro | full stack, no window |
+| `gpui_ui_pbt` | `E2ESut<Full>` | real GPUI window | Turso+Loro | full stack + geometry |
+| `org_roundtrip_pbt` | `Vec<Block>` | none | none | org parser↔renderer fidelity (stateless `proptest!`, shares `assert_normalized_docs_equal`) |
 
-## 6. The hard parts — read before you code
+(Other E2E slices exist: `task_state_coherence_pbt`, `org_create_ordering_pbt`, `split_block_content_pbt`, `org_render_fixed_point_pbt`.)
 
-### 6.1 ID identity across layers
-Pure-tree generates string IDs locally; SQL/Loro IDs come from URIs and peer_ids. Convention:
-- Generators that need to pick *an existing* block go through `RefBlockTree::blocks()` (layer-agnostic).
-- Generators that need to *create* a fresh ID call a trait method `RefBlockTreeMut::fresh_id()` — the impl decides whether that's a string UUID, a Loro tree-node ID, or a URI. The transition body trusts the returned ID.
-- Don't bake "this is a new block at position N" into the transition; bake "this is the block we just told the SUT to create."
+## 6. The invariant registry + runner
 
-### 6.2 The quiescence model
-Has to be uniform across slices. `SutQuiesce::quiesce()` returns a future:
-- Pure slice: `ready(())`
-- SQL slice: drains the CDC queue, awaits matview catch-up
-- GPUI slice: pumps frames until the bounds registry stops changing
+This is the heart of the current architecture. **There is no inline invariant code** — every suite runs invariants only through `run_invariant_registry`.
 
-Most existing PBT timing code (`wait_for_widget_kind`, CDC-drain helpers) folds cleanly into this.
+**Registry (metadata only).** Each invariant is one `InvariantSpec { id, description, min_sut: BTreeSet<Subsystem>, mode: RunMode }`. `min_sut` is the *minimum* set of subsystems the body touches. The registry is kept in lockstep with `docs/TESTING_INVARIANT_AUDIT.md` (the invariant↔subsystem matrix).
 
-### 6.3 ID-from-async-write determinism
-At higher slices, `SutBlockTreeWrite::create_block(...)` returns the ID *after* quiescence. Transitions that chain on a just-created block must `quiesce().await` first. Wire this into the harness, not into each transition body.
+`Subsystem` = `BlockTree | Loro | TursoProjection | Cdc | ViewModel | Renderer | EditorState | FrontendBounds | Driver`. `RunMode` = `Strict` (a `Fail` terminates) | `Warn` (a `Fail` is logged; a separate `block_raw` truth-check decides flake vs regression).
 
-### 6.4 The frontend backing seam
-Some slices (in-memory blocks + real GPUI) require the frontend to accept a non-Turso `BuilderServices` impl. The capability framework *exposes* this seam, it doesn't *grant* it. Budget the frontend refactor when proposing such a slice. Other slices (matview-drift without UI, pure editor) cost almost nothing once the traits exist.
+**Bodies (executable).** Each id has one `Invariant<R,S>` body in `invariants/bodies/`. Per-store block-identity invariants share a single body: `inv-blocks-match-ref/{matview,loro,block_raw,org}` all dispatch the one `compare_blocks` over their respective `SutBackend`/`SutLoroLog`/`SutSqlProjection`/`SutOrgRead` snapshot — which keeps subsystem selection declarative (the `/loro` id auto-drops in a Loro-less slice).
 
-**Status**: Phase 9 H7 audit ran the LOC budget — `BuilderServices` has 3 render-path matviews (`block`, `block_requirement_edges`, `focus_roots`) to faithfully reproduce in-memory, exceeding the ≤2 matview gate; total impl estimated 1600-2950 LOC vs ≤1500 budget. **Deferred** to a separate plan; framework still ships without this slice. See [PHASE_9_H7_AUDIT.md](../PHASE_9_H7_AUDIT.md) for the full audit and viable alternatives.
+**The runner (`run_invariant_registry`).**
+1. **Suite selection is detect-from-caps**: `Subsystem::all()` when `frontend_geometry.is_some()` (the `gpui_ui_pbt` window), else `Subsystem::headless_wide()` (all but `FrontendBounds`). A spec is selected iff its `min_sut ⊆` the suite's subsystems. No suite descriptor is plumbed through harnesses.
+2. **Doc-URI remap (keystone)**: the wide ref model uses synthetic doc URIs (`block:ref-doc-N`); the SUT assigns real UUIDs asynchronously. `ReferenceState::with_resolved_doc_uris(map)` remaps the ref into the SUT ID-space once per pass (block ids, parent_ids, `block_documents` keys), so bodies compare same-space with **zero** per-body resolution logic.
+3. **Settle**: `settle_before_invariants` polls `block_raw` to convergence before any body reads storage (the Loro→SQL projection is convergent but lags briefly). Its wall time is the `pbt.settle` span → the `settle_ms` NFR metric (§7).
+4. **CachingProxy**: the SUT is wrapped in a per-tick memoizer so repeated cap reads in one pass are cheap. Non-proxiable caps (e.g. `SutDriver` with `&mut self`, `SutSpanMetrics` as an integration-tests-local trait) are driven by passing `self`, not `&proxy`, to `run_one`.
+5. **Dispatch**: `run_one<S,B>(selected, ref, sut, body)` runs each selected body; the runner owns `Warn`-vs-`Strict` and the `nav_only` gate (structural invariants skipped for pure-navigation transitions). Distinct `[inv-*]` log labels disambiguate output.
 
-### 6.5 Generics ergonomics
-Long `where` clauses get painful. Mitigations:
-- Bundled "umbrella" traits with blanket impls:
-  ```rust
-  trait EditorOps: SutBlockTreeWrite + SutEditorMirrorWrite + SutFocusWrite + SutQuiesce {}
-  impl<T> EditorOps for T where T: SutBlockTreeWrite + SutEditorMirrorWrite + SutFocusWrite + SutQuiesce {}
-  ```
-- Macros for the `impl Transition for X requires caps Y` boilerplate, once we have ≥3 transitions sharing a pattern.
+## 7. Non-functional requirements — the budget spine
 
-### 6.6 The registry doesn't go away
-`pbt/invariants/registry.rs` stays as the human-readable catalogue (id, description, min_sut, run mode). Trait bounds replace runtime filtering, but the registry is still where humans read "what invariants does this slice cover" and where docs link to.
+`transition_budgets.rs` budgets per-transition NFRs (SQL counts, wall time, RSS, sync latency) through one data-driven path:
 
-## 7. Roll-out strategy (HISTORICAL — Stages A + B complete)
+- **`Metric`** (`SqlReads`/`SqlWrites`/`SqlDdl`/`MaxQueryMs`/`WallMs`/`SettleMs`/`RssDeltaBytes`/`RssCumulativeBytes`) + **`MetricSample { metric, actual, limit, severity, message }`**. `build_samples` turns raw `TransitionMetrics`/timing/memory into samples (each carrying its verbatim violation message); `evaluate` is the single comparator (`actual > limit`).
+- **Baseline-relative regression**: a committed `nfr_baseline.json` (`transition_key → metric → value`); a sample regresses when `actual > baseline × (1 + tol)` (`HOLON_NFR_REGRESSION_TOL`, default 25%), emitted as a `Warning`. **Ships dormant** — no file means no regression checking (no fabricated numbers). Generate one deliberately: `HOLON_NFR_BASELINE_UPDATE=1 cargo nextest run -p holon-integration-tests --features pbt <test> --no-capture -j1`.
 
-**Stage A (Phases 1-5) — shipped:**
-1. ✅ Capability traits at `holon-pbt-core/src/capabilities.rs` — `RefBlockTree(+Mut)`, `RefEditorMirror(+Mut)`, `RefFocus(+Mut)` + symmetric `Sut*` variants. Blanket impls on `ReferenceState` and `E2ESut<V>`. No wide-PBT behavior change.
-2. ✅ Seven (eventually nine) T0 transitions migrated: `TypeChars`, `DeleteBackward`, `MoveCursor*`, `SplitBlock`, `JoinBlock`, `Indent`, `Outdent`. Each exposes a `pub fn <name>_(apply_to_ref|weighted_generator|preconditions)<R: ...>` free helper; the macro-generated trait impl is a thin adapter.
-3. ✅ First slice consumer at `tests/editor_pure_pbt.rs` — `EditorPureRef` + `EditorPureSut` implementing exactly the 6 trait pairs.
-4. ✅ Two-consumer gate satisfied: wide PBT and editor_pure_pbt consume the same trait set.
+Adding a per-transition timing NFR is a 4-line change: wrap the work in a `pbt.<name>` span, `sum_span` it into `TransitionMetrics`, add a `Metric` variant, push one sample in `build_samples`. The only caller is the `inv-sql-budget` cap path, so it stays additive and behavior-preserving.
 
-**Stage B (Phases 6-10) — shipped:**
-- **Phase 6**: all 8 remaining cluster traits scaffolded — Loro, Turso/CDC, ViewModel/Renderer, Layout, Driver, OrgRender, QueryCompile, Lifecycle. 26/32 SUT methods wired; 6 stubs with documented blockers.
-- **Phase 7**: `Invariant<R,S>` trait + `CachingProxy<'a, S>` (zero-unsafe eager-drain) + `WidgetSnapshot` IR. 28 `Invariant<R,S>` impls under `pbt/invariants/bodies/` (9 functional, 19 deferred with documented blockers).
-- **Phase 8**: second slice consumer at `tests/storage_consistency_pbt.rs` using `E2ESut<SqlOnly>` + 2 storage invariants.
-- **Phase 9**: **deferred** per H7 audit (matview-required count 3 > 2 gate; LOC budget 1600-2950 > 1500 gate). See [PHASE_9_H7_AUDIT.md](../PHASE_9_H7_AUDIT.md).
-- **Phase 10**: cleanup + hardening — 28 invariants registered with parity self-tests; 2 archlint smell rules forbidding regression; 4 wide-PBT inline invariant assertions migrated to `Invariant<R,S>` calls; 4 dead-code helpers retired from `sut.rs`.
+## 8. The hard parts — read before you code
 
-**What remains (not blocking):**
-- 19 deferred `Invariant<R,S>` bodies under `pbt/invariants/bodies/` returning `InvariantResult::Skipped(...)` with documented unblockers — promote as the corresponding SUT plumbing lands. (5 still Skipped as of 2026-05-19 — see "Phase A progress" below.)
-- 3 wide-PBT inline invariants kept inline (state-toggle, root-matches-render-expr, entity-ids-subset-of-data) because the wide version asserts strictly more than the slim migrated impls.
-- Phase 9 deferred to a separate plan if cross-frontend (Flutter, web) consumers materialise.
+- **ID identity across layers.** Pure-tree IDs are local strings; SQL/Loro IDs are URIs/peer_ids. Generators that pick an *existing* block go through `RefBlockTree::blocks()`; generators that *create* one mint the ID SUT-side and the transition trusts the returned ID. Don't bake "new block at position N" into a transition — bake "the block we just told the SUT to create."
+- **Quiescence is the harness's job, not the transition's.** Per-call CDC drain (transition executor) + per-tick VM-emission drain (`CachingProxy`) + the runner's `settle_before_invariants` cover it. Transition bodies don't await consistency themselves.
+- **Async-write determinism.** Higher slices return a created block's ID only *after* quiescence; chained transitions rely on the harness ordering, not on sleeps.
+- **The frontend backing seam.** A slice mixing in-memory blocks with a real GPUI window needs the frontend to accept a non-Turso `BuilderServices`. The framework *exposes* this seam; it doesn't *grant* it — budget that refactor when proposing such a slice (see §11, "Target state").
+- **Generics ergonomics.** Where-clauses on bodies top out at 3–4 caps. If one exceeds ~5, introduce a bundled supertrait with a blanket impl rather than repeating the list.
 
-## 🧹 Cleanup work in progress (2026-05-19)
+## 9. Naming conventions
 
-`sut.rs` was 7322 LOC the morning of 2026-05-19 (incomplete Phase 10 + 46 unmigrated SutHandle transitions). Active refactor splits:
-
-**Phase A — promote `Skipped` bodies to live invariants** (deletes the inline equivalents in `sut.rs::check_invariants_async`):
-- ✅ A1: `InvOrgRenderFixedPoint` promoted. Capability `SutOrgRender::render_documents_to_org` widened to `snapshot_org_render_pairs() -> Vec<(path, disk, rendered)>`. sut.rs inline section (33 LOC at the old L4273-4305) replaced with a `assert_invariants!` macro call. storage_consistency_pbt PASS (186 s).
-- ✅ A2: `InvViewmodelNoErrorWidgets` promoted. Capability `SutViewModel::headless_error_node_count() -> Option<usize>` added. Impl snapshots `reactive_engine` + `reactive_root_id` (now `pub(super)` after D4), drives `HeadlessBuilderServices::new(backend_engine)` + `interpret_pure` + `count_error_nodes`. Wide-PBT inline kept for diagnostic richness (per §9 retrospective). Body now runs on any `SutViewModel` slice; SqlOnly slices Skip cleanly (no engine).
-- ✅ A3 (clarification, not real work): `focus_matches_ref` and `editable_text_has_draggable` were already migrated to live in the morning audit — the "Skipped" word in their doc comments described conditional skip paths inside live bodies, not blockers.
-- ⏳ Remaining 2 true Skipped bodies:
-  - **`matview_consistent_with_ref`**: needs `SutViewModel::root_layout_data_row_ids()` (and ref-side caps for `block_state.blocks` + `layout_blocks` + `profile_block_ids` + `is_descendant_of_any` + `expected_focus_root_ids`). Plus `RunMode::Warn` + a `Skipped`-path classifier for the soft-check semantics.
-  - **`viewmodel_tree_virtual_slots`**: needs `display_tree` wired into `WidgetSnapshot` + virtual-slot entity IDs propagated. Larger architectural lift.
-
-**Phase D — mechanical file split** (no behavior change; pure relocation):
-- ✅ D1: `leader_key_for` + `KeybindingsFile` + `leader_key_tests` → `pbt/sut_keybindings.rs` (86 LOC).
-- ✅ D2: `parse_block_row` + `mutation_expected_properties` + `row_properties_to_map` + `BLOCK_SQL_COLUMNS` → `pbt/sut_row_parsing.rs` (160 LOC).
-- ✅ D3: `impl SutHandle for E2ESut<V>` (the 2400-LOC trait impl block) → `pbt/sut_handle.rs` (2426 LOC). Required bumping visibility on 19 `E2ESut` methods (`pub(super)`) and 2 fields (`loro_sut`, `pre_ref_state`).
-- ✅ D4: `apply_transition_async` + `check_invariants_async` + `live_blocks` + `live_focus_roots` + `wait_for_live_data_mirrors` (the 3rd `impl<V> E2ESut<V>` block, ~2960 LOC) → `pbt/sut_check_invariants.rs` (2991 LOC). `assert_invariants!` macro moved to `pbt/sut_macros.rs` (24 LOC). Bumped visibility on 6 more fields (`reactive_engine`, `vm_emissions`, `reactive_root_id`, `live_tree`, `live_blocks_cell`, `live_focus_roots_cell`) and `FocusRoot` struct + fields.
-- ✅ D5: Extracted 6 of 14 sections from `check_invariants_async` into named `pub(super) (async )?fn check_inv_<name>` methods:
-  - 3 trivial `assert_invariants!` delegations: `check_inv_loro_no_errors`, `check_inv_org_render_fixed_point`, `check_inv_focus_matches_ref`.
-  - `check_inv_no_startup_errors` (Flutter DDL/sync race guard).
-  - `check_inv_view_and_watches` (sections 4 + 5, sync).
-  - `check_inv_no_orphan_blocks` (section 6, takes `backend_blocks` + `live_blocks_stale` as args).
-  - Plus deleted the unused `live_focus_roots_arc` method.
-- ✅ D6 (cleanup): pruned ~9 unused-import warnings post-D4. `live_focus_roots_arc` (dead since D4) removed.
-- **Result: sut.rs 7322 → 1710 LOC (−5612, −77 %).** All 3 fast slices + storage_consistency_pbt pass post-split.
-
-**Phase C — migrate fat SutHandle transitions to capability-bound per-transition helpers** (not started yet, recalibrated from earlier estimate):
-- 8 fat transitions carry inline business logic: `apply_bulk_external_add` (288 LOC), `apply_start_app` (211), `apply_split_block` (195), `apply_toggle_state` (179), `apply_trigger_doc_link` (161), `apply_click_block` (121), `apply_edit_via_display_tree` (116), `apply_edit_via_view_model` (115), `apply_trigger_slash_command` (113).
-- Per-migration: 1-3 hr each, moves body into `pbt/transitions/<name>.rs` as `pub fn <name>_apply_to_sut<S: ...>(sut: &mut S, ...)` bound on capability traits.
-- Coupling cost: most reach into private E2ESut state (`driver`, `ctx`, `reactive_engine`, `wait_for_entity_bounds`, `resolve_uri`, …) — each migration extends one or two capability traits along the way.
-- Total expected reduction in `sut_handle.rs`: −1200 to −1500 LOC over 3-5 days. Increases modularity (one transition per file) and slice reusability (capability-bound helpers).
-- 40 thin transitions are 4-20 LOC pure dispatches; not worth migrating until a slice asks for them.
-
-### Where to pick up tomorrow
-
-After overnight session of 2026-05-18→19, Phase D is fully landed and Phase A is 2-of-3-true-Skipped done. Real remaining `bodies/` Skipped count: **2** (true blockers):
-
-1. **`matview_consistent_with_ref`** — needs `SutViewModel::root_layout_data_row_ids()` (and ref-side caps for `block_state.blocks` + `layout_blocks` + `profile_block_ids` + `is_descendant_of_any` + `expected_focus_root_ids`). Plus `RunMode::Warn` + a `Skipped`-path classifier for the soft-check semantics. Larger lift (~3-4 hr including the ref-side caps).
-2. **`viewmodel_tree_virtual_slots`** — needs `display_tree` wired into `WidgetSnapshot` + virtual-slot entity IDs propagated through the IR. Largest architectural lift (~1 day).
-
-Recommended next steps, ROI-ordered:
-
-1. **Continue splitting `check_invariants_async` into named per-section methods** (~2-3 hr) — sections `1`/`1b`/`2`/`2b`/`3`/`7`/`8`/`9/10` still inline. Each extraction requires moving the local `resolve` closure setup into a `self` method or recomputing the `lazy_doc_uri_map` inside the new method (cheap, ~10 LOC each). After this, `check_invariants_async` becomes a narrative sequence of 14 `self.check_inv_X(ref_state).await` calls and individual sections become individually testable / replaceable. Pure modularity win, no behavior change.
-2. **Phase A3: promote `matview_consistent_with_ref`** (~3-4 hr) — extend `SutViewModel::root_layout_data_row_ids()` mirroring the A2 pattern (snapshot reactive_engine + extract data rows), add the missing ref-side caps (`RefBlockTreeReadAll`, `RefLayoutBlocks`, `RefFocusRoots`). Promote the body, delete the inline equivalent in `sut_check_invariants.rs`.
-3. **Phase C first migration: `apply_focus_editable_text`** (~1-2 hr) — extend `SutFocusWrite` with `wait_for_entity_bounds(id, timeout)` + `click_entity(id, region)`. Move the body into `pbt/transitions/focus_editable_text.rs` as `pub async fn apply_to_sut_<S: SutFocusWrite>(sut: &mut S, id: &EntityUri)`. Thin adapter remains in `sut_handle.rs`. Sets the template for the 8 fat transitions (`apply_bulk_external_add` 288 LOC, `apply_start_app` 211, `apply_toggle_state` 179, `apply_trigger_doc_link` 161, `apply_click_block` 121, `apply_edit_via_*` 115 each, `apply_trigger_slash_command` 113).
-4. **Phase A4: promote `viewmodel_tree_virtual_slots`** (~1 day) — needs `display_tree` wired into `WidgetSnapshot` + virtual-slot entity IDs threaded through the IR. Bigger structural change.
-
-### Final LOC distribution (post-overnight)
-
-| File | LOC | Purpose |
-|---|---|---|
-| `sut.rs` | 1700 | `E2ESut<V>` struct + `FocusRoot`, Deref/DerefMut/Debug/Drop, `new`, `with_driver`, chord dispatch (`send_key_chord`, `dispatch_block_op_via_chord`, `send_leader_chord`), URI/keybinding helpers, the 4th `impl<V> E2ESut<V>` block (state-machine setup + helpers), `impl StateMachineTest`. |
-| `sut_handle.rs` | 2426 | `impl SutHandle for E2ESut<V>` — 52 transition dispatch methods. |
-| `sut_check_invariants.rs` | 3017 | `apply_transition_async` + `check_invariants_async` (still ~2740 LOC, 14 numbered sections — 6 extracted into named `check_inv_*` methods so far) + live-data mirror accessors. |
-| `sut_capabilities.rs` | 751 | Capability trait blanket impls (`SutBlockTree`, `SutLoroLog`, `SutOrgRender`, `SutViewModel::headless_error_node_count` from A2, etc.). |
-| `sut_keybindings.rs` | 86 | Leader-chord YAML lookup. |
-| `sut_row_parsing.rs` | 160 | Row→Block conversion + property helpers. |
-| `sut_macros.rs` | 24 | `assert_invariants!` declarative macro. |
-
-**`sut.rs` shrinkage: 7322 → 1700 LOC (−5622, −77 %)** while 4 of 5 slices continue to pass post-refactor:
-- ✅ `editor_pure_pbt` (fast)
-- ✅ `org_roundtrip_pbt` (fast)
-- ✅ `storage_consistency_pbt` (~106-135 s, gates the SqlOnly E2ESut variant)
-- ✅ `cdc_delivery_pbt` (~86 s)
-- ⚠ `loro_sync_controller_pbt` fails on the **checked-in regression seed** `6e33948a…` which shrinks to `(peers:2, peer_counter:3, transitions:[])` — failure happens at init with zero transitions applied. Pre-existing issue: the seeds in `tests/loro_sync_controller_pbt.pbt-regressions` predate this work, the failure is at `crates/holon-integration-tests/src/pbt/loro_sync/mod.rs:123` (invariant I1: downstream store doesn't mirror SUT primary Loro doc), and the slice uses `StubSut` not `E2ESut` — so the D-phase relocation can't have caused it. Worth investigating separately as an unrelated bug in the Loro sync controller.
-
-### Final session summary (2026-05-18→19, autonomous)
-
-In one overnight session:
-
-- **2 deferred invariants promoted to live** (`InvOrgRenderFixedPoint`, `InvViewmodelNoErrorWidgets`) by extending `SutOrgRender` and `SutViewModel` capability traits. 2 of 3 true-Skipped bodies now functional; 2 still blocked on bigger architectural lifts.
-- **6 of 14 `check_invariants_async` sections** extracted into named `check_inv_*` methods (`no_startup_errors`, `loro_no_errors`, `org_render_fixed_point`, `focus_matches_ref`, `view_and_watches`, `no_orphan_blocks`). Wide PBT runner is now half-narrative.
-- **`sut.rs` decomposed** into 6 sibling files: `sut.rs` (struct + lifecycle + StateMachineTest), `sut_handle.rs` (52 SutHandle dispatch methods), `sut_check_invariants.rs` (apply + invariant runner), `sut_keybindings.rs`, `sut_row_parsing.rs`, `sut_macros.rs`. `sut.rs` 7322 → 1700 LOC.
-- **Each split preserved by visibility bumps** to `pub(super)` on the methods/fields that newly cross module boundaries — no `pub` leak past the `pbt` module.
-- **All builds clean**, 4 of 5 slices pass post-refactor (the 5th was already failing on a checked-in seed before the work started).
-
-Sibling files now in `crates/holon-integration-tests/src/pbt/`:
-- `sut.rs` (1710 LOC) — `E2ESut<V>` struct + `FocusRoot`, lifecycle (`new`, `with_driver`, `Drop`, `Deref`/`DerefMut`/`Debug`), chord dispatch (`send_key_chord`, `dispatch_block_op_via_chord`, `send_leader_chord`), URI/keybinding helpers (`resolve_uri`, `resolve_stable_id`, `find_keybinding_for_op`), the 4th `impl<V> E2ESut<V>` block (lots of state-machine setup + helpers), `impl StateMachineTest`.
-- `sut_handle.rs` (2426 LOC) — `impl SutHandle for E2ESut<V>` — 52 transition dispatch methods.
-- `sut_check_invariants.rs` (2991 LOC) — `apply_transition_async` + `check_invariants_async` (still one ~2780-LOC method with 14 numbered sections) + live-data mirror accessors. Next architectural target: split `check_invariants_async` into ~14 named `check_inv_<name>` methods, OR continue promoting `bodies/` skeletons so the inline sections delete themselves.
-- `sut_capabilities.rs` (711 LOC) — capability trait blanket impls (`SutBlockTree`, `SutLoroLog`, `SutOrgRender`, etc.).
-- `sut_keybindings.rs` (86 LOC) — leader-chord YAML lookup.
-- `sut_row_parsing.rs` (160 LOC) — row→Block conversion + property helpers.
-- `sut_macros.rs` (24 LOC) — `assert_invariants!` declarative macro.
-
-**Stage B+ — future slices:**
-The pattern: each new slice forces extraction of one or two more capability methods. Don't pre-extract.
-- Notification-bus PBT → would extract `SutNotifications` + revisit the killed `CanonicalEvent`.
-- Real GPUI + in-memory blocks → Phase 9 follow-up plan; opens the frontend backing seam.
-
-## 8. Naming conventions
-
-- Test files: `<slice-name>_pbt.rs` in the relevant crate's `tests/`. Examples: `editor_pure_pbt.rs`, `editor_loro_pbt.rs`, `matview_drift_pbt.rs`, `block_cell_registry_pbt.rs`. **Do not** put phase numbers (`t0`, `t1`) in filenames — they go stale.
-- Slice types: `<SliceName>Slice` (declaration), `<SliceName>Ref`, `<SliceName>Sut` (assemblies).
-- Capability impls: `<Backing><Capability>`, e.g. `MemBlockStore`, `TursoBackedSut`, `GpuiLayoutImpl`.
-- Capability traits: `Ref<Thing>` / `Sut<Thing>` for read; suffix `Mut` / `Write` for write. Reads first, writes split.
-- Invariant ids: keep the `inv-<area>-<predicate>` shape already in the registry. Stable identifiers — log greps depend on them.
-
-## 9. Where this design was wrong (post-implementation retrospective)
-
-The §9 risks were stated before the work landed. Verdict:
-
-- **`CanonicalEvent` stayed empty.** Never materialised — no slice needed cross-medium notification assertions. Killed before the schema ossified; slice-local event types remain right.
-- **Forwarding boilerplate manageable for capability impls; macro shipped for slice declaration.** Three slices ship without a derive macro for *capability forwarding* (the `E2ESut<V>` blanket impls in `sut_capabilities.rs` are ~700 LOC mechanical forwarding; `EditorPureSut` is ~150 LOC — below the "write the macro" threshold). However, the *slice declaration* itself (state machine + invariant runner + proptest entry) was 250-370 LOC per slice and crossed the threshold once two SqlOnly slices showed near-identical structure with one well-bounded variation (`prop_filter` per transition). `declare_pbt_slice!` landed 2026-05-19, ~220 LOC of infra, drops per-slice cost to ~15-25 LOC.
-- **Quiescence model split, not leaked.** Original `SutQuiesce::quiesce()` became (a) per-call `SutCdc::drain_cdc` invoked by the transition executor before invariant evaluation, and (b) per-tick eager drain inside `CachingProxy` for VM emissions. Transition bodies don't touch either — the harness owns both.
-- **Trait bounds stayed manageable.** Where-clauses on individual invariant impls top out at 3-4 caps. No umbrella traits introduced. If a future invariant exceeds 5 caps, that's the trigger.
-
-Additional learnings from the implementation:
-
-- **`Invariant<R,S>` vs the registry's `InvariantSpec`** — kept both. `InvariantSpec` is the human-readable catalogue (id, description, min_sut, mode); `Invariant<R,S>` is the executable. Parity guarded by `body_ids_match_registry_ids` self-test. The "merge them" temptation was resisted because the catalogue describes *every* invariant including the still-inline ones, while the trait impls only exist for migrated bodies.
-- **Wide PBT keeps inline bodies that assert strictly more than the migrated impls.** State-toggle, root-matches-render-expr, entity-ids-subset-of-data — the wide inline carries diagnostic richness (display_tree pretty-print, label-vs-state_display, fresh `interpret_pure` path) the slim impls don't model. Migration loses coverage; we accept the dual maintenance.
-- **The macro-generated thin adapters stay.** `declare_e2e_transitions!` still emits `apply_to_ref(&self, state: &mut ReferenceState)` because that's the proptest-state-machine shape; the trait body delegates to the capability-bound free helper. This is the right boundary — generic transitions ship behind a concrete-typed adapter.
+- Test files: `<slice>_pbt.rs` in the crate's `tests/`. No phase numbers in names — they go stale.
+- Slice types: `<SliceName>Ref` / `<SliceName>Sut` (assemblies), local to the test file.
+- Cap impls: `<Backing><Capability>`, e.g. `MemBlockStore`.
+- Cap traits: `Ref<Thing>` / `Sut<Thing>` for read; `Mut`/`Write` suffix for write.
+- Invariant ids: `inv-<area>-<predicate>` (`/`-suffixed per-store where one body serves several). **Stable** — log greps and the registry depend on them.
 
 ## 10. Adding a new slice
 
-If you're standing up a new slice today:
+1. Skim `tests/cdc_delivery_pbt.rs` — the smallest `declare_pbt_slice!` consumer; crib from it.
+2. Pick the axes (storage / renderer / driver). Reuse an existing SUT variant where possible: `E2ESut<Full>`, `E2ESut<SqlOnly>`, `EditorPureSut`.
+3. Pick invariants from `pbt/invariants/bodies/` whose trait bounds your SUT satisfies — trait bounds gate compile-time membership.
+4. Add `tests/<slice>_pbt.rs` using `declare_pbt_slice!` (§5) or `component_pbt!` (§13).
+5. Run `cargo nextest run --features pbt --lib invariants` — the registry parity self-tests must still pass.
 
-1. Read this doc + [TESTING_PHASE10_HANDOFF.md](../TESTING_PHASE10_HANDOFF.md). Skim `crates/holon-integration-tests/tests/cdc_delivery_pbt.rs` (77 LOC) — the smallest live consumer; cribbing from it is the right starting point.
-2. Pick the slice axes (storage / renderer / driver). Don't think of slices as "wide vs narrow" — think of them as compositions on those three axes.
-3. Reuse existing SUT variants where possible: `E2ESut<Full>` (wide), `E2ESut<SqlOnly>` (no UI), `EditorPureSut` (pure data). The macro is wired for any `Sut` type that exposes a `new(runtime)` constructor and an `apply_transition_async` async method — i.e. any `E2ESut<V>` today.
-4. Pick the invariants from `pbt/invariants/bodies/` whose trait bounds your slice satisfies. Trait bounds gate compile-time membership — if your SUT lacks `SutLoroLog`, `InvLoroNoErrors` won't compile into your slice.
-5. Add a new test file in `crates/holon-integration-tests/tests/` named `<slice>_pbt.rs`. Use `declare_pbt_slice!` (see § 5 above for the full syntax). The archlint rule `pbt-slice-invariant-foreign-module` will keep you honest about not introducing slice-local-only invariants.
-6. Run `cargo nextest run --features pbt --lib invariants` — the registry parity tests should still pass.
+A native-mode slice (`proptest_config:`) gets its `ProptestConfig` from the shared `pbt::standard_pbt_config(slice_name)` — it activates the atomic editor, installs the rejection-histogram panic hook, and pins `tests/<slice_name>.proptest-regressions` (pass the same `slice_name` from sibling slices that share one state machine to share the regressions file). The cases-based macro arm builds its config from `cases:` / `max_shrink_iters:` directly, so it needs none of this.
 
-**Things the macro does NOT handle today** (escape hatches if you need them):
+No registration step: a slice is discovered from its `test_fn:` in `tests/`. `just pbt-list` enumerates every slice with the `Wiring`/`ComponentSet` it composes; `just pbt-slice <name> [cases]` runs one by exact name (the file stem may differ — one file can declare several slices); `just pbt-slices` runs them all. (`just pbt <general|petri|orgmode|loro>` remains for the cross-crate PBTs that aren't `holon-integration-tests` slices.)
 
-- **SUT types without `E2ESut<V>` shape.** The macro assumes `<inner_sut>::new(runtime)` and `apply_transition_async(ref_state, &transition)`. For an `EditorPureSut`-shaped SUT (no async, no runtime), hand-write the `StateMachineTest` impl until a second consumer demands a generic version.
-- **Slice-local invariants** are forbidden by `pbt-slice-invariant-foreign-module` archlint — they must live in `pbt/invariants/bodies/`. This is intentional; the runtime H11 registry guard and the static smell together prevent rubber-stamp invariants from creeping in per-slice.
-- **Slice-specific `init_test` setup** (e.g. seeding a DB before the test) — drop down to hand-written `StateMachineTest` impl. Don't fork the macro for one-off setup. If a pattern recurs across ≥2 slices, extend the macro.
+**One file per slice (don't merge them all).** Each `tests/*.rs` is a separate integration-test *binary* — independent incremental compile/link, `cargo test --test <stem>` and `just pbt-slice` granularity, and a file-scoped `.proptest-regressions` / `fixtures_dir`. Two slices that share a state machine + regressions file may live in one file (e.g. `general_e2e_pbt` + its `_sql_only` peer), but collapsing all slices into one file would make one giant binary and lose that isolation for no gain.
 
-When in doubt: crib `cdc_delivery_pbt.rs`, replace the transition + invariant lists, ship the diff back so we can refine the doc.
+If a body you want is gated on a cap your SUT can't supply, that's the signal to either supply the cap (component-shaped!) or leave that invariant out — never copy its logic into the slice.
+
+## 11. Guardrails
+
+**Archlint** (`archlint/smells/pbt_transitions.toml`):
+- `pbt-transition-helper-concrete-ref` — forbids new transition helpers from naming `ReferenceState` in their signature.
+- `pbt-slice-invariant-foreign-module` — forbids slice test files from importing `Inv*` structs outside `…::pbt::invariants::bodies::` (no slice-local rubber-stamp invariants).
+
+**Registry self-tests** (`invariants/registry.rs`):
+`registry_size_matches_audit`, `gpui_wide_pbt_selects_all`, `headless_wide_pbt_drops_frontend_bounds_invariants`, `under_scoped_spec_rejects_multi_subsystem`, `warn_mode_invariants_preserved`, `body_ids_match_registry_ids`, `storage_slice_invariants_are_subset_of_wide_registry`, `every_registry_id_has_a_body_file`, `every_invariant_has_a_non_empty_min_sut`.
+
+## 12. Target state (intentionally not built yet)
+
+The current system above is complete for the headless and GPUI suites. The remaining gaps are deliberate, not debt:
+
+- **In-memory blocks + real GPUI slice** (a "layout-only" slice without Turso). Needs a faithful non-Turso `BuilderServices` (the frontend backing seam, §8). Deferred on a LOC-budget basis (3 render-path matviews to reproduce in-memory); revive if a cross-frontend (Flutter/web) consumer materialises.
+- **`every_registry_id_has_a_body_file` is weaker than ideal** — it checks a body *file* exists, not that it impls a runnable `Invariant`. In practice every id now has a real body, but a stronger compile-time guard ("every registered id has a runnable impl") would prevent regression.
+- **Layout/a11y NFR bodies** over the existing `SutLayout::rendered_elements()` cap (`inv-no-zero-size-interactive`, `inv-text-not-clipped`, `inv-no-sibling-overlap`) are a natural next addition — gpui-only, pure functions over the geometry snapshot.
+- **Bespoke PBTs not yet folded in**: `sync_controller_mutation_pbt` (could become a SUT over `SutOrgFileWrite + SutSqlProjection`) and the backend-vs-reference family (`loro_backend_pbt`, `turso_pbt_tests`, Todoist) — evaluate value before migrating. Genuinely out of scope: `petri_e2e_pbt`, `holon-engine` PBT, `inline_marks_proptest`, `identity_operations`, `turso_ivm_bug_proptest`.
+- **Narrow state-machine PBTs — evaluated, kept as-is (do NOT fold into `declare_pbt_slice!`).** `editor_pure_pbt` and `loro_sync_controller_pbt` use their own minimal `ReferenceStateMachine` (`EditorPureRef`/`PureTransition`; `LoroSyncReference` over `GroupState`/`GroupTransition`) with `prop_state_machine!` directly, not the macro. This is correct, not debt:
+  - `declare_pbt_slice!`/`component_pbt!` is hardwired to `ReferenceState`/`E2ETransition`/`E2ESut`. `editor_pure` would gain a real storage backend it doesn't want (it's a storage-free, ~5200× faster fuzz of the editor `_apply_to_ref` cap fns — the speed *is* the value), and `loro_sync` would need its CRDT group model rewritten into the block model (not even semantically possible).
+  - They already adopt the architecture where it helps: `editor_pure` reuses the shared transition structs, `_cap` fns, and `TransitionFactory`/`weighted_arm` generation; both check areas the wide PBT *also* covers (structural integrity ≈ `inv-no-ln-blocks`; multi-peer sync via `AddPeer`/`PeerEdit`/`SyncWithPeer` in `storage_consistency_pbt`) but faster and in isolation, with extra checks the wide PBT lacks (cursor-within-text-len; CRDT convergence S1–S3/C1–C3).
+  - They are a distinct *tier* (narrow, fast, sub-component) in the speed pyramid, not non-adopters of the slice schema. Folding would trade their reason for existing (speed + isolation) for nothing.
+  - *Minor follow-up (not done):* `editor_pure`'s two invariants are inline asserts; `inv-tree-structural-integrity` has a registry sibling (`inv-no-ln-blocks`) but `inv-tree-cursor-within-text-len` appears to have none — so its "also fires in the wide PBT" header claim is partly stale. Either add a cursor-bounds body to the registry or correct the comment.
+
+> Note: a clean "wide PBT green via the registry" run is currently gated on **pre-existing, unrelated** product bugs (JoinBlock dispatch, org `assert_blocks_equivalent`, the watch root-layout CDC bug), not on the test architecture. The architecture's own proof is *runner ≡ former monolith* — no new failures.
+
+## 13. `ComponentSet` + component bisection (ADR 0009)
+
+A slice's `wiring:` (ADR 0007) names which storage/sync/actor adapters it assembles. ADR 0009 lifts that into a first-class, *bisectable* value and adds a shared sequential engine both runners share. See `docs/adr/0009-component-subset-pbts-and-bisection.md` for the full rationale; this section is the operational summary.
+
+**`ComponentSet` = `Wiring` + observable `Projection`s** (`crates/holon-pbt-core/src/component_set.rs`). `Projection::{ViewModel, EditorState}` are the rendered/edited surfaces the invariants observe. Blessed presets: `full_gpui` (UI window, all 9 subsystems), `full_headless` (CI default, all but `FrontendBounds`), `loro_vm_fast` (fast inner loop). `Subsystem` selection is **derived** from a set — `invariants/registry.rs::subsystems(&ComponentSet)` is total — so the invariant set is a projection of the components, not an independently-tuned knob. `validate()` enforces `UI ⟹ ≥1 storage + ViewModel`; `needs_real_window()` (≡ `has_actor(UI)`) picks the runner.
+
+**The lattice.** `valid_children()` drops one component (validity-pruned: it never offers dropping `ViewModel` under `UI`); `valid_parents_within(ceiling)` adds one back. This is the search space for bisection.
+
+**One-line slices — `component_pbt!`** (`slice.rs`). Sugar over `declare_pbt_slice!` that names a slice by *what it composes*: `component_pbt! { test_fn: x, set: ComponentSet::loro_vm_fast(), … }` lowers the set to its `.wiring` and delegates (native and explicit-slice forms). `loro_backend_pbt` is written this way. The projection axis isn't threaded into a standalone slice's selection (the runner always observes both projections); it only changes which lattice node a *bisection* oracle builds — so `set → set.wiring` loses nothing a single slice could express.
+
+**One engine, a `Stepper` seam** (`crates/holon-integration-tests/src/pbt/stepper.rs`). `proptest-state-machine`'s `test_sequential` is a plain synchronous loop with **no thread affinity** (the main-thread constraint is GPUI's window alone). `run_sequence(stepper, ref0, transitions, seen, mode)` factors that loop over a `Stepper` (init / apply / check_invariants). Implementors:
+- `SmtStepper<T>` — the headless proptest-macro path; both `declare_pbt_slice!` macros override `StateMachineTest::test_sequential` to route through it (generation/shrinking/`.proptest-regressions` are unchanged, above the loop).
+- `GpuiReplayStepper<'a>` — replays a fixed `Vec<E2ETransition>` through an already-launched window (borrows the live SUT + driver). The live GPUI *generator* stays hand-rolled by design (mid-sequence window launch + seed-reproducible incremental generation + per-step gestures/screenshots).
+- `BisectionStepper` — builds an `E2ESut` **per node** via `new_with_backend(storage_selector_for_wiring(node.wiring))`. (`SmtStepper<E2ESut>` can't serve a node: `E2ESut::init_test` hard-wires Turso.)
+- `NullStepper` — no SUT; records the applied transitions, for the §3a spike.
+
+**Cross-set replay portability (the load-bearing invariant, ADR §4).** `ReplayMode::SkipGated` makes a captured sequence portable *down the lattice*: a transition the node's wiring gates out (`E2ETransition::required_wiring().satisfied_by(node.wiring)` is false) becomes a deterministic `StepOutcome::SkippedByGating` no-op that **never reaches `apply`**, instead of `Strict` mode's hard panic. Because applicability is a pure function of `(transition, fixed wiring)` and reference `apply` is pure, the `SkipGated` applied sequence equals exactly the node's applicable subsequence — proven by `tests/bisection_pbt.rs` (`skip_gated_replay_is_portable_for_committed_capture`, `editor_transition_skips_purely_under_storeless_node`), always-on and SUT-free. **Gotcha:** assert over the *applied-transition sequence* (serde-canonical), never a whole-`ReferenceState` `Debug` — the latter embeds the interpreter's hash-ordered builder list and is unstable across instances; `E2ETransition` is deliberately not `PartialEq`.
+
+**Captures, not seeds.** Bisection replays the JSON capture (`tests/.captures/*.captured.json`, a serde-tagged `Vec<E2ETransition>` written by the slice wrapper's `Drop`-on-panic), **never** a `.proptest-regressions` RNG seed — a seed regenerates a *different* sequence against a changed alphabet. The capture omits wiring on purpose: the bisector supplies it per node. **The GPUI runner writes captures too:** `run_pbt_with_driver_sync_callback` arms the same thread-local capture and writes `tests/.captures/<name>.captured.json` (default `gpui_ui_pbt`) on a panicking unwind — so a UI-observed failure feeds the fast headless lattice. (`HOLON_PBT_FORCE_FAIL_AT_STEP=N` forces a panic after step N — a deterministic on-demand capture generator for testing the pipeline.)
+
+**Bisecting a failure** (`crates/holon-integration-tests/src/pbt/bisect_driver.rs`). `holon_pbt_core::bisect(ceiling, floor, reproduces)` walks the lattice and returns a `Localization`: `DownwardMinimal` (bug enters when a component is *added* — the classic case), `UpwardMinimal` (an absent-component / missing-handler bug, present only while a component is *removed*), or `NotReproduced`. The node oracle `reproduces_under(set, caps)` replays the capture through `run_sequence(.., SkipGated)` inside a `catch_unwind`. **Honest framing:** "reproduces" means the reference model and the node's enabled projections *disagree* — it localizes *where* the divergence enters, not *who is wrong* (in this codebase it has often been a reference-model fidelity gap, not a prod bug).
+
+**CI triage — `scripts/pbt-bisect.sh`.** On a red wide PBT, the slice has already written its capture; one command localizes it (each node builds a real SUT, so it is manual/env-gated, not inline on every run):
+```
+scripts/pbt-bisect.sh <slice>            # full bisection → Localization
+scripts/pbt-bisect.sh <slice> --probe    # cheap: does the ceiling even reproduce?
+```
+Under the hood it sets `HOLON_BISECT_SLICE=<slice>` (resolve the capture from the slice name) on the `bisect_capture_from_env` test; `HOLON_BISECT_CAPTURE=<path>` takes an explicit path instead, `HOLON_BISECT_CEILING` ∈ {`full_gpui`, `full_headless`, `loro_vm_fast`} sets the ceiling (default `full_headless`, a safe universal ceiling — unset transitions simply never gate), and `HOLON_BISECT_PROBE=1` does the single-node reproduce check. With none set, the test no-ops (CI-safe).
+
+**Editor path is bisectable across storage (ADR asymmetry #1).** `TypeChars`/`PressKey` gate on `AnyStorageOf({Loro, Turso})` (not `HasStorage(Loro)`), so "edit content" is structurally available under Turso-only — exercising the on-blur `set_field` path as a transition. Headless Turso-only slices are unaffected: the transitions' `preconditions` still require `enable_loro() || real_editor_enabled()`, gating them dynamically without a real editor.
+
+**Reproduction is a signature match, not "any panic".** A capture generated under one wiring does not always replay faithfully under another — a transition's SUT path can be storage-coupled (e.g. `SplitBlock`'s Turso-only `probe_block_sql_state` diagnostic crashing `test_ctx()` "App not started" on a no-Turso node) or settle-timing-sensitive. Counting *any* replay panic as a reproduction makes such infidelity aborts look like the bug, and the walk localizes spuriously (an early `general_e2e_pbt` run mis-localized to `{Loro}` this way). So `reproduces_under` counts a panic as a reproduction **iff its message contains the reproduction signature** — by default the cross-layer `trouble begins at:` marker (present iff an invariant actually diverged), overridable with `HOLON_BISECT_SIGNATURE` to pin an exact failure. Everything else is logged as an *inconclusive node* and not counted, so the search never descends into a node it cannot faithfully replay. (`HOLON_BISECT_VERBOSE=1` prints the panic; `HOLON_BISECT_REPEAT=N` measures Heisenbug flakiness.)
+
+**Still open** (ADR §"Migration"): asymmetry #2 — assert the GPUI window's `ReactiveEngine` is the *same instance* the ViewModel invariants observe.

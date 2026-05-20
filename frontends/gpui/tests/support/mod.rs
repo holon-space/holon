@@ -28,16 +28,15 @@ use gpui::{
     Styled, TestAppContext, UniformListScrollHandle, Window, WindowBounds, WindowHandle,
     WindowOptions,
 };
-use holon::entity_profile::RowProfile;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
+use holon_api::RenderProfile as RowProfile;
 use holon_api::{EntityUri, QueryLanguage};
-use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::RenderContext as FrontendRenderContext;
-use holon_frontend::{QueryContext, RowChangeStream, WidgetState};
+use holon_frontend::{QueryContext, WidgetState};
 use holon_gpui::entity_view_registry::LocalEntityScope;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::navigation_state::NavigationState;
@@ -61,11 +60,13 @@ impl BuilderServices for StubServices {
     fn resolve_profile(&self, _: &DataRow) -> Option<RowProfile> {
         unimplemented!("StubServices::resolve_profile")
     }
-    fn compile_to_sql(&self, _: &str, _: QueryLanguage) -> Result<String> {
-        unimplemented!("StubServices::compile_to_sql")
-    }
-    fn start_query(&self, _: String, _: Option<QueryContext>) -> Result<RowChangeStream> {
-        unimplemented!("StubServices::start_query")
+    fn watch_query(
+        &self,
+        _: &str,
+        _: QueryLanguage,
+        _: Option<QueryContext>,
+    ) -> Result<holon_api::EnrichedChangeStream> {
+        unimplemented!("StubServices::watch_query")
     }
     fn widget_state(&self, _: &str) -> WidgetState {
         unimplemented!("StubServices::widget_state")
@@ -86,12 +87,17 @@ impl BuilderServices for StubServices {
     fn runtime_handle(&self) -> tokio::runtime::Handle {
         unimplemented!("StubServices::runtime_handle — fast-UI fixtures are synchronous")
     }
-    fn popup_query(
+    fn search_link_candidates(
         &self,
-        _: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>
-    {
-        unimplemented!("StubServices::popup_query — fast-UI fixtures don't run popups")
+        _: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<holon_api::LinkCandidate>>>
+                + Send
+                + 'static,
+        >,
+    > {
+        unimplemented!("StubServices::search_link_candidates — fast-UI fixtures don't run popups")
     }
 }
 
@@ -104,12 +110,12 @@ impl BuilderServices for StubServices {
 /// `BackendEngine`, no DI.
 ///
 /// Unlike `StubServices`, `TestServices` does NOT panic on `interpret` /
-/// `runtime_handle` / `popup_query` — it returns real values so that the
+/// `runtime_handle` / `search_link_candidates` — it returns real values so that the
 /// production `get_or_create_reactive_shell` path works end-to-end inside a
 /// fast-UI test.
 pub struct TestServices {
     inner: holon_frontend::reactive::StubBuilderServices,
-    popup_results: std::sync::Mutex<Vec<DataRow>>,
+    popup_results: std::sync::Mutex<Vec<holon_api::LinkCandidate>>,
     registry: Arc<BlockTreeRegistry>,
     /// Per-drawer open/closed state. Absent = default (open).
     pub drawer_states: std::sync::Mutex<std::collections::HashMap<String, bool>>,
@@ -152,10 +158,10 @@ impl TestServices {
         })
     }
 
-    /// Construct a `TestServices` whose `popup_query` returns canned rows.
-    /// Used by editor-layer tests that need `LinkProvider` to produce
-    /// deterministic items without touching a real SQL backend.
-    pub fn with_popup_results(rows: Vec<DataRow>) -> Arc<Self> {
+    /// Construct a `TestServices` whose `search_link_candidates` returns
+    /// canned candidates. Used by editor-layer tests that need `LinkProvider`
+    /// to produce deterministic items without touching a real SQL backend.
+    pub fn with_popup_results(rows: Vec<holon_api::LinkCandidate>) -> Arc<Self> {
         Arc::new(Self {
             inner: holon_frontend::reactive::StubBuilderServices::new(),
             popup_results: std::sync::Mutex::new(rows),
@@ -186,11 +192,13 @@ impl BuilderServices for TestServices {
     fn resolve_profile(&self, row: &DataRow) -> Option<RowProfile> {
         self.inner.resolve_profile(row)
     }
-    fn compile_to_sql(&self, query: &str, lang: QueryLanguage) -> Result<String> {
-        self.inner.compile_to_sql(query, lang)
-    }
-    fn start_query(&self, sql: String, ctx: Option<QueryContext>) -> Result<RowChangeStream> {
-        self.inner.start_query(sql, ctx)
+    fn watch_query(
+        &self,
+        query: &str,
+        lang: QueryLanguage,
+        ctx: Option<QueryContext>,
+    ) -> Result<holon_api::EnrichedChangeStream> {
+        self.inner.watch_query(query, lang, ctx)
     }
     fn widget_state(&self, id: &str) -> WidgetState {
         let states = self.drawer_states.lock().unwrap();
@@ -241,11 +249,16 @@ impl BuilderServices for TestServices {
             self.inner.runtime_handle()
         }
     }
-    fn popup_query(
+    fn search_link_candidates(
         &self,
-        _: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DataRow>>> + Send + 'static>>
-    {
+        _: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<holon_api::LinkCandidate>>>
+                + Send
+                + 'static,
+        >,
+    > {
         let rows = self.popup_results.lock().unwrap().clone();
         Box::pin(async move { Ok(rows) })
     }
@@ -580,403 +593,6 @@ pub fn render_reactive_fixture_sized(
     cx.run_until_parked();
 
     holon_layout_testing::snapshot::snapshot_from_provider(&bounds)
-}
-
-// ── GpuiScenarioSession (multi-render window) ─────────────────────────
-//
-// Keeps a `ReactiveFixtureView` window alive across a whole action sequence
-// so the action-aware proptest can render the *same* window multiple times.
-// Owns a `BlockTreeRegistry` that is shared with the window's `TestServices`,
-// so `apply_action(SwitchViewMode)` pushes a new tree through the registry's
-// channel and the ReactiveShell consumer task re-renders.
-
-/// Holds an open `ReactiveFixtureView` window, its bounds registry, and the
-/// per-scenario `BlockTreeRegistry`. The registry is shared with the window's
-/// `TestServices` so that `apply_action` can switch block modes in-process.
-pub struct GpuiScenarioSession {
-    bounds: BoundsRegistry,
-    registry: Arc<BlockTreeRegistry>,
-    services: Arc<TestServices>,
-    _window: WindowHandle<ReactiveFixtureView>,
-}
-
-impl GpuiScenarioSession {
-    /// Open a window with `vm` as the root, register `blocks` into a fresh
-    /// `BlockTreeRegistry`, and run the first render to completion.
-    ///
-    /// `blocks` is a list of `(block_id, modes, active_mode)` entries — the
-    /// same shape as `BlockTreeRegistry::register`. An empty `blocks` list is
-    /// fine for scenarios that don't contain any `LiveBlock` nodes.
-    pub fn open(
-        cx: &mut TestAppContext,
-        vm: Arc<ReactiveViewModel>,
-        blocks: Vec<(String, Vec<(String, BlockTreeThunk)>, usize)>,
-        state: holon_layout_testing::SceneState,
-        window_size: Size<Pixels>,
-    ) -> Self {
-        cx.update(|cx| {
-            gpui_component::init(cx);
-        });
-
-        let registry = Arc::new(BlockTreeRegistry::new());
-        for (block_id, modes, active_mode) in blocks {
-            registry.register(block_id, modes, active_mode);
-        }
-
-        // Shared-registry + quiescent-runtime services: (a) `watch_live`
-        // resolves to the session's registered blocks, (b) reactive-view
-        // drivers queue onto a current-thread runtime that's never entered,
-        // avoiding gpui's `TestScheduler` off-thread panic.
-        let services = TestServices::with_registry_quiescent(registry.clone());
-        // Pre-populate drawer states *before* opening the window so the
-        // first render reads the requested open/closed state.
-        {
-            let mut ds = services.drawer_states.lock().unwrap();
-            for (id, open) in state.closed_drawers() {
-                ds.insert(id, open);
-            }
-        }
-        // Pre-applying collapsible state is deferred: tree_item
-        // `expanded` Mutables live inside the VM tree, which doesn't
-        // exist until after the view is constructed. Done post-mount
-        // via `pre_set_collapsed_rows` below.
-        let collapsed_rows = state.collapsed_rows();
-        let bounds = BoundsRegistry::new();
-        let bounds_for_view = bounds.clone();
-        let services_for_view = services.clone() as Arc<dyn BuilderServices>;
-
-        let window: WindowHandle<ReactiveFixtureView> = cx.update(|cx| {
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds {
-                        origin: Point::default(),
-                        size: window_size,
-                    })),
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    cx.new(|_cx| {
-                        ReactiveFixtureView::with_services_and_bounds(
-                            vm,
-                            services_for_view,
-                            window_size,
-                            bounds_for_view,
-                        )
-                    })
-                },
-            )
-            .expect("open_window failed")
-        });
-
-        let session = Self {
-            bounds,
-            registry,
-            services,
-            _window: window,
-        };
-        session.settle(cx);
-        // Reset every tree_item's `expanded` Mutable to the default
-        // (true). Reference and test mounts share the underlying
-        // `ReactiveView` (and thus the same Mutables) across calls to
-        // `materialize()`; without this reset the test mount would
-        // inherit whatever state the reference mount left behind.
-        // Idempotent — safe to run when there are no collapsibles.
-        session.reset_collapsibles_to_default(cx);
-        if !collapsed_rows.is_empty() {
-            session.pre_set_collapsed_rows(cx, &collapsed_rows);
-            session.settle(cx);
-        }
-        session
-    }
-
-    /// Walk every `tree_item` in the rendered VM tree and set its
-    /// `expanded` Mutable to `true`. Ensures a clean baseline before
-    /// applying per-scenario collapse overrides.
-    pub fn reset_collapsibles_to_default(&self, cx: &mut TestAppContext) {
-        self._window
-            .update(cx, |view, _window, cx| {
-                walk_and_reset_tree_items(&view.vm);
-                if let Some(collection) = view.vm.collection.as_ref() {
-                    let items = collection.items.lock_ref();
-                    for item in items.iter() {
-                        walk_and_reset_tree_items(item);
-                    }
-                }
-                cx.notify();
-            })
-            .expect("window update failed");
-    }
-
-    /// Walk the rendered VM tree and flip the `expanded` `Mutable<bool>`
-    /// to `false` for every `tree_item` whose `target_id` prop matches a
-    /// key in `collapsed`. Used by the reference mount so all dimensions
-    /// — modes, drawers, *and* collapse state — are in their final state
-    /// before the snapshot is compared.
-    pub fn pre_set_collapsed_rows(
-        &self,
-        cx: &mut TestAppContext,
-        collapsed: &std::collections::HashMap<String, bool>,
-    ) {
-        if collapsed.is_empty() {
-            return;
-        }
-        self._window
-            .update(cx, |view, _window, cx| {
-                // Walk the rendered VM tree. For each `tree_item` whose
-                // `target_id` prop is in `collapsed`, set its `expanded`
-                // Mutable to `false`. Other tree_items keep their default.
-                walk_and_collapse_tree_items(&view.vm, collapsed);
-                // Also walk the collection items (the tree's row list
-                // sits inside `ReactiveView::items`, not as direct
-                // children of the tree VM).
-                if let Some(collection) = view.vm.collection.as_ref() {
-                    let items = collection.items.lock_ref();
-                    for item in items.iter() {
-                        walk_and_collapse_tree_items(item, collapsed);
-                    }
-                }
-                cx.notify();
-            })
-            .expect("window update failed");
-    }
-
-    /// Pre-set drawer open/closed states before the first render settles.
-    /// Used by the reference render to pre-apply final drawer states so
-    /// the reference snapshot reflects the end-of-scenario state.
-    pub fn pre_set_drawer_states(
-        &self,
-        cx: &mut TestAppContext,
-        states: &std::collections::HashMap<String, bool>,
-    ) {
-        {
-            let mut ds = self.services.drawer_states.lock().unwrap();
-            for (id, open) in states {
-                ds.insert(id.clone(), *open);
-            }
-        }
-        self._window
-            .update(cx, |_view, _window, cx| cx.notify())
-            .expect("window update failed");
-        self.settle(cx);
-    }
-
-    /// Apply a `UiInteraction` to the open window and settle the executor.
-    ///
-    /// For `SwitchViewMode`: locates the canonical VMS button element in the
-    /// session's `BoundsRegistry` (id = `vms_button_id_for(block_id, mode)`),
-    /// synthesizes a real mouse-down/mouse-up sequence at the button's center
-    /// via `VisualTestContext::simulate_event`. The click lands on the
-    /// production VMS click handler, which uses `set_template` (intra-variant)
-    /// or full slot replacement (cross-variant). Every pixel of the production
-    /// path runs.
-    ///
-    /// **Fails loud** if the target button is missing from `BoundsRegistry`
-    /// — a missing button means the scenario produced a `SwitchViewMode`
-    /// for a block/mode combination the UI didn't actually render, which
-    /// is a scenario-generator bug, not a test runtime to paper over.
-    pub fn apply_action(
-        &self,
-        cx: &mut TestAppContext,
-        action: &holon_layout_testing::UiInteraction,
-    ) {
-        use holon_layout_testing::{LayoutRef, LayoutSut, UiInteraction};
-        use holon_pbt_core::TransitionImpl;
-
-        // Dispatch via the shared `TransitionImpl` impls in
-        // `holon_layout_testing::transitions::*`. The orphan-rule
-        // wrappers `LayoutSut` / `LayoutRef` let those impls work
-        // against this crate's `GpuiInteractionSession` and against a
-        // default `SceneState` (the per-variant `apply_to_sut` impls
-        // don't read ref state — replay/projection is done in
-        // `run_scenario`, not per-action).
-        {
-            let mut session = GpuiInteractionSession { session: self, cx };
-            let mut sut = LayoutSut::new(&mut session);
-            let ref_state = holon_layout_testing::SceneState::default();
-            let ref_view = LayoutRef::new(&ref_state);
-            futures::executor::block_on(async {
-                match action {
-                    UiInteraction::SwitchViewMode(t) => t.apply_to_sut(&ref_view, &mut sut).await,
-                    UiInteraction::ToggleDrawer(t) => t.apply_to_sut(&ref_view, &mut sut).await,
-                    UiInteraction::ToggleCollapse(t) => t.apply_to_sut(&ref_view, &mut sut).await,
-                    UiInteraction::DeliverBlockContent(t) => {
-                        t.apply_to_sut(&ref_view, &mut sut).await
-                    }
-                }
-            });
-        }
-        // The shared `SwitchViewMode::apply_to_sut` just clicks the VMS
-        // button. In production the click handler swaps the slot via
-        // `tmpl_mode_*` templates, but the layout PBT's manually-built
-        // VMS wraps a `live_block` and never populates those templates —
-        // so the click is a visual no-op and the live_block's underlying
-        // tree (sourced from `BlockTreeRegistry`) doesn't change. Mirror
-        // the production effect by pushing the mode flip through the
-        // registry, which wakes the ReactiveShell consumer stream.
-        if let holon_layout_testing::UiInteraction::SwitchViewMode(t) = action {
-            self.registry.set_active(&t.block_id, &t.target_mode);
-        }
-        self.settle(cx);
-    }
-
-    /// Drive the gpui executor until no tasks are pending, advance the
-    /// fake clock past any pending animation, then drive to quiescence
-    /// again. Call after applying an action and before `snapshot()`.
-    pub fn settle(&self, cx: &mut TestAppContext) {
-        cx.run_until_parked();
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(500));
-        cx.run_until_parked();
-    }
-
-    /// Expose the underlying `WindowHandle` for constructing a
-    /// `VisualTestContext` (needed for scroll simulation).
-    pub fn window_handle(&self) -> WindowHandle<ReactiveFixtureView> {
-        self._window
-    }
-
-    /// Push new block content into the registry channel WITHOUT calling
-    /// `cx.notify()` or settling. The GPUI `cx.spawn` consumer in
-    /// `ReactiveShell::new_for_block` has the data queued but hasn't
-    /// been polled yet — simulating the race window between tokio
-    /// delivering data and GPUI running its next layout pass.
-    pub fn deliver_block_content_silent(&self, block_id: &str) {
-        self.registry.set_active(block_id, "loaded");
-    }
-
-    /// Notify the GPUI window and settle. Use after
-    /// `deliver_block_content_silent` to complete the delivery.
-    pub fn notify_and_settle(&self, cx: &mut TestAppContext) {
-        self._window
-            .update(cx, |_view, _window, cx| cx.notify())
-            .expect("window update failed");
-        self.settle(cx);
-    }
-
-    /// Build a `BoundsSnapshot` of the most recently completed render.
-    /// Entries are sorted by seq so the snapshot's iteration order
-    /// matches render-tree traversal order.
-    pub fn snapshot(&self) -> BoundsSnapshot {
-        // Promote the last staged render into committed so the snapshot sees
-        // the UI as of the most recent render, not the one before it. The
-        // double-buffer in `BoundsRegistry` only rotates at the *start* of
-        // the next render, and the gpui test scheduler doesn't run extra
-        // frames on its own — so without this, every snapshot after a
-        // `notify`-driven re-render lags by one frame.
-        self.bounds.flush();
-        holon_layout_testing::snapshot::snapshot_from_provider(&self.bounds)
-    }
-}
-
-// ── GpuiInteractionSession (primitives-only SUT for TransitionImpl) ──
-//
-// Thin bag of GPUI-specific primitives that the per-variant
-// `TransitionImpl` impls under `support/transitions/<variant>.rs`
-// orchestrate. Holds the borrows the primitives need together:
-// `&GpuiScenarioSession` (bounds, registry, services, window) plus
-// `&mut TestAppContext` (mouse simulation, window update).
-//
-// Adding a new variant means adding a new file under
-// `support/transitions/` and — if the variant needs a primitive that
-// doesn't exist yet — adding one method here. The variant file owns
-// the semantics; this struct owns the GPUI plumbing.
-pub struct GpuiInteractionSession<'a> {
-    session: &'a GpuiScenarioSession,
-    cx: &'a mut TestAppContext,
-}
-
-impl holon_layout_testing::Clickable for GpuiInteractionSession<'_> {
-    /// Synthesize a real left-click at the centre of the element
-    /// registered under `element_id` in the session's `BoundsRegistry`.
-    /// Panics loud if no bounds — a missing element is a scenario-
-    /// generator bug, not a runtime to paper over.
-    fn click_at_element(&mut self, element_id: &str) {
-        let info = self
-            .session
-            .bounds
-            .element_info(element_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "GpuiInteractionSession::click_at_element({element_id:?}): \
-                     no bounds recorded under that id. Either the widget didn't \
-                     render, or its builder failed to wrap with TransparentTracker."
-                )
-            });
-        let (cx_ref, cy) = info.center();
-        let position = gpui::Point::new(px(cx_ref), px(cy));
-
-        let mut vcx = gpui::VisualTestContext::from_window(self.session._window.into(), self.cx);
-        // Move first so hit-test picks up the non-zero hitbox — same
-        // reason `simulate_wheel_at` does this (see its doc).
-        vcx.simulate_event(gpui::MouseMoveEvent {
-            position,
-            ..Default::default()
-        });
-        vcx.simulate_event(gpui::MouseDownEvent {
-            position,
-            button: gpui::MouseButton::Left,
-            modifiers: gpui::Modifiers::default(),
-            click_count: 1,
-            first_mouse: false,
-        });
-        vcx.simulate_event(gpui::MouseUpEvent {
-            position,
-            button: gpui::MouseButton::Left,
-            modifiers: gpui::Modifiers::default(),
-            click_count: 1,
-        });
-    }
-}
-
-impl holon_layout_testing::LiveBlockSink for GpuiInteractionSession<'_> {
-    /// Push deferred `live_block` content into the registry channel
-    /// (the test-harness side of async data arrival) and notify the
-    /// window so the next layout pass picks it up.
-    fn deliver_block_content_loaded(&mut self, block_id: &str) {
-        self.session.registry.set_active(block_id, "loaded");
-        self.session
-            ._window
-            .update(self.cx, |_view, _window, cx| cx.notify())
-            .expect("window update failed");
-    }
-}
-
-/// Walk a `ReactiveViewModel` tree and reset every `tree_item`'s
-/// per-instance `expanded` Mutable to `true` (the default). Used by
-/// `reset_collapsibles_to_default` to give every mount a deterministic
-/// starting baseline despite ReactiveView Arcs being shared across
-/// `materialize()` calls.
-fn walk_and_reset_tree_items(node: &holon_frontend::reactive_view_model::ReactiveViewModel) {
-    if node.widget_name().as_deref() == Some("tree_item") {
-        if let Some(ref expanded) = node.expanded {
-            expanded.set(true);
-        }
-    }
-    for child in &node.children {
-        walk_and_reset_tree_items(child);
-    }
-}
-
-/// Walk a `ReactiveViewModel` tree and flip the per-instance `expanded`
-/// `Mutable<bool>` to `false` for every `tree_item` whose `target_id`
-/// prop appears in `collapsed`. Used by `pre_set_collapsed_rows` so the
-/// reference render starts with the post-replay collapse state.
-fn walk_and_collapse_tree_items(
-    node: &holon_frontend::reactive_view_model::ReactiveViewModel,
-    collapsed: &std::collections::HashMap<String, bool>,
-) {
-    if node.widget_name().as_deref() == Some("tree_item") {
-        if let Some(target_id) = node.prop_str("target_id") {
-            if collapsed.contains_key(&target_id) {
-                if let Some(ref expanded) = node.expanded {
-                    expanded.set(false);
-                }
-            }
-        }
-    }
-    for child in &node.children {
-        walk_and_collapse_tree_items(child, collapsed);
-    }
 }
 
 // ── Scroll fixture ────────────────────────────────────────────────────

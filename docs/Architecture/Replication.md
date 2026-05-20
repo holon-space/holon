@@ -17,7 +17,7 @@
 Holon stores one logical structure — a tree of **blocks** — but no single
 component holds all of it, and the components are wildly heterogeneous:
 
-- **Org / Markdown files** hold one document's blocks; durable; edited *out of
+- **Org / Markdown files** (when enabled) hold one document's blocks; optional; durable; edited *out of
   band* (the user or an AI agent edits the file directly — we cannot funnel
   those writes).
 - **Loro** (when enabled) holds a CRDT replica of the tree; optional.
@@ -37,6 +37,13 @@ tree across partial, heterogeneous replicas, reconciled by 3-way merge against a
 per-component base, with order owned by a single consolidator and projected
 verbatim to read-only sinks.**
 
+Equivalently, from the user's point of view: the 3-way merge is how we
+**recover intent** from an out-of-band edit. We cannot funnel an org-file edit
+through an intent API, so we reconstruct the intent after the fact —
+`diff(base, theirs)` is precisely the delta between what a component last
+agreed on and what it holds now, i.e. the user's intent expressed in that
+component's language. §4 turns that delta into explicit intent ops.
+
 ---
 
 ## 2. Components are capability profiles, not roles
@@ -47,7 +54,7 @@ component declares a capability profile:
 | Axis | Values | org file | Loro (full) | Todoist | Turso | UI |
 |---|---|---|---|---|---|---|
 | **ID policy** | Mint / AcceptForeign / OwnForeign(map) | AcceptForeign (+mint on a brand-new on-disk block) | Mint | **OwnForeign** (needs id-map) | AcceptForeign | — |
-| **Merge caps** | FullCRDT / TextCRDT-on-demand / LWW | LWW (or borrow TextCRDT) | FullCRDT | LWW per field | LWW | — |
+| **Merge caps** | FullCRDT / TextCRDT-on-demand / LWW | LWW (or borrow TextCRDT) | FullCRDT | LWW per field | LWW (or borrow TextCRDT) | — |
 | **Order rep** | Sequence / SortKey / FractionalIndex | Sequence (line order) | FractionalIndex | Sequence | SortKey | — |
 | **Domain** | all / one-doc / tasks-only / rendered-subset | one doc | all | tasks only | **union (all)** | rendered subset |
 | **Durability** | durable / ephemeral | **durable** | durable-if-present | external | **ephemeral** | ephemeral |
@@ -56,17 +63,31 @@ component declares a capability profile:
 
 - **Consolidator** = the most capable *merger* currently present. It performs the
   one authoritative merge per change. Capability order:
-  `FullCRDT (Loro) > 3-way-with-base (git/jj over files) > LWW`.
-- **Durable base** = whichever durable component holds truth. *Today this is the
-  org files* (Turso is ephemeral; Loro persistence optional). The abstraction
-  must allow org **or** Loro to be the durable base.
+  `FullCRDT (Loro store) > 3-way-with-base (git/jj over files) > LWW` — this
+  ranks **structural** merge capability; text merge never degrades (see the
+  store-vs-merge-function distinction below).
+- **Durable base** = whichever durable component holds truth. *Today we default
+  to the org files*, but that is a stability choice, not an architectural one —
+  org is exactly as optional as every other component. We default to org while
+  Holon matures because a mangled org file is human-readable and trivially
+  repaired, while a mangled Loro doc is not; once Holon is stable enough, Loro
+  becomes the default durable base. The abstraction must allow org **or** Loro
+  to fill the role.
 - **Sink** = a derived, read-only consumer that **never re-merges**; it applies
   the consolidated result verbatim. Turso and the UI are sinks.
 
-This is "make the best of what we've got": with Loro present, Loro is the
-consolidator and Turso is a downstream sink; with only Turso (the "don't delete
-the `.db`" mode), Turso is consolidator *and* store *and* sink (LWW is the best
-available — and that's fine).
+This is "make the best of what we've got": with the Loro store present, Loro is
+the consolidator and Turso is a downstream sink; with only Turso (the "don't
+delete the `.db`" mode), Turso is consolidator *and* store *and* sink.
+
+**Loro-the-store and Loro-the-merge-function are two different capabilities**
+(§4, invariant 7). The Loro *library* is always linked, so CRDT **text** merge
+is available in every mode: a consolidator not backed by the Loro store can
+still merge concurrent edits to one text field (say, org file vs. UI) through a
+*transient* `LoroText`. What actually varies by mode is **structural** merge
+capability — the tree CRDT (parent / order / move semantics) exists only when
+Loro is the store; without it, structure falls back to 3-way AST merge or LWW.
+That is what the consolidator capability order above ranks.
 
 **Removability is orthogonal to peer-ness.** Dropping Turso loses cross-system
 queries but replication still runs; dropping Loro downgrades merge to
@@ -101,9 +122,12 @@ resurrection/scramble bug class. This answers, in one move:
   that differs mine-vs-base but disk==base means the file is merely behind.
 - **"What is `last_synced_hash` a special case of?"** → a content-addressed
   identity of the base snapshot.
+- **"Where does *intent* come from?"** → this same diff. For components whose
+  writes we cannot funnel (files edited out of band), `diff(base, theirs)` *is*
+  the intent extraction; §4 converts it into explicit intent ops.
 
-> **Current state:** `OrgSyncController` already has this idea as
-> `last_projection` (`org_sync_controller.rs:8`, `:242`). The work is to (a)
+> **Current state:** `FileSyncController` already has this idea as
+> `last_projection` (`file_sync_controller.rs:8`, `:242`). The work is to (a)
 > formalize it behind a `SyncBaseStore` trait, (b) make it the **sole** diff
 > base, and (c) stop entangling it with cache reads (`block_reader.get_blocks`
 > via `QueryableCache<Block>` at `:380`/`:430`). **Diff against the base, never
@@ -141,11 +165,14 @@ leak and how stale data gets re-ingested.
    - **Structure / order** (block created / re-parented / reordered) comes from
      diffing the *parsed ASTs* (base-AST vs disk-AST) — **not** a text/line diff
      and **not** Loro. The org parser produces structural intent.
-   - **Text fields**: a text diff (`similar`/`diffy`) → insert/delete ops, *or*,
-     when Loro is the store, seed a `LoroText` at the base and `update(disk)` so
-     Loro emits the minimal ops *as this component* — the intent is then already
-     in the merge target's language.
-
+   - **Text fields**: seed a `LoroText` at the base and `update(disk)` so Loro
+     emits the minimal ops *as this component* — the intent is then already in
+     the merge target's language. This does **not** require Loro to be the
+     store: a *shared* `LoroText` when it is, a *transient* one when it isn't
+     (see below). There is no separate text-diff path: when a field's merge
+     capability is LWW the whole value wins (no ops extracted), and a git/jj
+     3-way merge consumes the raw texts directly — ops-as-intent always means
+     LoroText.
 2. **Merge** the intent at the **consolidator** (the most capable merger). Only
    the consolidator decides the outcome. Every other component applies the
    result.
@@ -364,3 +391,15 @@ every variant of this model — so it doubles as the foundation's first step:
 3. Make the consolidated feed the **sole** writer of Turso.
 
 See [Sync.md](Sync.md) for the current implementation surface this evolves.
+
+> **Implementation status (2026-06-11).** Steps 1–2 have **landed**:
+> `SyncBaseStore` exists and `LoroProjection::project` diffs against the base;
+> children read the Loro tree for single-owner order.
+> Phase 1 (sole Turso writer, authority-first delete, intent vocabulary) is in
+> progress per `codev/specs/0007-architecture-improvement-plan.md`.
+> Cell backing types (`LoroMetaCellBacking<T>`, `LoroTreeParentCellBacking`,
+> `LoroTreePositionCellBacking`, `LwwScalarBacking<T>`, `LwwTextCellBacking`)
+> are documented but deferred past Phase 1; only `LoroTextCellBacking` is
+> implemented. The `write_field` carve-outs in `block_cell_registry.rs` handle
+> routing correctly without them.
+> See `devlog/2026-05-22-blocksync-p3-basediff-handoff.md`.
