@@ -15,12 +15,16 @@ use std::cell::RefCell;
 use bridge::WorkerBridge;
 use dioxus::prelude::*;
 use holon_frontend::view_model::ViewModel;
-use holon_frontend::BLOCK_READ_TABLE_PUB as BLOCK_READ_TABLE;
 use js_sys::Reflect;
-use serde_json::Value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+
+/// The read-side block table name, mirroring `holon_turso::BLOCK_READ_TABLE`.
+/// That const lives in the native-only `holon-turso` crate, which the wasm
+/// frontend can't depend on; the worker (which owns the DB) uses the same
+/// value, so this readiness-probe string must stay in sync with it.
+const BLOCK_READ_TABLE: &str = "block";
 
 /// URL of the worker entry module, relative to the serving root.
 const WORKER_URL: &str = "/web/worker-entry.mjs";

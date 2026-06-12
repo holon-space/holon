@@ -1,12 +1,9 @@
 use super::prelude::*;
-use holon_api::render_types::RenderExpr;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(
-    content: &Box<ViewModel>,
-    _: &Option<String>,
-    _: &Option<String>,
-    _: &Option<RenderExpr>,
-    _: &DioxusRenderContext,
-) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::LiveQuery { content, .. } = &node.kind else {
+        return rsx! {};
+    };
     rsx! { RenderNode { node: (**content).clone() } }
 }

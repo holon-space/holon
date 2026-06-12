@@ -13,7 +13,7 @@ use validated::Validated;
 
 use crate::pbt::query::WatchSpec;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutWatchRegister;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -32,6 +32,12 @@ pub struct SetupWatch {
 }
 
 impl TransitionFactory<ReferenceState> for SetupWatch {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutWatchRegister,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: the navigation / CDC-watch / MCP providers this transition
@@ -96,10 +102,14 @@ impl TransitionRef<ReferenceState> for SetupWatch {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for SetupWatch {
+impl<S: SutWatchRegister> TransitionImpl<ReferenceState, S> for SetupWatch {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_setup_watch(&self.query_id, &self.query, self.language)
-            .await;
+        // Compile the integration-test-local `TestQuery` at the boundary: the
+        // `SutWatchRegister` cap (pbt-core) cannot name `TestQuery`, so it takes
+        // the already-compiled `(source, lang)` — exactly what `E2ESut`'s old
+        // `apply_setup_watch` did internally before this decomposition.
+        let (source, lang) = self.query.compile_for(self.language);
+        sut.register_watch(&self.query_id, &source, lang).await;
     }
 }
 

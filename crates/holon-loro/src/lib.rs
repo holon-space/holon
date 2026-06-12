@@ -3,7 +3,7 @@
 //! This crate provides the Loro CRDT backend, P2P sync infrastructure,
 //! and snapshot/block query capabilities — extracted from the `holon` god crate.
 //!
-//! Re-exported into `holon::sync` for backward compatibility.
+//! Re-exported into `holon::sync` so existing `holon::sync::*` paths resolve.
 
 pub mod block_cell_registry;
 pub mod canonical_path;
@@ -91,10 +91,10 @@ pub use holon_api::EntityUri;
 pub use iroh_sync_adapter::IrohSyncAdapter;
 pub use live_value::LiveValue;
 pub use loro_backend::{
-    LoroBackend, LoroMapExt, SnapshotBlock, configure_text_styles, mark_from_loro_value,
-    mark_to_loro_value, read_marks_from_text, snapshot_blocks_from_doc,
-    snapshot_blocks_from_doc_settled, LoroTreeView,
-    TREE_NAME, STABLE_ID, CONTENT_TYPE, CONTENT_RAW, SOURCE_CODE, SOURCE_LANGUAGE, EXTERNAL_ID,
+    CONTENT_RAW, CONTENT_TYPE, EXTERNAL_ID, LoroBackend, LoroMapExt, LoroTreeView, SOURCE_CODE,
+    SOURCE_LANGUAGE, STABLE_ID, SnapshotBlock, TREE_NAME, configure_text_styles,
+    mark_from_loro_value, mark_to_loro_value, read_marks_from_text, snapshot_blocks_from_doc,
+    snapshot_blocks_from_doc_settled,
 };
 pub use loro_block_operations::LoroBlockOperations;
 pub use loro_blocks_datasource::LoroBlocksDataSource;

@@ -1253,7 +1253,9 @@ mod tests {
         );
         let main_panel = ViewModel::live_block(
             "block:default-main-panel",
-            ViewModel::collection("column", vec![main_item]),
+            // `collection` has no `column` kind; this resolved to `list` via the
+            // old silent default, so spell it `list` now that parsing is strict.
+            ViewModel::collection("list", vec![main_item]),
         );
         let root = ViewModel::layout("columns", vec![left_panel, main_panel]);
 

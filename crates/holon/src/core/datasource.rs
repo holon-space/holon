@@ -11,11 +11,9 @@
 //! requirements so a single trait definition compiles on both targets.
 
 use async_trait::async_trait;
-use holon_api::EntityName;
 
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::traits::{IntoEntity, TryFromEntity};
-use crate::storage::types::StorageEntity;
 
 // Re-export core traits from holon-core
 pub use holon_core::{
@@ -72,7 +70,7 @@ pub use crate::api::{Change, ChangeOrigin, StreamPosition};
 /// # Examples
 /// ```ignore
 /// // Individual cache:
-pub use holon_core::OperationProvider;
+pub use holon_core::{OperationProvider, OriginTaggedWrites};
 
 /// Observer for operation execution events
 ///

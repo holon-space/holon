@@ -75,26 +75,6 @@ pub fn set_loro_peer_id_if_unset(default: &str) {
     }
 }
 
-/// Enable `PBT_ATOMIC_EDITOR=1` if it isn't already set. The atomic
-/// editor primitives (`FocusEditableText`, `TypeChars`,
-/// `DeleteBackward`, `MoveCursor`, `PressKey`) are the
-/// keyboard-driven UI path; with this on, the bypass-style
-/// `EditViaViewModel` / `EditViaDisplayTree` transitions are gated
-/// off. See `frontends/tui/TODO.md` items A6 and the May 2026
-/// "atomic editor PBT primitives" memory note.
-///
-/// Call before the PBT thread spawns; the flag is read by
-/// `ReferenceState::atomic_editor_enabled()` at strategy-construction
-/// time.
-pub fn enable_atomic_editor_if_unset() {
-    if std::env::var("PBT_ATOMIC_EDITOR").is_err() {
-        // SAFETY: same prologue invariant as the helpers above.
-        unsafe {
-            std::env::set_var("PBT_ATOMIC_EDITOR", "1");
-        }
-    }
-}
-
 /// Print the per-transition rejection histogram on every panic. Without this
 /// the `proptest_state_machine!` path swallows the `print_rejection_histogram()`
 /// hook that the phased-PBT path runs in `pbt_teardown`, so the histogram is
@@ -124,7 +104,6 @@ pub fn install_rejection_histogram_panic_hook() {
 pub fn standard_pbt_config(slice_name: &str) -> proptest::test_runner::Config {
     use proptest::test_runner::{Config, FileFailurePersistence};
 
-    enable_atomic_editor_if_unset();
     install_rejection_histogram_panic_hook();
     let max_shrink = std::env::var("PROPTEST_MAX_SHRINK_ITERS")
         .ok()

@@ -140,8 +140,11 @@ mod tests {
         let content = "# A ^aa\n\nbody\n";
         let parsed = adapter.parse(&path, content, &parent, &root).unwrap();
         let via_adapter = adapter.render_blocks(&parsed.blocks, &path, &parsed.document.id);
-        let via_direct = MarkdownRenderer::new(MarkdownDialect::obsidian())
-            .render_blocks(&parsed.blocks, &path, &parsed.document.id);
+        let via_direct = MarkdownRenderer::new(MarkdownDialect::obsidian()).render_blocks(
+            &parsed.blocks,
+            &path,
+            &parsed.document.id,
+        );
         assert_eq!(via_adapter, via_direct);
     }
 

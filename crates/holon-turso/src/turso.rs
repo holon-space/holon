@@ -195,6 +195,7 @@ fn positional_params_fingerprint(params: &[turso::Value]) -> String {
 /// This is the public API for database operations. Clone freely - all clones
 /// share the same underlying actor and CDC broadcast channel.
 #[derive(Clone)]
+/// @c4 code
 pub struct DbHandle {
     tx: mpsc::Sender<DbCommand>,
     cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
@@ -929,7 +930,9 @@ fn trace_sql(tag: &str, sql: &str) {
         // process — measured to ~2x startup time on org-pkm initial scan).
         #[cfg(not(debug_assertions))]
         {
-            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+            let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+                .expect("now within range")
+                .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!("{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql}");
         }
         tracing::trace!("[TursoBackend] {tag}: {sql}");
@@ -942,7 +945,9 @@ fn trace_sql_positional(tag: &str, sql: &str, params: &[turso::Value]) {
     if full_sql_tracing() && !params.is_empty() {
         #[cfg(not(debug_assertions))]
         {
-            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+            let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+                .expect("now within range")
+                .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
                 "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params:?}"
             );
@@ -969,7 +974,9 @@ fn trace_sql_named(tag: &str, sql: &str, params: &HashMap<String, Value>) {
     let params_str = parts.join(", ");
     #[cfg(not(debug_assertions))]
     {
-        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+        let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+            .expect("now within range")
+            .format("%Y-%m-%dT%H:%M:%S%.6f");
         eprintln!(
             "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params_str}"
         );
@@ -981,6 +988,8 @@ fn trace_sql_named(tag: &str, sql: &str, params: &HashMap<String, Value>) {
 // TursoBackend with merged actor logic
 // ============================================================================
 
+/// @c4 code
+/// @c4 uses DbHandle "actor handle" "call"
 pub struct TursoBackend {
     db: Arc<Database>,
     /// Broadcast channel for CDC events - all subscribers share this channel.
@@ -1087,7 +1096,9 @@ impl TursoBackend {
 
         // Set up CDC callback to broadcast to all subscribers
         if full_sql_tracing() {
-            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f");
+            let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+                .expect("now within range")
+                .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
                 "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: registering CDC callback"
             );

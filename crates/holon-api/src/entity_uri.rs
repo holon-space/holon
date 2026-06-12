@@ -206,12 +206,20 @@ impl EntityUri {
             // A bare synthetic id containing `::` separators (e.g.
             // `root-layout::src::0`, `default-main-panel::render::0`) is a
             // valid RFC 3986 URI: scheme `root-layout`, path `:src::0`. A real
-            // `scheme:path` URI never has a path starting with `:` — that
-            // shape is the head of a bare id, not a scheme. Mis-accepting it
-            // made `is_block()` false downstream, so `resolve_to_tree_id`
-            // silently missed existing Loro nodes and field writes forked to
-            // the SQL path (layout-swap Loro divergence, 2026-06-11).
-            if !uri.id().starts_with(':') {
+            // `scheme:path` URI (other than the entity schemes below) never has
+            // a path starting with `:` — that shape is the head of a bare id,
+            // not a scheme. Mis-accepting it made `is_block()` false downstream,
+            // so `resolve_to_tree_id` silently missed existing Loro nodes and
+            // field writes forked to the SQL path (layout-swap Loro divergence,
+            // 2026-06-11).
+            //
+            // EXCEPTION: the entity schemes `block`/`doc` DO legitimately carry a
+            // colon-leading id — the reference model's synthetic split ids are
+            // `block::split-N` (scheme `block`, id `:split-N`). Those must
+            // round-trip (e.g. `MemoryBackend::children_of` re-parses stored
+            // child ids), so accept a known entity scheme even with a `:`-leading
+            // id. Bare layout ids keep their non-entity scheme and stay bare.
+            if !uri.id().starts_with(':') || matches!(uri.scheme(), "block" | "doc") {
                 return uri;
             }
         }
@@ -335,17 +343,22 @@ mod tests {
             "default-main-panel::render::0",
             "block:root-layout::src::0",
         ] {
+            // ALLOW(entity_uri_from_raw): test exercises from_raw parsing directly
             let uri = EntityUri::from_raw(raw);
             assert!(uri.is_block(), "{raw:?} → {uri:?} must be a block URI");
             assert_eq!(uri.id(), raw.strip_prefix("block:").unwrap_or(raw));
             // Idempotent: re-parsing the schemed form round-trips.
+            // ALLOW(entity_uri_from_raw): test exercises from_raw parsing directly
             let again = EntityUri::from_raw(uri.as_str());
             assert_eq!(again, uri);
         }
         // Real schemes are untouched.
+        // ALLOW(entity_uri_from_raw): test exercises from_raw parsing directly
         assert_eq!(EntityUri::from_raw("person:abc").scheme(), "person");
+        // ALLOW(entity_uri_from_raw): test exercises from_raw parsing directly
         assert!(EntityUri::from_raw("sentinel:no_parent").is_sentinel());
         assert_eq!(
+            // ALLOW(entity_uri_from_raw): test exercises from_raw parsing directly
             EntityUri::from_raw("https://jira.example.com/ISSUE-1").scheme(),
             "https"
         );

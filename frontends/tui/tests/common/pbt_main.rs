@@ -17,8 +17,8 @@ use holon_integration_tests::pbt::phased::{
     run_pbt_with_driver_sync_callback, PbtReadyContext, PbtReadyResult,
 };
 use holon_integration_tests::pbt::ui_harness::{
-    enable_atomic_editor_if_unset, screenshot_dir, set_loro_peer_id_if_unset,
-    set_memory_multiplier_if_unset, try_start_embedded_mcp, wait_for_geometry_ready,
+    screenshot_dir, set_loro_peer_id_if_unset, set_memory_multiplier_if_unset,
+    try_start_embedded_mcp, wait_for_geometry_ready,
 };
 use holon_integration_tests::ui_driver::VisualState;
 use holon_integration_tests::GeometryDriver;
@@ -49,11 +49,6 @@ struct TuiLaunchContext {
 pub fn run(wiring: holon_pbt_core::Wiring, label: &'static str) {
     set_memory_multiplier_if_unset("15");
     set_loro_peer_id_if_unset("1");
-    // Use the atomic-editor primitives (FocusEditableText / TypeChars
-    // / DeleteBackward / Blur / MoveCursor / PressKey) instead of the
-    // bypass-style EditViaViewModel / EditViaDisplayTree transitions.
-    // See `frontends/tui/TODO.md` A6.
-    enable_atomic_editor_if_unset();
 
     eprintln!("[{label}] wiring: {wiring:?}");
 

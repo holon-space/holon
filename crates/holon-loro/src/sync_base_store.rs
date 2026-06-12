@@ -246,13 +246,18 @@ mod tests {
         Block::new_text(EntityUri::block(id), EntityUri::no_parent(), id.to_string())
     }
 
+    /// `ids` are BARE block ids (no scheme) — `block()` mints the `EntityUri`.
+    /// The map is keyed by the schemed `EntityUri` string, mirroring production
+    /// (`loro_backend::snapshot_blocks_from_doc_settled` keys by
+    /// `block.id.to_string()`).
     fn snapshot(ids: &[&str]) -> HashMap<String, SnapshotBlock> {
         ids.iter()
             .map(|id| {
+                let block = block(id);
                 (
-                    id.to_string(),
+                    block.id.to_string(),
                     SnapshotBlock {
-                        block: block(id),
+                        block,
                         sort_key: "A0".to_string(),
                     },
                 )
@@ -272,7 +277,7 @@ mod tests {
     fn put_then_get_round_trips_per_key() {
         let store = SyncBaseStore::in_memory();
         let key = BaseKey::file("org", "/a.org");
-        store.put_base(&key, snapshot(&["block:a", "block:b"]));
+        store.put_base(&key, snapshot(&["a", "b"]));
         assert!(store.is_base_seeded(&key));
         let got = store.get_base(&key);
         assert_eq!(got.len(), 2);
@@ -297,9 +302,9 @@ mod tests {
         let a = BaseKey::file("org", "/a.org");
         let b = BaseKey::file("org", "/b.org");
         let g = BaseKey::global();
-        store.put_base(&a, snapshot(&["block:a"]));
-        store.put_base(&b, snapshot(&["block:b1", "block:b2"]));
-        store.put_base(&g, snapshot(&["block:g"]));
+        store.put_base(&a, snapshot(&["a"]));
+        store.put_base(&b, snapshot(&["b1", "b2"]));
+        store.put_base(&g, snapshot(&["g"]));
         assert_eq!(store.get_base(&a).len(), 1);
         assert_eq!(store.get_base(&b).len(), 2);
         assert_eq!(store.get_base(&g).len(), 1);

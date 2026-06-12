@@ -19,6 +19,17 @@ import {
 
 import { OpfsDirectory, opfsWorkerImports } from '/web/opfs-bridge.mjs'
 
+// Surface fatal worker errors to the parent. The top-level `await` below means
+// any instantiation failure becomes an unhandled rejection whose `error` event
+// is opaque (`{isTrusted:true}`) cross-context; forward the real message so the
+// page can show it instead of just a ready-timeout.
+self.addEventListener('unhandledrejection', (ev) => {
+  self.postMessage({ kind: 'fatal', error: String((ev.reason && ev.reason.stack) || ev.reason) })
+})
+self.addEventListener('error', (ev) => {
+  self.postMessage({ kind: 'fatal', error: String((ev.error && ev.error.stack) || ev.message || ev) })
+})
+
 // ── Wasm instantiation ────────────────────────────────────────────────────
 
 const __wasi = new __WASI({
@@ -50,9 +61,18 @@ const { napiModule: __napiModule } = __emnapiInstantiateNapiModuleSync(__wasmFil
     // generated `wasi-worker-browser.mjs` because the generated file is
     // clobbered on every build AND lacks the OPFS import stubs that the
     // turso_browser_shim requires for child-thread linking.
-    return new Worker(new URL('/web/wasi-worker-with-opfs-stubs.mjs', self.location.origin), {
+    const w = new Worker(new URL('/web/wasi-worker-with-opfs-stubs.mjs', self.location.origin), {
       type: 'module',
     })
+    w.addEventListener('message', (ev) => {
+      if (ev.data && ev.data.__holon_fatal) {
+        self.postMessage({ kind: 'fatal', error: 'child-thread: ' + ev.data.__holon_fatal })
+      }
+    })
+    w.addEventListener('error', (ev) => {
+      self.postMessage({ kind: 'fatal', error: 'child-thread onerror: ' + (ev.message || `${ev.filename}:${ev.lineno}`) })
+    })
+    return w
   },
   overwriteImports(importObject) {
     importObject.env = {

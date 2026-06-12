@@ -38,11 +38,7 @@ pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
     state: &R,
 ) -> Validated<(), Reason> {
     let checks: Vec<Validated<(), Reason>> = vec![
-        check(R::atomic_editor_enabled(), Reason::AtomicEditorDisabled),
-        check(
-            state.enable_loro() || ReferenceState::real_editor_enabled(),
-            Reason::LoroRequiredForAtomicEditor,
-        ),
+        check(state.has_editor_buffer(), Reason::NoEditorBuffer),
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
         check(
@@ -80,27 +76,30 @@ pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycl
 
 /// Ref-state apply for `TypeChars`, capability-bound. Mirrors the
 /// original ReferenceState-specific apply exactly: type into the active
-/// editor, then commit through to block content if Loro is enabled.
+/// editor, then commit through to block content.
 pub fn type_chars_apply_to_ref<R>(text: &str, state: &mut R)
 where
     R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
 {
     state.type_chars(text);
-    // After Phase 1 of `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`:
-    // when Loro is enabled, per-keystroke writes flow through
-    // `MutableText` into the global Loro doc, and `LoroSyncController`
-    // projects them into `block.content` SQL between transitions (CDC
-    // quiescence barrier at the PBT runner). SqlOnly has no Loro path —
-    // typing only lives in the editor's `InputState` until on-blur
-    // fires `set_field`, so ref-state shouldn't commit either.
-    if state.enable_loro() {
-        commit_active_editor_if_changed(state);
-    }
+    // The GPUI editor now always commits typed text: when Loro is
+    // enabled the per-keystroke pipeline writes through the Cell into
+    // the Loro doc, and when no cell is attached (SqlOnly / no-Loro
+    // mode) the change handler falls back to `set_field("content")`.
+    // The ref must mirror this so the invariant sees the same content
+    // on both sides regardless of storage backend.
+    commit_active_editor_if_changed(state);
 }
 
 // ── E2E trait impls (wide PBT entry point; delegate to _cap fns) ──
 
 impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for TypeChars {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutEditorMirrorWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // ADR 0009 asymmetry #1: "edit content" works on any block store (under

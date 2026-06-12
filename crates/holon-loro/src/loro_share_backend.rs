@@ -7,14 +7,7 @@
 //!
 //! See the crate-level plan in docs/Reference/SUBTREE_SHARING.md for the threat model.
 
-use holon_core::OperationProvider;
-use holon_api::OperationDescriptor;
-use holon_core::{
-    OperationResult, Result, UndoAction,
-};
-use crate::debounced_commit_worker::{
-    self, DebouncedCommitWorkerHandle, any_commit, local_only,
-};
+use crate::debounced_commit_worker::{self, DebouncedCommitWorkerHandle, any_commit, local_only};
 use crate::degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
 use crate::iroh_advertiser::{ALPN_PREFIX, IrohAdvertiser, OnPeerConnected};
 use crate::iroh_sync_adapter::{
@@ -31,9 +24,12 @@ use crate::ticket::Ticket;
 use async_trait::async_trait;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
 use holon_core::MaybeSendSync;
+use holon_core::{OperationProvider, OriginTaggedWrites};
+use holon_core::{OperationResult, Result, UndoAction};
 use iroh::{EndpointAddr, SecretKey};
 use loro::{LoroDoc, TreeID, TreeParentId, ValueOrContainer};
 use std::collections::HashMap;
@@ -167,7 +163,7 @@ pub struct LoroShareBackend {
     /// `Option` so tests that construct the backend directly (without the
     /// full DI stack) can keep working; when `None`, mount-node projection
     /// is skipped.
-    sql_ops: Option<Arc<dyn OperationProvider>>,
+    sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
     /// `shared_tree_id → known peer endpoint addrs`. Populated on
     /// accept (ticket author's addr), on every inbound advertiser
     /// handshake, and at startup from the sidecar JSON.
@@ -270,7 +266,7 @@ const PROJECTION_DEBOUNCE: Duration = Duration::from_millis(150);
 
 fn spawn_projection_worker(
     doc: Arc<LoroDoc>,
-    sql_ops: Arc<dyn OperationProvider>,
+    sql_ops: Arc<dyn OriginTaggedWrites>,
     mount_block_uri: String,
     shared_tree_id: String,
 ) -> ProjectionWorker {
@@ -389,7 +385,7 @@ impl LoroShareBackend {
         advertiser: Arc<IrohAdvertiser>,
         degraded_bus: Arc<DegradedSignalBus>,
         device_key: SecretKey,
-        sql_ops: Option<Arc<dyn OperationProvider>>,
+        sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|self_weak| Self {
             store,

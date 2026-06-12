@@ -22,6 +22,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// persisted on the `_change_origin` CDC column so the inbound direction can
 /// echo-suppress its own writes (e.g. the Loro→SQL projection tags its writes
 /// `EventOrigin::Loro`).
+///
+/// @c4 code
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventOrigin {
     Loro,
@@ -55,6 +57,9 @@ impl EventOrigin {
 /// Providers that support entity operations implement this trait.
 /// The `*_with_origin` variants allow callers to tag writes with their
 /// provenance so the inverse sync direction can skip echoes.
+///
+/// @c4 code
+/// @c4 uses OperationResult "operation outcome" "returns"
 #[async_trait]
 pub trait OperationProvider: Send + Sync {
     /// Get all operations this provider supports
@@ -92,56 +97,42 @@ pub trait OperationProvider: Send + Sync {
         params: holon_api::StorageEntity,
     ) -> Result<OperationResult>;
 
-    /// Execute multiple operations as a batch.
-    ///
-    /// Default implementation executes sequentially.
-    async fn execute_batch(
-        &self,
-        entity_name: &EntityName,
-        operations: Vec<(String, holon_api::StorageEntity)>,
-    ) -> Result<Vec<OperationResult>> {
-        let mut results = Vec::with_capacity(operations.len());
-        for (op_name, params) in operations {
-            results.push(
-                self.execute_operation(entity_name, &op_name, params)
-                    .await?,
-            );
-        }
-        Ok(results)
+    /// Get the last created entity ID (if any). Default returns `None`.
+    fn get_last_created_id(&self) -> Option<String> {
+        None
     }
+}
 
-    /// Execute a batch of operations and tag the resulting events with a
-    /// specific [`EventOrigin`].
-    ///
-    /// Default implementation ignores the origin and delegates to
-    /// `execute_batch`.
-    async fn execute_batch_with_origin(
-        &self,
-        entity_name: &EntityName,
-        operations: Vec<(String, holon_api::StorageEntity)>,
-        _: EventOrigin,
-    ) -> Result<Vec<OperationResult>> {
-        self.execute_batch(entity_name, operations).await
-    }
-
-    /// Execute a single operation and tag with [`EventOrigin`].
-    ///
-    /// Default implementation ignores the origin and delegates to
-    /// `execute_operation`.
+/// Origin-tagged write capability — execute operations while preserving the
+/// originating [`EventOrigin`] for CDC echo-suppression.
+///
+/// Split out of [`OperationProvider`] because preserving write provenance is a
+/// genuine precondition of the projection write paths (Loro→SQL, Org→SQL), not
+/// a property every provider has. While these lived on `OperationProvider` with
+/// a default that delegated to the non-origin variant, any caller handed a
+/// provider that didn't override them would *silently drop the origin*.
+/// Requiring this trait at those call sites turns "I preserve write origin"
+/// into a checked obligation: a provider that can't tag writes won't typecheck
+/// where one is needed. The two methods are deliberately required (no default)
+/// so opting in is explicit.
+#[async_trait]
+pub trait OriginTaggedWrites: OperationProvider {
+    /// Execute a single operation and tag the resulting events with `origin`.
     async fn execute_operation_with_origin(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: holon_api::StorageEntity,
-        _: EventOrigin,
-    ) -> Result<OperationResult> {
-        self.execute_operation(entity_name, op_name, params).await
-    }
+        origin: EventOrigin,
+    ) -> Result<OperationResult>;
 
-    /// Get the last created entity ID (if any). Default returns `None`.
-    fn get_last_created_id(&self) -> Option<String> {
-        None
-    }
+    /// Execute a batch of operations and tag the resulting events with `origin`.
+    async fn execute_batch_with_origin(
+        &self,
+        entity_name: &EntityName,
+        operations: Vec<(String, holon_api::StorageEntity)>,
+        origin: EventOrigin,
+    ) -> Result<Vec<OperationResult>>;
 }
 
 /// Build the response payload for a structural focus-mover (`split_block` /
@@ -248,6 +239,8 @@ impl FieldDelta {
 /// - `changes`: Field-level changes for propagation to cache/sync systems
 /// - `undo`: Semantic undo operation (same code path as forward)
 /// - `follow_ups`: Operations to execute after this one completes (e.g., cursor update after split)
+///
+/// @c4 code
 #[derive(Debug, Clone)]
 pub struct OperationResult {
     pub changes: Vec<FieldDelta>,
@@ -974,7 +967,7 @@ where
         let new_block_id = format!("block:{new_block_uuid}");
 
         // Get current timestamp
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = holon_api::clock::now_millis();
 
         // sort_key for the new block: delegate to BlockOrdering. Loro
         // mode returns a placeholder (overwritten by apply_create reading

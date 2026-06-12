@@ -231,7 +231,7 @@ mod tests {
     use holon_api::Value;
 
     fn create_test_block(id: &str, parent_id: &str, content: &str) -> Block {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = holon_api::clock::now_millis();
         let mut properties = HashMap::new();
         properties.insert("ID".to_string(), Value::String("local://test".to_string()));
         Block {

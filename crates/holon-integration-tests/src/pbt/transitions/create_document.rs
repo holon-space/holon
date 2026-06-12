@@ -10,8 +10,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::local_caps::SutAppLifecycle;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
@@ -30,6 +30,12 @@ pub struct CreateDocument {
 }
 
 impl TransitionFactory<ReferenceState> for CreateDocument {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutAppLifecycle,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = CreateDocument {
@@ -85,9 +91,9 @@ impl TransitionRef<ReferenceState> for CreateDocument {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for CreateDocument {
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
-        sut.apply_create_document(&self.file_name, ref_state).await;
+impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for CreateDocument {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.create_document(&self.file_name).await;
     }
 }
 

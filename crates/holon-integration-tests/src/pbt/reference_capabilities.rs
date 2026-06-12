@@ -19,6 +19,7 @@
 //!   sees valid `EntityUri`s, so a parse failure is a programmer error.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
@@ -32,7 +33,7 @@ use super::peer_ops::PeerBlock;
 use super::reference_state::PeerRefState;
 use super::state_machine::{merge_peer_blocks_into_primary, refresh_peer_baseline};
 
-use super::reference_state::{CursorPosition, ReferenceState};
+use super::reference_state::{CursorPosition, ReferenceState, Resolved};
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 //
@@ -81,14 +82,14 @@ impl RefLifecycle for ReferenceState {
         self.wiring
             .has_storage(holon_pbt_core::StorageAdapter::Loro)
     }
+    fn has_editor_buffer(&self) -> bool {
+        ReferenceState::has_editor_buffer(self)
+    }
     fn renders_block_interactively(&self, block_id: &EntityUri) -> bool {
         ReferenceState::renders_block_interactively(self, block_id)
     }
     fn last_transition_kind(&self) -> Option<&'static str> {
         self.action.last_transition_kind
-    }
-    fn atomic_editor_enabled() -> bool {
-        ReferenceState::atomic_editor_enabled()
     }
 }
 
@@ -872,4 +873,73 @@ impl RefTaskState for ReferenceState {
             .get("task_state")
             .and_then(|v| v.as_string().map(str::to_owned))
     }
+}
+
+// ─── CapProvider — the keystone (ADR 0007 / PbtCompositionDesign §6) ───
+//
+// Lets a live `ReferenceState` BE the ref `CapMap` that `run_selected`
+// consumes, so any slice (and the generic subsystem-shrink PBT) can read the
+// single real oracle instead of a bespoke parallel ref model.
+//
+// We register the read caps the composed catalog consumes today
+// (`RefBackend` + `RefBlockTree` for the block invariants, `RefEditorMirror`
+// for the editor invariants, `RefLayout` for the windowed
+// `inv-frontend-bounds-rendered`). Further widening of the read surface
+// (focus/render/…) stays deferred (it could newly *select* catalog invariants —
+// the "catalog scope creep" risk in the plan) until each is wired.
+//
+// `RefEditorMirror` is registered unconditionally: selection is an AND over
+// the SUT and ref cap sets (`Needs::selected_against`), so the editor
+// invariants still deselect for a config whose SUT has no editor — the ref
+// carrying the cap is harmless.
+impl holon_pbt_core::composition::CapProvider for ReferenceState {
+    fn register(self: Arc<Self>, caps: &mut holon_pbt_core::composition::CapMap) {
+        caps.insert(self.clone() as Arc<dyn RefBackend>);
+        caps.insert(self.clone() as Arc<dyn RefBlockTree>);
+        caps.insert(self.clone() as Arc<dyn RefEditorMirror>);
+        // `RefLayout` carries the layout-block / document metadata the windowed
+        // `inv-frontend-bounds-rendered` reads (`has_user_documents`,
+        // `region_entity_focused`). Registering it unconditionally is harmless to
+        // existing slices: selection ANDs the SUT and ref cap sets, and only the
+        // windowed slice supplies the matching `SutLayout + SutViewModel`.
+        caps.insert(self.clone() as Arc<dyn RefLayout>);
+        // `RefWatches` carries the active-watch query set + expected rows the B5
+        // watch invariants read (E1 SutWatchRows relocation). Harmless to existing
+        // slices: only the frontend slice supplies the matching `SutWatchRows`.
+        caps.insert(self.clone() as Arc<dyn RefWatches>);
+        // `RefFocus` carries the per-region navigation focus + expected focus roots
+        // the `inv-navigation-focus` / `inv-focus-roots` invariants read (SutHandle
+        // decomposition: NavigateFocus onto SutFocusWrite). Harmless to existing
+        // slices: selection ANDs the SUT and ref cap sets, and only a slice that
+        // also supplies `SutSqlProjection` (+`SutBackend`) selects the focus
+        // invariants — and only the navigation slice drives real focus data.
+        caps.insert(self.clone() as Arc<dyn RefFocus>);
+        // `RefRender` carries the active-view / render-expr metadata the ViewModel
+        // invariants read (`inv-view-selection`, the C3 renderer cluster). The
+        // logic already lives on `ReferenceState`; this just exposes it on the ref
+        // `CapMap`. Harmless to existing slices: selection ANDs the SUT and ref cap
+        // sets, and only a slice supplying `SutViewModel`/`SutRenderer` selects it.
+        caps.insert(self.clone() as Arc<dyn RefRender>);
+        // `RefTaskState` + `RefGlobalFocus` carry the task-state / global-focus
+        // metadata the `value_fn_provider_*` ViewModel invariants read (C3 batch 2).
+        // Logic already on `ReferenceState`; harmless to existing slices (selection
+        // ANDs SUT∧ref cap sets — only a `SutViewModel` slice selects them).
+        caps.insert(self.clone() as Arc<dyn RefTaskState>);
+        caps.insert(self as Arc<dyn RefGlobalFocus>);
+    }
+}
+
+/// Build the ref `CapMap` from a [`Resolved`] [`ReferenceState`] — the keystone
+/// helper the slices and the generic PBT use in place of `ref_map`/`full_ref_map`.
+///
+/// Requires the [`Resolved`] witness: the comparison caps built here compare ids
+/// directly against the SUT, so the ref's ids must already live in the SUT's id
+/// space (see [`ReferenceState::with_resolved_doc_uris`] /
+/// [`Resolved::identity`]). An unresolved ref is a compile error here.
+pub fn reference_state_ref_caps(
+    state: Resolved<Arc<ReferenceState>>,
+) -> holon_pbt_core::composition::CapMap {
+    let mut caps = holon_pbt_core::composition::CapMap::new();
+    holon_pbt_core::composition::CapProvider::register(state.into_inner(), &mut caps);
+    caps
 }

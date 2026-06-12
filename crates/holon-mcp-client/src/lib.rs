@@ -1,3 +1,13 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
+//! @c4 uses holon "core orchestration" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
+//! Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s.
+
 pub mod credential_store;
 pub mod integration_config;
 pub mod mcp_call_surface;

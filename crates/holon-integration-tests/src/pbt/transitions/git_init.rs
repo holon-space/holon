@@ -11,8 +11,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::local_caps::SutFixtureFs;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -23,6 +23,12 @@ use crate::pbt::transition_budgets::ExpectedSql;
 pub struct GitInit;
 
 impl TransitionFactory<ReferenceState> for GitInit {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutFixtureFs,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         GitInit
@@ -52,9 +58,9 @@ impl TransitionRef<ReferenceState> for GitInit {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for GitInit {
+impl<S: SutFixtureFs> TransitionImpl<ReferenceState, S> for GitInit {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_git_init().await;
+        sut.git_init().await;
     }
 }
 

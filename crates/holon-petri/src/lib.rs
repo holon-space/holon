@@ -370,7 +370,8 @@ fn topo_sort_computed(computed: &BTreeMap<String, &CompiledExpr>) -> Vec<String>
     for (name, compiled) in computed {
         let mut name_deps = Vec::new();
         for other in &computed_names {
-            if *other != name.as_str() && holon_core::util::expr_references(&compiled.source, other) {
+            if *other != name.as_str() && holon_core::util::expr_references(&compiled.source, other)
+            {
                 name_deps.push(*other);
             }
         }
@@ -697,7 +698,12 @@ pub fn materialize(
     self_desc: &SelfDescriptor,
     prototype_props: &BTreeMap<String, PrototypeValue>,
 ) -> (TaskNet, TaskMarking) {
-    materialize_at(blocks, self_desc, prototype_props, Utc::now())
+    materialize_at(
+        blocks,
+        self_desc,
+        prototype_props,
+        DateTime::from_timestamp_millis(holon_api::clock::now_millis()).expect("now within range"),
+    )
 }
 
 /// Like `materialize` but with an explicit `now` for testability.

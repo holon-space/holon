@@ -101,7 +101,6 @@ impl ViewEventHandler {
             ViewEvent::TriggerFired {
                 action,
                 filter_text,
-                current_line,
                 prefix_start,
             } => match action.as_str() {
                 "command_menu" => {
@@ -304,7 +303,6 @@ mod tests {
         let result = h.handle(ViewEvent::TriggerFired {
             action: "doc_link".into(),
             filter_text: "foo".into(),
-            current_line: "[[foo".into(),
             prefix_start: 0,
         });
         assert!(
@@ -322,7 +320,6 @@ mod tests {
         let result = h.handle(ViewEvent::TriggerFired {
             action: "doc_link".into(),
             filter_text: "foo".into(),
-            current_line: "[[foo".into(),
             prefix_start: 0,
         });
         assert!(

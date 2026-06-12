@@ -1,9 +1,9 @@
 use super::prelude::*;
-use holon_frontend::render_interpreter::shared_live_query_build;
+use holon_frontend::view_model::ViewKind;
 
-pub fn build(ba: BA<'_>) -> Element {
-    match shared_live_query_build(&ba) {
-        Ok(result) => result.content,
-        Err(msg) => rsx! { span { font_size: "12px", color: "var(--error)", {msg} } },
-    }
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::LiveQuery { content, .. } = &node.kind else {
+        return rsx! {};
+    };
+    rsx! { RenderNode { node: (**content).clone() } }
 }

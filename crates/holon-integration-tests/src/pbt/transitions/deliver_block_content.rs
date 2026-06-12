@@ -11,7 +11,6 @@ use validated::Validated;
 pub use holon_pbt_core::DeliverBlockContent;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::Reason;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
@@ -36,9 +35,17 @@ impl TransitionRef<ReferenceState> for DeliverBlockContent {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for DeliverBlockContent {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_deliver_block_content_loaded(&self.block_id).await;
+impl<S> TransitionImpl<ReferenceState, S> for DeliverBlockContent {
+    async fn apply_to_sut(&self, _: &ReferenceState, _: &mut S) {
+        // Unreachable: `weighted_generator` and `preconditions` both hard-fail
+        // (`DeliverNotMeaningfulInBackendTests`), so this variant is never
+        // generated or applied. Fail loud if that ever changes.
+        panic!(
+            "[DeliverBlockContent] reached apply_to_sut for {} — backend PBT rejects \
+             DeliverBlockContent in its generator/preconditions; the live-block \
+             delivery axis is dead here.",
+            self.block_id
+        );
     }
 }
 

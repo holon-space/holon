@@ -144,7 +144,9 @@ pub trait UserDriver: Send + Sync {
     /// operation name if the chord matched, `None` otherwise.
     fn resolve_key_chord(
         &self,
-        root_block_id: &EntityUri,
+        // Part of the UserDriver contract (callers pass the layout root); no
+        // resolve impl consumes it — they key off the router / root_tree.
+        _: &EntityUri,
         root_tree: &ReactiveViewModel,
         entity_id: &EntityUri,
         chord: &KeyChord,
@@ -342,7 +344,8 @@ pub trait UserDriver: Send + Sync {
         anyhow::bail!(
             "send_raw_keystroke is unimplemented for this UserDriver. \
              Atomic editor primitives need a real-input driver (GpuiUserDriver). \
-             Was PBT_ATOMIC_EDITOR=1 set in a headless run?"
+             Was an atomic-editor transition generated for a headless run \
+             (the editor buffer capability requires a real-input driver)?"
         )
     }
 
@@ -635,7 +638,9 @@ impl UserDriver for ReactiveEngineDriver {
 
     fn resolve_key_chord(
         &self,
-        root_block_id: &EntityUri,
+        // Part of the UserDriver contract (callers pass the layout root); no
+        // resolve impl consumes it — they key off the router / root_tree.
+        _: &EntityUri,
         root_tree: &ReactiveViewModel,
         entity_id: &EntityUri,
         chord: &KeyChord,

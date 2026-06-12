@@ -188,8 +188,8 @@ impl SharedSnapshotStore {
         if !path.is_file() {
             return Ok(None);
         }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let port: u16 = text
             .trim()
             .parse()
@@ -213,7 +213,10 @@ impl SharedSnapshotStore {
         match doc.import(&bytes) {
             Ok(_) => Ok(doc),
             Err(e) => {
-                let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+                let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+                    .expect("now within range")
+                    .format("%Y%m%dT%H%M%SZ")
+                    .to_string();
                 let quarantine = self
                     .shares_dir
                     .join(format!("{shared_tree_id}.loro.corrupt-{ts}"));

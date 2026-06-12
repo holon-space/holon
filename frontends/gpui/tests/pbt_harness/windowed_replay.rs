@@ -141,8 +141,14 @@ impl WindowedReplayer {
             // A setup error (not an invariant panic) is a hard failure, not a
             // "did not reproduce" — surface it loudly as a panic so the caller's
             // signature check rejects it rather than silently swallowing.
-            replay_fixture_with_driver_sync_callback(wiring, steps, on_ready, seen_counter)
-                .expect("windowed replay setup failed");
+            replay_fixture_with_driver_sync_callback(
+                wiring,
+                steps,
+                on_ready,
+                |_, _| {},
+                seen_counter,
+            )
+            .expect("windowed replay setup failed");
         }))
     }
 }

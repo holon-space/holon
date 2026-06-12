@@ -1,0 +1,105 @@
+@startuml c4-component
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title Component Diagram (GoF Patterns)
+
+Container_Boundary(Adapters_boundary, "Adapters") {
+    Component(holon_markdown, "holon-markdown", "Adapter", "Obsidian-flavored Markdown parsing + rendering and the `MarkdownFormatAdapter` impl of `holon_core::FileFormatAdapter`.")
+    Component(holon_mcp_client, "holon-mcp-client", "Adapter", "Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s.")
+    Component(holon_org_format, "holon-org-format", "Adapter", "Org-mode format: pure parsing, rendering, and diffing.")
+    Component(holon_orgmode, "holon-orgmode", "Adapter", "Org-mode disk I/O and sync layer.")
+    Component(holon_turso, "holon-turso", "Adapter", "`holon-turso` — the Turso (SQLite-IVM) storage adapter.")
+}
+
+Container_Boundary(Composition_boundary, "Composition") {
+    Component(holon_app, "holon-app", "Composition Root", "DI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`.")
+}
+
+Container_Boundary(Core_boundary, "Core") {
+    Component(holon, "holon", "Facade", "Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, and DI modules.")
+    Component(holon_api, "holon-api", "Shared Kernel", "Shared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps.")
+    Component(holon_core, "holon-core", "Port", "Core traits for Holon datasources")
+    Component(holon_filesystem, "holon-filesystem", "Adapter", "FileSystem + FileChangeSource ports with in-memory and notify-based adapters (ADR 0011).")
+    Component(holon_frontend, "holon-frontend", "MVVM ViewModel", "Frontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.")
+    Component(holon_macros, "holon-macros", "Code Generation", "Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives.")
+}
+
+Container_Boundary(Engine_boundary, "Engine") {
+    Component(holon_engine, "holon-engine", "Interpreter", "Standalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF ranking, and what-if analysis.")
+    Component(holon_expr, "holon-expr", "Interpreter", "Compiled Rhai expressions — the shared vocabulary between holon-api entity definitions and the holon-engine Petri-net guard evaluator.")
+}
+
+Container_Boundary(Testing_boundary, "Testing") {
+    Component(holon_architecture_tests, "holon-architecture-tests", "Test Harness", "`cargo test` wrapper that shells out to `archlint --all` for a full-repo architecture sweep.")
+    Component(holon_block_roundtrip_testing, "holon-block-roundtrip-testing", "Test Harness", "Format-and-storage-agnostic generators and normalized comparison shapes for block round-trip property tests.")
+    Component(holon_integration_tests, "holon-integration-tests", "Test Harness", "Shared test infrastructure for Holon integration tests")
+    Component(holon_layout_testing, "holon-layout-testing", "Test Harness", "Shared layout-testing primitives for Holon's property-based UI tests.")
+    Component(holon_macros_test, "holon-macros-test", "Test Harness", "Macro-expansion tests for `holon-macros`.")
+    Component(holon_pbt_core, "holon-pbt-core", "Strategy", "Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`.")
+}
+
+Rel(holon, holon_api, "shared value & operation types", "Rust")
+Rel(holon, holon_core, "core datasource traits", "Rust")
+Rel(holon, holon_engine, "Petri-net engine", "Rust")
+Rel(holon, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon, holon_turso, "Turso storage adapter", "Rust")
+Rel(holon_api, holon_expr, "compiled Rhai expressions", "Rust")
+Rel(holon_api, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_app, holon, "core orchestration", "Rust")
+Rel(holon_app, holon_api, "shared value & operation types", "Rust")
+Rel(holon_app, holon_core, "core datasource traits", "Rust")
+Rel(holon_app, holon_filesystem, "filesystem ports", "Rust")
+Rel(holon_app, holon_frontend, "frontend session abstraction", "Rust")
+Rel(holon_app, holon_mcp_client, "MCP client providers", "Rust")
+Rel(holon_app, holon_orgmode, "org-mode sync I/O", "Rust")
+Rel(holon_block_roundtrip_testing, holon_api, "shared value & operation types", "Rust")
+Rel(holon_block_roundtrip_testing, holon_core, "core datasource traits", "Rust")
+Rel(holon_block_roundtrip_testing, holon_org_format, "org parse/render", "Rust")
+Rel(holon_core, holon_api, "shared value & operation types", "Rust")
+Rel(holon_core, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_engine, holon_expr, "compiled Rhai expressions", "Rust")
+Rel(holon_filesystem, holon_api, "shared value & operation types", "Rust")
+Rel(holon_filesystem, holon_core, "core datasource traits", "Rust")
+Rel(holon_filesystem, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_frontend, holon_api, "shared value & operation types", "Rust")
+Rel(holon_frontend, holon_core, "core datasource traits", "Rust")
+Rel(holon_frontend, holon_filesystem, "filesystem ports", "Rust")
+Rel(holon_frontend, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_integration_tests, holon, "core orchestration", "Rust")
+Rel(holon_integration_tests, holon_api, "shared value & operation types", "Rust")
+Rel(holon_integration_tests, holon_app, "DI composition root", "Rust")
+Rel(holon_integration_tests, holon_block_roundtrip_testing, "block round-trip generators", "Rust")
+Rel(holon_integration_tests, holon_filesystem, "filesystem ports", "Rust")
+Rel(holon_integration_tests, holon_frontend, "frontend session abstraction", "Rust")
+Rel(holon_integration_tests, holon_layout_testing, "layout PBT primitives", "Rust")
+Rel(holon_integration_tests, holon_mcp, "MCP frontend", "Rust")
+Rel(holon_integration_tests, holon_mcp_client, "MCP client providers", "Rust")
+Rel(holon_integration_tests, holon_orgmode, "org-mode sync I/O", "Rust")
+Rel(holon_integration_tests, holon_pbt_core, "PBT transition traits", "Rust")
+Rel(holon_layout_testing, holon_api, "shared value & operation types", "Rust")
+Rel(holon_layout_testing, holon_frontend, "frontend session abstraction", "Rust")
+Rel(holon_layout_testing, holon_pbt_core, "PBT transition traits", "Rust")
+Rel(holon_macros_test, holon, "core orchestration", "Rust")
+Rel(holon_macros_test, holon_api, "shared value & operation types", "Rust")
+Rel(holon_macros_test, holon_core, "core datasource traits", "Rust")
+Rel(holon_macros_test, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_markdown, holon_api, "shared value & operation types", "Rust")
+Rel(holon_markdown, holon_core, "core datasource traits", "Rust")
+Rel(holon_mcp_client, holon, "core orchestration", "Rust")
+Rel(holon_mcp_client, holon_api, "shared value & operation types", "Rust")
+Rel(holon_mcp_client, holon_core, "core datasource traits", "Rust")
+Rel(holon_mcp_client, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_org_format, holon_api, "shared value & operation types", "Rust")
+Rel(holon_org_format, holon_core, "core datasource traits", "Rust")
+Rel(holon_org_format, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_orgmode, holon, "core orchestration", "Rust")
+Rel(holon_orgmode, holon_api, "shared value & operation types", "Rust")
+Rel(holon_orgmode, holon_core, "core datasource traits", "Rust")
+Rel(holon_orgmode, holon_filesystem, "filesystem ports", "Rust")
+Rel(holon_orgmode, holon_macros, "entity/operation derive macros", "Rust")
+Rel(holon_orgmode, holon_org_format, "org parse/render", "Rust")
+Rel(holon_pbt_core, holon_api, "shared value & operation types", "Rust")
+Rel(holon_turso, holon_api, "shared value & operation types", "Rust")
+Rel(holon_turso, holon_core, "core datasource traits", "Rust")
+
+@enduml

@@ -1,4 +1,15 @@
-//! holon-app — the wiring crate (storage de-leak Stage 6).
+//! @c4 component
+//! @c4 layer Composition
+//! Pattern: Composition Root
+//! @c4 uses holon "core orchestration" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-filesystem "filesystem ports" "Rust"
+//! @c4 uses holon-frontend "frontend session abstraction" "Rust"
+//! @c4 uses holon-mcp-client "MCP client providers" "Rust"
+//! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
+//!
+//! DI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`.
 //!
 //! Owns all DI assembly that names concrete backends: the Turso
 //! `BackendEngine` stack ([`wiring`]), the no-Turso Loro stack ([`no_turso`]),

@@ -51,6 +51,9 @@ serde_yaml.workspace = true
 holon-engine = { path = "../holon-engine" }
 holon-petri.workspace = true
 holon-profiles.workspace = true
+# holon-loro's default `iroh-sync` feature is disabled at the workspace root
+# (it pulls iroh → QUIC/TLS/ring, native-only and fatal on wasm). holon's own
+# `iroh-sync` feature re-enables `holon-loro/iroh-sync`, so native is unchanged.
 holon-loro.workspace = true
 fluxdi.workspace = true
 futures.workspace = true

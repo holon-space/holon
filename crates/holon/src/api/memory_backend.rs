@@ -6,14 +6,14 @@
 
 use holon_api::streaming::ChangeSubscribers;
 
-use holon_loro::{EventRing, deliver_to_subscribers, DEFAULT_EVENT_RING_CAPACITY};
-use holon_api::repository::{CoreOperations, Lifecycle, NewBlock};
 use async_trait::async_trait;
 use holon_api::block_mutation::{BlockMutation, BlockTreeView};
+use holon_api::repository::{CoreOperations, Lifecycle, NewBlock};
 use holon_api::streaming::ChangeNotifications;
 use holon_api::{
     ApiError, Block, BlockChange, BlockContent, Change, ChangeOrigin, EntityUri, StreamPosition,
 };
+use holon_loro::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -48,6 +48,7 @@ pub struct MemoryBackend {
     doc_id: String,
     /// Internal state
     state: Arc<RwLock<MemoryState>>,
+    clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
 impl Clone for MemoryBackend {
@@ -65,6 +66,7 @@ impl Clone for MemoryBackend {
         Self {
             doc_id: self.doc_id.clone(),
             state: Arc::new(RwLock::new(cloned_state)),
+            clock: self.clock.clone(),
         }
     }
 }
@@ -140,9 +142,14 @@ impl MemoryBackend {
         id
     }
 
+    pub fn with_clock(mut self, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Get current Unix timestamp in milliseconds.
-    fn now_millis() -> i64 {
-        holon_core::util::now_unix_millis()
+    fn now_millis(&self) -> i64 {
+        self.clock.now_millis()
     }
 
     /// Notify all active subscribers of a change event and add to event log.
@@ -178,6 +185,7 @@ impl Lifecycle for MemoryBackend {
         Ok(Self {
             doc_id,
             state: Arc::new(RwLock::new(MemoryState::default())),
+            clock: std::sync::Arc::new(holon_api::SystemClock),
         })
     }
 
@@ -439,9 +447,14 @@ impl CoreOperations for MemoryBackend {
 
         let old_parent = block.parent_id.as_raw_str().to_string();
 
-        // Verify new parent exists and not deleted
-        if !state.blocks.contains_key(&new_parent_str)
-            || state.deleted_ids.contains(&new_parent_str)
+        // Verify new parent exists and not deleted. A sentinel/no_parent target
+        // is virtual (always valid) — moving a block to the top level (e.g.
+        // outdenting a depth-1 child) is legitimate, mirroring `create_block`'s
+        // `parent_is_virtual` allowance.
+        let new_parent_is_virtual = new_parent.is_no_parent() || new_parent.is_sentinel();
+        if !new_parent_is_virtual
+            && (!state.blocks.contains_key(&new_parent_str)
+                || state.deleted_ids.contains(&new_parent_str))
         {
             return Err(ApiError::BlockNotFound {
                 id: new_parent_str.clone(),
@@ -471,7 +484,7 @@ impl CoreOperations for MemoryBackend {
         // Update block's parent_id and updated_at
         let block = state.blocks.get_mut(id.as_str()).unwrap();
         block.parent_id = new_parent;
-        block.updated_at = Self::now_millis();
+        block.updated_at = self.now_millis();
 
         let result_block = block.clone();
 

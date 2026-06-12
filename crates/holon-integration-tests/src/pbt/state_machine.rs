@@ -108,6 +108,38 @@ pub fn fresh_reference_state(wiring: holon_pbt_core::Wiring) -> ReferenceState {
     ReferenceState::new(wiring, interpreter)
 }
 
+/// A [`fresh_reference_state`] advanced to the minimal "app started + properly
+/// set up" state the editor transition preconditions require, **honestly**:
+///
+/// - `action.app_started = true`
+/// - one seed-classified query block (its `block_documents` entry is
+///   `no_parent`, so it is excluded from the non-seed block comparison) whose
+///   id is registered in `layout_blocks.query_source_ids` — this is exactly
+///   what `is_properly_setup()` checks (`!query_source_ids.is_empty()`).
+///
+/// It deliberately does **not** seed the working tree or open an editor — those
+/// are caller concerns (the working tree is slice-specific, and the editor must
+/// be opened only when the UI actor is wired). The full symmetric `StartApp` on
+/// both sides is the deferred committed-parity path.
+pub fn started_reference_state(wiring: holon_pbt_core::Wiring) -> ReferenceState {
+    let mut state = fresh_reference_state(wiring);
+    state.action.app_started = true;
+
+    let query_id = EntityUri::block("started-ref-layout-query");
+    state.domain.block_state.blocks.insert(
+        query_id.clone(),
+        Block::new_text(query_id.clone(), EntityUri::no_parent(), "query"),
+    );
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(query_id.clone(), EntityUri::no_parent());
+    state.domain.layout_blocks.query_source_ids.insert(query_id);
+
+    state
+}
+
 /// Map a PBT [`Wiring`](holon_pbt_core::Wiring) manifest onto the SUT storage
 /// substrate it implies (ADR 0004 Phase 9, part (a)). A manifest that includes
 /// the query-capable `Turso` adapter builds the historical Turso SUT; a

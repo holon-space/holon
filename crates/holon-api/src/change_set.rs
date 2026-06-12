@@ -244,6 +244,7 @@ fn decode_create(params: &StorageEntity) -> ChangeOp {
     let after_sibling = params
         .get("after_block_id")
         .and_then(Value::as_string)
+        // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the StorageEntity operation-params map
         .map(|s| EntityUri::from_raw(s));
     // from_raw is infallible: bare strings → EntityUri::block(s),
     // schemed strings → parse; as_string already filtered non-String Values.
@@ -267,9 +268,9 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
     let id = id_of(params);
 
     let parent_changed = params.contains_key("parent_id");
-    // sort_key fallback until Phase 5 flip: structural moves currently emit
-    // `sort_key` but not `after_block_id`; dropping the fallback would stop
-    // emitting Relocate for indent/outdent/move.
+    // ALLOW(fallback): until the Phase 5 flip, structural moves emit `sort_key`
+    // but not `after_block_id`; accepting both keys keeps Relocate firing for
+    // indent/outdent/move.
     let order_changed = params.contains_key("after_block_id") || params.contains_key("sort_key");
     if parent_changed || order_changed {
         out.push(ChangeOp::Relocate {
@@ -281,6 +282,7 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
             after_sibling: params
                 .get("after_block_id")
                 .and_then(Value::as_string)
+                // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the StorageEntity operation-params map
                 .map(|s| EntityUri::from_raw(s)),
         });
     }

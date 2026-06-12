@@ -3,7 +3,6 @@ use crate::models::{
     DEFAULT_DONE_KEYWORDS,
 };
 use anyhow::Result;
-use chrono::Utc;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::types::{ContentType, SourceLanguage, TaskState};
@@ -357,7 +356,7 @@ fn process_headlines(
             }
         };
 
-        let now = Utc::now().timestamp_millis();
+        let now = holon_api::clock::now_millis();
         let mut block = Block {
             // ALLOW(entity_uri_from_raw): org parser output: id from extract_or_generate_id()
             id: EntityUri::from_raw(&id),
@@ -410,7 +409,7 @@ fn process_headlines(
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
                     // ALLOW(entity_uri_from_raw): org drawer REQUIRES value: bare slug promoted at parse boundary
-                    .map(|s| EntityUri::from_raw(s).to_string())
+                    .map(|s| EntityUri::from_raw(s))
                     .collect();
             } else {
                 block.set_property(key, holon_api::Value::String(value.to_string()));
@@ -886,9 +885,9 @@ mod tests {
         assert_eq!(
             h.requires,
             vec![
-                "block:foo".to_string(),
-                "block:bar".to_string(),
-                "block:baz".to_string(),
+                EntityUri::parse("block:foo").unwrap(),
+                EntityUri::parse("block:bar").unwrap(),
+                EntityUri::parse("block:baz").unwrap(),
             ],
             "bare slugs (comma- or whitespace-separated) must be normalised to block: URIs"
         );
@@ -900,7 +899,7 @@ mod tests {
         let result = parse_test_org(content);
 
         let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
-        assert_eq!(h.requires, vec!["block:foo".to_string()]);
+        assert_eq!(h.requires, vec![EntityUri::parse("block:foo").unwrap()]);
     }
 
     #[test]

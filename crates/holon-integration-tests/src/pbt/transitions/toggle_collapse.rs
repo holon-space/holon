@@ -13,8 +13,8 @@ pub use holon_pbt_core::ToggleCollapse;
 
 use crate::pbt::layout_bridge::SutClickAdapter;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, map_nevec};
+use holon_pbt_core::capabilities::SutBlockInteract;
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
@@ -31,6 +31,12 @@ fn parse_target(target_id: &str) -> EntityUri {
 }
 
 impl TransitionFactory<ReferenceState> for ToggleCollapse {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let ref_view = LayoutRef::new(state);
@@ -68,7 +74,7 @@ impl TransitionRef<ReferenceState> for ToggleCollapse {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ToggleCollapse {
+impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for ToggleCollapse {
     async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
         let ref_view = LayoutRef::new(state);
         let mut adapter = SutClickAdapter(sut);

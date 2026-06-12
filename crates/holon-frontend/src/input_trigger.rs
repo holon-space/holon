@@ -31,8 +31,6 @@ pub(crate) enum ViewEvent {
         action: String,
         /// The text after the trigger prefix (e.g., "emb" after "/emb").
         filter_text: String,
-        /// The current full line text.
-        current_line: String,
         /// Column where the prefix starts.
         prefix_start: usize,
     },
@@ -71,7 +69,6 @@ pub(crate) fn check_triggers(
                         return Some(ViewEvent::TriggerFired {
                             action: action.clone(),
                             filter_text: current_line[prefix.len()..].to_string(),
-                            current_line: current_line.to_string(),
                             prefix_start: 0,
                         });
                     }
@@ -88,7 +85,6 @@ pub(crate) fn check_triggers(
                         return Some(ViewEvent::TriggerFired {
                             action: action.clone(),
                             filter_text: between.to_string(),
-                            current_line: current_line.to_string(),
                             prefix_start: pos,
                         });
                     }

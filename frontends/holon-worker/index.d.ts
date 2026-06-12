@@ -49,6 +49,16 @@ export declare function engineExecuteSql(sql: string): void
 export declare function engineInit(dbPath: string): void
 
 /**
+ * Dispatch an MCP tool call by name. `args_json` is a JSON object string
+ * with the tool's arguments. Returns the result as a JSON string.
+ *
+ * Used by the Dioxus page relay bridge: it receives `{id, tool, arguments}`
+ * over WebSocket from the native relay, serialises `arguments` to a JSON
+ * string, and calls this function.
+ */
+export declare function engineMcpTool(name: string, argsJson: string): string
+
+/**
  * B2 validation: run `watch_live` on the root layout block and return
  * the root node variant tag.
  */
@@ -60,6 +70,15 @@ export declare function engineReactiveCheck(): string
  * `ReactiveEngine::set_variant`).
  */
 export declare function engineSetVariant(blockId: string, variant: string): void
+
+/**
+ * Await the block's reactive ViewModel becoming ready (up to 5 s), then
+ * return the current snapshot as a JSON string.
+ *
+ * Used by the browser MCP relay bridge for the `describe_ui` tool when
+ * called before the block has been watched by any UI component.
+ */
+export declare function engineSnapshotView(blockId: string): string
 
 /**
  * Drive the current-thread runtime for `budget_ms` milliseconds so
@@ -80,7 +99,7 @@ export declare function engineTick(budgetMs: number): void
  * handle is registered BEFORE the drain task is spawned, so JS can
  * rely on the returned value without any ordering dance.
  */
-export declare function engineWatchView(blockId: string, callback: (arg0: string) => void): number
+export declare function engineWatchView(blockId: string, callback: (arg: [string]) => void): number
 
 /**
  * turso-db in the the browser requires explicit thread pool initialization

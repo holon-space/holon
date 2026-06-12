@@ -36,8 +36,6 @@ exclude = [
     # Fix landed in codespan-reporting 0.13; waiting for wgpu/naga backport:
     # https://github.com/gfx-rs/wgpu/issues/8366
     "frontends/waterui",
-    # cocoa 0.26.0 (gpui) vs 0.26.1 (dioxus-desktop) conflict
-    "frontends/dioxus",
     # ast-grep depends on tree-sitter 0.26, gpui-component on 0.25 — link conflict
     "crates/holon-architecture-tests",
     # holon-worker is an out-of-workspace crate targeting wasm32-wasip1-threads
@@ -47,6 +45,10 @@ exclude = [
     # dioxus-web targets wasm32 only; web-sys/js-sys are not available on native
     # so cargo check --workspace would fail. Build via `trunk build` instead.
     "frontends/dioxus-web",
+    # TEMP (W3 local only): dioxus 0.7 pulls cocoa 0.25 which conflicts with
+    # gpui's pinned cocoa =0.26.0 during workspace resolution. Excluded so the
+    # TUI can build/run in isolation. Revert before landing.
+    "frontends/dioxus",
     # waterkit-screen (transitive via waterui) uses CGWindowListCreateImage,
     # which is obsoleted in macOS 15+ (Xcode 26 SDK). Build via the ply-specific
     # toolchain when needed; excluded from --workspace check.
@@ -176,7 +178,11 @@ holon-engine = { path = "crates/holon-engine" }
 holon-expr = { path = "crates/holon-expr" }
 holon-petri = { path = "crates/holon-petri" }
 holon-profiles = { path = "crates/holon-profiles" }
-holon-loro = { path = "crates/holon-loro" }
+# default-features = false drops holon-loro's `iroh-sync` (iroh → QUIC/TLS/ring,
+# native-only, fatal on wasm). holon's own `iroh-sync` feature re-enables it, so
+# native builds are unchanged; the wasm worker (holon default-features = false)
+# gets a loro stack with no iroh. holon is the only holon-loro consumer.
+holon-loro = { path = "crates/holon-loro", default-features = false }
 holon-turso = { path = "crates/holon-turso" }
 holon-frontend = { path = "crates/holon-frontend" }
 holon-app = { path = "crates/holon-app" }

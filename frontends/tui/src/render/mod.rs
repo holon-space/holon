@@ -169,11 +169,13 @@ pub struct RenderRegistry {
 pub struct RenderCtx<'a> {
     pub engine: &'a Arc<ReactiveEngine>,
     pub registry: &'a mut RenderRegistry,
-    /// Index of the currently keyboard-focused selectable, if any. Compared
-    /// against `registry.selectables.len()` _before_ pushing the current
-    /// selectable, so it indexes the order in which `render_selectable` is
-    /// called.
-    pub focus_index: Option<usize>,
+    /// The currently keyboard-focused row, identified by `(entity_id, kind)`
+    /// — the same "pin" `reconcile_focus` maintains as the source of truth.
+    /// The focus marker (`►`) is drawn by matching this against each row's
+    /// id+kind rather than its registry index, so it stays correct even after
+    /// the registry is de-duplicated post-walk (registry indices would
+    /// otherwise drift out of sync with `focus_index`).
+    pub focus_pin: Option<(String, SelectableKind)>,
     /// Region index assigned by the outermost `render_columns`. `None` until
     /// the walk enters the first columns layout; once set, nested
     /// `render_columns` calls leave it alone so a nested grid inside one
@@ -214,12 +216,12 @@ impl<'a> RenderCtx<'a> {
     pub fn new(
         engine: &'a Arc<ReactiveEngine>,
         registry: &'a mut RenderRegistry,
-        focus_index: Option<usize>,
+        focus_pin: Option<(String, SelectableKind)>,
     ) -> Self {
         Self {
             engine,
             registry,
-            focus_index,
+            focus_pin,
             region: None,
             edit: None,
             live_block_depth: 0,
@@ -233,6 +235,14 @@ impl<'a> RenderCtx<'a> {
 
     fn current_region(&self) -> usize {
         self.region.unwrap_or(0)
+    }
+
+    /// True when the focus pin names this exact row (id + kind). Used to draw
+    /// the `►` marker independently of registry indices.
+    fn is_focused(&self, entity_id: &str, kind: SelectableKind) -> bool {
+        self.focus_pin
+            .as_ref()
+            .is_some_and(|(id, k)| *k == kind && id == entity_id)
     }
 }
 
@@ -269,6 +279,10 @@ pub const TUI_SUPPORTED_WIDGETS: &[&str] = &[
     "tree",
     "table",
     "outline",
+    "query_result",
+    "table_row",
+    "board",
+    "board_lane",
     "checkbox",
     "badge",
     "icon",
@@ -321,15 +335,19 @@ pub fn render_view_model(
         "row" => render_row(node, ctx, ops, start_row, start_col, max_width),
         "column" => render_column(node, ctx, ops, start_row, start_col, max_width),
         "columns" => render_columns(node, ctx, ops, start_row, start_col, max_width),
-        "list" | "section" | "tree" | "table" | "outline" => render_collection_vertical(
-            node,
-            ctx,
-            ops,
-            start_row,
-            start_col,
-            max_width,
-            name.as_str(),
-        ),
+        "list" | "section" | "tree" | "table" | "outline" | "query_result" | "board" => {
+            render_collection_vertical(
+                node,
+                ctx,
+                ops,
+                start_row,
+                start_col,
+                max_width,
+                name.as_str(),
+            )
+        }
+        "table_row" => render_table_row(node, ops, start_row, start_col, max_width),
+        "board_lane" => render_board_lane(node, ctx, ops, start_row, start_col, max_width),
         "error" => render_error(node, ops, start_row, start_col, max_width),
         "pref_field" => render_pref_field(node, ops, start_row, start_col, max_width),
         "loading" => render_plain(node, ops, start_row, start_col, "Loading…"),
@@ -393,7 +411,7 @@ fn render_live_block(
 
 /// Renders a `selectable` wrapper. Captures the click intent (for keyboard
 /// activation) and registers an entry in `ctx.registry`. If the registered
-/// index matches `ctx.focus_index`, paints a `►` marker before the child
+/// row matches `ctx.focus_pin`, paints a `►` marker before the child
 /// and shifts the child two cells to the right.
 ///
 /// Falls through to `render_passthrough` when the node has no click intent —
@@ -415,7 +433,7 @@ fn render_selectable(
         .unwrap_or_default();
 
     let idx = ctx.registry.selectables.len();
-    let is_focused = ctx.focus_index == Some(idx);
+    let is_focused = ctx.is_focused(&entity_id, SelectableKind::Selectable);
     let region = ctx.current_region();
     // Sidebar `selectable(action: ...)` widgets dispatch a navigation_focus
     // intent on Enter — we don't try to edit them inline.
@@ -673,6 +691,79 @@ fn render_plain(
     };
     render_tui_styled_texts_into(&texts, ops);
     1
+}
+
+/// Renders a `table_row` — one row of SQL query-result data. Mirrors
+/// `frontends/gpui/src/render/builders/table_row.rs`: the row's `data`
+/// keys are sorted and their display values laid out left-to-right,
+/// separated by two cells. Emitted as the items of a `query_result`
+/// collection.
+fn render_table_row(
+    node: &ReactiveViewModel,
+    ops: &mut RenderOpIRVec,
+    start_row: usize,
+    start_col: usize,
+    max_width: usize,
+) -> usize {
+    let data = node.entity();
+    let mut keys: Vec<&String> = data.keys().collect();
+    keys.sort();
+    let line = keys
+        .iter()
+        .map(|k| {
+            data.get(*k)
+                .map(|v| v.to_display_string())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+    if line.is_empty() {
+        return 1;
+    }
+    let clipped = clip_to_width(&line, max_width);
+    *ops += RenderOpCommon::MoveCursorPositionAbs(Pos::from((col(start_col), row(start_row))));
+    let texts = tui_styled_texts! {
+        tui_styled_text! { @style: new_style!(color_fg: {tui_color!(hex "#CCCCCC")}), @text: clipped.as_str() },
+    };
+    render_tui_styled_texts_into(&texts, ops);
+    1
+}
+
+/// Renders a `board_lane` — one kanban column. The TUI flattens the
+/// horizontal board into stacked lanes: a bold lane title (`▌ Doing`)
+/// followed by the lane's cards rendered one per line, indented two
+/// cells. Mirrors the lane grouping in
+/// `frontends/gpui/src/render/builders/board.rs` minus the horizontal
+/// columns and drag/drop (which don't map cleanly to a terminal).
+fn render_board_lane(
+    node: &ReactiveViewModel,
+    ctx: &mut RenderCtx<'_>,
+    ops: &mut RenderOpIRVec,
+    start_row: usize,
+    start_col: usize,
+    max_width: usize,
+) -> usize {
+    let title = node.prop_str("title").unwrap_or_default();
+    let header = format!("▌ {}", title);
+    let clipped = clip_to_width(&header, max_width);
+    *ops += RenderOpCommon::MoveCursorPositionAbs(Pos::from((col(start_col), row(start_row))));
+    let texts = tui_styled_texts! {
+        tui_styled_text! { @style: new_style!(bold color_fg: {tui_color!(hex "#00AAFF")}), @text: clipped.as_str() },
+    };
+    render_tui_styled_texts_into(&texts, ops);
+    let mut consumed = 1;
+    for child in &node.children {
+        let rows = render_view_model(
+            child.as_ref(),
+            ctx,
+            ops,
+            start_row + consumed,
+            start_col + 2,
+            max_width.saturating_sub(2),
+        );
+        consumed += rows.max(1);
+    }
+    consumed.max(1)
 }
 
 fn render_checkbox(
@@ -1082,14 +1173,16 @@ fn render_collection_vertical(
                 .or_else(|| descendant_entity_id(item.as_ref()));
             if let Some(row_id) = row_id {
                 let idx = ctx.registry.selectables.len();
+                let row_id_str = row_id.to_string();
                 let region = ctx.current_region();
                 let editable = find_editable_target(item.as_ref(), Some(row_id.as_str()));
                 let displayed_text = editable
                     .as_ref()
                     .map(|e| e.current_content.clone())
                     .or_else(|| item.prop_str("content"));
+                let focused = ctx.is_focused(&row_id_str, SelectableKind::Block);
                 ctx.registry.selectables.push(SelectableRegion {
-                    entity_id: row_id.to_string(),
+                    entity_id: row_id_str,
                     intent: None,
                     kind: SelectableKind::Block,
                     region,
@@ -1102,7 +1195,7 @@ fn render_collection_vertical(
                     displayed_text,
                 });
                 registered_idx = Some(idx);
-                ctx.focus_index == Some(idx)
+                focused
             } else {
                 false
             }
@@ -1295,6 +1388,40 @@ fn descendant_entity_id(node: &ReactiveViewModel) -> Option<holon_api::EntityUri
     None
 }
 
+/// Collapse duplicate registry entries that point at the same entity within
+/// the same region. The default left sidebar is a `tree` whose `item_template`
+/// is a `selectable(...)`: `render_collection_vertical` registers each row as a
+/// `Block` (its `register_as_blocks` path) AND `render_selectable` registers it
+/// again as a `Selectable`. That double entry (a) makes cursor navigation take
+/// two key presses to move one row, and (b) — because the sidebar shows the
+/// same docs that appear as main-panel blocks — leaves a sidebar `Block` with
+/// the same id as a main-panel `Block`, so `switch_region`'s pin matches the
+/// sidebar copy first and focus snaps back. We keep the actionable
+/// `Selectable` (it carries the click intent) and drop the redundant `Block`,
+/// then collapse any remaining exact `(entity_id, region)` repeats.
+pub fn dedup_registry(registry: &mut RenderRegistry) {
+    use std::collections::HashSet;
+
+    let has_selectable: HashSet<(String, usize)> = registry
+        .selectables
+        .iter()
+        .filter(|s| s.kind == SelectableKind::Selectable)
+        .map(|s| (s.entity_id.clone(), s.region))
+        .collect();
+
+    let mut kept: HashSet<(String, usize)> = HashSet::new();
+    registry.selectables.retain(|s| {
+        let key = (s.entity_id.clone(), s.region);
+        // A `Block` superseded by a `Selectable` for the same id+region is the
+        // redundant collection registration — drop it.
+        if s.kind == SelectableKind::Block && has_selectable.contains(&key) {
+            return false;
+        }
+        // Keep the first entry for each id+region; drop later exact repeats.
+        kept.insert(key)
+    });
+}
+
 fn display_width(s: &str) -> usize {
     s.graphemes(true).count()
 }
@@ -1318,4 +1445,105 @@ fn clip_to_width(line: &str, max_width: usize) -> String {
 /// Public for `lib.rs` so `render_supported_widgets` can build a HashSet.
 pub fn supported_widget_names() -> Vec<&'static str> {
     TUI_SUPPORTED_WIDGETS.to_vec()
+}
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+    use holon_api::Value;
+    use std::collections::HashMap;
+
+    fn data_row(pairs: &[(&str, &str)]) -> Arc<HashMap<String, Value>> {
+        Arc::new(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn table_row_lays_out_sorted_column_values() {
+        let node = ReactiveViewModel::element(
+            "table_row",
+            data_row(&[("b_col", "beta"), ("a_col", "alpha")]),
+            vec![],
+        );
+        let mut ops = RenderOpIRVec::new();
+        let consumed = render_table_row(&node, &mut ops, 0, 0, 80);
+        assert_eq!(consumed, 1);
+        let dbg = format!("{ops:?}");
+        // Sorted by key: a_col -> "alpha" before b_col -> "beta".
+        let a = dbg.find("alpha").expect("alpha painted");
+        let b = dbg.find("beta").expect("beta painted");
+        assert!(a < b, "columns must render in sorted-key order");
+    }
+
+    #[test]
+    fn table_row_with_no_data_paints_nothing() {
+        let node = ReactiveViewModel::element("table_row", data_row(&[]), vec![]);
+        let mut ops = RenderOpIRVec::new();
+        let consumed = render_table_row(&node, &mut ops, 0, 0, 80);
+        assert_eq!(consumed, 1);
+        assert!(!format!("{ops:?}").contains("MoveCursorPositionAbs"));
+    }
+
+    #[test]
+    fn query_result_and_table_row_are_advertised_as_supported() {
+        let names = supported_widget_names();
+        for w in ["query_result", "table_row", "board", "board_lane"] {
+            assert!(names.contains(&w), "{w} must be advertised as supported");
+        }
+    }
+
+    fn reg(entity_id: &str, kind: SelectableKind, region: usize) -> SelectableRegion {
+        SelectableRegion {
+            entity_id: entity_id.to_string(),
+            intent: None,
+            kind,
+            region,
+            editable: None,
+            start_row: 0,
+            start_col: 0,
+            rows: 1,
+            cols: 10,
+            widget_type: "x".to_string(),
+            displayed_text: None,
+        }
+    }
+
+    #[test]
+    fn dedup_drops_block_when_selectable_exists_for_same_id_and_region() {
+        // Sidebar row registered twice (Block + Sel, same id+region) and the
+        // same doc as a main-panel Block in a different region.
+        let mut registry = RenderRegistry {
+            selectables: vec![
+                reg("block:doc", SelectableKind::Block, 0), // sidebar dup — dropped
+                reg("block:doc", SelectableKind::Selectable, 0), // sidebar — kept
+                reg("block:other", SelectableKind::Selectable, 0),
+                reg("block:doc", SelectableKind::Block, 1), // main panel — kept
+            ],
+        };
+        dedup_registry(&mut registry);
+
+        // Sidebar keeps only the Selectable; the redundant Block is gone.
+        let sidebar: Vec<_> = registry
+            .selectables
+            .iter()
+            .filter(|s| s.region == 0)
+            .map(|s| (s.entity_id.as_str(), s.kind))
+            .collect();
+        assert_eq!(
+            sidebar,
+            vec![
+                ("block:doc", SelectableKind::Selectable),
+                ("block:other", SelectableKind::Selectable),
+            ]
+        );
+        // The main-panel Block (different region) survives — so switch_region's
+        // pin resolves uniquely to it instead of the sidebar copy.
+        assert!(registry.selectables.iter().any(|s| s.region == 1
+            && s.entity_id == "block:doc"
+            && s.kind == SelectableKind::Block));
+    }
 }

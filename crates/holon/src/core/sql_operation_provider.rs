@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use crate::core::datasource::{OperationProvider, OperationResult, Result};
+use crate::core::datasource::{OperationProvider, OperationResult, OriginTaggedWrites, Result};
 use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
@@ -213,6 +213,8 @@ pub struct SqlOperationProvider {
     /// Edge-typed fields (multi-valued, projected to a junction table).
     /// Indexed by field name for O(1) partition-time lookup.
     edge_fields: HashMap<String, EdgeFieldDescriptor>,
+    /// Wall-clock authority for write-time timestamps. Defaults to SystemClock.
+    clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
 impl SqlOperationProvider {
@@ -253,7 +255,14 @@ impl SqlOperationProvider {
             entity_short_name,
             known_columns,
             edge_fields,
+            clock: std::sync::Arc::new(holon_api::SystemClock),
         }
+    }
+
+    /// Override the clock (tests). Defaults to SystemClock.
+    pub fn with_clock(mut self, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     fn value_to_sql(value: &Value) -> String {
@@ -444,7 +453,7 @@ impl SqlOperationProvider {
         // Ensure timestamps are present so the event payload is a complete Block.
         // Without this, CacheEventSubscriber fails to deserialize: "missing field created_at".
         let mut params = params.clone();
-        let now_ms = holon_core::util::now_unix_millis();
+        let now_ms = self.clock.now_millis();
         params
             .entry("created_at".into())
             .or_insert_with(|| Value::Integer(now_ms));
@@ -881,7 +890,10 @@ impl OperationProvider for SqlOperationProvider {
         )
         .await
     }
+}
 
+#[async_trait]
+impl OriginTaggedWrites for SqlOperationProvider {
     async fn execute_operation_with_origin(
         &self,
         entity_name: &EntityName,
@@ -1149,25 +1161,9 @@ impl OperationProvider for SqlOperationProvider {
         }
     }
 
-    /// Execute multiple operations in a single transaction.
-    ///
-    /// All SQL statements are wrapped in one transaction (single CDC/IVM pass).
-    async fn execute_batch(
-        &self,
-        entity_name: &EntityName,
-        operations: Vec<(String, StorageEntity)>,
-    ) -> Result<Vec<OperationResult>> {
-        self.execute_batch_with_origin(
-            entity_name,
-            operations,
-            EventOrigin::Other("sql".to_string()),
-        )
-        .await
-    }
-
     /// Execute a batch in a single transaction.
     ///
-    /// The `origin` argument is part of the `OperationProvider` write API
+    /// The `origin` argument is part of the `OriginTaggedWrites` write API
     /// (callers such as `LoroSyncController` tag their outbound batches
     /// `EventOrigin::Loro`), but the SQL writer no longer consumes it:
     /// provenance for echo-suppression rides the `_change_origin` CDC column via
@@ -1232,9 +1228,56 @@ impl OperationProvider for SqlOperationProvider {
 }
 
 #[cfg(test)]
-#[path = "sql_operation_provider_outbound_parent_test.rs"]
-mod sql_operation_provider_outbound_parent_test;
-
-#[cfg(test)]
 #[path = "sql_operation_provider_diff_test.rs"]
 mod sql_operation_provider_diff_test;
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use holon_api::TestClock;
+    use std::sync::Arc;
+
+    /// An injected clock drives the write-time `created_at`/`updated_at`
+    /// timestamps instead of the ambient system clock.
+    #[tokio::test]
+    async fn with_clock_stamps_injected_timestamp() {
+        let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        db_handle
+            .execute(
+                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, created_at INTEGER, updated_at INTEGER)",
+                vec![],
+            )
+            .await
+            .expect("create table");
+
+        let provider = SqlOperationProvider::new(
+            db_handle.clone(),
+            "block_raw".to_string(),
+            "block".to_string(),
+            "block".to_string(),
+        )
+        .with_clock(Arc::new(TestClock::new(123456)));
+
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String("b1".to_string()));
+        let prepared = provider.prepare_create(&params);
+
+        db_handle
+            .execute(&prepared.sql_statements[0], vec![])
+            .await
+            .expect("insert");
+
+        let rows = db_handle
+            .query(
+                "SELECT created_at, updated_at FROM block_raw WHERE id = 'b1'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query");
+        let row = &rows[0];
+        assert_eq!(row.get("created_at"), Some(&Value::Integer(123456)));
+        assert_eq!(row.get("updated_at"), Some(&Value::Integer(123456)));
+    }
+}

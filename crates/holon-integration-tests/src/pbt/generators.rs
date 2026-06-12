@@ -317,7 +317,7 @@ pub fn generate_org_file_content_with_keywords(
                     // the parsed order. Skip self-refs from duplicate ids.
                     // Stored as a `block:` URI to match the parser boundary.
                     if make_requires && i > 0 && ids[i - 1] != id && parents[i] == parents[i - 1] {
-                        b.requires = vec![EntityUri::block(&ids[i - 1]).to_string()];
+                        b.requires = vec![EntityUri::block(&ids[i - 1])];
                     }
                     b
                 })

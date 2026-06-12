@@ -50,8 +50,8 @@ impl ValueFn for StateAccentValueFn {
     fn invoke(
         &self,
         args: &ResolvedArgs,
-        _services: &dyn BuilderServices,
-        _ctx: &RenderContext,
+        _: &dyn BuilderServices,
+        _: &RenderContext,
     ) -> InterpValue {
         let state = args
             .positional

@@ -9,8 +9,10 @@
 //! - `props["current"]` matches the reference block's task_state
 //! - `props["label"]` == `state_display(current).0` (displayed label
 //!   matches the state-display of the current value)
-//! - For task blocks (those with a non-empty task_state): a
-//!   `set_field:task_state:` operation is bound
+//! - For task blocks (those with a non-empty task_state): an operation whose
+//!   `affected_fields` include `task_state` is bound (the typed
+//!   `set_state`/`cycle_task_state` ops — NOT the generic `set_field`, whose
+//!   affected-fields are empty)
 //! - States list is non-empty for task blocks
 
 use holon_pbt_core::capabilities::{EntityUri, RefBlockTree, RefTaskState, SutRenderer};
@@ -84,13 +86,24 @@ where
                 ));
             }
 
-            // Task blocks (non-empty task_state) must have set_field op
-            // bound + non-empty states.
+            // Task blocks (non-empty task_state) must have an operation that can
+            // change the block's task_state, bound + non-empty states. The bound
+            // ops are the typed `set_state`/`cycle_task_state` (whose
+            // `affected_fields` is `task_state`), NOT the generic `set_field` (whose
+            // `affected_fields` is empty — `field` is a runtime param). Match by the
+            // affected-field, not a hardcoded op name, so this stays render-faithful.
             let is_task = !expected_state.is_empty();
             if is_task {
-                if node.find_op("set_field:task_state:").is_none() {
+                let affects_task_state = node.operations.iter().any(|op| {
+                    // Canonical op form: `<name>:<affected_fields_csv>:<params_csv>`.
+                    op.split(':')
+                        .nth(1)
+                        .is_some_and(|fields| fields.split(',').any(|f| f == "task_state"))
+                });
+                if !affects_task_state {
                     return InvariantResult::Fail(format!(
-                        "[inv-viewmodel-state-toggle-correct] No set_field op for 'task_state' on {block_id}"
+                        "[inv-viewmodel-state-toggle-correct] No operation affecting 'task_state' on {block_id} (ops: {:?})",
+                        node.operations
                     ));
                 }
                 let states = node.props.get("states").map(String::as_str).unwrap_or("");

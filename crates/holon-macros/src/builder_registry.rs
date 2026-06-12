@@ -168,6 +168,10 @@ struct BuilderRegistryInput {
     ///
     /// When omitted, the raw render result is used directly (identity transform).
     transform: Option<proc_macro2::TokenStream>,
+    /// Expression used for the `Some("empty") | None` arm in `node_dispatch`
+    /// mode. Defaults to `gpui::div().into_any_element()` so GPUI keeps working
+    /// without changes; non-gpui frontends (e.g. dioxus) pass `empty: rsx! {}`.
+    empty: Option<proc_macro2::TokenStream>,
 }
 
 /// Walk a template `TokenStream` and replace `__inner` / `__name` placeholder
@@ -212,6 +216,7 @@ impl Parse for BuilderRegistryInput {
         let mut kind_type = None;
         let mut widget_metas = false;
         let mut transform = None;
+        let mut empty = None;
 
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
@@ -271,11 +276,22 @@ impl Parse for BuilderRegistryInput {
                     }
                     transform = Some(tokens);
                 }
+                "empty" => {
+                    input.parse::<Token![:]>()?;
+                    // Parse an expression for the empty/None arm, consuming
+                    // tokens until a top-level comma or end of input.
+                    let mut tokens = proc_macro2::TokenStream::new();
+                    while !input.is_empty() && !input.peek(Token![,]) {
+                        let tt: proc_macro2::TokenTree = input.parse()?;
+                        tokens.extend(std::iter::once(tt));
+                    }
+                    empty = Some(tokens);
+                }
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
-                            "expected `skip`, `register`, `dispatch`, `node_dispatch`, `ext`, `context`, `node_type`, `kind_type`, `transform`, or `widget_metas`, found `{other}`"
+                            "expected `skip`, `register`, `dispatch`, `node_dispatch`, `ext`, `context`, `node_type`, `kind_type`, `transform`, `empty`, or `widget_metas`, found `{other}`"
                         ),
                     ));
                 }
@@ -292,6 +308,7 @@ impl Parse for BuilderRegistryInput {
             kind_type,
             widget_metas,
             transform,
+            empty,
         })
     }
 }
@@ -391,6 +408,7 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
                 .context_type
                 .expect("node_dispatch mode requires `context: Type`");
             let transform = &input.transform;
+            let empty = &input.empty;
             let node_path: syn::Path = input.node_type.unwrap_or_else(|| {
                 syn::parse_str("holon_frontend::reactive_view_model::ReactiveViewModel")
                     .expect("default node path parses")
@@ -422,6 +440,12 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
             let unsupported_inner = quote! { render_unsupported(name, ctx) };
             let unsupported_applied = apply(unsupported_inner, "__unknown");
 
+            // Empty/None arm. Defaults to the GPUI expression so existing
+            // GPUI consumers keep working; other frontends pass `empty: ...`.
+            let empty_arm = empty
+                .clone()
+                .unwrap_or_else(|| quote! { gpui::div().into_any_element() });
+
             quote! {
                 pub fn render_node(
                     node: &#node_path,
@@ -430,7 +454,7 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
                     let name = node.widget_name();
                     match name.as_deref() {
                         #(#arms)*
-                        Some("empty") | None => gpui::div().into_any_element(),
+                        Some("empty") | None => #empty_arm,
                         _ => {
                             let name = name.as_deref().unwrap_or("unknown");
                             tracing::warn!("Unsupported widget: {name}");

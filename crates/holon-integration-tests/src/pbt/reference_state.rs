@@ -7,6 +7,7 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::{Arg, RenderExpr};
 use holon_api::{ContentType, EntityName, Region, Value};
+use holon_frontend::editor_caret;
 
 use super::action_actor_state::ActionActorState;
 use super::mcp_server_actor_state::MCPServerActorState;
@@ -404,6 +405,25 @@ pub struct ReferenceState {
     /// `RequiredWiring` gating (ADR 0007).
     pub wiring: Wiring,
 
+    /// The capability set the SUT supplies, when the SUT is a composed `CapMap`.
+    /// `None` = unrestricted: a concrete SUT (`E2ESut`) provides every cap, or this is
+    /// a non-composed run, so the cap gate passes everything and the alphabet behaves
+    /// exactly as before. `Some(set)` = a composed/partial SUT, so transitions whose
+    /// [`TransitionFactory::required_caps`] aren't all present are gated out of the
+    /// alphabet — the cap-analog of [`wiring`](Self::wiring)/`RequiredWiring` (PCG-2).
+    pub cap_set: Option<holon_pbt_core::composition::CapSet>,
+
+    /// Whether a **real editor** (a live `InputState` driven by the GPUI/TUI
+    /// `UserDriver`) — not the headless `HeadlessEditorMirror` — drives the SUT.
+    /// Set by the real-editor driver harness (`phased.rs`), which builds the
+    /// reference state directly. When true, [`Self::blur_active_editor`] commits
+    /// the editor's dirty buffer to block content on blur, mirroring prod's
+    /// `on_blur` → `set_field("content")`. Replaces the former process-global
+    /// `PBT_REAL_EDITOR` env gate — the property now lives on the state the
+    /// driver constructs, so it is deterministic and capture/replay-faithful
+    /// without an env-var side channel. Headless slices leave it `false`.
+    pub real_editor: bool,
+
     /// Loro-only peer instances for multi-instance sync testing.
     pub peers: Vec<PeerRefState>,
 
@@ -476,36 +496,32 @@ pub struct ActiveEditor {
 }
 
 impl ActiveEditor {
-    /// Insert ASCII text at the cursor and advance.
+    /// Insert text at the cursor and advance. Delegates caret/text math to the
+    /// **shared** `editor_caret` primitive — the SAME one the SUT's
+    /// `InMemEditorComponent` drives — so ref and SUT cannot diverge on the
+    /// text primitive itself (multibyte-safe).
     pub fn type_chars(&mut self, text: &str) {
         debug_assert!(self.cursor_byte <= self.in_memory_content.len());
-        self.in_memory_content.insert_str(self.cursor_byte, text);
-        self.cursor_byte += text.len();
+        self.cursor_byte =
+            editor_caret::insert_at(&mut self.in_memory_content, self.cursor_byte, text);
         self.dirty = true;
     }
 
     /// Delete `count` chars before the cursor (Backspace ×count). Stops at start.
     pub fn delete_backward(&mut self, count: usize) {
-        for _ in 0..count {
-            if self.cursor_byte == 0 {
-                break;
-            }
-            // Step back one full char, not one byte — extended-gen content
-            // is multi-byte and `String::remove` panics off a char boundary.
-            let new_cursor = self.in_memory_content[..self.cursor_byte]
-                .char_indices()
-                .next_back()
-                .expect("cursor_byte > 0 implies a preceding char")
-                .0;
-            self.in_memory_content.remove(new_cursor);
-            self.cursor_byte = new_cursor;
-            self.dirty = true;
+        if count == 0 {
+            return;
         }
+        self.cursor_byte =
+            editor_caret::delete_back(&mut self.in_memory_content, self.cursor_byte, count);
+        self.dirty = true;
     }
 
-    /// Move the caret to a clamped byte position.
+    /// Move the caret to a clamped byte position. Snaps to the nearest char
+    /// boundary at or before the target (a raw byte target — home/end/a click —
+    /// may land mid-codepoint); `clamp_boundary` keeps the caret legal.
     pub fn move_cursor(&mut self, position: usize) {
-        self.cursor_byte = position.min(self.in_memory_content.len());
+        self.cursor_byte = editor_caret::clamp_boundary(&self.in_memory_content, position);
     }
 }
 
@@ -559,9 +575,60 @@ impl NavigationHistory {
     }
 }
 
+/// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either
+/// [`ReferenceState::with_resolved_doc_uris`] has run (synthetic `block::split-N`
+/// / `block:ref-doc-N` placeholders remapped to the SUT's real ids), or the ref
+/// was built over a backend that mints no new ids (see [`Resolved::identity`]).
+///
+/// The capability-bound comparison entry points (`reference_state_ref_caps`,
+/// `run_with_seeded_ref`) require this witness, so an **unresolved** reference
+/// state can no longer be compared against the SUT. The historical false
+/// divergence — comparing a synthetic `block::split-N` against a real UUID
+/// because someone forgot to reconcile — is now a *compile error* rather than a
+/// runtime assertion (cf. `exp3_unreconciled_split_is_caught`, which simulates
+/// the *under*-reconciled case with an empty map).
+#[derive(Clone)]
+pub struct Resolved<T>(T);
+
+impl<T> Resolved<T> {
+    /// The resolved value.
+    pub fn get(&self) -> &T {
+        &self.0
+    }
+
+    /// Consume the witness, yielding the resolved value.
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+
+    /// Map the inner value while carrying the witness forward — e.g.
+    /// `Resolved<ReferenceState>` → `Resolved<Arc<ReferenceState>>`. The closure
+    /// only repackages an already-resolved value, so the witness still holds.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Resolved<U> {
+        Resolved(f(self.0))
+    }
+
+    /// Crate-internal mutable access for post-resolution seed preparation
+    /// (`inject_scaffold_seed`), whose injected ids are themselves real
+    /// SUT-keyed scaffold ids — so the value stays resolved.
+    pub(crate) fn inner_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+impl Resolved<ReferenceState> {
+    /// Witness that no id resolution is needed: the reference state was built over
+    /// a backend that mints no fresh ids (seed/started refs, or the counter-sync
+    /// `MemoryBackend` whose `align_ids` keeps mints in lockstep with the oracle),
+    /// so the synthetic and real id spaces already coincide.
+    pub fn identity(state: ReferenceState) -> Self {
+        Resolved(state)
+    }
+}
+
 impl ReferenceState {
-    /// Return a clone of this reference state with its block tree remapped
-    /// into the SUT's ID space via `map` (synthetic doc URI → real UUID).
+    /// Return a [`Resolved`] clone of this reference state with its block tree
+    /// remapped into the SUT's ID space via `map` (synthetic doc URI → real UUID).
     /// Capability-bound invariant bodies run against this resolved view so
     /// they can compare block IDs/parents directly against the SUT without
     /// any per-comparison resolution.
@@ -569,7 +636,10 @@ impl ReferenceState {
     /// Scope: currently remaps `block_state` only (covers the block-tree /
     /// SQL-projection invariants). Focus/navigation/watch fields also carry
     /// doc URIs and must be added here as those invariant bodies migrate.
-    pub fn with_resolved_doc_uris(&self, map: &BTreeMap<EntityUri, EntityUri>) -> ReferenceState {
+    pub fn with_resolved_doc_uris(
+        &self,
+        map: &BTreeMap<EntityUri, EntityUri>,
+    ) -> Resolved<ReferenceState> {
         let resolve = |u: &EntityUri| map.get(u).cloned().unwrap_or_else(|| u.clone());
         let mut resolved = self.clone();
         resolved.domain.block_state = self.domain.block_state.remapped_doc_uris(map);
@@ -630,7 +700,7 @@ impl ReferenceState {
         if let Some(editor) = resolved.ui.tab.active_editor.as_mut() {
             editor.block_id = resolve(&editor.block_id);
         }
-        resolved
+        Resolved(resolved)
     }
 
     pub fn new(wiring: Wiring, interpreter: Arc<ShadowInterpreter>) -> Self {
@@ -646,8 +716,29 @@ impl ReferenceState {
             jj_initialized: false,
             pre_startup_file_count: 0,
             wiring,
+            cap_set: None,
+            real_editor: false,
             peers: Vec::new(),
             interpreter,
+        }
+    }
+
+    /// Set the composed SUT's capability set (the cap gate's RHS). The composed harness
+    /// calls this with `caps.cap_set()` so the alphabet auto-narrows to the transitions
+    /// whose caps the `CapMap` actually supplies. Concrete-SUT runs leave it `None`.
+    pub fn with_cap_set(mut self, cap_set: holon_pbt_core::composition::CapSet) -> Self {
+        self.cap_set = Some(cap_set);
+        self
+    }
+
+    /// Whether the active SUT supplies every cap in `required` — the cap gate mirroring
+    /// `RequiredWiring::satisfied_by(&self.wiring)`. Unrestricted (`cap_set == None`)
+    /// always passes, so concrete-SUT runs gate nothing (regression-safe). **Necessary,
+    /// not sufficient**, exactly like the wiring gate.
+    pub fn caps_available(&self, required: &[holon_pbt_core::composition::CapId]) -> bool {
+        match &self.cap_set {
+            None => true,
+            Some(set) => required.iter().all(|cap| set.contains(cap)),
         }
     }
 
@@ -660,15 +751,14 @@ impl ReferenceState {
             .has_storage(holon_pbt_core::StorageAdapter::Loro)
     }
 
-    /// Whether atomic editor transitions (FocusEditableText, MoveCursor,
-    /// TypeChars, DeleteBackward, PressKey) are enabled. Gated to the
-    /// GPUI PBT — they need a real `InputState` to expose the
-    /// in-memory-vs-DB divergence the bug class lives in.
-    pub fn atomic_editor_enabled() -> bool {
-        std::env::var("PBT_ATOMIC_EDITOR")
-            .ok()
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
+    /// Whether this reference owns an editor buffer carrying uncommitted text —
+    /// the headless atomic-editor capability (the single editor-transition gate;
+    /// see [`RefLifecycle::has_editor_buffer`]). Inherent mirror of the trait
+    /// method so transition bodies holding a concrete `&ReferenceState` can read
+    /// it without importing the trait. Derived from the wiring's UI actor (the
+    /// editor's `InputState`/buffer host), not Loro-as-storage or an env var.
+    pub fn has_editor_buffer(&self) -> bool {
+        self.wiring.has_actor(holon_pbt_core::Actor::UI)
     }
 
     pub fn mutable_text_enabled() -> bool {
@@ -678,44 +768,18 @@ impl ReferenceState {
             .unwrap_or(false)
     }
 
-    /// Whether a REAL editor (a live `InputState` driven by the GPUI/TUI
-    /// `UserDriver`) — not the headless `HeadlessEditorMirror` — is driving
-    /// the SUT. Set by [`crate::pbt::phased::run_pbt_with_driver_sync_callback`]
-    /// (the only real-editor harness); never set by the headless slices.
-    ///
-    /// Two effects, both keyed off this flag so the headless gates are
-    /// untouched:
-    /// 1. The atomic-editor transitions (FocusEditableText/TypeChars/…) are
-    ///    additionally gated on `enable_loro()` because the headless mirror
-    ///    can't carry per-keystroke writes without Loro — but a real editor
-    ///    can (it types into `InputState`, persists via on-blur `set_field`),
-    ///    so this relaxes that gate for SqlOnly real-editor runs.
-    /// 2. Closing an editor commits its in-memory text to the block, mirroring
-    ///    prod's `on_blur` → `set_field("content")`. In SqlOnly prod ONLY
-    ///    persists on blur (no Loro per-keystroke writer), so committing at the
-    ///    same blur point keeps ref and SUT aligned tick-for-tick — green when
-    ///    persistence works, red when it regresses (the bug this catches).
-    pub fn real_editor_enabled() -> bool {
-        std::env::var("PBT_REAL_EDITOR")
-            .ok()
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    }
-
     /// Close the active editor, committing its pending text first when a real
-    /// editor is driving (see [`Self::real_editor_enabled`]). The commit is
-    /// idempotent under Loro (per-keystroke writes already committed it) and a
-    /// no-op when no editor is active, so call sites can swap a bare
-    /// `active_editor = None` for this unconditionally.
+    /// editor is driving (see [`Self::real_editor`]). The commit is idempotent
+    /// under Loro (per-keystroke writes already committed it) and a no-op when
+    /// no editor is active, so call sites can swap a bare `active_editor = None`
+    /// for this unconditionally.
     pub fn blur_active_editor(&mut self) {
         // Dirty-gated: only user-authored pending text commits on an
         // authority move (prod commits via the focus-binding's
         // authority-left arm — deterministic, window-activation-independent).
         // A clean mirror that merely diverged from block.content is stale
         // against an external change and must not be committed.
-        if Self::real_editor_enabled()
-            && self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty)
-        {
+        if self.real_editor && self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty) {
             self.commit_active_editor_if_changed();
         }
         self.ui.tab.active_editor = None;

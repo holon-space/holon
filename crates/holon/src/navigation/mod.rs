@@ -43,7 +43,10 @@ mod loro_exclusion_test {
         // hits a distinct Loro touchpoint: the backend (writes) and the
         // sync controller (orchestrates inbound/outbound).
         let sources: &[(&str, &str)] = &[
-            ("loro_backend.rs", include_str!("../../../holon-loro/src/loro_backend.rs")),
+            (
+                "loro_backend.rs",
+                include_str!("../../../holon-loro/src/loro_backend.rs"),
+            ),
             (
                 "loro_sync_controller.rs",
                 include_str!("../../../holon-loro/src/loro_sync_controller.rs"),

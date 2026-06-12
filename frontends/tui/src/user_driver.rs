@@ -424,6 +424,44 @@ fn tui_keystrokes_for_op(
     })
 }
 
+/// Maps a navigation [`holon_api::Region`] to the top-level `columns`
+/// slot index the renderer tags rows with (see `render_columns` in
+/// `crate::render`). The default layout is `[left-sidebar, main-panel,
+/// right-sidebar]`, so the slot order matches the panel order. Keep this
+/// in sync with the layout's column ordering.
+fn region_columns_slot(region: holon_api::Region) -> usize {
+    match region {
+        holon_api::Region::LeftSidebar => 0,
+        holon_api::Region::Main => 1,
+        holon_api::Region::RightSidebar => 2,
+    }
+}
+
+/// Entity ids painted under columns `slot` with non-zero extent, parsed to
+/// URIs. Backs `entities_in_region`; split out so it's testable against a
+/// hand-built `RenderRegistry` without standing up a full driver.
+fn registry_entities_in_slot(registry: &RenderRegistry, slot: usize) -> Vec<holon_api::EntityUri> {
+    registry
+        .selectables
+        .iter()
+        .filter(|r| r.region == slot && r.rows > 0 && r.cols > 0)
+        // ALLOW(filter_map_ok): the registry holds whatever id the builder
+        // tagged (raw row ids without a scheme); the trait contract is
+        // `Vec<EntityUri>` and non-URI ids aren't addressable anyway.
+        .filter_map(|r| holon_api::EntityUri::parse(&r.entity_id).ok()) // ALLOW(ok): same
+        .collect()
+}
+
+/// The click intent baked for `entity_id` at shadow-build time, if a
+/// selectable in the registry targets it. Backs `click_intent_of`.
+fn registry_click_intent(registry: &RenderRegistry, entity_id: &str) -> Option<OperationIntent> {
+    registry
+        .selectables
+        .iter()
+        .find(|r| r.entity_id == entity_id)
+        .and_then(|r| r.intent.clone())
+}
+
 /// Translate a `send_raw_keystroke` keystroke string + modifier names
 /// into a single `InputEvent`. Used for the atomic-editor PBT path
 /// (TypeChars, MoveCursor, DeleteBackward, PressKey, Blur) which calls
@@ -641,25 +679,44 @@ impl UserDriver for TuiUserDriver {
 
     // ── Observation verbs ──────────────────────────────────────────────
     //
-    // Stubs for now. Step 2 / future TUI work fills these in — the TUI
-    // has its own widget registry that maps to the same `ReactiveViewModel`
-    // tree the headless driver uses, so the impl can follow the
-    // `ReactiveEngineDriver` pattern.
+    // The TUI's medium is its per-frame `RenderRegistry`, shared with the
+    // renderer through `geometry` and `last_registry`. Every
+    // `SelectableRegion` carries the entity id, painted bounds, baked
+    // click intent, displayed text, and the top-level columns slot it
+    // lives under. The verbs read that registry — the same source the
+    // keyboard handler and `TuiGeometry` consult — so observation matches
+    // what the user sees. This parallels the GPUI screen driver (which
+    // reads its `BoundsRegistry`) rather than the headless VM-tree walk.
 
-    fn is_widget_visible(&self, _: &holon_api::EntityUri) -> bool {
-        unimplemented!("TuiUserDriver::is_widget_visible — pending TUI observation impl")
+    fn is_widget_visible(&self, entity_id: &holon_api::EntityUri) -> bool {
+        self.geometry
+            .find_by_entity_id(entity_id.as_str())
+            .filter(|info| info.area() > 0.0)
+            .is_some()
     }
 
-    fn is_in_region(&self, _: &holon_api::EntityUri, _: holon_api::Region) -> bool {
-        unimplemented!("TuiUserDriver::is_in_region — pending TUI observation impl")
+    fn is_in_region(&self, entity_id: &holon_api::EntityUri, region: holon_api::Region) -> bool {
+        self.entities_in_region(region)
+            .iter()
+            .any(|uri| uri == entity_id)
     }
 
-    fn entities_in_region(&self, _: holon_api::Region) -> Vec<holon_api::EntityUri> {
-        unimplemented!("TuiUserDriver::entities_in_region — pending TUI observation impl")
+    /// Entity ids painted under `region`'s top-level columns slot. The
+    /// outermost `render_columns` tags each `SelectableRegion` with the
+    /// slot index it sits under (left sidebar = 0, main = 1, right sidebar
+    /// = 2 in the default layout); we filter the registry by that slot.
+    /// Only regions with non-zero painted extent count as on-screen.
+    fn entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
+        let registry = self.last_registry.lock().unwrap();
+        registry_entities_in_slot(&registry, region_columns_slot(region))
     }
 
-    fn reachable_entities_in_region(&self, _: holon_api::Region) -> Vec<holon_api::EntityUri> {
-        unimplemented!("TuiUserDriver::reachable_entities_in_region — pending TUI observation impl")
+    /// The TUI redraws the whole screen each frame and has no virtualized
+    /// lists — every entity in a region's tree is painted with bounds (see
+    /// `scroll_to_entity`). So "reachable by scrolling" equals "currently
+    /// in region", mirroring the headless `ReactiveEngineDriver`.
+    fn reachable_entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
+        self.entities_in_region(region)
     }
 
     async fn scroll_to_entity(&self, _: &holon_api::EntityUri) -> Result<()> {
@@ -672,14 +729,114 @@ impl UserDriver for TuiUserDriver {
         Ok(())
     }
 
+    /// The click intent the TUI baked into the `selectable` at
+    /// shadow-build time — the same value Enter dispatches on the focused
+    /// row. Read from the registry entry for `entity_id`; `Block` rows and
+    /// selectables without an `action:` have `None`.
     fn click_intent_of(
         &self,
-        _: &holon_api::EntityUri,
+        entity_id: &holon_api::EntityUri,
     ) -> Option<holon_frontend::operations::OperationIntent> {
-        unimplemented!("TuiUserDriver::click_intent_of — pending TUI observation impl")
+        let registry = self.last_registry.lock().unwrap();
+        registry_click_intent(&registry, entity_id.as_str())
     }
 
-    fn displayed_text(&self, _: &holon_api::EntityUri) -> Option<String> {
-        unimplemented!("TuiUserDriver::displayed_text — pending TUI observation impl")
+    /// The text the TUI actually painted for `entity_id` — read from the
+    /// registry's recorded `displayed_text` (the in-edit buffer when
+    /// active, else the resolved `content` prop), surfaced through the
+    /// geometry adapter. Mirrors the GPUI driver reading
+    /// `ElementInfo::displayed_text`.
+    fn displayed_text(&self, entity_id: &holon_api::EntityUri) -> Option<String> {
+        self.geometry
+            .find_by_entity_id(entity_id.as_str())
+            .and_then(|info| info.displayed_text.map(|s| s.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::{SelectableKind, SelectableRegion};
+    use holon_api::{EntityName, Region};
+
+    fn region_entry(
+        entity_id: &str,
+        slot: usize,
+        intent: Option<OperationIntent>,
+    ) -> SelectableRegion {
+        SelectableRegion {
+            entity_id: entity_id.to_string(),
+            intent,
+            kind: SelectableKind::Block,
+            region: slot,
+            editable: None,
+            start_row: 0,
+            start_col: 0,
+            rows: 1,
+            cols: 10,
+            widget_type: "render_entity".to_string(),
+            displayed_text: None,
+        }
+    }
+
+    #[test]
+    fn region_slot_maps_panels_in_layout_order() {
+        assert_eq!(region_columns_slot(Region::LeftSidebar), 0);
+        assert_eq!(region_columns_slot(Region::Main), 1);
+        assert_eq!(region_columns_slot(Region::RightSidebar), 2);
+    }
+
+    #[test]
+    fn entities_in_slot_filters_by_region_and_visible_extent() {
+        let mut zero_extent = region_entry("block:hidden", 1, None);
+        zero_extent.rows = 0;
+        let registry = RenderRegistry {
+            selectables: vec![
+                region_entry("block:sidebar-item", 0, None),
+                region_entry("block:main-a", 1, None),
+                region_entry("block:main-b", 1, None),
+                zero_extent, // same region but unpainted -> excluded
+            ],
+        };
+
+        let main = registry_entities_in_slot(&registry, 1);
+        let ids: Vec<&str> = main.iter().map(|u| u.as_str()).collect();
+        assert!(ids.contains(&"block:main-a"));
+        assert!(ids.contains(&"block:main-b"));
+        assert!(!ids.contains(&"block:hidden"));
+        assert_eq!(main.len(), 2);
+
+        let sidebar = registry_entities_in_slot(&registry, 0);
+        assert_eq!(sidebar.len(), 1);
+        assert_eq!(sidebar[0].as_str(), "block:sidebar-item");
+    }
+
+    #[test]
+    fn entities_in_slot_drops_non_uri_ids() {
+        // Raw row ids without a scheme aren't addressable URIs and are dropped.
+        let registry = RenderRegistry {
+            selectables: vec![region_entry("not a uri!", 1, None)],
+        };
+        assert!(registry_entities_in_slot(&registry, 1).is_empty());
+    }
+
+    #[test]
+    fn click_intent_reads_baked_intent_and_none_for_blocks() {
+        let intent = OperationIntent::new(
+            EntityName::new("block"),
+            "navigation_focus".to_string(),
+            std::collections::HashMap::new(),
+        );
+        let registry = RenderRegistry {
+            selectables: vec![
+                region_entry("block:nav", 0, Some(intent)),
+                region_entry("block:plain", 1, None),
+            ],
+        };
+
+        let found = registry_click_intent(&registry, "block:nav").expect("intent present");
+        assert_eq!(found.op_name, "navigation_focus");
+        assert!(registry_click_intent(&registry, "block:plain").is_none());
+        assert!(registry_click_intent(&registry, "block:absent").is_none());
     }
 }

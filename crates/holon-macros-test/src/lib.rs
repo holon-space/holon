@@ -1,3 +1,13 @@
+//! @c4 component
+//! @c4 layer Testing
+//! Pattern: Test Harness
+//! @c4 uses holon "core orchestration" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
+//! Macro-expansion tests for `holon-macros`.
+
 // Test crate for holon-macros
 // This allows us to test the macro expansion since proc macros can't be used in their own crate
 #![allow(clippy::manual_range_contains)] // expanded operations_trait macro emits `>=`/`<=` checks

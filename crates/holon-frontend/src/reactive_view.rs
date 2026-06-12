@@ -129,7 +129,14 @@ impl VirtualChildRowProvider {
     fn new(inner: Arc<dyn ReactiveRowProvider>, slot: &VirtualChildSlot) -> Self {
         use holon_api::Value;
 
-        let virtual_id = format!("virtual:{}", slot.parent_id.as_str());
+        // Must match `parse_virtual_id` (view_event_handler.rs) and
+        // `virtual_child_row` — the `:__virtual:` infix is what the editor's
+        // submit handler recognises to materialize a real entity on first edit.
+        let virtual_id = format!(
+            "{}:__virtual:{}",
+            slot.parent_id.scheme(),
+            slot.parent_id.id()
+        );
         let mut row = std::collections::HashMap::new();
         row.insert("id".to_string(), Value::String(virtual_id));
         row.insert(

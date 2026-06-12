@@ -26,8 +26,6 @@
 //!   works under generic-V SUTs. The trait grows methods as variants
 //!   are migrated; today it is empty.
 
-use super::reference_state::ReferenceState;
-
 /// Per-variant weight multiplier read from the `HOLON_PBT_WEIGHTS`
 /// environment variable. The macro `declare_e2e_transitions!` applies
 /// this automatically to every arm of `aggregate_transitions`, so
@@ -154,213 +152,144 @@ fn parse_weight_env() -> Vec<(WeightPattern, u32)> {
 /// methods as variants are migrated; each migration that needs a new SUT
 /// capability adds one method here and one impl in `sut_handle.rs`
 /// (delegating to existing helpers).
-#[allow(async_fn_in_trait)]
+/// `SutHandle` is now a pure **marker bundle**: it declares no methods of its
+/// own — the entire transition alphabet is hosted by the fine-grained capability
+/// traits below. The cluster-peel relocated every former `SutHandle::apply_*`
+/// method into a `#[capmap_adapter]` cap (placed per the cap home-rule:
+/// holon-api-typed → `holon-pbt-core`; frontend-typed → `holon-frontend`;
+/// test-only-typed → `crate::pbt::local_caps`). `ref_state` is never in a cap
+/// signature — action-time needs are precomputed at the transition boundary
+/// (e.g. `StartApp`'s `root_id`) and settle/reconcile work lives in
+/// `E2ESut::block_tree_post_action`.
+///
+/// Because the bundle is a pure conjunction of caps, a composed `CapMap` that
+/// holds all of them satisfies `SutHandle` exactly as `E2ESut` does — which is
+/// the whole point of the decomposition (E3/E5 can then delete `E2ESut`).
 pub trait SutHandle:
     ::holon_pbt_core::capabilities::SutEditorMirrorWrite
     + ::holon_pbt_core::capabilities::SutBlockTreeWrite
     + ::holon_pbt_core::capabilities::SutLoro
+    + ::holon_pbt_core::capabilities::SutFocusWrite
+    + ::holon_pbt_core::capabilities::SutNavHistoryWrite
+    + ::holon_pbt_core::capabilities::SutWatchRegister
+    + ::holon_pbt_core::capabilities::SutViewControl
+    + ::holon_pbt_core::capabilities::SutMcpEmit
+    + ::holon_pbt_core::capabilities::SutHistoryWrite
+    + ::holon_pbt_core::capabilities::SutNavHistoryDrive
+    + ::holon_pbt_core::capabilities::SutBlockInteract
+    + ::holon_frontend::pbt_caps::SutArrowNavigate
+    + crate::pbt::local_caps::SutMutate
+    + crate::pbt::local_caps::SutSeamMutate
+    + crate::pbt::local_caps::SutFixtureFs
+    + crate::pbt::local_caps::SutAppLifecycle
 {
-    /// Shared-PBT capability: synthesize a click on a UI element by
-    /// its bounds-registry id. Used by `holon_layout_testing`'s shared
-    /// `apply_to_sut` bodies (`SwitchViewMode`, `ToggleDrawer`,
-    /// `ToggleCollapse`) via `SutClickAdapter`. Default impl panics
-    /// loud — concrete SUTs override with their click pipeline (e.g.
-    /// `GpuiUserDriver::click_entity`).
-    async fn apply_click_at_element(&mut self, element_id: &str) {
-        let _ = element_id;
-        unimplemented!(
-            "SutHandle::apply_click_at_element — the concrete SUT for this PBT \
-             variant hasn't been migrated to support shared layout interactions yet."
-        )
-    }
+}
 
-    /// Shared-PBT capability: push deferred `live_block` content
-    /// through the SUT's data-arrival pipeline. Mirror of the layout
-    /// PBT's `LiveBlockSink::deliver_block_content_loaded`. Default
-    /// panics — real backend tests should override or skip
-    /// `DeliverBlockContent` from their generator.
-    async fn apply_deliver_block_content_loaded(&mut self, block_id: &str) {
-        let _ = block_id;
-        unimplemented!(
-            "SutHandle::apply_deliver_block_content_loaded — the integration-tests \
-             PBT runs a real backend; deferred block delivery isn't a meaningful \
-             stimulus there. Skip `DeliverBlockContent` in the generator."
-        )
-    }
+/// Blanket marker impl: any type providing the full capability bundle IS a
+/// `SutHandle`. No explicit `impl SutHandle for E2ESut` is needed (or allowed
+/// alongside this) — `E2ESut` implements every cap, so it satisfies the bundle
+/// automatically, as will the composed `CapMap`.
+impl<T> SutHandle for T where
+    T: ::holon_pbt_core::capabilities::SutEditorMirrorWrite
+        + ::holon_pbt_core::capabilities::SutBlockTreeWrite
+        + ::holon_pbt_core::capabilities::SutLoro
+        + ::holon_pbt_core::capabilities::SutFocusWrite
+        + ::holon_pbt_core::capabilities::SutNavHistoryWrite
+        + ::holon_pbt_core::capabilities::SutWatchRegister
+        + ::holon_pbt_core::capabilities::SutViewControl
+        + ::holon_pbt_core::capabilities::SutMcpEmit
+        + ::holon_pbt_core::capabilities::SutHistoryWrite
+        + ::holon_pbt_core::capabilities::SutNavHistoryDrive
+        + ::holon_pbt_core::capabilities::SutBlockInteract
+        + ::holon_frontend::pbt_caps::SutArrowNavigate
+        + crate::pbt::local_caps::SutMutate
+        + crate::pbt::local_caps::SutSeamMutate
+        + crate::pbt::local_caps::SutFixtureFs
+        + crate::pbt::local_caps::SutAppLifecycle
+{
+}
 
-    /// Pilot-variant capability: drive the navigation back-button via
-    /// `TestContext::navigate_back` and dump nav tables for tracing.
-    async fn navigate_back(&mut self, region: holon_api::Region);
+/// `cap_transition!` — terse, single-sourced SUT dispatch + cap declaration.
+///
+/// Generates a transition's `TransitionImpl<ReferenceState, S>` block (bound on
+/// exactly one fine-grained cap) AND the matching `declared_caps()` from the
+/// **same** cap token, so the dispatch bound and `TransitionFactory::required_caps`
+/// can no longer drift. Any transition authored through this macro no longer needs
+/// an entry in the `required_caps_match_transition_impl_bounds` guard test.
+///
+/// It is also the migration seam (see `docs/Testing/PbtCompositionDesign.md` §8.9):
+/// the per-transition call site is agnostic to whether `apply_to_sut` dispatches
+/// over a generic `S: Cap` (today) or a concrete composed `CapMap` (post-E5) —
+/// flipping that is a change to *this macro's expansion*, not to any transition
+/// file. The body calls `sut.<cap-method>(…)`, which works identically whether
+/// `sut: &mut S` (S: Cap) or `sut: &mut CapMap` (CapMap implements every cap via
+/// `#[capmap_adapter]`).
+///
+/// Single-cap form (the `TransitionFactory::required_caps` body becomes
+/// `Self::declared_caps()`):
+/// ```ignore
+/// cap_transition! {
+///     SplitBlock: SutBlockTreeWrite,
+///     |me, _state, sut| { sut.apply_split_block(&me.block_id, me.position).await; }
+/// }
+/// ```
+///
+/// No-cap form (bound on the full `SutHandle` bundle; `required_caps` stays the
+/// trait default of empty):
+/// ```ignore
+/// cap_transition! { Nothing, |_me, _state, _sut| {} }
+/// ```
+#[macro_export]
+macro_rules! cap_transition {
+    // ── single cap ──────────────────────────────────────────────────
+    (
+        $name:ident : $cap:path,
+        | $me:ident, $state:ident, $sut:ident | $body:block
+    ) => {
+        impl $name {
+            /// Single source of this transition's cap: `required_caps()` forwards
+            /// here, and the `TransitionImpl` bound below binds the same `$cap`.
+            pub(crate) fn declared_caps() -> ::std::vec::Vec<::holon_pbt_core::composition::CapId> {
+                ::std::vec![::holon_pbt_core::composition::CapId::of::<dyn $cap>()]
+            }
+        }
 
-    /// Pre-startup: write an org file to the temp directory.
-    async fn apply_write_org_file(&mut self, filename: &str, content: &str);
+        #[allow(async_fn_in_trait)]
+        impl<S: $cap>
+            ::holon_pbt_core::TransitionImpl<$crate::pbt::reference_state::ReferenceState, S>
+            for $name
+        {
+            async fn apply_to_sut(
+                &self,
+                $state: &$crate::pbt::reference_state::ReferenceState,
+                $sut: &mut S,
+            ) {
+                let $me = self;
+                $body
+            }
+        }
+    };
 
-    /// Pre-startup: create a directory.
-    async fn apply_create_directory(&mut self, path: &str);
-
-    /// Pre-startup: initialize git repository.
-    async fn apply_git_init(&mut self);
-
-    /// Pre-startup: initialize jj repository.
-    async fn apply_jj_git_init(&mut self);
-
-    /// Pre-startup: create a stale/corrupted .loro file.
-    async fn apply_create_stale_loro(
-        &mut self,
-        org_filename: &str,
-        corruption_type: crate::LoroCorruptionType,
-    );
-
-    /// Start the application.
-    async fn apply_start_app(
-        &mut self,
-        ref_state: &ReferenceState,
-        wait_for_ready: bool,
-        enable_fake_mcp: bool,
-        enable_loro: bool,
-    );
-
-    /// Navigate to focus on a specific block within a region.
-    async fn apply_navigate_focus(
-        &mut self,
-        region: holon_api::Region,
-        block_id: &holon_api::EntityUri,
-    );
-
-    /// Navigate forward in the per-region navigation history.
-    async fn apply_navigate_forward(&mut self, region: holon_api::Region);
-
-    /// Navigate home (return to root) in a region.
-    async fn apply_navigate_home(&mut self, region: holon_api::Region);
-
-    /// Simulate app restart: clears last_projection and triggers re-sync.
-    async fn apply_simulate_restart(&mut self, ref_state: &ReferenceState);
-
-    /// Post-startup: create a new document and record the UUID mapping.
-    async fn apply_create_document(&mut self, file_name: &str, ref_state: &ReferenceState);
-
-    /// Post-startup: remove an active query watch.
-    async fn apply_remove_watch(&mut self, query_id: &str);
-
-    /// Post-startup: switch the current view.
-    async fn apply_switch_view(&mut self, view_name: &str);
-
-    /// Post-startup: run sequential query_and_watch operations to test for schema-lock bugs.
-    async fn apply_concurrent_schema_init(&mut self);
-
-    /// Post-startup: set up a query watch.
-    async fn apply_setup_watch(
-        &mut self,
-        query_id: &str,
-        query: &crate::pbt::query::TestQuery,
-        language: holon_api::QueryLanguage,
-    );
-
-    /// Post-startup: toggle a block's task state via the StateToggle widget path.
-    async fn apply_toggle_state(
-        &mut self,
-        block_id: &holon_api::EntityUri,
-        new_state: crate::pbt::transitions::toggle_state::CycleTarget,
-    );
-
-    /// Post-startup: bulk add blocks to a document by writing an org file.
-    async fn apply_bulk_external_add(
-        &mut self,
-        doc_uri: &holon_api::EntityUri,
-        blocks: &[holon_api::block::Block],
-        ref_state: &ReferenceState,
-    );
-
-    /// Post-startup: apply a single UI or external mutation.
-    async fn apply_apply_mutation(
-        &mut self,
-        event: crate::pbt::types::MutationEvent,
-        ref_state: &ReferenceState,
-    );
-
-    /// Post-startup: trigger the "/" slash-command menu on a block and select "delete".
-    async fn apply_trigger_slash_command(&mut self, block_id: &holon_api::EntityUri);
-
-    // `apply_indent` / `apply_outdent` / `apply_move_up` / `apply_move_down`
-    // / `apply_split_block` / `apply_join_block` now come from the
-    // `SutBlockTreeWrite` supertrait (pure ACTIONS, no `ref_state`), so the
-    // block-tree transitions narrow to `S: SutBlockTreeWrite`. Their
-    // `ref_state`-dependent post-action (sync barrier, block-count check,
-    // synthetic-id reconciliation) lives in
-    // `E2ESut::block_tree_post_action`, run by the harness after
-    // `apply_to_sut`.
-
-    /// Post-startup: drag the source block onto the target, re-parenting source as
-    /// a child of the target.
-    async fn apply_drag_drop_block(
-        &mut self,
-        source: &holon_api::EntityUri,
-        target: &holon_api::EntityUri,
-    );
-
-    /// Post-startup: click on a rendered block to focus it.
-    async fn apply_click_block(
-        &mut self,
-        region: holon_api::Region,
-        block_id: &holon_api::EntityUri,
-    );
-
-    /// Post-startup: undo the last UI mutation.
-    async fn apply_undo_last_mutation(&mut self, ref_state: &ReferenceState);
-
-    /// Post-startup: redo the last undone mutation.
-    async fn apply_redo(&mut self, ref_state: &ReferenceState);
-
-    /// Post-startup: trigger IVM re-evaluation.
-    async fn apply_emit_mcp_data(&mut self);
-
-    /// Post-startup: focus an editable text block (atomic editor primitive).
-    async fn apply_focus_editable_text(&mut self, block_id: &holon_api::EntityUri);
-
-    // `apply_move_cursor` / `apply_type_chars` / `apply_delete_backward`
-    // now come from the `SutEditorMirrorWrite` supertrait, so `TypeChars`
-    // / `MoveCursor` / `DeleteBackward` can narrow to `S:
-    // SutEditorMirrorWrite` and run on any SUT supplying that cap.
-
-    /// Post-startup: press a structural key chord in the active editor.
-    /// Takes `ref_state` so Enter (which dispatches `split_block`) can
-    /// map the freshly-minted prod UUID back to the synthetic
-    /// `block::split-N` slot the ref-state allocated.
-    async fn apply_press_key(&mut self, chord: &holon_api::KeyChord, ref_state: &ReferenceState);
-
-    /// Post-startup: arrow-key navigation from the focused block.
-    async fn apply_arrow_navigate(
-        &mut self,
-        region: holon_api::Region,
-        direction: holon_frontend::navigation::NavDirection,
-        steps: u8,
-        ref_state: &ReferenceState,
-    );
-
-    /// Post-startup: pin a block to a sidebar (`focus_pin` op — LogSeq-style
-    /// shift+click). No leader chord exists for this; the headless PBT
-    /// dispatches the navigation op directly.
-    async fn apply_pin_block(&mut self, region: holon_api::Region, block_id: &holon_api::EntityUri);
-
-    /// Post-startup: close one open `navigation_history` row by id (`close`
-    /// op — sidebar X button). Region-less.
-    async fn apply_unpin_block(&mut self, history_id: i64);
-
-    /// Post-startup: flip an `expand_toggle`'s `expanded` Mutable from
-    /// false to true. Production binding is a chevron click; there is no
-    /// backend operation — it's a frontend-state flip that drives
-    /// `LazyReactiveSlot::materialize_if_gated` on the next render. The
-    /// `E2ESut` impl walks the engine's reactive tree, finds the
-    /// `expand_toggle` node whose `target_id` prop matches `block_id`,
-    /// and calls `.expanded.set(true)`. Fails loud if the corpus grows a
-    /// toggle render but the engine produces no matching node.
-    async fn apply_expand_toggle(&mut self, block_id: &holon_api::EntityUri);
-
-    /// Inverse of `apply_expand_toggle` — sets `.expanded` to false.
-    /// Same walker; the `LazyReactiveSlot` cache is preserved by design
-    /// so re-expand is instant. See
-    /// `devlog/2026-05-15-lazy-expand-toggle-plan.md`.
-    async fn apply_collapse_toggle(&mut self, block_id: &holon_api::EntityUri);
+    // ── no cap (bound on the full SutHandle bundle) ──────────────────
+    (
+        $name:ident,
+        | $me:ident, $state:ident, $sut:ident | $body:block
+    ) => {
+        #[allow(async_fn_in_trait)]
+        impl<S: $crate::pbt::transition_dispatch::SutHandle>
+            ::holon_pbt_core::TransitionImpl<$crate::pbt::reference_state::ReferenceState, S>
+            for $name
+        {
+            async fn apply_to_sut(
+                &self,
+                $state: &$crate::pbt::reference_state::ReferenceState,
+                $sut: &mut S,
+            ) {
+                let $me = self;
+                $body
+            }
+        }
+    };
 }
 
 /// `declare_e2e_transitions!` — the only central code in the file-
@@ -427,7 +356,12 @@ macro_rules! declare_e2e_transitions {
 
         // SUT-side dispatch (concrete-`S`): apply_to_sut. Generic over
         // `S: SutHandle`; variants may narrow `S` to fine-grained caps —
-        // `SutHandle` is a supertrait bundle, so they still satisfy this.
+        // `SutHandle` is a supertrait bundle of them, so they still satisfy this.
+        // `SutFocusWrite` / `SutNavHistoryWrite` / `SutWatchRegister` (the caps
+        // the `NavigateFocus` / `NavigateHome` / `SetupWatch` variants bind) are
+        // now `SutHandle` supertraits (decomposition #4 deleted the duplicate
+        // `SutHandle` copies that previously forced the method-name clash), so the
+        // dispatch bound is once again just `S: SutHandle` — no extra `+` bounds.
         #[allow(async_fn_in_trait)]
         impl<S: $crate::pbt::transition_dispatch::SutHandle>
             ::holon_pbt_core::TransitionImpl<
@@ -483,6 +417,18 @@ macro_rules! declare_e2e_transitions {
                     >>::required_wiring(), )*
                 }
             }
+
+            /// Value-level mirror of `TransitionFactory::required_caps` — the cap-analog
+            /// of [`required_wiring`](Self::required_wiring), consumed at replay time so
+            /// `stepper::run_sequence` can gate a concrete transition against a composed
+            /// SUT's `cap_set` exactly as generation does (PCG-2).
+            pub fn required_caps(&self) -> Vec<::holon_pbt_core::composition::CapId> {
+                match self {
+                    $( Self::$variant(_) => <$ty as ::holon_pbt_core::TransitionFactory<
+                        $crate::pbt::reference_state::ReferenceState,
+                    >>::required_caps(), )*
+                }
+            }
         }
 
         $vis fn aggregate_transitions(
@@ -504,6 +450,9 @@ macro_rules! declare_e2e_transitions {
                     $crate::pbt::reference_state::ReferenceState,
                 >>::required_wiring()
                     .satisfied_by(&state.wiring)
+                    && state.caps_available(&<$ty as ::holon_pbt_core::TransitionFactory<
+                        $crate::pbt::reference_state::ReferenceState,
+                    >>::required_caps())
                 {
                     // Per-variant arm built by the shared `holon_pbt_core::weighted_arm`
                     // helper (one aggregation path across every PBT). The

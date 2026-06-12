@@ -13,7 +13,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutBlockInteract;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -29,6 +29,12 @@ pub struct PressKey {
 }
 
 impl TransitionFactory<ReferenceState> for PressKey {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // ADR 0009 asymmetry #1: "edit content" is exercisable on **any** block
@@ -106,14 +112,7 @@ impl TransitionRef<ReferenceState> for PressKey {
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(
-                ReferenceState::atomic_editor_enabled(),
-                Reason::AtomicEditorDisabled,
-            ),
-            check(
-                state.enable_loro() || ReferenceState::real_editor_enabled(),
-                Reason::LoroRequiredForAtomicEditor,
-            ),
+            check(state.has_editor_buffer(), Reason::NoEditorBuffer),
             check(state.action.app_started, Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
             check(
@@ -233,9 +232,9 @@ impl TransitionRef<ReferenceState> for PressKey {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for PressKey {
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
-        sut.apply_press_key(&self.chord, ref_state).await;
+impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for PressKey {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.press_key(&self.chord).await;
     }
 }
 

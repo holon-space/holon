@@ -418,10 +418,10 @@ impl App for AppMain {
                     let mut content_ops = RenderOpIRVec::new();
                     let max_width = window_size.col_width.as_usize().saturating_sub(2);
                     let mut registry = RenderRegistry::default();
-                    let focus_index = match state.focus_index.load(Ordering::Acquire) {
-                        NO_FOCUS => None,
-                        i => Some(i),
-                    };
+                    // The marker is pinned to the focused row's (entity_id, kind),
+                    // not its registry index, so it survives the post-walk
+                    // de-dup of the registry.
+                    let focus_pin = state.focus_pin.lock().unwrap().clone();
                     // Snapshot edit_state under its lock so the view borrow
                     // stays valid for the duration of the render walk.
                     let edit_guard = state.edit_state.lock().unwrap();
@@ -431,7 +431,7 @@ impl App for AppMain {
                         buffer: e.vm.current_text().unwrap_or_default(),
                         cursor: e.cursor,
                     });
-                    let mut ctx = RenderCtx::new(&state.engine, &mut registry, focus_index)
+                    let mut ctx = RenderCtx::new(&state.engine, &mut registry, focus_pin)
                         .with_edit(edit_view);
                     render_view_model(
                         model.as_ref(),
@@ -443,6 +443,13 @@ impl App for AppMain {
                     );
                     drop(edit_guard);
                     it.render_pipeline.push(ZOrder::Normal, content_ops);
+
+                    // Collapse double-registered rows (sidebar `tree` rows are
+                    // registered both as a `Block` by the collection and as a
+                    // `Selectable` by their `selectable` template) so cursor
+                    // navigation moves one row per press and region switching
+                    // doesn't snap back to a same-id sidebar entry.
+                    crate::render::dedup_registry(&mut registry);
 
                     // Re-anchor focus to the same entity_id across renders so
                     // the user's selection stays put when the registry's
@@ -1161,7 +1168,7 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, status_msg: &str
     let color_fg = tui_color!(hex "#E9C940");
 
     let help_text = format!(
-        "^q Exit | ^r Sync | Space · leader (↑↓←→⏎ x) | ↑↓ Move | Enter Edit | {}",
+        "^q Exit | ^r Sync | Space · leader (↑↓←→⏎ x) | ↑↓ Move | Tab Panel | Enter Edit | {}",
         status_msg
     );
 

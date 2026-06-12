@@ -1,6 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(gap: &f32, children: &LazyChildren, _: &DioxusRenderContext) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::List { gap, children } = &node.kind else {
+        return rsx! {};
+    };
     let gap = *gap;
     rsx! {
         div {

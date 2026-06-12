@@ -1,3 +1,9 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Port
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
 //! Core traits for Holon datasources
 //!
 //! This crate provides the core traits for datasource operations:
@@ -31,8 +37,8 @@ pub use traits::{
     BlockDataSourceHelpers, BlockEntity, BlockMaintenanceHelpers, BlockOperations,
     BlockQueryHelpers, CompletionStateInfo, CrudOperations, DataSource, EventOrigin, FieldDelta,
     MarkOperations, MaybeSendSync, MoveOperations, OperationLogOperations, OperationProvider,
-    OperationRegistry, OperationResult, RenameOperations, Result, TaskEntity, TaskOperations,
-    TextOperations, UndoAction, UnknownOperationError,
+    OperationRegistry, OperationResult, OriginTaggedWrites, RenameOperations, Result, TaskEntity,
+    TaskOperations, TextOperations, UndoAction, UnknownOperationError,
 };
 pub use undo::UndoStack;
 

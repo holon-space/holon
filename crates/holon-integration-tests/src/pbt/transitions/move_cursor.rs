@@ -33,11 +33,7 @@ pub fn move_cursor_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
     state: &R,
 ) -> Validated<(), Reason> {
     let checks: Vec<Validated<(), Reason>> = vec![
-        check(R::atomic_editor_enabled(), Reason::AtomicEditorDisabled),
-        check(
-            state.enable_loro() || ReferenceState::real_editor_enabled(),
-            Reason::LoroRequiredForAtomicEditor,
-        ),
+        check(state.has_editor_buffer(), Reason::NoEditorBuffer),
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
         check(
@@ -89,6 +85,12 @@ pub fn move_cursor_apply_to_ref<R: RefEditorMirrorMut>(byte_position: usize, sta
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
 impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for MoveCursor {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutEditorMirrorWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // ADR 0009 asymmetry #1 (same as TypeChars/PressKey): editor primitives

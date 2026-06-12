@@ -258,11 +258,12 @@ mod tests {
             Box::pin(signal.to_signal_vec())
         }
 
-        fn on_select(&self, item: &PopupItem, _filter: &str) -> PopupResult {
+        fn on_select(&self, item: &PopupItem, _: &str) -> PopupResult {
             PopupResult::Execute {
                 entity_name: "test".into(),
                 op_name: item.id.clone(),
                 params: HashMap::new(),
+                strip_prefix_start: None,
             }
         }
     }

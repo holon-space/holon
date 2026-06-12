@@ -10,8 +10,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::local_caps::SutAppLifecycle;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
@@ -24,6 +24,12 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance}
 pub struct SimulateRestart;
 
 impl TransitionFactory<ReferenceState> for SimulateRestart {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutAppLifecycle,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: restart reopens the Turso DB from disk and waits on the
@@ -62,9 +68,9 @@ impl TransitionRef<ReferenceState> for SimulateRestart {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for SimulateRestart {
-    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
-        sut.apply_simulate_restart(state).await;
+impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for SimulateRestart {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.simulate_restart().await;
     }
 }
 

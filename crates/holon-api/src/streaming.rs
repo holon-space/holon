@@ -235,6 +235,7 @@ impl ChangeOrigin {
 /// Note: This generic type is not directly exposed to FRB. Use concrete type aliases like `BlockChange` or `MapChange`.
 /// flutter_rust_bridge:ignore
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// @c4 code
 pub enum Change<T> {
     /// Block was created
     Created { data: T, origin: ChangeOrigin },

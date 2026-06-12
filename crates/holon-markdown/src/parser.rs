@@ -33,7 +33,6 @@
 //! marker back.
 
 use anyhow::Result;
-use chrono::Utc;
 use holon_api::block::Block;
 use holon_api::types::{ContentType, SourceLanguage, Tags, TaskState};
 use holon_api::EntityUri;
@@ -144,7 +143,7 @@ pub fn parse_markdown_file(
     // a heading of depth `d` is the nearest entry whose depth is `< d`; if
     // the stack is empty, the document is the parent.
     let mut parent_stack: Vec<(u8, EntityUri)> = Vec::new();
-    let now_ms = Utc::now().timestamp_millis();
+    let now_ms = holon_api::clock::now_millis();
 
     for hi in 0..heading_indices.len() {
         let heading_idx = heading_indices[hi];
@@ -486,7 +485,10 @@ fn apply_frontmatter_to_document(doc: &mut Block, fm: &Frontmatter) {
     // `fm.aliases` is only populated when the dialect enables
     // `frontmatter_aliases`; otherwise aliases ride along inside `extra`.
     if !fm.aliases.is_empty() {
-        doc.set_property("aliases", holon_api::Value::String(to_json_string(&fm.aliases)));
+        doc.set_property(
+            "aliases",
+            holon_api::Value::String(to_json_string(&fm.aliases)),
+        );
     }
     if !fm.extra.is_empty() {
         let json = serde_json::to_string(&fm.extra).expect("YAML extras serialize to JSON");

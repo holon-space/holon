@@ -26,18 +26,20 @@ use crate::file_watcher::OrgFileWatcher;
 use crate::org_renderer::OrgRenderer;
 use crate::traits::{BlockReader, DocumentManager};
 use crate::OrgModeSyncProvider;
-use holon::core::datasource::{OperationProvider, SyncTokenStore, SyncableProvider};
+use holon::core::datasource::{
+    OperationProvider, OriginTaggedWrites, SyncTokenStore, SyncableProvider,
+};
 use holon::core::operation_wrapper::OperationWrapper;
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
-use holon::sync::event_bus::EventOrigin;
 use holon::sync::{LoroBlockOperations, LoroDocumentStore};
 use holon::type_registry::TypeRegistry;
 use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::EventOrigin;
 
 /// Signal that indicates the FileWatcher is ready to receive file change events.
 ///
@@ -488,7 +490,7 @@ impl BlockReader for CacheBlockReader {
 /// CDC automatically propagates them into the LiveData.
 pub struct LiveDocumentManager {
     live: Arc<holon::sync::LiveData<Block>>,
-    command_bus: Arc<dyn OperationProvider>,
+    command_bus: Arc<dyn OriginTaggedWrites>,
     /// Serializes find-then-create against itself so two concurrent
     /// `get_or_create_by_name_chain` calls for the same `(parent_id, title)`
     /// can't both miss the LiveData lookup and INSERT distinct UUIDs. The
@@ -500,7 +502,7 @@ pub struct LiveDocumentManager {
 impl LiveDocumentManager {
     /// Create a LiveDocumentManager backed by a materialized view over document blocks.
     pub async fn new(
-        command_bus: Arc<dyn OperationProvider>,
+        command_bus: Arc<dyn OriginTaggedWrites>,
         db_handle: holon::storage::DbHandle,
     ) -> anyhow::Result<Self> {
         let matview_mgr =
@@ -931,8 +933,8 @@ impl Module for OrgModeModule {
                     BlockSchemaModule.edge_fields(),
                 ));
 
-                let command_bus: Arc<dyn OperationProvider> =
-                    sql_ops.clone() as Arc<dyn OperationProvider>;
+                let command_bus: Arc<dyn OriginTaggedWrites> =
+                    sql_ops.clone() as Arc<dyn OriginTaggedWrites>;
 
                 // ============================================================
                 // PHASE 2: Create FileSyncController

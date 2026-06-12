@@ -5,10 +5,13 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use crate::core::datasource::{OperationProvider, OperationResult, Result};
 use crate::storage::DbHandle;
-use holon_api::{EntityName, OperationDescriptor, OperationParam, Region, TypeHint, Value};
+use holon_api::{
+    EntityName, NavigationOp, OperationDescriptor, OperationParam, Region, TypeHint, Value,
+};
 use holon_core::storage::types::StorageEntity;
 
 /// Navigation operations entity name
@@ -36,7 +39,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
-            name: "focus".to_string(),
+            name: NavigationOp::Focus.as_str().to_string(),
             display_name: "Focus".to_string(),
             description: "Navigate to focus on a specific block".to_string(),
             required_params: vec![
@@ -55,7 +58,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
-            name: "focus_pin".to_string(),
+            name: NavigationOp::FocusPin.as_str().to_string(),
             display_name: "Pin Block".to_string(),
             description: "Pin a block to a region (move-to-top dedup; right sidebar uses this)"
                 .to_string(),
@@ -75,7 +78,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
-            name: "close".to_string(),
+            name: NavigationOp::Close.as_str().to_string(),
             display_name: "Close Pin".to_string(),
             description: "Soft-close a navigation_history row by id (sidebar X button)".to_string(),
             required_params: vec![OperationParam {
@@ -91,7 +94,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
-            name: "go_back".to_string(),
+            name: NavigationOp::GoBack.as_str().to_string(),
             display_name: "Go Back".to_string(),
             description: "Navigate to previous view in history".to_string(),
             required_params: vec![region_param()],
@@ -103,7 +106,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
-            name: "go_forward".to_string(),
+            name: NavigationOp::GoForward.as_str().to_string(),
             display_name: "Go Forward".to_string(),
             description: "Navigate to next view in history".to_string(),
             required_params: vec![region_param()],
@@ -115,7 +118,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
-            name: "go_home".to_string(),
+            name: NavigationOp::GoHome.as_str().to_string(),
             display_name: "Go Home".to_string(),
             description: "Navigate to home view (no block focused)".to_string(),
             required_params: vec![region_param()],
@@ -511,7 +514,7 @@ impl OperationProvider for NavigationProvider {
         }
 
         // `close` takes only `history_id` (no region) — handle before region extraction.
-        if op_name == "close" {
+        if op_name == NavigationOp::Close.as_str() {
             let history_id = params
                 .get("history_id")
                 .and_then(|v| v.as_i64())
@@ -526,15 +529,15 @@ impl OperationProvider for NavigationProvider {
             .try_into()
             .map_err(|e: Box<dyn std::error::Error + Send + Sync>| e.to_string())?;
 
-        match op_name {
-            "focus" => {
+        match NavigationOp::from_str(op_name) {
+            Ok(NavigationOp::Focus) => {
                 let block_id = params.get("block_id").and_then(|v| match v {
                     Value::String(s) => Some(s.as_str()),
                     _ => None,
                 });
                 self.focus(region, block_id).await
             }
-            "focus_pin" => {
+            Ok(NavigationOp::FocusPin) => {
                 let block_id = params
                     .get("block_id")
                     .and_then(|v| match v {
@@ -544,11 +547,15 @@ impl OperationProvider for NavigationProvider {
                     .ok_or_else(|| "Missing required parameter 'block_id'".to_string())?;
                 self.focus_pin(region, block_id).await
             }
-            "go_back" => self.go_back(region).await,
-            "go_forward" => self.go_forward(region).await,
-            "go_home" => self.go_home(region).await,
-            other => Err(format!(
-                "NavigationProvider: unknown operation '{other}' for entity '{ENTITY_NAME}'"
+            Ok(NavigationOp::GoBack) => self.go_back(region).await,
+            Ok(NavigationOp::GoForward) => self.go_forward(region).await,
+            Ok(NavigationOp::GoHome) => self.go_home(region).await,
+            // `close` is dispatched before region extraction above.
+            Ok(NavigationOp::Close) => {
+                unreachable!("close is handled before region extraction")
+            }
+            Err(_) => Err(format!(
+                "NavigationProvider: unknown operation '{op_name}' for entity '{ENTITY_NAME}'"
             )
             .into()),
         }

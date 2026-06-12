@@ -1,0 +1,88 @@
+{
+  "name": "gpui_ui_pbt_sim_captured",
+  "description": "Auto-captured from a panicking proptest case. Rename + move into the slice's fixtures_dir to lock it.",
+  "environment": {
+    "wiring": {
+      "storage_adapters": [
+        "Loro",
+        "Org",
+        "Markdown",
+        "Turso"
+      ],
+      "sync_adapters": [
+        "Todoist"
+      ],
+      "actors": [
+        "UI",
+        "MCPServer",
+        "ActionEngine"
+      ]
+    },
+    "env_flags": {
+      "PBT_MUTABLE_TEXT": "1"
+    }
+  },
+  "initial_state": null,
+  "transitions": [
+    {
+      "WriteOrgFile": {
+        "filename": "__281494.org",
+        "blocks": [
+          {
+            "id": "block:--9qpqbyfb--9-rdu1ts--n3",
+            "parent_id": "block:gen-placeholder",
+            "content": "Q8",
+            "content_type": "text",
+            "source_language": null,
+            "source_name": null,
+            "properties": {
+              "ID": "--9qpqbyfb--9-rdu1ts--n3"
+            },
+            "marks": null,
+            "created_at": 1782126636023,
+            "updated_at": 1782126636023
+          }
+        ],
+        "keyword_set": null
+      }
+    },
+    {
+      "StartApp": {
+        "wait_for_ready": true,
+        "enable_fake_mcp": true,
+        "enable_loro": true
+      }
+    },
+    {
+      "NavigateFocus": {
+        "region": "main",
+        "block_id": "block:ref-doc-0"
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block:--9qpqbyfb--9-rdu1ts--n3",
+        "position": 1
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block::split-0",
+        "position": 0
+      }
+    },
+    {
+      "SplitBlock": {
+        "block_id": "block::split-1",
+        "position": 0
+      }
+    },
+    {
+      "PressKey": {
+        "chord": [
+          "backspace"
+        ]
+      }
+    }
+  ]
+}

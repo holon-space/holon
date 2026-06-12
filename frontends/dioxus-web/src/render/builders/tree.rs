@@ -1,6 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(children: &LazyChildren, _: &DioxusRenderContext) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Tree { children } = &node.kind else {
+        return rsx! {};
+    };
     rsx! {
         div {
             style: "display: flex; flex-direction: column; gap: 0px;",

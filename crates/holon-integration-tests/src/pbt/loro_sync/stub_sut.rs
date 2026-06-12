@@ -12,7 +12,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon::core::datasource::{
-    OperationDescriptor, OperationProvider, OperationResult, Result as DatasourceResult,
+    OperationDescriptor, OperationProvider, OperationResult, OriginTaggedWrites,
+    Result as DatasourceResult,
 };
 use holon::storage::types::StorageEntity;
 use holon::sync::event_bus::EventOrigin;
@@ -78,7 +79,7 @@ impl StubSut {
 
     /// (Re)start the `LoroSyncController`. Used by `Restart` and `OfflineMerge`.
     async fn start_controller(&mut self) -> Result<()> {
-        let command_bus: Arc<dyn OperationProvider> = self.stub_ops.clone();
+        let command_bus: Arc<dyn OriginTaggedWrites> = self.stub_ops.clone();
         let sink_reader: Arc<dyn holon::sync::SinkReader> = self.stub_ops.clone();
         let projection = Arc::new(holon::sync::LoroProjection::from_storage(
             self.doc_store.clone(),
@@ -375,6 +376,21 @@ impl OperationProvider for StubOperationProvider {
     ) -> DatasourceResult<OperationResult> {
         panic!(
             "StubOperationProvider::execute_operation is not implemented; use execute_batch_with_origin"
+        );
+    }
+}
+
+#[async_trait]
+impl OriginTaggedWrites for StubOperationProvider {
+    async fn execute_operation_with_origin(
+        &self,
+        _: &EntityName,
+        _: &str,
+        _: StorageEntity,
+        _: EventOrigin,
+    ) -> DatasourceResult<OperationResult> {
+        panic!(
+            "StubOperationProvider::execute_operation_with_origin is not implemented; use execute_batch_with_origin"
         );
     }
 

@@ -1,15 +1,9 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn build(ba: BA<'_>) -> Element {
-    if let Some(child_expr) = ba.args.positional_exprs.first() {
-        (ba.interpret)(child_expr, ba.ctx)
-    } else if let Some(tmpl) = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"))
-    {
-        (ba.interpret)(tmpl, ba.ctx)
-    } else {
-        rsx! {}
-    }
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Focusable { child, .. } = &node.kind else {
+        return rsx! {};
+    };
+    rsx! { RenderNode { node: (**child).clone() } }
 }

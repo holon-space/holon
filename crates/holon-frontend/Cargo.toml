@@ -6,6 +6,10 @@ publish = false
 
 [features]
 default = []
+# PBT SUT capability traits hosted here per the cap home-rule (a cap lives in the
+# crate that owns the types it names, e.g. `NavDirection`). Gated so production
+# builds never pull the test vocabulary. See docs/Testing/PbtCompositionBacklog.md.
+pbt = ["dep:holon-pbt-core"]
 heap-profile = ["dep:dhat", "dep:ctrlc", "dep:libc"]
 chrome-trace = ["dep:tracing-chrome", "dep:chrono"]
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-stdout"]
@@ -24,6 +28,7 @@ tracing.workspace = true
 holon-core.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
+holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 async-trait.workspace = true
 futures.workspace = true
 futures-signals.workspace = true
@@ -59,3 +64,4 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true

@@ -32,10 +32,7 @@ use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
 /// flush window for offscreen virtualized list items
 /// (`wait_for_entity_bounds` polls for ~200 ms before issuing a
 /// scroll-into-view RPC, then keeps polling).
-pub async fn apply_focus_editable_text_to_sut<S: SutLayout + SutDriver>(
-    sut: &mut S,
-    id: &EntityUri,
-) {
+pub async fn apply_focus_editable_text_to_sut<S: SutLayout + SutDriver>(sut: &S, id: &EntityUri) {
     sut.wait_for_bounds(id, Duration::from_secs(5))
         .await
         .unwrap_or_else(|e| panic!("[FocusEditableText] bounds unavailable for {id}: {e}"));
@@ -52,6 +49,12 @@ pub struct FocusEditableText {
 }
 
 impl TransitionFactory<ReferenceState> for FocusEditableText {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutFocusWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // ADR 0009 asymmetry #1 (same as TypeChars/PressKey): editor primitives
@@ -119,19 +122,7 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
             .collect();
 
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(
-                ReferenceState::atomic_editor_enabled(),
-                Reason::AtomicEditorDisabled,
-            ),
-            // See `press_key.rs` — atomic editor primitives need a Loro
-            // path to carry per-keystroke writes; SqlOnly has none — UNLESS a
-            // real editor (`InputState`) is driving, which carries keystrokes
-            // itself and persists on blur via `set_field` (see
-            // `ReferenceState::real_editor_enabled`).
-            check(
-                state.enable_loro() || ReferenceState::real_editor_enabled(),
-                Reason::LoroRequiredForAtomicEditor,
-            ),
+            check(state.has_editor_buffer(), Reason::NoEditorBuffer),
             check(state.action.app_started, Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
             // Block-interaction transitions need the block to render as an

@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use futures_signals::signal_map::{MapDiff, SignalMapExt};
 
-use holon_core::storage::types::Result;
-use holon_api::live_data::LiveData;
 use holon_api::block::Block;
 use holon_api::link_parser::{Link, extract_links};
+use holon_api::live_data::LiveData;
+use holon_core::storage::types::Result;
 
 /// Write side of the block-link index. Replaces or drops the persisted links
 /// of one source block.

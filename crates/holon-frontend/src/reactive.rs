@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -22,7 +23,7 @@ use futures_signals::signal_vec::{SignalVec, SignalVecExt};
 use holon_api::render_types::RenderExpr;
 use holon_api::streaming::UiEvent;
 use holon_api::widget_spec::{DataRow, EnrichedRow};
-use holon_api::{ptr_identity, EntityUri, QueryLanguage, ReactiveRowProvider};
+use holon_api::{ptr_identity, EntityUri, NavigationOp, QueryLanguage, ReactiveRowProvider};
 
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::render_context::RenderContext;
@@ -124,6 +125,28 @@ pub trait BuilderServices: Send + Sync {
 
     /// Look up widget state by block ID.
     fn widget_state(&self, id: &str) -> WidgetState;
+
+    /// Look up the *explicitly stored* widget state, or `None` when the user
+    /// never toggled it. The default treats every widget as explicit (i.e.
+    /// preserves the legacy open-by-default semantics); the real session-backed
+    /// impl overrides it so [`Self::drawer_open`] can default overlay drawers
+    /// closed.
+    fn widget_state_explicit(&self, id: &str) -> Option<WidgetState> {
+        Some(self.widget_state(id))
+    }
+
+    /// Effective open state for a drawer in the given mode.
+    ///
+    /// An explicit user setting always wins. With no stored state, the default
+    /// is mode-dependent: `Shrink` drawers (desktop sidebars that reserve width)
+    /// start open, while `Overlay` drawers (narrow/phone layouts that float over
+    /// the main panel) start closed — an open-by-default overlay would obscure
+    /// the content on first paint.
+    fn drawer_open(&self, id: &str, mode: crate::view_model::DrawerMode) -> bool {
+        self.widget_state_explicit(id)
+            .map(|s| s.open)
+            .unwrap_or_else(|| mode.default_open())
+    }
 
     /// Set a widget's `open` field. Used by self-rendering toggle widgets
     /// (`drawer`, `collapse_toggle`) so the click handler doesn't have to
@@ -1905,6 +1928,10 @@ impl BuilderServices for ReactiveEngine {
         self.session.widget_state(id)
     }
 
+    fn widget_state_explicit(&self, id: &str) -> Option<WidgetState> {
+        self.session.widget_state_explicit(id)
+    }
+
     fn set_widget_open(&self, id: &str, open: bool) {
         self.session.set_widget_open(id, open);
     }
@@ -2347,12 +2374,12 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
     if intent.entity_name != "navigation" {
         return;
     }
-    match intent.op_name.as_str() {
+    match NavigationOp::from_str(&intent.op_name) {
         // `navigation.focus` (sidebar / page navigation) has no CDC path back
         // into `UiState`, so mirror it here. (Editor focus is no longer a
         // dispatched op — clicks call `set_focus` directly and split/join set
         // it from their op result; see ADR 0010.)
-        "focus" => {
+        Ok(NavigationOp::Focus) => {
             let block_id = intent
                 .params
                 .get("block_id")
@@ -2363,11 +2390,18 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
             ui_state.set_focus(block_id);
         }
         // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for value-fn graph.
-        "go_home" => ui_state.set_focus(None),
-        // `go_back` / `go_forward` would require reading
-        // `navigation_history` to know the target — leave them alone
-        // until the backend grows a synchronous "current focus" accessor.
-        _ => {}
+        Ok(NavigationOp::GoHome) => ui_state.set_focus(None),
+        // `focus_pin` / `close` / `go_back` / `go_forward` would require reading
+        // `navigation_history` to know the target — leave them alone until the
+        // backend grows a synchronous "current focus" accessor. `Err` is a
+        // non-navigation op (the `entity_name` guard above keeps it out here).
+        Ok(
+            NavigationOp::FocusPin
+            | NavigationOp::Close
+            | NavigationOp::GoBack
+            | NavigationOp::GoForward,
+        )
+        | Err(_) => {}
     }
 }
 

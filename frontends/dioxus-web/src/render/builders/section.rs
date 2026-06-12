@@ -1,6 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(title: &String, children: &LazyChildren, _: &DioxusRenderContext) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Section { title, children } = &node.kind else {
+        return rsx! {};
+    };
     let title = title.clone();
     rsx! {
         div {

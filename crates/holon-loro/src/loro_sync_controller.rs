@@ -36,10 +36,12 @@ use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
 
-use crate::loro_backend::{SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled};
-use holon_core::OperationProvider;
 use crate::LoroDocumentStore;
+use crate::loro_backend::{
+    SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled,
+};
 use crate::sync_base_store::{BaseKey, BaseStore};
+use holon_core::OriginTaggedWrites;
 
 /// Filename of the sidecar file that persists the sync watermark next to the
 /// `.loro` snapshot. One file per `LoroDocumentStore`.
@@ -266,7 +268,7 @@ impl LoroProjection {
     pub fn new(
         doc_store: Arc<RwLock<LoroDocumentStore>>,
         last_synced: Arc<StdMutex<Frontiers>>,
-        command_bus: Arc<dyn OperationProvider>,
+        command_bus: Arc<dyn OriginTaggedWrites>,
         sink_reader: Arc<dyn SinkReader>,
         sidecar_path: PathBuf,
     ) -> Self {
@@ -313,7 +315,7 @@ impl LoroProjection {
     /// last session (e.g. org-scan `create_in_tree` blocks).
     pub fn from_storage(
         doc_store: Arc<RwLock<LoroDocumentStore>>,
-        command_bus: Arc<dyn OperationProvider>,
+        command_bus: Arc<dyn OriginTaggedWrites>,
         sink_reader: Arc<dyn SinkReader>,
         storage_dir: &std::path::Path,
     ) -> Self {
@@ -718,7 +720,7 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
         Value::String(block.content_type.to_string()),
     );
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = holon_api::clock::now_millis();
     let created = if block.created_at > 0 {
         block.created_at
     } else {
@@ -755,7 +757,7 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
         let arr: Vec<Value> = block
             .requires
             .iter()
-            .map(|r| Value::String(r.clone()))
+            .map(|r| Value::String(r.to_string()))
             .collect();
         params.insert("requires".into(), Value::Array(arr));
     }
@@ -816,7 +818,7 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     let mut params = HashMap::new();
     params.insert("id".into(), Value::String(new.id.to_string()));
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = holon_api::clock::now_millis();
     params.insert("updated_at".into(), Value::Integer(now));
 
     if old.parent_id != new.parent_id {
@@ -839,7 +841,7 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
         let arr: Vec<Value> = new
             .requires
             .iter()
-            .map(|r| Value::String(r.clone()))
+            .map(|r| Value::String(r.to_string()))
             .collect();
         params.insert("requires".into(), Value::Array(arr));
     }

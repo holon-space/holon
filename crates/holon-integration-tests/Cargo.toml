@@ -43,8 +43,10 @@ tokio-console = ["dep:console-subscriber", "otel-testing", "tokio/tracing"]
 pbt = [
     "test-infra",
     "otel-testing",
+    "holon-frontend/pbt",
     "dep:holon-layout-testing",
     "dep:holon-pbt-core",
+    "dep:holon-macros",
     "dep:holon-mcp",
     "dep:proptest",
     "dep:proptest-state-machine",
@@ -88,6 +90,7 @@ xcap = { git = "https://github.com/nightscape/xcap", branch = "feat/macos-offscr
 signal-hook = "0.3"
 holon-layout-testing = { path = "../holon-layout-testing", optional = true }
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
+holon-macros = { workspace = true, optional = true }
 holon-block-roundtrip-testing = { workspace = true, optional = true }
 holon-mcp = { path = "../../frontends/mcp", optional = true }
 proptest = { workspace = true, optional = true }

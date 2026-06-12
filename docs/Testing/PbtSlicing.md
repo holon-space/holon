@@ -1,5 +1,13 @@
 # PBT Slicing — Capability-Composed Property Tests
 
+> **PARTIALLY SUPERSEDED (2026-06-14) by [`PbtCompositionDesign.md`](PbtCompositionDesign.md).**
+> The capability/selection *concepts* here remain valid, but several concrete
+> details have drifted from code (§4/§12/§13 reference `MemBlockStore` /
+> `MemEditorMirror` that do not exist; `EditorPureSut` just wraps `EditorPureRef`).
+> For the trivial-arbitrary-slice mechanism (capability typemap, omnipotent Ref +
+> negative selection, async object-safety, migration plan), follow the new design.
+> Trust code over this doc where they disagree.
+
 **Audience**: a Claude session asked to add or refactor a property-based test in this repo. Read this *before* writing a new PBT, and prefer reusing the abstractions described here over adding a monolithic per-test ref/SUT struct.
 
 **One-line model**: there is **one** set of transitions, **one** registry of invariants, and **one** runner. A *slice* is a small product struct that composes capability impls; the slice picks which transitions and invariants it can run purely by which capability traits it satisfies. The wide E2E PBT and the fast narrow slices share all of it.
@@ -126,7 +134,6 @@ The macro assumes an `E2ESut<V>`-shaped SUT (`new(runtime)` + `apply_transition_
 | Slice | SUT | Renderer | Storage | Targeted bug class |
 |---|---|---|---|---|
 | `editor_pure_pbt` | `EditorPureSut` | none | in-memory | pure editor state-machine |
-| `storage_consistency_pbt` | `E2ESut<SqlOnly>` | none | Turso+Loro | end-to-end storage consistency |
 | `cdc_delivery_pbt` | `E2ESut<SqlOnly>` | none | Turso+Loro | matview→CDC→watch delivery |
 | `general_e2e_pbt` | `E2ESut<Full>` | ReactiveEngine (headless) | Turso+Loro | full stack, no window |
 | `gpui_ui_pbt` | `E2ESut<Full>` | real GPUI window | Turso+Loro | full stack + geometry |
@@ -211,7 +218,7 @@ The current system above is complete for the headless and GPUI suites. The remai
 - **Bespoke PBTs not yet folded in**: `sync_controller_mutation_pbt` (could become a SUT over `SutOrgFileWrite + SutSqlProjection`) and the backend-vs-reference family (`loro_backend_pbt`, `turso_pbt_tests`, Todoist) — evaluate value before migrating. Genuinely out of scope: `petri_e2e_pbt`, `holon-engine` PBT, `inline_marks_proptest`, `identity_operations`, `turso_ivm_bug_proptest`.
 - **Narrow state-machine PBTs — evaluated, kept as-is (do NOT fold into `declare_pbt_slice!`).** `editor_pure_pbt` and `loro_sync_controller_pbt` use their own minimal `ReferenceStateMachine` (`EditorPureRef`/`PureTransition`; `LoroSyncReference` over `GroupState`/`GroupTransition`) with `prop_state_machine!` directly, not the macro. This is correct, not debt:
   - `declare_pbt_slice!`/`component_pbt!` is hardwired to `ReferenceState`/`E2ETransition`/`E2ESut`. `editor_pure` would gain a real storage backend it doesn't want (it's a storage-free, ~5200× faster fuzz of the editor `_apply_to_ref` cap fns — the speed *is* the value), and `loro_sync` would need its CRDT group model rewritten into the block model (not even semantically possible).
-  - They already adopt the architecture where it helps: `editor_pure` reuses the shared transition structs, `_cap` fns, and `TransitionFactory`/`weighted_arm` generation; both check areas the wide PBT *also* covers (structural integrity ≈ `inv-no-ln-blocks`; multi-peer sync via `AddPeer`/`PeerEdit`/`SyncWithPeer` in `storage_consistency_pbt`) but faster and in isolation, with extra checks the wide PBT lacks (cursor-within-text-len; CRDT convergence S1–S3/C1–C3).
+  - They already adopt the architecture where it helps: `editor_pure` reuses the shared transition structs, `_cap` fns, and `TransitionFactory`/`weighted_arm` generation; both check areas the wide PBT *also* covers (structural integrity ≈ `inv-no-ln-blocks`; multi-peer sync via `AddPeer`/`PeerEdit`/`SyncWithPeer` in the convergence harness `subsystem_convergence_pbt`) but faster and in isolation, with extra checks the wide PBT lacks (cursor-within-text-len; CRDT convergence S1–S3/C1–C3).
   - They are a distinct *tier* (narrow, fast, sub-component) in the speed pyramid, not non-adopters of the slice schema. Folding would trade their reason for existing (speed + isolation) for nothing.
   - *Minor follow-up (not done):* `editor_pure`'s two invariants are inline asserts; `inv-tree-structural-integrity` has a registry sibling (`inv-no-ln-blocks`) but `inv-tree-cursor-within-text-len` appears to have none — so its "also fires in the wide PBT" header claim is partly stale. Either add a cursor-bounds body to the registry or correct the comment.
 

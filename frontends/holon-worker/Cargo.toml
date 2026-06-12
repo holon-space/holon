@@ -1,7 +1,14 @@
 # Out-of-workspace crate: targets wasm32-wasip1-threads via `napi build`.
 # Intentionally declares its own empty [workspace] to opt out of the holon
 # root workspace. See ~/.claude/plans/nifty-bouncing-ladybug.md H3.
+#
+# resolver = "2" is REQUIRED: with the default resolver (v1) an empty workspace
+# unifies features across all targets, so `holon`'s native-only
+# `[target.'cfg(not(target_arch = "wasm32"))']` deps (iroh, reqwest → tokio
+# "net"/"rt-multi-thread") leak into the wasm build and trip tokio's
+# `compile_error!("Only features sync,macros,io-util,rt,time … on wasm")`.
 [workspace]
+resolver = "2"
 
 [package]
 name = "holon-worker"
@@ -27,7 +34,10 @@ tokio = { version = "1", default-features = false, features = ["rt", "time", "ma
 # Turso database — same fork/branch as holon's root workspace. Only needed
 # when the `browser` feature is on, but we pull it in unconditionally so
 # `cargo check` (native) covers the shim as well.
-turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fs", "json", "uuid", "time", "series", "encryption"] }
+# NOTE: `encryption` is intentionally omitted — it pulls rustls→ring, whose C
+# crypto can't compile for wasm32-wasi without a wasi-sdk clang sysroot. The
+# worker runs an in-memory DB (`:memory:`), so at-rest encryption is moot.
+turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
 anyhow = "1"
 parking_lot = "0.12"
 tracing = "0.1"
@@ -46,6 +56,30 @@ holon = { path = "../../crates/holon", default-features = false }
 # heap-profile / chrome-trace / otel features that pull native-only transitive
 # deps. The wasi cfg gates in holon-frontend/Cargo.toml strip the rest.
 holon-frontend = { path = "../../crates/holon-frontend", default-features = false }
+
+# The unmaintained `symlink` crate (pulled by tracing-appender ← turso_sdk_kit)
+# gates its functions to unix/windows/redox only, so it fails to compile on
+# wasm32-wasip1-threads. Replace it with a wasi-aware drop-in (identical
+# behavior on native; errors at runtime on wasm where symlinks are unsupported).
+[patch.crates-io]
+symlink = { path = "patches/symlink" }
+
+# Point the turso git dependency at the local checkout (git source, branch
+# holon-wasm-load-extension) so the wasm fix in sdk-kit/src/rsapi.rs (gate
+# `load_extension` off wasm) takes effect. Using a git (not path) source keeps
+# turso's own workspace-hack git-sourced so it doesn't collide with holon's
+# path-sourced workspace-hack. All turso crates are redirected together so the
+# graph stays coherent. Drop this block once the fix lands upstream.
+[patch."https://github.com/nightscape/turso.git"]
+turso = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_core = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_ext = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_parser = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_sdk_kit_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_sync_engine = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso_sync_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
 
 [build-dependencies]
 napi-build = "2.3.1"

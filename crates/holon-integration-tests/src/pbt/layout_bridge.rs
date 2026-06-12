@@ -21,10 +21,10 @@
 use std::sync::OnceLock;
 
 use holon_layout_testing::blueprint::{BlockHandle, DrawerHandle};
-use holon_layout_testing::{Clickable, LayoutRefState, LiveBlockSink};
+use holon_layout_testing::{Clickable, LayoutRefState};
 
 use super::reference_state::ReferenceState;
-use super::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutBlockInteract;
 
 /// Default-layout drawer handles. The integration-tests PBT always boots the
 /// default layout, which renders two sidebars (`block:default-left-sidebar`
@@ -110,31 +110,28 @@ impl LayoutRefState for ReferenceState {
     }
 }
 
-/// Wrap `&mut S` (any `S: SutHandle`) so it satisfies the capability
-/// traits the shared `apply_to_sut` bodies require. Construct at the
+/// Wrap `&mut S` (any `S: SutBlockInteract`) so it satisfies the `Clickable`
+/// capability the shared `apply_to_sut` bodies require. Construct at the
 /// dispatch site: `let mut sut = SutClickAdapter(handle); let mut
-/// layout_sut = LayoutSut::new(&mut sut);`. Generic over `S` since
-/// `SutHandle` is no longer `dyn`-dispatched (concrete-`S` dispatch).
-pub struct SutClickAdapter<'a, S: SutHandle>(pub &'a mut S);
+/// layout_sut = LayoutSut::new(&mut sut);`. Bounds the fine-grained
+/// `SutBlockInteract` cap (where `click_at_element` now lives) rather than the
+/// whole `SutHandle` bundle.
+pub struct SutClickAdapter<'a, S: SutBlockInteract>(pub &'a mut S);
 
-impl<S: SutHandle> Clickable for SutClickAdapter<'_, S> {
+impl<S: SutBlockInteract> Clickable for SutClickAdapter<'_, S> {
     fn click_at_element(&mut self, element_id: &str) {
-        // The shared `apply_to_sut` bodies are async; the SutHandle method is
-        // too. We're already inside a tokio runtime (the integration-tests
-        // PBT runner uses `runtime.block_on`), so `futures::executor::block_on`
-        // would `EnterError`. `block_in_place` releases the worker so we can
-        // call `Handle::current().block_on` synchronously without deadlock.
+        // The shared `apply_to_sut` bodies are async; the cap method is too.
+        // We're already inside a tokio runtime (the integration-tests PBT runner
+        // uses `runtime.block_on`), so `futures::executor::block_on` would
+        // `EnterError`. `block_in_place` releases the worker so we can call
+        // `Handle::current().block_on` synchronously without deadlock.
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.0.apply_click_at_element(element_id))
+            tokio::runtime::Handle::current().block_on(self.0.click_at_element(element_id))
         });
     }
 }
 
-impl<S: SutHandle> LiveBlockSink for SutClickAdapter<'_, S> {
-    fn deliver_block_content_loaded(&mut self, block_id: &str) {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.0.apply_deliver_block_content_loaded(block_id))
-        });
-    }
-}
+// `LiveBlockSink` impl deleted: `DeliverBlockContent` is unreachable in this PBT
+// (generator + preconditions both hard-fail), so the live-block-delivery axis is
+// dead. `DeliverBlockContent::apply_to_sut` now panics directly instead of
+// routing through this adapter.

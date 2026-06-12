@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Engine
+//! Pattern: Interpreter
+//! @c4 uses holon-expr "compiled Rhai expressions" "Rust"
+//!
+//! Standalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF ranking, and what-if analysis.
+
 pub mod arc;
 pub mod display;
 pub mod engine;

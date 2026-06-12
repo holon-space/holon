@@ -184,6 +184,10 @@ impl GeometryProvider for BoundsRegistry {
     fn generation(&self) -> u64 {
         self.committed_generation()
     }
+
+    fn clone_box(&self) -> Box<dyn GeometryProvider> {
+        Box::new(self.clone())
+    }
 }
 
 // Thread-local render-path stack used by `BoundsTracker` / `TransparentTracker`

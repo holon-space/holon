@@ -22,6 +22,7 @@ use crate::Value;
 ///
 /// flutter_rust_bridge:non_opaque
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// @c4 code
 pub enum EntityName {
     Named(String),
     Wildcard,
@@ -273,6 +274,75 @@ impl FromStr for QueryLanguage {
             "holon_gql" => Ok(QueryLanguage::HolonGql),
             "holon_sql" => Ok(QueryLanguage::HolonSql),
             other => anyhow::bail!("Not a query language: {other:?}"),
+        }
+    }
+}
+
+// =============================================================================
+// NavigationOp
+// =============================================================================
+
+/// Operations understood by the `navigation` entity provider. Single source of
+/// truth for the navigation op-name vocabulary: backend dispatch
+/// (`NavigationProvider` / `InMemoryNavigationProvider`) and the frontend
+/// focus-mirror both parse `OperationIntent.op_name` into this enum, so adding
+/// a navigation op becomes a compile error until every consumer handles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NavigationOp {
+    /// Move focus to a block (or clear it when no `block_id` is supplied).
+    Focus,
+    /// Focus a block and pin it into navigation history.
+    FocusPin,
+    /// Soft-close a `navigation_history` row by id (sidebar X button).
+    Close,
+    /// Step backward in navigation history.
+    GoBack,
+    /// Step forward in navigation history.
+    GoForward,
+    /// Return to the navigation root (clears focus).
+    GoHome,
+}
+
+impl NavigationOp {
+    pub const ALL: &[NavigationOp] = &[
+        NavigationOp::Focus,
+        NavigationOp::FocusPin,
+        NavigationOp::Close,
+        NavigationOp::GoBack,
+        NavigationOp::GoForward,
+        NavigationOp::GoHome,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NavigationOp::Focus => "focus",
+            NavigationOp::FocusPin => "focus_pin",
+            NavigationOp::Close => "close",
+            NavigationOp::GoBack => "go_back",
+            NavigationOp::GoForward => "go_forward",
+            NavigationOp::GoHome => "go_home",
+        }
+    }
+}
+
+impl fmt::Display for NavigationOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for NavigationOp {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "focus" => Ok(NavigationOp::Focus),
+            "focus_pin" => Ok(NavigationOp::FocusPin),
+            "close" => Ok(NavigationOp::Close),
+            "go_back" => Ok(NavigationOp::GoBack),
+            "go_forward" => Ok(NavigationOp::GoForward),
+            "go_home" => Ok(NavigationOp::GoHome),
+            other => anyhow::bail!("Not a navigation op: {other:?}"),
         }
     }
 }

@@ -1,3 +1,9 @@
+//! @c4 container
+//! @c4 layer UI
+//! Pattern: MVVM View
+//!
+//! GPUI desktop frontend (primary; mobile via gpui-mobile feature) — the MVVM **View** layer; its render functions build native GPUI widgets from holon-frontend's `ReactiveViewModel`.
+
 #![recursion_limit = "1024"]
 
 pub mod di;
@@ -23,7 +29,7 @@ use holon_api::EntityName;
 use holon_frontend::input::{InputAction, WidgetInput};
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_frontend::theme::ThemeRegistry;
-use holon_frontend::view_model::ViewModel;
+use holon_frontend::view_model::{DrawerMode, ViewModel};
 use holon_frontend::{FrontendSession, ReactiveViewModel, RenderContext};
 
 use entity_view_registry::LocalEntityScope;
@@ -460,11 +466,13 @@ impl Render for HolonApp {
         };
         let text = theme.foreground;
 
-        // Drawer IDs from static snapshot (simpler than walking reactive tree)
-        let drawer_ids = view_model.collect_drawer_ids();
-        let left_drawer_id = drawer_ids.first().cloned();
-        let right_drawer_id = if drawer_ids.len() > 1 {
-            drawer_ids.last().cloned()
+        // Drawer (id, mode) pairs from static snapshot (simpler than walking
+        // reactive tree). Mode is needed so the toggle reads the same mode-aware
+        // default open state the drawer renders with.
+        let drawers = view_model.collect_drawers();
+        let left_drawer = drawers.first().cloned();
+        let right_drawer = if drawers.len() > 1 {
+            drawers.last().cloned()
         } else {
             None
         };
@@ -550,10 +558,10 @@ impl Render for HolonApp {
                             .hover(|s| s.bg(gpui::rgba(0x00000010)))
                             .child("☰")
                             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                if let Some(ref bid) = left_drawer_id {
+                                if let Some((ref bid, mode)) = left_drawer {
                                     left_model.update(cx, |m, cx| {
-                                        let ws = m.session.widget_state(bid);
-                                        m.session.set_widget_open(bid, !ws.open);
+                                        let current = m.session.drawer_open(bid, mode);
+                                        m.session.set_widget_open(bid, !current);
                                         m.rebuild(cx);
                                         cx.notify();
                                     });
@@ -584,10 +592,10 @@ impl Render for HolonApp {
                             .hover(|s| s.bg(gpui::rgba(0x00000010)))
                             .child("◧")
                             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                if let Some(ref bid) = right_drawer_id {
+                                if let Some((ref bid, mode)) = right_drawer {
                                     right_model.update(cx, |m, cx| {
-                                        let ws = m.session.widget_state(bid);
-                                        m.session.set_widget_open(bid, !ws.open);
+                                        let current = m.session.drawer_open(bid, mode);
+                                        m.session.set_widget_open(bid, !current);
                                         m.rebuild(cx);
                                         cx.notify();
                                     });

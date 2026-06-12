@@ -22,6 +22,7 @@
 
 use std::collections::BTreeSet;
 
+use proptest::strategy::{BoxedStrategy, Just, Strategy, Union};
 use serde::{Deserialize, Serialize};
 
 /// A storage adapter: authoritative state is local; events are reliable.
@@ -286,6 +287,199 @@ impl RequiredWiring {
             RequiredWiring::AnyOf(reqs) => reqs.iter().any(|r| r.satisfied_by(wiring)),
         }
     }
+}
+
+// ── PBT generator (ADR 0007 item 5) ─────────────────────────────────
+//
+// Promoted out of `#[cfg(test)]` so the faithful convergence harness
+// (`subsystem_convergence_pbt`) can generate a shrinkable, validity-filtered
+// manifest as the `init_state` of a `prop_state_machine!`. The harness drives
+// the real booted `E2ESut` from whatever wiring this yields, and on failure
+// the manifest shrinks toward the minimal causal subsystem set.
+
+/// Probability that a query-capable (expensive) storage adapter — today only
+/// [`StorageAdapter::Turso`] — is included in a generated manifest. Turso boots
+/// the full `BackendEngine`; every other storage adapter runs on the cheap
+/// in-memory Loro backend. Biasing this low keeps most generated cases fast
+/// while still exercising Turso (and shrinking it *out* first, since a weighted
+/// bool shrinks `true → false`). The bias is explicit, not incidental: a
+/// uniform subset would include Turso in ~half of all draws.
+const QUERY_ADAPTER_INCLUSION_PROB: f64 = 0.15;
+
+/// The toggleable adapter/actor universe a generated [`Wiring`] may draw from.
+///
+/// **Default = headless-faithful scope:** storage `{Loro, Org, Turso}`, sync
+/// `{}`, actors `{MCPServer, ActionEngine}`. Deliberately **no [`Actor::UI`]**
+/// (whether a headless `E2ESut` honestly executes editor transitions is
+/// unverified, so editor transitions must not generate here yet) and no
+/// `Markdown`/`GCal`/`GMail` (the SUT only faithfully backs Turso-vs-LoroMemory).
+///
+/// Overridable via `HOLON_PBT_WIRING_AXES`, three `;`-separated comma lists
+/// `"storage;sync;actors"` — e.g. `"Loro,Turso,Org;Todoist;MCPServer,ActionEngine"`
+/// or `"Loro,Turso;;"` to scope a run to two storage axes and no sync/actors.
+/// **Fail-loud on a typo** (unknown token or wrong section count panics).
+pub fn wiring_axes() -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<Actor>) {
+    match std::env::var("HOLON_PBT_WIRING_AXES") {
+        Err(_) => (
+            vec![
+                StorageAdapter::Loro,
+                StorageAdapter::Org,
+                StorageAdapter::Turso,
+            ],
+            vec![],
+            vec![Actor::MCPServer, Actor::ActionEngine],
+        ),
+        Ok(spec) => parse_wiring_axes(&spec),
+    }
+}
+
+/// Parse the `HOLON_PBT_WIRING_AXES` override. Fail-loud on a malformed spec.
+fn parse_wiring_axes(spec: &str) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<Actor>) {
+    let sections: Vec<&str> = spec.split(';').collect();
+    assert!(
+        sections.len() == 3,
+        "HOLON_PBT_WIRING_AXES must have exactly 3 ';'-separated sections \
+         (storage;sync;actors), got {} in {spec:?}",
+        sections.len()
+    );
+    (
+        parse_axis(sections[0], parse_storage_adapter, "storage adapter"),
+        parse_axis(sections[1], parse_sync_adapter, "sync adapter"),
+        parse_axis(sections[2], parse_actor, "actor"),
+    )
+}
+
+/// Parse one comma-separated axis section into a deduplicated, order-preserving
+/// `Vec`. An empty section yields an empty axis.
+fn parse_axis<T: Copy + PartialEq>(
+    section: &str,
+    parse_one: fn(&str) -> Option<T>,
+    kind: &str,
+) -> Vec<T> {
+    let mut out = Vec::new();
+    for tok in section.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let parsed = parse_one(tok).unwrap_or_else(|| {
+            panic!("HOLON_PBT_WIRING_AXES: unknown {kind} {tok:?}");
+        });
+        if !out.contains(&parsed) {
+            out.push(parsed);
+        }
+    }
+    out
+}
+
+fn parse_storage_adapter(tok: &str) -> Option<StorageAdapter> {
+    match tok {
+        "Loro" => Some(StorageAdapter::Loro),
+        "Org" => Some(StorageAdapter::Org),
+        "Markdown" => Some(StorageAdapter::Markdown),
+        "Turso" => Some(StorageAdapter::Turso),
+        _ => None,
+    }
+}
+
+fn parse_sync_adapter(tok: &str) -> Option<SyncAdapter> {
+    match tok {
+        "Todoist" => Some(SyncAdapter::Todoist),
+        "GCal" => Some(SyncAdapter::GCal),
+        "GMail" => Some(SyncAdapter::GMail),
+        _ => None,
+    }
+}
+
+fn parse_actor(tok: &str) -> Option<Actor> {
+    match tok {
+        "UI" => Some(Actor::UI),
+        "MCPServer" => Some(Actor::MCPServer),
+        "ActionEngine" => Some(Actor::ActionEngine),
+        _ => None,
+    }
+}
+
+/// A uniform shrinkable subset (`btree_set`, size `0..=len`, shrinks by removing
+/// elements) over a fixed axis. An empty axis yields the empty set.
+fn uniform_subset<T>(items: &[T]) -> BoxedStrategy<BTreeSet<T>>
+where
+    T: Copy + Ord + std::fmt::Debug + 'static,
+{
+    if items.is_empty() {
+        return Just(BTreeSet::new()).boxed();
+    }
+    let n = items.len();
+    let arms: Vec<_> = items.iter().map(|&i| Just(i)).collect();
+    proptest::collection::btree_set(Union::new(arms), 0..=n).boxed()
+}
+
+/// A subset over `items` where each element is included independently with
+/// probability `prob` (a weighted bool shrinks `true → false`, so an included
+/// element shrinks *out* first). Used for the expensive query-capable adapters.
+fn weighted_subset<T>(items: &[T], prob: f64) -> BoxedStrategy<BTreeSet<T>>
+where
+    T: Copy + Ord + std::fmt::Debug + 'static,
+{
+    items
+        .iter()
+        .fold(Just(BTreeSet::new()).boxed(), move |acc, &item| {
+            (acc, proptest::bool::weighted(prob))
+                .prop_map(move |(mut set, include)| {
+                    if include {
+                        set.insert(item);
+                    }
+                    set
+                })
+                .boxed()
+        })
+}
+
+/// A shrinkable, validity-filtered [`Wiring`] strategy over [`wiring_axes`].
+///
+/// Storage is split into cheap (uniform subset) and query-capable/expensive
+/// (low-probability inclusion, see [`QUERY_ADAPTER_INCLUSION_PROB`]) so most
+/// draws stay on the fast LoroMemory backend. Removing elements (cheap-set
+/// element removal; expensive bool `true → false`) shrinks the manifest toward
+/// the minimal combination — the architectural delta-debug axis.
+///
+/// `.prop_filter` drops manifests that fail [`Wiring::validate`] (≥1 storage;
+/// `ActionEngine` ⇒ a query-capable storage adapter). Because
+/// `run_invariant_registry` always supplies `ViewModel` + `EditorState` at
+/// runtime, any `validate()`-valid wiring is observation-valid — `validate()`
+/// is the only filter needed.
+pub fn any_valid_wiring() -> BoxedStrategy<Wiring> {
+    let (storage_axis, sync_axis, actor_axis) = wiring_axes();
+
+    let cheap_storage: Vec<StorageAdapter> = storage_axis
+        .iter()
+        .copied()
+        .filter(|a| !a.is_query_capable())
+        .collect();
+    let query_storage: Vec<StorageAdapter> = storage_axis
+        .iter()
+        .copied()
+        .filter(|a| a.is_query_capable())
+        .collect();
+
+    let cheap = uniform_subset(&cheap_storage);
+    let expensive = weighted_subset(&query_storage, QUERY_ADAPTER_INCLUSION_PROB);
+    let sync = uniform_subset(&sync_axis);
+    let actors = uniform_subset(&actor_axis);
+
+    (cheap, expensive, sync, actors)
+        .prop_map(|(mut storage, query, sync_adapters, actors)| {
+            storage.extend(query);
+            Wiring {
+                storage_adapters: storage,
+                sync_adapters,
+                actors,
+            }
+        })
+        .prop_filter("invalid wiring (Wiring::validate)", |w| {
+            w.validate().is_ok()
+        })
+        .boxed()
 }
 
 #[cfg(test)]

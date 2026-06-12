@@ -37,7 +37,7 @@ impl ValueFn for OpsOfValueFn {
         &self,
         args: &ResolvedArgs,
         services: &dyn BuilderServices,
-        _ctx: &RenderContext,
+        _: &RenderContext,
     ) -> InterpValue {
         let uri = args
             .positional

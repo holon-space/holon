@@ -153,11 +153,14 @@ macro_rules! __declare_pbt_slice_arm {
     // Filtered: paren-wrapped (Type, "reason", filter_closure).
     ($arms:ident, $state:expr, ($ty:path, $reason:expr, $filter:expr $(,)?)) => {{
         use ::proptest::strategy::Strategy;
-        // ADR 0007 item 3: manifest gate (necessary, not sufficient).
+        // ADR 0007 item 3: manifest gate (necessary, not sufficient) + PCG-2 cap gate.
         if <$ty as ::holon_pbt_core::TransitionFactory<
             $crate::pbt::reference_state::ReferenceState,
         >>::required_wiring()
         .satisfied_by(&$state.wiring)
+            && $state.caps_available(&<$ty as ::holon_pbt_core::TransitionFactory<
+                $crate::pbt::reference_state::ReferenceState,
+            >>::required_caps())
         {
             if let ::validated::Validated::Good((w, s)) =
                 <$ty as ::holon_pbt_core::TransitionFactory<
@@ -177,11 +180,14 @@ macro_rules! __declare_pbt_slice_arm {
     // `aggregate_transitions`); slice generators discard rejection
     // reasons — `preconditions` records them on its own pass.
     ($arms:ident, $state:expr, $ty:path) => {{
-        // ADR 0007 item 3: manifest gate (necessary, not sufficient).
+        // ADR 0007 item 3: manifest gate (necessary, not sufficient) + PCG-2 cap gate.
         if <$ty as ::holon_pbt_core::TransitionFactory<
             $crate::pbt::reference_state::ReferenceState,
         >>::required_wiring()
         .satisfied_by(&$state.wiring)
+            && $state.caps_available(&<$ty as ::holon_pbt_core::TransitionFactory<
+                $crate::pbt::reference_state::ReferenceState,
+            >>::required_caps())
         {
             if let ::validated::Validated::Good(Some(arm)) =
                 ::holon_pbt_core::weighted_arm::<_, $ty, $crate::pbt::transitions::E2ETransition>(
@@ -273,7 +279,12 @@ macro_rules! declare_pbt_slice {
         $(,)?
     ) => {
         $crate::__declare_pbt_full_slice!(
-            $test_fn, $wiring, $config, $step_lo, $step_hi
+            $test_fn,
+            ::proptest::strategy::Strategy::boxed(::proptest::strategy::Just(
+                $crate::pbt::fresh_reference_state($wiring),
+            )),
+            false,
+            $config, $step_lo, $step_hi
         );
     };
 
@@ -318,6 +329,64 @@ macro_rules! declare_pbt_slice {
             },
             $step_lo, $step_hi
             $(, $fixtures_dir)?
+        );
+    };
+}
+
+/// The **faithful subsystem-convergence harness** (F2 / Plan 2). A thin arm over
+/// the same [`__declare_pbt_full_slice!`] expansion the blessed slices use — so
+/// it shares their capture/replay parity exactly — but it replaces the constant
+/// `init_state` (`Just(fresh_reference_state($wiring))`, immune to shrinking)
+/// with a **generated, shrinkable** [`Wiring`](holon_pbt_core::any_valid_wiring):
+/// proptest draws which subsystems are active, drives the real booted `E2ESut`
+/// through the full production alphabet, runs the wiring-gated invariant
+/// registry, and on failure **shrinks the active subsystem set toward the
+/// minimal combination that still reproduces**.
+///
+/// Unlike a blessed slice, there is no `wiring:` — the wiring *is* the generated
+/// input. `init_test` reads `ref_state.wiring` at runtime to select the backend
+/// (`storage_selector_for_wiring`), so a Loro-only draw boots the cheap
+/// `LoroMemory` SUT and a Turso draw boots the full `BackendEngine`. The `$boot_guard`
+/// (always `true` here) makes `teardown` fail loud if a non-trivial case never
+/// fired `StartApp` — guarding against vacuous pre-startup-only green.
+///
+/// This harness is **not `#[ignore]`d** — it runs under a default `cargo test`.
+/// Because it shares the blessed slices' expansion and the default `wiring_axes`
+/// generate over `{Loro, Org, Turso}` (Turso down-weighted), it **subsumes** the
+/// per-Wiring blessed slices — each pins one point in the generated powerset. The
+/// first retired this way was `loro_backend_pbt` (pinned `{Loro}`), now one draw of
+/// this harness. Scope/​widen a run with `HOLON_PBT_WIRING_AXES`.
+///
+/// ```ignore
+/// declare_pbt_convergence! {
+///     test_fn: subsystem_convergence_pbt,
+///     proptest_config: ::proptest::test_runner::Config {
+///         cases: 4, max_shrink_iters: 8, ..Default::default()
+///     },
+///     steps: 3..12,
+/// }
+/// ```
+#[macro_export]
+macro_rules! declare_pbt_convergence {
+    (
+        test_fn: $test_fn:ident,
+        proptest_config: $config:expr,
+        steps: $step_lo:tt .. $step_hi:tt
+        $(,)?
+    ) => {
+        $crate::__declare_pbt_full_slice!(
+            $test_fn,
+            ::proptest::strategy::Strategy::boxed(::proptest::strategy::Strategy::prop_map(
+                ::holon_pbt_core::any_valid_wiring(),
+                $crate::pbt::fresh_reference_state,
+            )),
+            true,
+            $config,
+            $step_lo,
+            $step_hi // No `test_attrs` ⇒ the harness runs under a default `cargo test`
+                     // (no longer `#[ignore]`d). It is fast enough with the default
+                     // `wiring_axes` (Turso down-weighted, most draws boot the cheap
+                     // `LoroMemory` SUT); scope a run further with `HOLON_PBT_WIRING_AXES`.
         );
     };
 }
@@ -434,6 +503,22 @@ macro_rules! __declare_pbt_slice_wrapper {
                     use ::holon_pbt_core::TransitionRef;
                     use $crate::pbt::validation::record_rejection;
                     use ::validated::Validated;
+                    // Value-level wiring gate, mirroring `aggregate_transitions`'
+                    // alphabet gate (`transition_dispatch.rs`). Generation only
+                    // ever offers wiring-satisfied transitions, so this is a no-op
+                    // for the fixed-wiring slices — but the convergence harness
+                    // shrinks the *generated manifest itself*. When a wiring-shrink
+                    // would strand a transition the smaller manifest no longer
+                    // structurally supports, this makes that transition fail its
+                    // precondition; `proptest-state-machine`'s `check_acceptable`
+                    // then *rejects that shrink* rather than replaying an
+                    // inapplicable transition on the wrong backend. (Make-or-break
+                    // #1c: wiring-dropped transitions are skipped, never panicked.)
+                    if !transition.required_wiring().satisfied_by(&state.wiring)
+                        || !state.caps_available(&transition.required_caps())
+                    {
+                        return false;
+                    }
                     match transition.preconditions(state) {
                         Validated::Good(()) => true,
                         Validated::Fail(reasons) => {
@@ -604,8 +689,9 @@ macro_rules! __declare_pbt_slice_wrapper {
 #[macro_export]
 macro_rules! __declare_pbt_full_slice {
     (
-        $test_fn:ident, $wiring:expr,
+        $test_fn:ident, $init:expr, $boot_guard:expr,
         $config:expr, $step_lo:tt, $step_hi:tt
+        $(, test_attrs: [ $(#[$test_meta:meta])* ])?
     ) => {
         ::paste::paste! {
             pub struct [<$test_fn:camel Machine>];
@@ -617,9 +703,7 @@ macro_rules! __declare_pbt_full_slice {
                 type Transition = $crate::pbt::transitions::E2ETransition;
 
                 fn init_state() -> ::proptest::strategy::BoxedStrategy<Self::State> {
-                    ::proptest::strategy::Strategy::boxed(::proptest::strategy::Just(
-                        $crate::pbt::fresh_reference_state($wiring),
-                    ))
+                    $init
                 }
 
                 fn transitions(state: &Self::State) -> ::proptest::strategy::BoxedStrategy<Self::Transition> {
@@ -630,6 +714,22 @@ macro_rules! __declare_pbt_full_slice {
                     use ::holon_pbt_core::TransitionRef;
                     use $crate::pbt::validation::record_rejection;
                     use ::validated::Validated;
+                    // Value-level wiring gate, mirroring `aggregate_transitions`'
+                    // alphabet gate (`transition_dispatch.rs`). Generation only
+                    // ever offers wiring-satisfied transitions, so this is a no-op
+                    // for the fixed-wiring slices — but the convergence harness
+                    // shrinks the *generated manifest itself*. When a wiring-shrink
+                    // would strand a transition the smaller manifest no longer
+                    // structurally supports, this makes that transition fail its
+                    // precondition; `proptest-state-machine`'s `check_acceptable`
+                    // then *rejects that shrink* rather than replaying an
+                    // inapplicable transition on the wrong backend. (Make-or-break
+                    // #1c: wiring-dropped transitions are skipped, never panicked.)
+                    if !transition.required_wiring().satisfied_by(&state.wiring)
+                        || !state.caps_available(&transition.required_caps())
+                    {
+                        return false;
+                    }
                     match transition.preconditions(state) {
                         Validated::Good(()) => true,
                         Validated::Fail(reasons) => {
@@ -716,6 +816,33 @@ macro_rules! __declare_pbt_full_slice {
                 ) {
                     let runtime = sut.inner.runtime.clone();
                     runtime.block_on(sut.inner.run_invariant_registry_end_of_case(&ref_state));
+                    // Visible "did it actually boot" guard (convergence harness only —
+                    // `$boot_guard` folds to `false` for the blessed slices). A
+                    // non-trivial case (>= `$step_lo` applied transitions) that never
+                    // fired `StartApp` exercised nothing on a booted app — the vacuous
+                    // pre-startup-only coverage the plan flags. It is surfaced *loudly
+                    // but non-fatally* (project error philosophy: "falls back visibly —
+                    // clearly signals degraded mode"): a panic here is wrong because
+                    // (a) a randomly-drawn pre-startup-only sequence is not a bug, and
+                    // (b) a teardown panic corrupts `proptest-state-machine`'s
+                    // `seen_transitions_counter` shrink bookkeeping. The nightly job
+                    // greps these lines to confirm coverage is real.
+                    if $boot_guard {
+                        let applied = $crate::pbt::slice::captured_transition_count();
+                        if !ref_state.action.app_started && applied >= $step_lo {
+                            ::tracing::warn!(
+                                target: "pbt_convergence",
+                                applied,
+                                "VACUOUS CASE: applied {applied} transition(s) but StartApp \
+                                 never fired (app_started=false) — exercised nothing on a \
+                                 booted app",
+                            );
+                            ::std::eprintln!(
+                                "[convergence] VACUOUS CASE: applied {applied} transition(s) \
+                                 but StartApp never fired — exercised nothing on a booted app",
+                            );
+                        }
+                    }
                 }
 
                 // Shared-engine loop (ADR 0009 §5); see the selective-slice
@@ -751,6 +878,7 @@ macro_rules! __declare_pbt_full_slice {
             ::proptest_state_machine::prop_state_machine! {
                 #![proptest_config($config)]
                 #[test]
+                $($(#[$test_meta])*)?
                 fn $test_fn(sequential $step_lo .. $step_hi => [<$test_fn:camel Sut>]);
             }
         }
@@ -804,6 +932,18 @@ pub fn record_transition(t: &E2ETransition) {
             state.transitions.push(t.clone());
         }
     });
+}
+
+/// Number of transitions applied (recorded) so far in the active case. The
+/// convergence harness uses this in `teardown` to tell a non-trivial case from
+/// a shrunk near-empty one when checking that `StartApp` actually fired.
+pub fn captured_transition_count() -> usize {
+    CAPTURE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|state| state.transitions.len())
+            .unwrap_or(0)
+    })
 }
 
 /// Write the captured transition sequence to

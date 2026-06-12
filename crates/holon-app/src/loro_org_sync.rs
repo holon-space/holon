@@ -377,7 +377,7 @@ impl BlockOrdering for LoroBlockOrdering {
         _: BlockContent,
         _: &HashMap<String, Value>,
         _: &Tags,
-        _: &[String],
+        _: &[EntityUri],
     ) -> BlockOrderingResult<bool> {
         Ok(false)
     }
@@ -472,6 +472,13 @@ impl BlockOrdering for LoroBlockOrdering {
                 .map_err(boxed)?;
         }
         if let Some(requires) = requires {
+            let requires: Vec<EntityUri> = requires
+                .into_iter()
+                .map(|r| {
+                    EntityUri::parse_owned(r)
+                        .map_err(|e| boxed(format!("update_in_tree: invalid 'requires' URI: {e}")))
+                })
+                .collect::<Result<_, _>>()?;
             self.backend
                 .set_block_requires(&id, &requires)
                 .await

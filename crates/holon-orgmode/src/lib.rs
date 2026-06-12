@@ -1,3 +1,13 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
+//! @c4 uses holon "core orchestration" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-filesystem "filesystem ports" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-org-format "org parse/render" "Rust"
+//!
 //! Org-mode disk I/O and sync layer.
 //!
 //! This crate handles file watching, bidirectional sync between org files and

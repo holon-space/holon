@@ -145,12 +145,13 @@ pub fn run_sequence<S: Stepper>(
     outcomes
 }
 
-/// Is this transition offered under `ref_state`'s wiring? Mirrors the alphabet
-/// gate in `aggregate_transitions` (`transition_dispatch.rs`), but value-level
+/// Is this transition offered under `ref_state`'s wiring AND cap set? Mirrors the
+/// alphabet gate in `aggregate_transitions` (`transition_dispatch.rs`), but value-level
 /// so it can be evaluated during replay. Relies on the value-level
-/// `E2ETransition::required_wiring` added in `transition_dispatch.rs`.
+/// `E2ETransition::required_wiring` + `required_caps` added in `transition_dispatch.rs`.
 fn transition_applicable(ref_state: &ReferenceState, transition: &E2ETransition) -> bool {
     transition.required_wiring().satisfied_by(&ref_state.wiring)
+        && ref_state.caps_available(&transition.required_caps())
 }
 
 /// `HOLON_PBT_STEP_TIMING=1` prints per-step apply/check wall times — the
@@ -374,7 +375,12 @@ impl Stepper for GpuiReplayStepper<'_> {
             Some((entity, op, params)) => self.runtime.block_on(async {
                 let handled = self.driver.try_ui_interaction(&entity, &op, &params).await;
                 if !handled {
-                    let drv = self.sut.driver.as_ref().expect("UserDriver not installed");
+                    let drv = self
+                        .sut
+                        .driver
+                        .borrow()
+                        .clone()
+                        .expect("UserDriver not installed");
                     drv.synthetic_dispatch(&entity, &op, params.clone())
                         .await
                         .expect("synthetic_dispatch failed during replay");

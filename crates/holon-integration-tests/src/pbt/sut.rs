@@ -3,6 +3,7 @@
 //! Contains the SUT wrapper, mutation application, invariant checking,
 //! and all transition handling for the real system.
 
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -22,7 +23,6 @@ use super::sut_loro::LoroSut;
 use super::reference_state::ReferenceState;
 
 use super::state_machine::ReferenceMachine;
-use super::types::*;
 
 pub struct E2ESut {
     pub ctx: TestContext,
@@ -30,30 +30,29 @@ pub struct E2ESut {
     /// ("doc:<uuid>") assigned by the real system. Shared (cloned) into the
     /// owned `LoroSut` for peer-sync stable-id resolution.
     pub doc_uri_map: super::types::DocUriMap,
-    /// How UI mutations are dispatched. `None` before `start_app` creates the engine.
-    /// Backend tests use `DirectUserDriver`; Flutter tests inject their own driver.
-    pub driver: Option<Arc<dyn UserDriver>>,
+    /// How UI mutations are dispatched. Empty before `start_app` creates the
+    /// engine. Backend tests use `DirectUserDriver`; Flutter/GPUI tests inject
+    /// their own driver. `RefCell` (not `OnceCell`) because the phased GPUI
+    /// harness *replaces* the default driver installed at `StartApp` with the
+    /// live `GpuiUserDriver` once the window is up.
+    pub driver: RefCell<Option<Arc<dyn UserDriver>>>,
     /// Optional Loro validation — reads blocks from LoroTree and compares against reference.
-    /// Active only when Loro is enabled.
-    pub(super) loro_sut: Option<LoroSut>,
+    /// Active only when Loro is enabled. Built once at `StartApp`, then read-only.
+    pub(super) loro_sut: OnceCell<LoroSut>,
     /// Render harness — owns the SUT's headless `ReactiveEngine`
     /// (+ root id + vm-emission collector), the externally-injected GPUI
     /// frontend surfaces (engine / geometry / visual state), and the headless
     /// live tree. See [`super::sut_render::RenderSut`].
     pub(super) render: super::sut_render::RenderSut,
-    /// MCP integration for exercising IVM re-evaluation in PBT.
-    pub pbt_mcp: Option<crate::pbt_mcp_fake::PbtMcpIntegration>,
+    /// MCP integration for exercising IVM re-evaluation in PBT. Built once at
+    /// `StartApp`, then read-only.
+    pub pbt_mcp: OnceCell<crate::pbt_mcp_fake::PbtMcpIntegration>,
     /// The last transition applied (for budget lookup in check_invariants).
     pub(super) last_transition: crate::pbt::transitions::E2ETransition,
     /// OTel / performance metrics for the SUT — owns the span collector, RSS
     /// sampling, and the whole-case query-origin accumulator. All raw metric
     /// state lives here; see [`super::sut_metrics::MetricsSut`].
     pub(super) metrics: super::sut_metrics::MetricsSut,
-    /// CDC-driven LiveData mirrors (hydrated `block` matview + `focus_roots`)
-    /// the invariant bodies read instead of issuing fresh SQL on every check.
-    /// All mirror state + lazy build logic lives here; see
-    /// [`super::sut_cdc_mirrors::CdcMirrors`].
-    pub(super) cdc: super::sut_cdc_mirrors::CdcMirrors,
     /// Reference state as it stood at the END of the previous transition —
     /// i.e. the state the user CURRENTLY sees rendered in the SUT, before
     /// the in-flight transition is applied. The framework passes the
@@ -232,15 +231,14 @@ impl E2ESut {
         Ok(Self {
             ctx: TestContext::new_with_backend(runtime, storage)?,
             doc_uri_map: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            driver: None,
-            loro_sut: None,
+            driver: RefCell::new(None),
+            loro_sut: OnceCell::new(),
             render: super::sut_render::RenderSut::new(),
-            pbt_mcp: None,
+            pbt_mcp: OnceCell::new(),
             last_transition: crate::pbt::transitions::E2ETransition::Nothing(
                 crate::pbt::transitions::Nothing,
             ),
             metrics: super::sut_metrics::MetricsSut::new(),
-            cdc: super::sut_cdc_mirrors::CdcMirrors::new(),
             pre_ref_state: None,
         })
     }
@@ -256,15 +254,14 @@ impl E2ESut {
         Ok(Self {
             ctx: TestContext::new(runtime)?,
             doc_uri_map: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            driver: Some(driver),
-            loro_sut: None,
+            driver: RefCell::new(Some(driver)),
+            loro_sut: OnceCell::new(),
             render: super::sut_render::RenderSut::new(),
-            pbt_mcp: None,
+            pbt_mcp: OnceCell::new(),
             last_transition: crate::pbt::transitions::E2ETransition::Nothing(
                 crate::pbt::transitions::Nothing,
             ),
             metrics: super::sut_metrics::MetricsSut::new(),
-            cdc: super::sut_cdc_mirrors::CdcMirrors::new(),
             pre_ref_state: None,
         })
     }
@@ -273,12 +270,11 @@ impl E2ESut {
     /// Uses the same dispatch path as GPUI (BuilderServices::dispatch_intent).
     /// Also installs the same `Arc<dyn UserDriver>` into `live_driver()`
     /// so PBT generators read observation verbs from the same medium.
-    pub(super) fn install_driver(&mut self) {
-        if self.driver.is_some() {
+    pub(super) fn install_driver(&self) {
+        if self.driver.borrow().is_some() {
             return; // respect pre-installed driver (e.g. FlutterUserDriver)
         }
-        let driver: Arc<dyn UserDriver> = if let Some(reactive) = self.ctx.reactive_engine.as_ref()
-        {
+        let driver: Arc<dyn UserDriver> = if let Some(reactive) = self.ctx.reactive_engine.get() {
             Arc::new(crate::ReactiveEngineDriver::new(reactive.clone()))
         } else {
             // Tests without ReactiveEngine fall back to DirectUserDriver —
@@ -287,7 +283,7 @@ impl E2ESut {
             let engine = self.test_ctx().engine().clone();
             Arc::new(DirectUserDriver::new(engine))
         };
-        self.driver = Some(driver);
+        *self.driver.borrow_mut() = Some(driver);
     }
 
     /// Snapshot the current root layout as a `ReactiveViewModel`.
@@ -481,7 +477,8 @@ impl E2ESut {
                 // than the fail-loud parse; the scroll RPC tolerates ids it
                 // can't locate (poll timeout is the real failure signal).
                 let entity_uri = holon_api::entity_uri_from_id_str(entity_id);
-                if let Some(driver) = self.driver.as_ref()
+                let driver = self.driver.borrow().clone();
+                if let Some(driver) = driver
                     && let Err(e) = driver.scroll_to_entity(&entity_uri).await
                 {
                     tracing::debug!(
@@ -620,7 +617,7 @@ impl E2ESut {
         // Retry until the entity renders as an accepted widget kind; the
         // success value is the matched widget_type, the `Err` carries the
         // widget_types actually observed for this entity (for the diagnostic).
-        let driver = self.driver.clone();
+        let driver = self.driver.borrow().clone();
         let result = crate::pbt::retry::retry_until_ok_wake(
             timeout,
             Duration::from_millis(50),
@@ -653,7 +650,7 @@ impl E2ESut {
                     self.engine(),
                     self.ctx
                         .reactive_engine
-                        .as_ref()
+                        .get()
                         .and_then(|e| e.ui_state().focused_block())
                         .as_ref(),
                     self.render.frontend_geometry.as_deref(),
@@ -693,7 +690,7 @@ impl E2ESut {
         // Signal-driven: `signal_cloned().to_stream()` emits the CURRENT value
         // first and then every change, so there is no check-then-wait gap to
         // race against — the loop wakes exactly when focus moves.
-        let result: Result<(), Option<EntityUri>> = match self.ctx.reactive_engine.as_ref() {
+        let result: Result<(), Option<EntityUri>> = match self.ctx.reactive_engine.get() {
             Some(engine) => {
                 use futures::StreamExt;
                 use futures_signals::signal::SignalExt;
@@ -834,7 +831,8 @@ impl E2ESut {
             // over successive iterations this walks the whole list. Best-effort:
             // a scroll RPC that can't locate the entity in a virtualized list
             // returns Ok and the loop just keeps polling until the deadline.
-            if let Some(driver) = self.driver.as_ref()
+            let driver = self.driver.borrow().clone();
+            if let Some(driver) = driver
                 && let Some(target) = expected_child_ids
                     .iter()
                     .find(|id| !ever_seen.contains(*id))
@@ -854,38 +852,11 @@ impl E2ESut {
         // Deadline hit with children still never painted, even after scrolling
         // to them — genuinely unreachable rows past the list's scroll extent.
         let missing: Vec<&String> = expected_child_ids.difference(&ever_seen).collect();
-        // Layer attribution for each missing row: present in SQL
-        // (block_raw/matview), present in the interpreted ViewModel tree,
-        // absent only from paint? Pins which layer drops the row.
-        let mut layer_diag = String::new();
-        let vm_tree = holon_pbt_core::capabilities::SutRenderer::widget_tree_snapshot(self).await;
-        for id in &missing {
-            let in_vm: Vec<String> = vm_tree
-                .walk()
-                .filter(|n| n.entity_id.as_deref() == Some(id.as_str()))
-                .map(|n| {
-                    format!(
-                        "kind={} content={:?}",
-                        n.kind,
-                        n.props.get("content").map(|c| c.as_str())
-                    )
-                })
-                .collect();
-            layer_diag.push_str(&format!(
-                "\n--- missing row {id} ---\nViewModel nodes: {}\nSQL state:\n{}",
-                if in_vm.is_empty() {
-                    "<none — dropped at/before the ViewModel layer>".to_string()
-                } else {
-                    in_vm.join("; ")
-                },
-                self.probe_block_sql_state(id).await,
-            ));
-        }
         let diag = crate::pbt::panic_diag::focus_and_render_dump(
             self.engine(),
             self.ctx
                 .reactive_engine
-                .as_ref()
+                .get()
                 .and_then(|e| e.ui_state().focused_block())
                 .as_ref(),
             self.render.frontend_geometry.as_deref(),
@@ -918,7 +889,7 @@ impl E2ESut {
         // built with the same `build_shadow_interpreter`, so this is a pure
         // de-duplication: one engine, one UiState, observation == what the
         // driver mutates.
-        let reactive = self.ctx.reactive_engine.clone().expect(
+        let reactive = self.ctx.reactive_engine.get().cloned().expect(
             "ensure_reactive_engine: ctx.reactive_engine is None — StartApp must run first",
         );
 
@@ -993,7 +964,8 @@ impl E2ESut {
             .with_context(|| format!("send_key_chord: entity {entity_id}"))?;
         let driver = self
             .driver
-            .as_ref()
+            .borrow()
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("driver not installed"))?;
         // Harness ids come from transition-generated rows — schemed; parse
         // once at the driver boundary (typed end-to-end past this point).
@@ -1043,10 +1015,10 @@ impl E2ESut {
     /// runs after the chord matches in production. `label` is used in
     /// panic messages.
     pub async fn send_leader_chord(&self, nav_op: &str, label: &str) {
-        let driver = self
-            .driver
-            .as_ref()
-            .unwrap_or_else(|| panic!("[{label}] driver not installed — was start_app called?"));
+        let driver =
+            self.driver.borrow().clone().unwrap_or_else(|| {
+                panic!("[{label}] driver not installed — was start_app called?")
+            });
         // Native drivers (TUI/GPUI) route raw keystrokes through their real
         // input pipeline, which performs key-chord resolution before any
         // editor sees the keys. Send the leader key + chord key as raw
@@ -1123,7 +1095,7 @@ impl E2ESut {
         let Some(ref geometry) = self.render.frontend_geometry else {
             return Ok(());
         };
-        let driver = self.driver.clone();
+        let driver = self.driver.borrow().clone();
         crate::pbt::retry::retry_until_ok_wake(
             timeout,
             Duration::from_millis(50),
@@ -1165,7 +1137,8 @@ impl E2ESut {
     }
 
     pub(super) async fn sync_caret_to_new_split_block(&self, new_id: &EntityUri) {
-        if let Some(driver) = self.driver.as_ref() {
+        let driver = self.driver.borrow().clone();
+        if let Some(driver) = driver {
             // The split's focus follow-up moves focus to the NEW block, whose
             // editor mounts (and grabs WINDOW focus) on the next render pass.
             // A `home` sent earlier is either dropped or — worse — consumed by
@@ -1376,22 +1349,6 @@ impl E2ESut {
             .await;
     }
 
-    /// Apply a mutation (UI or External) and wait for sync to complete.
-    ///
-    /// Body lives in [`crate::pbt::transitions::apply_mutation::apply_apply_mutation_to_sut`];
-    /// this method is a thin forwarder so callers that still spell
-    /// `self.apply_mutation(...)` keep working.
-    pub(super) async fn apply_mutation(
-        &mut self,
-        event: MutationEvent,
-        ref_state: &ReferenceState,
-    ) {
-        crate::pbt::transitions::apply_mutation::apply_apply_mutation_to_sut(
-            self, event, ref_state,
-        )
-        .await;
-    }
-
     // ── Phase 7 accessors for capability-trait impls ───────────────────────
     // These expose private state through the narrowest safe surface.
     // DO NOT use from transitions — the proxy semantics are invariant-only.
@@ -1400,17 +1357,5 @@ impl E2ESut {
     /// Production path: sut.rs:5846 `std::mem::take(&mut *self.render.vm_emissions.lock().unwrap())`.
     pub(super) fn vm_emissions_drain(&mut self) -> Vec<holon_frontend::ViewModel> {
         self.render.vm_emissions_drain()
-    }
-
-    /// True if the `live_blocks` CDC mirror has not yet caught up to the
-    /// last emitted watermark. Compares `LiveData::consumed_seq()` against
-    /// `db_handle().cdc_emitted_watermark()`. Returns `false` when the app
-    /// is not running or the mirror has not been initialised yet.
-    pub(super) fn live_blocks_cdc_stale(&self) -> bool {
-        // Pre-startup: no engine, no mirror. Guard before touching the engine.
-        if !self.ctx.is_running() {
-            return false;
-        }
-        self.cdc.blocks_cdc_stale(self.ctx.engine())
     }
 }

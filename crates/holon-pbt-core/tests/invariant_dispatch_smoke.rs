@@ -6,7 +6,7 @@
 //! simply can't dispatch the invariant (compile-time slice opt-in).
 //!
 //! Runtime body verification happens in the wide PBT and in the
-//! future `storage_consistency_pbt` slice (Phase 8). This file is
+//! convergence harness (`subsystem_convergence_pbt`). This file is
 //! compile-only.
 
 use holon_pbt_core::capabilities::SutLoroLog;
@@ -36,7 +36,7 @@ where
 struct ToyRef;
 struct ToySut;
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutLoroLog for ToySut {
     async fn loro_had_errors(&self) -> bool {
         false

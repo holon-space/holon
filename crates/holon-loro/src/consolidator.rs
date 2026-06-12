@@ -18,22 +18,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use holon_api::{ChangeSet, EntityName, Provenance, agrees_with_ops};
 
-use holon_core::OperationProvider;
-use holon_api::StorageEntity;
 use crate::capability::{Consolidator, SessionCapabilities};
 use crate::event_bus::EventOrigin;
+use holon_api::StorageEntity;
+use holon_core::OriginTaggedWrites;
 
 /// The block consolidator. Wraps the sink command bus and the pinned session
 /// capabilities; owns the op-multiset shadow counters.
 pub struct BlockConsolidator {
-    command_bus: Arc<dyn OperationProvider>,
+    command_bus: Arc<dyn OriginTaggedWrites>,
     caps: SessionCapabilities,
     agreements: Arc<AtomicUsize>,
     divergences: Arc<AtomicUsize>,
 }
 
 impl BlockConsolidator {
-    pub fn new(command_bus: Arc<dyn OperationProvider>, caps: SessionCapabilities) -> Self {
+    pub fn new(command_bus: Arc<dyn OriginTaggedWrites>, caps: SessionCapabilities) -> Self {
         Self {
             command_bus,
             caps,

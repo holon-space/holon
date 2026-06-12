@@ -36,6 +36,8 @@ pub struct FileFormatParseResult {
 /// Implementors are stateless wrappers around the format crate's free
 /// functions (`parse_org_file`, `OrgRenderer::render_document`, …). Hold them
 /// behind `Arc<dyn FileFormatAdapter>` in the sync controller.
+///
+/// @c4 code
 pub trait FileFormatAdapter: Send + Sync {
     /// File extensions this adapter handles, lowercase, without leading dot
     /// (e.g. `&["org"]`, `&["md", "markdown"]`). The vault watcher uses this

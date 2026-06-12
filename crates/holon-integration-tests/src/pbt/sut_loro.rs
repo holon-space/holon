@@ -20,6 +20,7 @@ use holon::sync::{LoroDocumentStore, LoroSyncControllerHandle};
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_pbt_core::capabilities::{PeerEditOp, SutLoro, TextOp};
+use holon_pbt_core::composition::{CapMap, CapProvider};
 
 /// Encapsulates Loro-specific PBT validation **and** ownership of the
 /// multi-peer sync surface. With stable IDs, blocks from the LoroTree already
@@ -33,7 +34,7 @@ use holon_pbt_core::capabilities::{PeerEditOp, SutLoro, TextOp};
 pub struct LoroSut {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     /// Loro-only peer instances for multi-instance sync testing.
-    peers: Vec<holon::sync::multi_peer::PeerState<()>>,
+    peers: std::cell::RefCell<Vec<holon::sync::multi_peer::PeerState<()>>>,
     /// `LoroSyncController` handle for waiting on quiescence; `None` only if
     /// Loro was enabled without a controller (not expected in the wide PBT).
     sync_handle: Option<Arc<LoroSyncControllerHandle>>,
@@ -50,7 +51,7 @@ impl LoroSut {
     ) -> Self {
         Self {
             doc_store,
-            peers: Vec::new(),
+            peers: std::cell::RefCell::new(Vec::new()),
             sync_handle,
             doc_uri_map,
         }
@@ -197,10 +198,13 @@ impl LoroSut {
     }
 }
 
-#[allow(async_fn_in_trait)]
+// `?Send` because `LoroSut` is single-threaded (`RefCell` peers + `block_on`); no
+// `RefCell` borrow is ever held across an `.await` (the one `peers.push` is the final
+// synchronous statement of `apply_add_peer`; every indexed read is a short scoped borrow).
+#[async_trait::async_trait(?Send)]
 impl SutLoro for LoroSut {
-    async fn apply_add_peer(&mut self) {
-        tracing::trace!("[apply] AddPeer (peer_idx={})", self.peers.len());
+    async fn apply_add_peer(&self) {
+        tracing::trace!("[apply] AddPeer (peer_idx={})", self.peers.borrow().len());
         let store = self.doc_store.read().await;
         let global_doc = store
             .get_global_doc()
@@ -209,21 +213,24 @@ impl SutLoro for LoroSut {
         let snapshot = global_doc
             .export_snapshot()
             .expect("Failed to export snapshot for AddPeer");
-        let peer_id = (self.peers.len() as u64) + 100;
+        let peer_id = (self.peers.borrow().len() as u64) + 100;
         let peer_doc = holon::sync::multi_peer::init_doc(peer_id);
         peer_doc
             .import(&snapshot)
             .expect("Failed to import snapshot into peer");
-        self.peers.push(holon::sync::multi_peer::PeerState {
-            doc: peer_doc,
-            peer_id,
-            online: true,
-            data: (),
-        });
+        self.peers
+            .borrow_mut()
+            .push(holon::sync::multi_peer::PeerState {
+                doc: peer_doc,
+                peer_id,
+                online: true,
+                data: (),
+            });
     }
 
-    async fn apply_peer_edit(&mut self, peer_idx: usize, op: &PeerEditOp) {
-        let peer = &self.peers[peer_idx];
+    async fn apply_peer_edit(&self, peer_idx: usize, op: &PeerEditOp) {
+        let peers = self.peers.borrow();
+        let peer = &peers[peer_idx];
         tracing::trace!("[apply] PeerEdit peer_idx={} op={:?}", peer_idx, op);
         match op {
             PeerEditOp::Create {
@@ -250,7 +257,7 @@ impl SutLoro for LoroSut {
     }
 
     async fn apply_peer_create(
-        &mut self,
+        &self,
         peer_idx: usize,
         parent_stable_id: Option<&str>,
         content: &str,
@@ -267,7 +274,7 @@ impl SutLoro for LoroSut {
         .await;
     }
 
-    async fn apply_peer_update(&mut self, peer_idx: usize, stable_id: &str, content: &str) {
+    async fn apply_peer_update(&self, peer_idx: usize, stable_id: &str, content: &str) {
         self.apply_peer_edit(
             peer_idx,
             &PeerEditOp::Update {
@@ -278,7 +285,7 @@ impl SutLoro for LoroSut {
         .await;
     }
 
-    async fn apply_peer_delete(&mut self, peer_idx: usize, stable_id: &str) {
+    async fn apply_peer_delete(&self, peer_idx: usize, stable_id: &str) {
         self.apply_peer_edit(
             peer_idx,
             &PeerEditOp::Delete {
@@ -289,7 +296,7 @@ impl SutLoro for LoroSut {
     }
 
     async fn apply_peer_char_insert(
-        &mut self,
+        &self,
         peer_idx: usize,
         stable_id: &str,
         pos_codepoint: usize,
@@ -307,7 +314,7 @@ impl SutLoro for LoroSut {
     }
 
     async fn apply_peer_char_delete(
-        &mut self,
+        &self,
         peer_idx: usize,
         stable_id: &str,
         pos_codepoint: usize,
@@ -325,13 +332,14 @@ impl SutLoro for LoroSut {
     }
 
     async fn apply_peer_char_edit(
-        &mut self,
+        &self,
         peer_idx: usize,
         block_id: &str,
         op: &crate::pbt::transitions::TextOp,
     ) {
         use super::transitions::TextOp;
-        let peer = &self.peers[peer_idx];
+        let peers = self.peers.borrow();
+        let peer = &peers[peer_idx];
         let resolved_id = self.resolve_stable_id(block_id);
         match op {
             TextOp::Insert {
@@ -354,7 +362,7 @@ impl SutLoro for LoroSut {
         }
     }
 
-    async fn apply_sync_with_peer(&mut self, peer_idx: usize) {
+    async fn apply_sync_with_peer(&self, peer_idx: usize) {
         tracing::trace!("[apply] SyncWithPeer peer_idx={}", peer_idx);
         {
             let store = self.doc_store.read().await;
@@ -364,7 +372,8 @@ impl SutLoro for LoroSut {
                 .expect("Failed to get global doc for SyncWithPeer");
             let primary_doc = global_doc.doc();
             let primary = &*primary_doc;
-            let peer = &self.peers[peer_idx];
+            let peers = self.peers.borrow();
+            let peer = &peers[peer_idx];
             holon::sync::multi_peer::sync_docs_direct(primary, &peer.doc);
         }
         // Give the controller's spawned task time to process the
@@ -372,7 +381,7 @@ impl SutLoro for LoroSut {
         self.wait_for_quiescence(Duration::from_secs(10)).await;
     }
 
-    async fn apply_merge_from_peer(&mut self, peer_idx: usize) {
+    async fn apply_merge_from_peer(&self, peer_idx: usize) {
         tracing::trace!("[apply] MergeFromPeer peer_idx={}", peer_idx);
         {
             let store = self.doc_store.read().await;
@@ -387,7 +396,8 @@ impl SutLoro for LoroSut {
             // reconcile the diff into SQL via the command bus.
             let primary_doc = global_doc.doc();
             let primary = &*primary_doc;
-            let peer = &self.peers[peer_idx];
+            let peers = self.peers.borrow();
+            let peer = &peers[peer_idx];
             let peer_vv = primary.oplog_vv();
             let delta = peer
                 .doc
@@ -405,7 +415,7 @@ impl SutLoro for LoroSut {
     /// `(org_filename, LoroCorruptionType)` — a pre-startup file-corruption
     /// concept. Phase 7 will decide whether to reconcile the two models or
     /// keep them separate. Until then this panics loudly if called.
-    async fn apply_create_stale_peer(&mut self, _: usize) {
+    async fn apply_create_stale_peer(&self, _: usize) {
         unimplemented!(
             "SutLoro::apply_create_stale_peer: lag_steps-based peer snapshots \
              are not wired yet. The file-corruption variant lives on \
@@ -413,6 +423,17 @@ impl SutLoro for LoroSut {
              LoroCorruptionType) — a different model. Wire in Phase 7 once the \
              semantics are reconciled."
         )
+    }
+}
+
+/// `LoroSut` IS the composed peer-mesh surface: registering it on a `CapMap`
+/// hosts the `SutLoro` cap, so a Loro-only composed SUT can drive the peer
+/// transitions (`AddPeer`/`PeerEdit`/`SyncWithPeer`/`MergeFromPeer`) — the
+/// loro-only fast-config payoff. The `&self` peer methods (PCG-4) make `SutLoro`
+/// dyn-compatible, so the one `Arc` backs the cap through the adapter.
+impl CapProvider for LoroSut {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn SutLoro>);
     }
 }
 

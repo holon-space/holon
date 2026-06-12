@@ -12,7 +12,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutWatchRegister;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -25,6 +25,12 @@ pub struct RemoveWatch {
 }
 
 impl TransitionFactory<ReferenceState> for RemoveWatch {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutWatchRegister,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: the navigation / CDC-watch / MCP providers this transition
@@ -82,9 +88,9 @@ impl TransitionRef<ReferenceState> for RemoveWatch {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for RemoveWatch {
+impl<S: SutWatchRegister> TransitionImpl<ReferenceState, S> for RemoveWatch {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_remove_watch(&self.query_id).await;
+        sut.unregister_watch(&self.query_id).await;
     }
 }
 

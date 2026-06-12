@@ -223,7 +223,8 @@ fn frontmatter_from_document(doc: &Block) -> Frontmatter {
         .get("frontmatter_extra")
         .and_then(|v| v.as_string())
         .map(|json| {
-            serde_json::from_str::<BTreeMap<String, serde_yaml::Value>>(json).unwrap_or_default()
+            serde_json::from_str::<BTreeMap<String, serde_yaml::Value>>(json)
+                .unwrap_or_else(|e| panic!("corrupt `frontmatter_extra` JSON {json:?}: {e}"))
         })
         .unwrap_or_default();
 
@@ -262,8 +263,7 @@ mod tests {
     fn renders_simple_heading() {
         let mut block = Block::new_text(EntityUri::block("h1"), doc_uri(), "Top\nbody text");
         block.set_property("ID", holon_api::Value::String("h1".into()));
-        let out =
-            renderer().render_blocks(&[block], &PathBuf::from("/test/note.md"), &doc_uri());
+        let out = renderer().render_blocks(&[block], &PathBuf::from("/test/note.md"), &doc_uri());
         assert!(out.starts_with("# Top ^h1\n"));
         assert!(out.contains("body text"));
     }
@@ -275,8 +275,7 @@ mod tests {
         let mut child = Block::new_text(EntityUri::block("b"), EntityUri::block("a"), "B");
         child.set_property("ID", holon_api::Value::String("b".into()));
 
-        let out =
-            renderer().render_blocks(&[top, child], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer().render_blocks(&[top, child], &PathBuf::from("/note.md"), &doc_uri());
         assert!(out.contains("# A ^a"));
         assert!(out.contains("## B ^b"));
     }
@@ -297,11 +296,8 @@ mod tests {
         );
         src.set_property("ID", holon_api::Value::String("s".into()));
 
-        let out = renderer().render_blocks(
-            &[parent, text, src],
-            &PathBuf::from("/note.md"),
-            &doc_uri(),
-        );
+        let out =
+            renderer().render_blocks(&[parent, text, src], &PathBuf::from("/note.md"), &doc_uri());
         let src_pos = out.find("```python").expect("source fence present");
         let sub_pos = out.find("## Sub heading").expect("sub heading present");
         assert!(
@@ -337,12 +333,7 @@ mod tests {
         let mut head = Block::new_text(EntityUri::block("h"), doc_uri(), "Heading");
         head.set_property("ID", holon_api::Value::String("h".into()));
 
-        let out = renderer().render_document(
-            &doc,
-            &[head],
-            &PathBuf::from("/note.md"),
-            &doc_uri(),
-        );
+        let out = renderer().render_document(&doc, &[head], &PathBuf::from("/note.md"), &doc_uri());
         assert!(out.starts_with("---\n"));
         assert!(out.contains("title: My Note"));
         assert!(out.contains("# Heading ^h"));
@@ -363,8 +354,7 @@ mod tests {
         };
         src.set_property("ID", holon_api::Value::String("s".into()));
 
-        let out =
-            renderer().render_blocks(&[parent, src], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer().render_blocks(&[parent, src], &PathBuf::from("/note.md"), &doc_uri());
         assert!(out.contains("```holon_prql\nfrom x import y\n```"));
     }
 }

@@ -410,7 +410,9 @@ fn topo_sort_computed_fields(
     for (field, _) in &fields {
         let mut field_deps = Vec::new();
         for other in &names {
-            if *other != field.name.as_str() && holon_core::util::expr_references(&field.source, other) {
+            if *other != field.name.as_str()
+                && holon_core::util::expr_references(&field.source, other)
+            {
                 field_deps.push(*other);
             }
         }

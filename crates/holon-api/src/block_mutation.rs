@@ -107,7 +107,11 @@ impl BlockMutation {
                 if !tree.block_exists(id) {
                     return Err(InvalidMove::Missing(id.clone()));
                 }
-                if !tree.block_exists(new_parent) {
+                // A sentinel/no_parent target is virtual (always valid) — moving a
+                // block to the top level is legitimate (e.g. outdent of a depth-1
+                // child), mirroring the `Create` arm's virtual-parent allowance.
+                let new_parent_virtual = new_parent.is_no_parent() || new_parent.is_sentinel();
+                if !new_parent_virtual && !tree.block_exists(new_parent) {
                     return Err(InvalidMove::Missing(new_parent.clone()));
                 }
                 if is_ancestor_or_self(id, new_parent, tree) {

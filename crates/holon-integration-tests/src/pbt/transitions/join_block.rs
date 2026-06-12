@@ -135,6 +135,12 @@ pub fn join_block_apply_to_ref<R: RefBlockTree + RefBlockTreeMut + RefFocusMut>(
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
 impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for JoinBlock {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         join_block_weighted_generator(state)

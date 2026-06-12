@@ -129,7 +129,14 @@ pub fn create_initial_ref_state(runner: &mut TestRunner) -> anyhow::Result<Refer
     init_strategy
         .new_tree(runner)
         .map_err(|e| anyhow::anyhow!("Failed to generate initial state: {e}"))
-        .map(|tree| tree.current())
+        .map(|tree| {
+            // This is the real-editor driver harness — mark the reference so
+            // `blur_active_editor` commits pending text on blur (mirroring prod's
+            // `on_blur` → `set_field`). Replaces the former `PBT_REAL_EDITOR` env.
+            let mut state = tree.current();
+            state.real_editor = true;
+            state
+        })
 }
 
 /// Resolve a UI mutation's parameters (parent_id URIs) from a transition.
@@ -344,7 +351,11 @@ fn run_step_body_with_post_overlay(
                          {entity}.{op} — falling back to synthetic_dispatch \
                          (set PBT_STRICT_INPUT=1 to fail loud instead)"
                     );
-                    let drv = sut.driver.as_ref().expect("UserDriver not installed");
+                    let drv = sut
+                        .driver
+                        .borrow()
+                        .clone()
+                        .expect("UserDriver not installed");
                     drv.synthetic_dispatch(&entity, &op, params.clone()).await?;
                 }
                 driver.settle().await;
@@ -583,13 +594,12 @@ async fn pbt_setup_with_runtime(
     // dispatch through it) and `live_driver()` (so generators read
     // observation verbs from it). The two views must agree on which
     // medium answers — there is no fallback inside generators.
-    let driver: Arc<dyn crate::UserDriver> =
-        if let Some(reactive) = sut.ctx.reactive_engine.as_ref() {
-            Arc::new(crate::ReactiveEngineDriver::new(reactive.clone()))
-        } else {
-            Arc::new(DirectUserDriver::new(sut.ctx.engine().clone()))
-        };
-    sut.driver = Some(driver);
+    let driver: Arc<dyn crate::UserDriver> = if let Some(reactive) = sut.ctx.reactive_engine.get() {
+        Arc::new(crate::ReactiveEngineDriver::new(reactive.clone()))
+    } else {
+        Arc::new(DirectUserDriver::new(sut.ctx.engine().clone()))
+    };
+    *sut.driver.borrow_mut() = Some(driver);
 
     let summary = format!("setup complete: {actual_steps} pre-startup steps");
 
@@ -865,20 +875,16 @@ pub fn run_pbt_with_driver_sync_callback(
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
 
-    // This is the REAL-editor harness — a GPUI/TUI `UserDriver` drives a live
-    // `InputState`, not the headless `HeadlessEditorMirror`. Mark it so the
-    // atomic-editor transitions accept SqlOnly runs and the reference commits
-    // editor content on blur, mirroring prod's `on_blur` → `set_field`
-    // (see `ReferenceState::real_editor_enabled`). SAFETY: set before any
-    // transition is generated; the env is process-global and a real-editor
-    // PBT binary runs a single mode per process.
-    unsafe { std::env::set_var("PBT_REAL_EDITOR", "1") };
-
     crate::pbt::slice::record_capture_wiring(&wiring);
     eprintln!("[pbt_wiring] {wiring:?}");
 
     let mut runner = create_runner()?;
-    let ref_state = super::fresh_reference_state(wiring);
+    // This is the REAL-editor harness — a GPUI/TUI `UserDriver` drives a live
+    // `InputState`, not the headless `HeadlessEditorMirror`. Mark the reference
+    // so it commits editor content on blur, mirroring prod's `on_blur` →
+    // `set_field` (see `ReferenceState::real_editor`).
+    let mut ref_state = super::fresh_reference_state(wiring);
+    ref_state.real_editor = true;
     let mut sut = E2ESut::new(runtime.clone())?;
 
     let (mut ref_state, current_step, mut actual_steps) = run_pre_startup_loop(
@@ -896,7 +902,8 @@ pub fn run_pbt_with_driver_sync_callback(
         reactive_engine: sut
             .ctx
             .reactive_engine
-            .clone()
+            .get()
+            .cloned()
             .expect("ReactiveEngine not initialized after StartApp"),
         runtime_handle: runtime.handle().clone(),
         debug_services: sut
@@ -923,12 +930,12 @@ pub fn run_pbt_with_driver_sync_callback(
     // window is up.
     let user_driver: Arc<dyn crate::UserDriver> = match custom_driver {
         Some(d) => d,
-        None => match sut.ctx.reactive_engine.as_ref() {
+        None => match sut.ctx.reactive_engine.get() {
             Some(reactive) => Arc::new(crate::ReactiveEngineDriver::new(reactive.clone())),
             None => Arc::new(DirectUserDriver::new(sut.ctx.engine().clone())),
         },
     };
-    sut.driver = Some(user_driver);
+    *sut.driver.borrow_mut() = Some(user_driver);
     sut.render
         .install_frontend(frontend_engine, frontend_geometry, frontend_visual_state);
 
@@ -968,6 +975,11 @@ pub fn replay_fixture_with_driver_sync_callback(
     wiring: holon_pbt_core::Wiring,
     steps: Vec<crate::pbt::fixtures::FixtureStep>,
     on_ready: impl FnOnce(&PbtReadyContext) -> Option<PbtReadyResult>,
+    // Per-tick hook forwarded to `replay_steps` — fires after every post-StartApp
+    // transition with `(&mut E2ESut, &ReferenceState)`. The windowed sim (E4) supplies
+    // it to run the composed catalog over a windowed `CapMap` each tick; headless
+    // callers pass a no-op.
+    per_tick: impl FnMut(&mut E2ESut, &super::ReferenceState),
     seen_counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
 ) -> anyhow::Result<String> {
     struct PrintHistogramOnDrop;
@@ -980,7 +992,10 @@ pub fn replay_fixture_with_driver_sync_callback(
     crate::debug_pause::install_panic_pause_hook();
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create PBT runtime"));
-    let ref_state = super::fresh_reference_state(wiring);
+    // Real-editor replay harness — same blur-commit semantics as the live run
+    // (see `ReferenceState::real_editor`).
+    let mut ref_state = super::fresh_reference_state(wiring);
+    ref_state.real_editor = true;
     let sut = E2ESut::new(runtime.clone())?;
 
     let total = steps.len();
@@ -1007,7 +1022,8 @@ pub fn replay_fixture_with_driver_sync_callback(
                 reactive_engine: sut
                     .ctx
                     .reactive_engine
-                    .clone()
+                    .get()
+                    .cloned()
                     .expect("ReactiveEngine not initialized after StartApp"),
                 runtime_handle: runtime_for_hook.handle().clone(),
                 debug_services: sut
@@ -1018,7 +1034,7 @@ pub fn replay_fixture_with_driver_sync_callback(
             };
             if let Some(result) = callback(&ctx) {
                 if let Some(driver) = result.driver {
-                    sut.driver = Some(driver);
+                    *sut.driver.borrow_mut() = Some(driver);
                 }
                 sut.render.install_frontend(
                     result.frontend_engine,
@@ -1027,6 +1043,7 @@ pub fn replay_fixture_with_driver_sync_callback(
                 );
             }
         },
+        per_tick,
         seen_counter,
     );
 
@@ -1059,11 +1076,11 @@ pub fn run_phased_pbt_sync(num_steps: u32) -> anyhow::Result<String> {
 
     // Build the medium-aware driver and install into both `sut.driver`
     // and `live_driver()` so generators read the same source.
-    let user_driver: Arc<dyn crate::UserDriver> = match sut.ctx.reactive_engine.as_ref() {
+    let user_driver: Arc<dyn crate::UserDriver> = match sut.ctx.reactive_engine.get() {
         Some(reactive) => Arc::new(crate::ReactiveEngineDriver::new(reactive.clone())),
         None => Arc::new(DirectUserDriver::new(sut.ctx.engine().clone())),
     };
-    sut.driver = Some(user_driver);
+    *sut.driver.borrow_mut() = Some(user_driver);
 
     eprintln!("[run_phased_pbt_sync] setup complete: {actual_steps} pre-startup steps");
 
@@ -1123,7 +1140,8 @@ pub async fn pbt_execute_operation(
     let driver = state
         .sut
         .driver
-        .as_ref()
+        .borrow()
+        .clone()
         .expect("UserDriver not installed — call pbt_setup first");
     driver
         .synthetic_dispatch(entity, op, params.clone())

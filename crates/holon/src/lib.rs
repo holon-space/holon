@@ -1,3 +1,14 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Facade
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-engine "Petri-net engine" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-turso "Turso storage adapter" "Rust"
+//!
+//! Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, and DI modules.
+
 pub mod api;
 pub mod core;
 pub mod di;

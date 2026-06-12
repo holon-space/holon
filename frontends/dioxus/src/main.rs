@@ -1,20 +1,24 @@
-use dioxus::prelude::*;
-
-mod operations;
-mod render;
-
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dioxus::prelude::*;
 use fluxdi::{Injector, Module, ModuleLifecycleFuture, Shared};
-use holon_api::render_types::RenderExpr;
+use futures::StreamExt;
+use holon::di::CoreInfraModule;
+use holon_app::HolonFrontendModule;
 use holon_frontend::cli;
 use holon_frontend::config::{HolonConfig, SessionConfig};
-use holon_frontend::frontend_module::FrontendInjectorExt;
 use holon_frontend::preferences::PrefKey;
-use holon_frontend::reactive::RenderInterpreterInjectorExt;
-use holon_frontend::{FrontendSession, RenderSnapshot};
+use holon_frontend::reactive::{
+    make_interpret_fn, BuilderServices, BuilderServicesSlot, ReactiveEngine,
+    RenderInterpreterInjectorExt,
+};
+use holon_frontend::view_model::ViewModel;
+use holon_frontend::FrontendSession;
+
+mod editor;
+mod render;
 
 const BASE_CSS: &str = r#"<style>
 :root {
@@ -61,10 +65,6 @@ a:hover { text-decoration: underline; }
 
 // ── DioxusModule ─────────────────────────────────────────────────────────────
 
-fn to_di_err(phase: &str, e: &dyn std::fmt::Display) -> fluxdi::Error {
-    fluxdi::Error::module_lifecycle_failed("DioxusModule", phase, &e.to_string())
-}
-
 struct DioxusModule {
     holon_config: HolonConfig,
     session_config: SessionConfig,
@@ -72,25 +72,32 @@ struct DioxusModule {
     locked_keys: HashSet<PrefKey>,
 }
 
+impl DioxusModule {
+    fn core_module(&self) -> CoreInfraModule {
+        CoreInfraModule {
+            db_path: self.holon_config.resolve_db_path(&self.config_dir),
+        }
+    }
+
+    fn frontend_module(&self) -> HolonFrontendModule {
+        HolonFrontendModule {
+            holon_config: self.holon_config.clone(),
+            session_config: self.session_config.clone(),
+            config_dir: self.config_dir.clone(),
+            locked_keys: self.locked_keys.clone(),
+        }
+    }
+}
+
 impl Module for DioxusModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
-        let db_path = self.holon_config.resolve_db_path(&self.config_dir);
+        self.core_module().configure(injector)?;
+        self.frontend_module().configure(injector)?;
 
-        holon::di::open_and_register_core(injector, db_path, holon::di::StorageSelector::Turso)
-            .map_err(|e| to_di_err("configure", &e))?;
-
-        injector
-            .add_frontend(
-                self.holon_config.clone(),
-                self.session_config.clone(),
-                self.config_dir.clone(),
-                self.locked_keys.clone(),
-            )
-            .map_err(|e| to_di_err("configure", &e))?;
-
-        injector.set_render_interpreter(|_expr, _rows| {
-            holon_frontend::reactive_view_model::ReactiveViewModel::empty()
-        });
+        // The ReactiveEngine produces ViewModels by interpreting render-DSL
+        // exprs through the shadow builders; wire the shared interpret fn.
+        let slot = injector.resolve::<BuilderServicesSlot>();
+        injector.set_render_interpreter(make_interpret_fn(slot.0.clone()));
 
         Ok(())
     }
@@ -98,6 +105,13 @@ impl Module for DioxusModule {
     fn on_start(&self, injector: Shared<Injector>) -> ModuleLifecycleFuture {
         Box::pin(async move {
             let _session = injector.resolve_async::<FrontendSession>().await;
+
+            // Populate BuilderServicesSlot with the live engine so the
+            // interpret fn (and shadow builders) can resolve services.
+            let engine = injector.resolve::<ReactiveEngine>();
+            let slot = injector.resolve::<BuilderServicesSlot>();
+            let services: Arc<dyn BuilderServices> = engine.clone();
+            slot.0.set(services).ok();
 
             Ok(())
         })
@@ -113,8 +127,13 @@ fn main() {
 
     tracing_subscriber::fmt::init();
 
+    holon_frontend::shadow_builders::register_render_dsl_widget_names();
+
     let (holon_config, session_config, config_dir, locked) =
-        cli::build_session(dioxus_widgets()).expect("Failed to load config");
+        cli::build_session(render_supported_widgets()).expect("Failed to load config");
+    // Don't block window paint on the OrgMode initial scan; the reactive
+    // layer fills in data as it arrives.
+    let session_config = session_config.without_wait();
 
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
@@ -139,15 +158,18 @@ fn main() {
 
     let injector = app.injector();
     let session = injector.resolve::<FrontendSession>();
+    let engine = injector.resolve::<ReactiveEngine>();
     let rt_handle = runtime.handle().clone();
 
-    // Keep the tokio runtime alive in a background thread
+    // Keep the tokio runtime alive on a background thread; the webview blocks
+    // the main thread in launch() below.
     std::thread::spawn(move || {
         runtime.block_on(std::future::pending::<()>());
     });
 
     LaunchBuilder::new()
         .with_context(session)
+        .with_context(engine)
         .with_context(rt_handle)
         .with_cfg(
             dioxus::desktop::Config::new()
@@ -163,59 +185,44 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    let session: Arc<FrontendSession> = use_context();
+    let engine: Arc<ReactiveEngine> = use_context();
     let rt: tokio::runtime::Handle = use_context();
-    let default_snapshot: RenderSnapshot = (
-        RenderExpr::FunctionCall { name: "spacer".into(), args: vec![] },
-        vec![],
-    );
-    let mut render_snapshot = use_signal(|| default_snapshot.clone());
+    let session_keys: Arc<FrontendSession> = use_context();
+    let mut view_model: Signal<Option<ViewModel>> = use_signal(|| None);
 
-    // Bridge: tokio watch channel (Send) -> dioxus signal (!Send)
-    let watch_rx = use_hook(|| {
-        let (tx, rx) = tokio::sync::watch::channel(default_snapshot);
-
-        let session = session.clone();
-        rt.spawn(async move {
-            let root_id = holon_api::ROOT_LAYOUT_BLOCK_ID.to_string();
-            let watch = session
-                .watch_ui(root_id.clone(), None, true)
-                .await
-                .expect("watch_ui failed");
-
-            tracing::info!("watch_ui({root_id}) stream established");
-
-            let initial_expr = RenderExpr::FunctionCall { name: "spacer".into(), args: vec![] };
-            let cdc_state =
-                holon_frontend::CdcState::new(initial_expr, move |snapshot| {
-                    let _ = tx.send(snapshot);
-                });
-            holon_frontend::cdc::ui_event_listener(watch, cdc_state).await;
-        });
-
-        rx
+    // Bridge: tokio watch stream (Send) -> dioxus signal (!Send), carrying the
+    // root-layout ViewModel snapshots produced by ReactiveEngine::watch.
+    let watch_rx = use_hook({
+        let engine = engine.clone();
+        let rt = rt.clone();
+        move || {
+            let (tx, rx) = tokio::sync::watch::channel::<Option<ViewModel>>(None);
+            rt.spawn(async move {
+                let uri = holon_api::root_layout_block_uri();
+                let mut stream = engine.watch(&uri);
+                while let Some(rvm) = stream.next().await {
+                    if tx.send(Some(rvm.snapshot())).is_err() {
+                        break;
+                    }
+                }
+            });
+            rx
+        }
     });
 
-    // Poll the watch channel on the UI thread
     use_future(move || {
         let mut rx = watch_rx.clone();
         async move {
-            loop {
-                if rx.changed().await.is_err() {
-                    break;
-                }
-                let snapshot = rx.borrow_and_update().clone();
-                render_snapshot.set(snapshot);
+            while rx.changed().await.is_ok() {
+                view_model.set(rx.borrow_and_update().clone());
             }
         }
     });
 
-    let session_render: Arc<FrontendSession> = use_context();
-    let rt_render: tokio::runtime::Handle = use_context();
-    let (ref render_expr, ref data_rows) = *render_snapshot.read();
-
-    let session_keys: Arc<FrontendSession> = use_context();
-    let content = render::render_snapshot(render_expr, data_rows, &session_render, &rt_render);
+    let content = match &*view_model.read() {
+        Some(vm) => rsx! { render::RenderNode { node: vm.clone() } },
+        None => rsx! { div { style: "padding: 16px; color: var(--text-muted);", "Loading…" } },
+    };
 
     rsx! {
         div {
@@ -225,7 +232,7 @@ fn App() -> Element {
                 match (meta, shift, evt.key()) {
                     (true, false, Key::Character(c)) if c == "z" => {
                         let s = session_keys.clone();
-                        tokio::spawn(async move {
+                        rt.spawn(async move {
                             if let Err(e) = s.undo().await {
                                 tracing::error!("Undo failed: {e}");
                             }
@@ -233,7 +240,7 @@ fn App() -> Element {
                     }
                     (true, true, Key::Character(c)) if c == "z" || c == "Z" => {
                         let s = session_keys.clone();
-                        tokio::spawn(async move {
+                        rt.spawn(async move {
                             if let Err(e) = s.redo().await {
                                 tracing::error!("Redo failed: {e}");
                             }
@@ -247,26 +254,15 @@ fn App() -> Element {
     }
 }
 
-fn dioxus_widgets() -> std::collections::HashSet<String> {
-    [
-        "text",
-        "row",
-        "column",
-        "spacer",
-        "list",
-        "tree",
-        "columns",
-        "editable_text",
-        "rendered_text",
-        "selectable",
-        "icon",
-        "live_query",
-        "render_entity",
-        "live_block",
-        "table",
-        "section",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+/// Widget names the render layer supports — derived from the macro-generated
+/// builder set plus the collection layouts handled via the reactive shell.
+fn render_supported_widgets() -> HashSet<String> {
+    let mut widgets: HashSet<String> = render::builders::builder_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for name in ["table", "tree", "list", "outline", "columns"] {
+        widgets.insert(name.to_string());
+    }
+    widgets
 }

@@ -13,8 +13,8 @@ use std::time::Duration;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::capabilities::SutBlockInteract;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -44,10 +44,7 @@ use holon_api::{ContentType, EntityUri};
 /// Clicks the target editor, opens the slash menu via "/", filters to
 /// "delete" by typing the op name, asserts the popup_item_selected is
 /// the delete op, then presses Enter.
-pub async fn apply_trigger_slash_command_to_sut<S: SutLayout + SutDriver>(
-    sut: &mut S,
-    id: &EntityUri,
-) {
+pub async fn apply_trigger_slash_command_to_sut<S: SutLayout + SutDriver>(sut: &S, id: &EntityUri) {
     sut.wait_for_widget_kind(
         id,
         &["editable_text", "rendered_text"],
@@ -98,6 +95,12 @@ pub struct TriggerSlashCommand {
 }
 
 impl TransitionFactory<ReferenceState> for TriggerSlashCommand {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
@@ -202,9 +205,9 @@ impl TransitionRef<ReferenceState> for TriggerSlashCommand {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for TriggerSlashCommand {
+impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for TriggerSlashCommand {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_trigger_slash_command(&self.block_id).await;
+        sut.trigger_slash_command(&self.block_id).await;
     }
 }
 

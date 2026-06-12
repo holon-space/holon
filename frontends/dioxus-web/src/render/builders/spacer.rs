@@ -1,11 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(
-    width: &f32,
-    height: &f32,
-    _: &Option<String>,
-    _: &DioxusRenderContext,
-) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Spacer { width, height, .. } = &node.kind else {
+        return rsx! {};
+    };
     let w = *width;
     let h = *height;
     let style =

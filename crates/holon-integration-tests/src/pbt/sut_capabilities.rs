@@ -1,22 +1,19 @@
-//! Blanket `SutLoro` + `SutLoroLog` + `SutLifecycle` + Phase 6c-g impls on `E2ESut`.
+//! Blanket `SutLoro` + Phase 6c-g capability impls on `E2ESut`.
 //!
 //! Follows the same pattern as `reference_capabilities.rs`:
 //! thin forwarding impls that expose capability-trait surface
 //! over existing inherent / `SutHandle` methods.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use holon_pbt_core::capabilities::{
     EngineFocus, EntityUri, FrontendRootVm, PeerEditOp, ProviderStabilityReport, RenderedElement,
-    SutBackend, SutBlockTreeWrite, SutCdc, SutDriver, SutEditorMirrorRead, SutEditorMirrorWrite,
-    SutLayout, SutLifecycle, SutLoro, SutLoroLog, SutLoroTaskState, SutOrgFileWrite, SutOrgRead,
-    SutOrgRender, SutQueryCompile, SutRenderer, SutSqlProjection, SutViewModel, SutWatchRows,
-    TextOp, ViewportHint, WatchRow,
+    SutBlockTreeWrite, SutDriver, SutEditorMirrorRead, SutEditorMirrorWrite, SutLayout, SutLoro,
+    SutSqlProjection, SutViewModel, TextOp, ViewportHint,
 };
 
 use super::sut::E2ESut;
-use super::transition_dispatch::SutHandle;
 use holon_frontend::reactive::BuilderServices;
 
 // ─── SutLoro (forwarding) ─────────────────────────────────────────────
@@ -30,213 +27,121 @@ use holon_frontend::reactive::BuilderServices;
 impl E2ESut {
     /// The owned peer surface. Panics if Loro is disabled — peer transitions
     /// gate on `enable_loro` in their preconditions, so reaching here without
-    /// `loro_sut` is a wiring bug, not a runtime condition.
-    fn loro_mut(&mut self) -> &mut crate::pbt::sut_loro::LoroSut {
+    /// `loro_sut` is a wiring bug, not a runtime condition. `&self`: `LoroSut`'s
+    /// peer mutations are interior (`RefCell` peers), so the cap is `&self`-hosted.
+    fn loro(&self) -> &crate::pbt::sut_loro::LoroSut {
         self.loro_sut
-            .as_mut()
+            .get()
             .expect("SutLoro op reached E2ESut but Loro is not enabled (loro_sut is None)")
     }
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutLoro for E2ESut {
-    async fn apply_add_peer(&mut self) {
-        self.loro_mut().apply_add_peer().await;
+    async fn apply_add_peer(&self) {
+        self.loro().apply_add_peer().await;
     }
 
     async fn apply_peer_create(
-        &mut self,
+        &self,
         peer_idx: usize,
         parent_stable_id: Option<&str>,
         content: &str,
         stable_id: &str,
     ) {
-        self.loro_mut()
+        self.loro()
             .apply_peer_create(peer_idx, parent_stable_id, content, stable_id)
             .await;
     }
 
-    async fn apply_peer_update(&mut self, peer_idx: usize, stable_id: &str, content: &str) {
-        self.loro_mut()
+    async fn apply_peer_update(&self, peer_idx: usize, stable_id: &str, content: &str) {
+        self.loro()
             .apply_peer_update(peer_idx, stable_id, content)
             .await;
     }
 
-    async fn apply_peer_delete(&mut self, peer_idx: usize, stable_id: &str) {
-        self.loro_mut().apply_peer_delete(peer_idx, stable_id).await;
+    async fn apply_peer_delete(&self, peer_idx: usize, stable_id: &str) {
+        self.loro().apply_peer_delete(peer_idx, stable_id).await;
     }
 
     async fn apply_peer_char_insert(
-        &mut self,
+        &self,
         peer_idx: usize,
         stable_id: &str,
         pos_codepoint: usize,
         text: &str,
     ) {
-        self.loro_mut()
+        self.loro()
             .apply_peer_char_insert(peer_idx, stable_id, pos_codepoint, text)
             .await;
     }
 
     async fn apply_peer_char_delete(
-        &mut self,
+        &self,
         peer_idx: usize,
         stable_id: &str,
         pos_codepoint: usize,
         len_codepoint: usize,
     ) {
-        self.loro_mut()
+        self.loro()
             .apply_peer_char_delete(peer_idx, stable_id, pos_codepoint, len_codepoint)
             .await;
     }
 
-    async fn apply_peer_edit(&mut self, peer_idx: usize, op: &PeerEditOp) {
-        self.loro_mut().apply_peer_edit(peer_idx, op).await;
+    async fn apply_peer_edit(&self, peer_idx: usize, op: &PeerEditOp) {
+        self.loro().apply_peer_edit(peer_idx, op).await;
     }
 
-    async fn apply_peer_char_edit(&mut self, peer_idx: usize, block_id: &str, op: &TextOp) {
-        self.loro_mut()
+    async fn apply_peer_char_edit(&self, peer_idx: usize, block_id: &str, op: &TextOp) {
+        self.loro()
             .apply_peer_char_edit(peer_idx, block_id, op)
             .await;
     }
 
-    async fn apply_sync_with_peer(&mut self, peer_idx: usize) {
-        self.loro_mut().apply_sync_with_peer(peer_idx).await;
+    async fn apply_sync_with_peer(&self, peer_idx: usize) {
+        self.loro().apply_sync_with_peer(peer_idx).await;
     }
 
-    async fn apply_merge_from_peer(&mut self, peer_idx: usize) {
-        self.loro_mut().apply_merge_from_peer(peer_idx).await;
+    async fn apply_merge_from_peer(&self, peer_idx: usize) {
+        self.loro().apply_merge_from_peer(peer_idx).await;
     }
 
-    async fn apply_create_stale_peer(&mut self, lag_steps: usize) {
-        self.loro_mut().apply_create_stale_peer(lag_steps).await;
-    }
-}
-
-// ─── SutLifecycle ─────────────────────────────────────────────────────
-
-#[allow(async_fn_in_trait)]
-impl SutLifecycle for E2ESut {
-    async fn apply_start_app(&mut self) {
-        self.ctx
-            .start_app(true)
-            .await
-            .expect("SutLifecycle::apply_start_app failed");
-    }
-
-    /// Triggers a restart simulation with an empty expected-ids set. The
-    /// wide-PBT transition passes the full expected set from `ref_state`;
-    /// lifecycle callers that don't have ref_state use the empty set so
-    /// `simulate_restart` still clears and re-syncs Loro without blocking
-    /// on block convergence.
-    async fn apply_simulate_restart(&mut self) {
-        self.ctx
-            .simulate_restart(&HashSet::new())
-            .await
-            .expect("SutLifecycle::apply_simulate_restart failed");
-    }
-
-    async fn is_app_started(&self) -> bool {
-        self.ctx.is_running()
+    async fn apply_create_stale_peer(&self, lag_steps: usize) {
+        self.loro().apply_create_stale_peer(lag_steps).await;
     }
 }
 
-// ─── SutLoroLog ───────────────────────────────────────────────────────
+// ─── SutLifecycle ── E3: deleted off `E2ESut` (2026-06-24). Fully vestigial —
+// superseded by the finer `local_caps::SutAppLifecycle` (what the `StartApp`/
+// `SimulateRestart` transitions actually bind); the coarse trait had zero callers.
 
-#[allow(async_fn_in_trait)]
-impl SutLoroLog for E2ESut {
-    /// Delegates to `TestContext::loro_sync_error_count`, which reads the
-    /// `LoroSyncController`'s atomic error counter. Same source as the
-    /// `inv-loro-no-errors` body.
-    async fn loro_had_errors(&self) -> bool {
-        self.ctx.loro_sync_error_count() > 0
-    }
+// ─── SutLoroLog ── E3: deleted off `E2ESut` (relocated onto the composed
+// `LoroBackendComponent` / `loro_slice`). See `NATIVE_ONLY_EXCLUDED` +
+// `E1_RELOCATED_CAP_COVERAGE`.
 
-    /// Ordered child block ids of `block_id` in the live Loro tree.
-    /// `None` when Loro isn't enabled or `block_id` is absent from the tree;
-    /// `Some(vec)` (possibly empty) when the node exists. Reads the same
-    /// `LoroBackend::get_all_blocks` snapshot `LoroSut` trusts, filters by
-    /// `parent_id`, and orders by the fractional-index `sort_key` — the
-    /// authoritative sibling order.
-    async fn loro_children_of(&self, block_id: &str) -> Option<Vec<String>> {
-        let snaps = self
-            .loro_sut
-            .as_ref()?
-            .read_block_snapshots()
-            .await
-            .unwrap_or_else(|e| panic!("SutLoroLog::loro_children_of: read failed: {e}"));
-        snaps.iter().find(|s| s.block.id.as_str() == block_id)?;
-        let mut children: Vec<_> = snaps
-            .iter()
-            .filter(|s| s.block.parent_id.as_str() == block_id)
-            .collect();
-        children.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
-        Some(
-            children
-                .into_iter()
-                .map(|s| s.block.id.to_string())
-                .collect(),
-        )
-    }
-
-    /// Every block in the live Loro tree (`read_blocks`), or `None` when Loro
-    /// isn't enabled on this variant. `read_blocks` failures panic — a Loro
-    /// read error is itself a bug, never silently swallowed.
-    async fn loro_block_snapshot(&self) -> Option<Vec<holon_api::block::Block>> {
-        let loro = self.loro_sut.as_ref()?;
-        Some(
-            loro.read_blocks().await.unwrap_or_else(|e| {
-                panic!("SutLoroLog::loro_block_snapshot: read_blocks failed: {e}")
-            }),
-        )
-    }
-}
-
-// ─── SutErrorLog ──────────────────────────────────────────────────────
-
-#[allow(async_fn_in_trait)]
-impl holon_pbt_core::capabilities::SutErrorLog for E2ESut {
-    /// Flutter/event publish errors logged during initial document sync.
-    async fn app_error_count(&self) -> usize {
-        self.startup_error_count()
-    }
-
-    /// The documents present at startup — context for the failure message.
-    async fn app_error_context(&self) -> Vec<String> {
-        self.documents.keys().map(|k| k.to_string()).collect()
-    }
-}
+// ─── SutErrorLog ── E3: deleted off `E2ESut` (relocated onto the composed
+// `HeadlessFrontendComponent`, which hosts it over the same production
+// `FrontendSession` publish-error tracker). See `NATIVE_ONLY_EXCLUDED` +
+// `E1_RELOCATED_CAP_COVERAGE`.
 
 // ─── SutLoroTaskState ─────────────────────────────────────────────────
-
-#[allow(async_fn_in_trait)]
-impl SutLoroTaskState for E2ESut {
-    /// Project a block's `task_state` from the live Loro tree. `None` when
-    /// Loro isn't enabled, the block is absent, or it has no `task_state`
-    /// property. Reads the same `properties["task_state"]` scalar the SQL
-    /// sibling [`SutSqlProjection::block_task_state`] reads via
-    /// `json_extract(properties,'$.task_state')`, so the two are directly
-    /// comparable by `inv-task-state-storage-coherence`.
-    async fn loro_task_state_of(&self, block_id: &str) -> Option<String> {
-        let blocks = self
-            .loro_sut
-            .as_ref()?
-            .read_blocks()
-            .await
-            .unwrap_or_else(|e| {
-                panic!("SutLoroTaskState::loro_task_state_of: read_blocks failed: {e}")
-            });
-        let block = blocks.iter().find(|b| b.id.as_str() == block_id)?;
-        block
-            .properties
-            .get("task_state")
-            .and_then(|v| v.as_string_owned())
-    }
-}
+// E3: `impl SutLoroTaskState for E2ESut` was DELETED here. Its only live consumer
+// was the standalone `tests/task_state_coherence_pbt.rs` (a `component_pbt!`
+// E2ESut-wrapping slice dispatching `inv-task-state-storage-coherence`). Per the
+// convergence rule (Design §8.10) that standalone test was DELETED — not rewritten as a
+// composed slice — because the ONE PBT already covers the cap: `full_headless` hosts
+// `SutLoroTaskState` + `SutSqlProjection`, and `general_e2e_composed_pbt` / `WideE2E` now
+// lists `inv-task-state-storage-coherence` in `WIDE_REQUIRED_INVARIANTS` (runs every
+// tick); the real-SUT lockstep teeth lives in
+// `composed/invariants/task_state_storage_coherence.rs`. `SutLoroTaskState` is not a
+// `WideProxyCaps` member and the invariant is `NATIVE_ONLY_EXCLUDED`, so the native
+// runner never dispatched it over `E2ESut`. The trait + composed hosts
+// (`LoroBackendComponent` / `FixtureLoroTaskState`) remain; see
+// `E1_RELOCATED_CAP_COVERAGE` in `composed/parity.rs`.
 
 // ─── SutSqlProjection ─────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutSqlProjection for E2ESut {
     /// Queries the `block` materialized view for a single row and returns its
     /// fields as strings. Same data path as the
@@ -303,7 +208,11 @@ impl SutSqlProjection for E2ESut {
     /// `TestContext::ui_model`. Returns `None` when the query_id is not
     /// registered.
     async fn watch_row_count(&self, query_id: &str) -> Option<usize> {
-        self.ctx.ui_model.get(query_id).map(|acc| acc.len())
+        self.ctx
+            .ui_model
+            .borrow()
+            .get(query_id)
+            .map(|acc| acc.len())
     }
 
     /// Queries `block_raw` (write-side base table, no matview hydration) for a
@@ -444,161 +353,28 @@ impl SutSqlProjection for E2ESut {
     }
 }
 
-// ─── SutBackend ───────────────────────────────────────────────────────
+// ─── SutBackend: DELETED (E3, 2026-06-24) ─────────────────────────────
+// The headless `block_raw`/`block`-matview read surface (`live_block_snapshot`
+// / `block_raw_snapshot` / `live_focus_root_rows`) is now hosted by the composed
+// `HeadlessFrontendComponent` / `SqlProjectionComponent`. Its 6 structural
+// invariants (matview, block_raw, no-orphan, no-parent-cycles, source-language,
+// focus-roots) run only via the composed catalog — see `NATIVE_ONLY_EXCLUDED`
+// + the `SutBackend` row in `E1_RELOCATED_CAP_COVERAGE`.
 
-#[allow(async_fn_in_trait)]
-impl SutBackend for E2ESut {
-    /// Snapshot the CDC-driven `block` matview mirror (`live_blocks`) as
-    /// typed `Block` values via `live_blocks().read().values().cloned()`.
-    async fn live_block_snapshot(&self) -> Vec<holon_api::Block> {
-        self.live_blocks()
-            .await
-            .read()
-            .values()
-            .map(|b| (**b).clone())
-            .collect()
-    }
+// ─── SutWatchRows: DELETED (E3) ───────────────────────────────────────
+// E2ESut's `SutWatchRows` impl was removed once the cap was relocated onto
+// `HeadlessFrontendComponent`'s production reactive watch surface (E1/B5). The
+// watch invariants now run only via the composed `frontend_slice`; the native
+// runner no longer dispatches them (see `NATIVE_ONLY_EXCLUDED`).
 
-    /// Read the write-side `block_raw` table directly into `Block` values.
-    /// Only `block_raw`'s native columns are selected (no junction `tags`/
-    /// `requires`); `parse_block_row` leaves those empty, so the
-    /// `/block_raw` store compares a field subset. Panics on a row that
-    /// won't parse — a malformed `block_raw` row is a bug, not skipped.
-    async fn block_raw_snapshot(&self) -> Vec<holon_api::Block> {
-        let rows = self
-            .ctx
-            .query_sql(
-                "SELECT id, parent_id, content, content_type, source_language, properties \
-                 FROM block_raw",
-            )
-            .await
-            .expect("SutBackend::block_raw_snapshot query failed");
-        rows.iter()
-            .map(|r| {
-                let r: holon::storage::types::StorageEntity = r
-                    .iter()
-                    .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v.clone()))
-                    .collect();
-                super::sut_row_parsing::parse_block_row(&r).unwrap_or_else(|| {
-                    panic!("block_raw_snapshot: parse_block_row returned None for row {r:?}")
-                })
-            })
-            .collect()
-    }
-
-    /// Snapshot the CDC-driven `focus_roots` mirror (`live_focus_roots`) as
-    /// `(region, root_id)` rows via `live_focus_roots().read().values()`.
-    async fn live_focus_root_rows(&self) -> Vec<(String, String)> {
-        self.live_focus_roots()
-            .await
-            .read()
-            .values()
-            .map(|fr| (fr.region.clone(), fr.root_id.clone()))
-            .collect()
-    }
-}
-
-// ─── SutWatchRows ─────────────────────────────────────────────────────
-
-#[allow(async_fn_in_trait)]
-impl SutWatchRows for E2ESut {
-    /// `ui_model` keys — the watches currently registered on the SUT. The
-    /// active watch query-id map.
-    async fn watch_query_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.ctx.ui_model.keys().cloned().collect();
-        ids.sort();
-        ids
-    }
-
-    /// CDC-delivered rows for `query_id` (`ui_model[query_id].to_vec()`),
-    /// each `Value` mapped through `as_string()` into the `WatchRow` shape.
-    /// Empty if the watch is not registered.
-    async fn watch_rows(&self, query_id: &str) -> Vec<WatchRow> {
-        let Some(acc) = self.ctx.ui_model.get(query_id) else {
-            return Vec::new();
-        };
-        acc.to_vec()
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|(k, v)| (k.to_string(), v.as_string().map(str::to_string)))
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// Runs the `block_raw` truth-check SQL and projects the `id` column.
-    /// Extracts `id` from each row. Panics on a query error — a failed truth
-    /// query is itself a bug, never silently swallowed.
-    async fn block_raw_query_ids(&self, sql: &str) -> BTreeSet<EntityUri> {
-        let rows = self.ctx.query_sql(sql).await.unwrap_or_else(|e| {
-            panic!(
-                "[inv-watch-rows-match-ref truth check] block_raw query failed\n\
-                 sql: {sql}\n\
-                 error: {e}"
-            )
-        });
-        rows.into_iter()
-            .filter_map(|r| {
-                r.get("id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| EntityUri::parse(s).expect("invalid entity URI in block_raw row"))
-            })
-            .collect()
-    }
-
-    /// `SELECT {field} FROM block_raw WHERE id = ?` — the per-field truth
-    /// read for the field-level CDC-lag classifier.
-    async fn block_raw_field(&self, id: &EntityUri, field: &str) -> Option<String> {
-        let escaped_id = id.as_str().replace('\'', "''");
-        let sql = format!("SELECT {field} FROM block_raw WHERE id = '{escaped_id}'");
-        let rows = self
-            .ctx
-            .query_sql(&sql)
-            .await
-            .expect("SutWatchRows::block_raw_field query failed");
-        rows.into_iter()
-            .next()
-            .and_then(|r| r.get(field).and_then(|v| v.as_string()).map(str::to_string))
-    }
-}
-
-// ─── SutOrgFileWrite ──────────────────────────────────────────────────
-
-#[allow(async_fn_in_trait)]
-impl SutOrgFileWrite for E2ESut {
-    /// Delegates to `SutHandle::apply_write_org_file`, which writes the file
-    /// via `TestContext::write_org_file` and — when the app is running — waits
-    /// for `FileSyncController` to ingest it and re-key `ctx.documents`.
-    async fn write_org_file(&mut self, path: &str, contents: &str) {
-        <E2ESut as SutHandle>::apply_write_org_file(self, path, contents).await;
-    }
-}
-
-// ─── SutCdc ───────────────────────────────────────────────────────────
-
-#[allow(async_fn_in_trait)]
-impl SutCdc for E2ESut {
-    /// True when the `live_blocks` CDC mirror has not yet consumed all events
-    /// emitted since the last write. Delegates to `E2ESut::live_blocks_cdc_stale`
-    /// (pub(super) accessor): compares `LiveData::consumed_seq()` against
-    /// `db_handle().cdc_emitted_watermark()`. Returns `false` pre-startup or
-    /// before the mirror is initialised.
-    async fn cdc_in_flight(&self) -> bool {
-        self.live_blocks_cdc_stale()
-    }
-
-    /// Drains pending CDC events from all active watches into the `ui_model`.
-    /// Delegates to `TestContext::drain_cdc_events` — same logic used between
-    /// transitions in `apply_transition_async`.
-    async fn drain_cdc(&mut self) {
-        self.ctx.drain_cdc_events().await;
-    }
-}
+// ─── SutOrgFileWrite ── E3: deleted off `E2ESut` (2026-06-24). Fully vestigial —
+// was a redundant wrapper delegating straight to `local_caps::SutFixtureFs::write_org_file`,
+// which is what the `WriteOrgFile` transition binds directly; the coarse trait had
+// zero callers. Trait removed from pbt-core.
 
 // ─── SutViewModel ─────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutViewModel for E2ESut {
     /// Drains all pending ViewModel emissions since the last call.
     /// Delegates to `E2ESut::vm_emissions_drain` (pub(super) accessor).
@@ -665,7 +441,7 @@ impl SutViewModel for E2ESut {
 
     /// The selected view mode tracked on the test context.
     async fn current_view(&self) -> String {
-        self.current_view.clone()
+        self.current_view.borrow().clone()
     }
 
     /// Resolve the frontend engine's root layout and return its widget kind +
@@ -1078,14 +854,51 @@ impl SutViewModel for E2ESut {
 // ─── SutRenderer ──────────────────────────────────────────────────────
 
 impl E2ESut {
+    /// Builder services for an *independent* (fresh) headless re-interpret in the
+    /// `SutViewModel` render invariants. The Turso wiring re-interprets through a
+    /// fresh `HeadlessBuilderServices` over its `BackendEngine` (preserving the
+    /// established independence from the live reactive state); the no-Turso wiring
+    /// has no engine, so it re-interprets through the reactive engine built over
+    /// `block_query` — the only builder-services it carries. The `SutViewModel`
+    /// callers (`headless_error_node_count` etc.) populate the reactive engine
+    /// before calling here. `HeadlessBuilderServices` is Turso-only by
+    /// construction, so the selection keys off the explicit storage backend, not
+    /// a capability-presence proxy.
+    fn render_builder_services(&self) -> std::sync::Arc<dyn BuilderServices> {
+        match self.ctx.storage() {
+            holon::di::StorageSelector::Turso => std::sync::Arc::new(
+                holon_app::HeadlessBuilderServices::new(self.engine().clone()),
+            ),
+            holon::di::StorageSelector::LoroMemory => {
+                self.render.reactive_engine.borrow().clone().expect(
+                    "render_builder_services: no-Turso reactive engine must be set \
+                     (the SutViewModel caller watches the root first)",
+                ) as std::sync::Arc<dyn BuilderServices>
+            }
+        }
+    }
+}
+
+// ─── SutRenderer ── E3: the `SutRenderer` *capability* was deleted off
+// `E2ESut` — it is no longer in `WideProxyCaps`, the native proxy registry, or
+// any composed catalog (the headless `widget_tree_*` render surface is hosted
+// solely by the composed `HeadlessFrontendComponent` / `frontend_slice` for
+// invariant dispatch; see `NATIVE_ONLY_EXCLUDED` + `E1_RELOCATED_CAP_COVERAGE`).
+//
+// What remains below are *inherent* (non-cap) helpers used only by the Gherkin
+// `Then`-assertion fixtures (`fixtures::assert::widget_contains`), which replay
+// **headlessly** over `E2ESut` and need a headless render of a block's widget
+// tree — a surface `SutLayout` (windowed geometry only) cannot provide. They
+// are not part of the PBT invariant-composition surface.
+impl E2ESut {
     /// Resolve a ready reactive watch for `uri`.
     ///
-    /// With an installed `frontend_engine` (phased/GPUI harness) this keeps the
-    /// original semantics: return `None` immediately if the watch is still
-    /// loading. Without one (the `declare_pbt_slice!` harness has no GPUI), it
-    /// falls back to the lazily-created headless `reactive_engine` and polls
-    /// until its first results load (or a short timeout), since that engine
-    /// fills from background tasks on the shared runtime. This lets widget
+    /// With an installed `frontend_engine` (phased/GPUI harness) this returns
+    /// `None` immediately if the watch is still loading. Without one (the
+    /// `declare_pbt_slice!` harness has no GPUI), it falls back to the
+    /// lazily-created headless `reactive_engine` and polls until its first
+    /// results load (or a short timeout), since that engine fills from
+    /// background tasks on the shared runtime. This lets the Gherkin widget
     /// assertions render headlessly without changing the frontend path.
     async fn resolve_watch(
         &self,
@@ -1110,49 +923,11 @@ impl E2ESut {
         }
     }
 
-    /// Builder services for an *independent* (fresh) headless re-interpret in the
-    /// render invariants. The Turso wiring re-interprets through a fresh
-    /// `HeadlessBuilderServices` over its `BackendEngine` (preserving the
-    /// established independence from the live reactive state); the no-Turso wiring
-    /// has no engine, so it re-interprets through the reactive engine built over
-    /// `block_query` — the only builder-services it carries (the same handle the
-    /// `SutViewModel` methods already use). Callers run `resolve_watch` first, so
-    /// the reactive engine is populated by here. `HeadlessBuilderServices` is
-    /// Turso-only by construction, so the selection keys off the explicit storage
-    /// backend, not a capability-presence proxy.
-    fn render_builder_services(&self) -> std::sync::Arc<dyn BuilderServices> {
-        match self.ctx.storage() {
-            holon::di::StorageSelector::Turso => std::sync::Arc::new(
-                holon_app::HeadlessBuilderServices::new(self.engine().clone()),
-            ),
-            holon::di::StorageSelector::LoroMemory => {
-                self.render.reactive_engine.borrow().clone().expect(
-                    "render_builder_services: no-Turso reactive engine must be set \
-                     (resolve_watch runs first)",
-                ) as std::sync::Arc<dyn BuilderServices>
-            }
-        }
-    }
-}
-
-#[allow(async_fn_in_trait)]
-impl SutRenderer for E2ESut {
-    /// Returns a debug-formatted render-tree string for `id`. Uses the
-    /// installed `frontend_engine` when present, else the headless
-    /// `reactive_engine` fallback (see [`E2ESut::resolve_watch`]).
-    async fn render_tree_of(&self, id: &EntityUri) -> Option<String> {
-        let rqr = self.resolve_watch(id).await?;
-        let (render_expr, data_rows) = rqr.snapshot();
-        let services = self.render_builder_services();
-        let vm = holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot();
-        Some(vm.pretty_print(0))
-    }
-
-    /// Build a frontend-agnostic [`WidgetSnapshot`] from the ViewModel
-    /// rooted at the layout root. Mirrors the path
-    /// `render_tree_of` uses (interpret_pure against the layout root) but
-    /// returns the structured snapshot instead of a pretty-printed string.
-    async fn widget_tree_snapshot(&self) -> holon_pbt_core::capabilities::WidgetSnapshot {
+    /// Headless widget-tree snapshot rooted at the layout root, for the Gherkin
+    /// `the widget contains "<text>"` (no locator) assertion.
+    pub(crate) async fn widget_tree_snapshot(
+        &self,
+    ) -> holon_pbt_core::capabilities::WidgetSnapshot {
         let empty = || holon_pbt_core::capabilities::WidgetSnapshot {
             kind: "empty".into(),
             entity_id: None,
@@ -1170,48 +945,10 @@ impl SutRenderer for E2ESut {
         view_model_to_snapshot(&vm)
     }
 
-    /// Readiness signal for the root render — faithful port of the inline
-    /// `inv-viewmodel-snapshot` block's skip guards. Returns `false` (→ the
-    /// body must skip its structural assertions) when:
-    /// - the root layout isn't watchable yet (`resolve_watch` → `None`, i.e.
-    ///   the inline's closed-stream / still-`loading` skip),
-    /// - the settled render_expr is the `loading` placeholder,
-    /// - the settled render_expr is the `spacer` placeholder, or
-    /// - headless interpretation of the render_expr panics (the inline's
-    ///   `catch_unwind` skip for the pre-existing shadow-interpret bug).
-    ///
-    /// Returns `true` only for a settled, interpretable content render —
-    /// exactly the state in which the inline ran sub-checks 10a–10j. Roots
-    /// at `root_layout_block_uri()`, the same node `widget_tree_snapshot`
-    /// roots at and the same node the inline watched (`root_id`).
-    async fn root_render_ready(&self) -> bool {
-        let root_uri = holon_api::root_layout_block_uri();
-        let Some(rqr) = self.resolve_watch(&root_uri).await else {
-            return false;
-        };
-        let (render_expr, data_rows) = rqr.snapshot();
-
-        let placeholder = matches!(
-            &render_expr,
-            holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading" || name == "spacer"
-        );
-        if placeholder {
-            return false;
-        }
-
-        let services = self.render_builder_services();
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot();
-        }))
-        .is_ok()
-    }
-
-    /// Widget tree for an explicit block id. Builds the snapshot via
-    /// interpret_pure against that block's resolved render_expr +
-    /// data_rows, same path as `widget_tree_snapshot` but rooted at
-    /// `block_id` instead of the layout root. Returns `None` if the
-    /// block isn't watchable yet.
-    async fn widget_tree_for(
+    /// Headless widget tree for an explicit block id, for the Gherkin
+    /// `block "<id>" contains "<text>"` assertion. `None` when the block isn't
+    /// watchable yet.
+    pub(crate) async fn widget_tree_for(
         &self,
         block_id: &EntityUri,
     ) -> Option<holon_pbt_core::capabilities::WidgetSnapshot> {
@@ -1220,91 +957,6 @@ impl SutRenderer for E2ESut {
         let services = self.render_builder_services();
         let vm = holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot();
         Some(view_model_to_snapshot(&vm))
-    }
-
-    /// Extracts the `id` column from the layout root's data_rows.
-    /// Returns empty set if the layout root isn't watchable yet.
-    async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
-        let root_uri = holon_api::root_layout_block_uri();
-        let Some(rqr) = self.resolve_watch(&root_uri).await else {
-            return Default::default();
-        };
-        let (_, data_rows) = rqr.snapshot();
-        data_rows
-            .iter()
-            .filter_map(|r| {
-                r.get("id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| EntityUri::parse(s).expect("data_row id must be a valid EntityUri"))
-            })
-            .collect()
-    }
-
-    /// "Decompiler" content comparison for the root layout. Faithful port of
-    /// `inv-viewmodel-decompiled-rows-match-query`: interprets the root render_expr against its data_rows into a display
-    /// tree, decompiles per-row rendered content via
-    /// `extract_rendered_rows`, and pairs the rendered `content` strings with
-    /// the query `data_rows`' `content` (filtered to `visible_columns`).
-    ///
-    /// Returns `None` (→ body `Ok`) when the root isn't watchable / still
-    /// loading / a spacer, or when any of the inline gates is empty
-    /// (`rendered_rows`, `visible_columns`, `data_rows`).
-    async fn root_content_comparison(
-        &self,
-        visible_columns: &[String],
-    ) -> Option<(Vec<String>, Vec<String>)> {
-        let root_uri = holon_api::root_layout_block_uri();
-        let rqr = self.resolve_watch(&root_uri).await?;
-        let (render_expr, data_rows) = rqr.snapshot();
-
-        let services = self.render_builder_services();
-        let display_tree =
-            holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot();
-
-        let rendered_rows = crate::display_assertions::extract_rendered_rows(&display_tree);
-
-        if std::env::var("HOLON_PBT_ROOT_WATCH_DEBUG").is_ok() {
-            eprintln!(
-                "[root-watch-debug] render_expr={render_expr:?}\n\
-                 [root-watch-debug] data_rows={data_rows:#?}\n\
-                 [root-watch-debug] rendered_rows={rendered_rows:#?}"
-            );
-        }
-
-        // Inline gate: only compare when all three are non-empty.
-        if rendered_rows.is_empty() || visible_columns.is_empty() || data_rows.is_empty() {
-            return None;
-        }
-
-        // Expected: data_rows filtered to visible columns, then the `content`
-        // column. Faithful to the inline (filter → extract `content`).
-        let data_content: Vec<String> = data_rows
-            .iter()
-            .map(|r| {
-                r.iter()
-                    .filter(|(k, _)| visible_columns.contains(k))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<std::collections::HashMap<String, holon_api::Value>>()
-            })
-            .filter_map(|r| {
-                r.get("content")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-
-        // Rendered: pull the `content` column directly off each decompiled row
-        // (no visible-cols filter — matches the inline).
-        let rendered_content: Vec<String> = rendered_rows
-            .iter()
-            .filter_map(|r| {
-                r.get("content")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-
-        Some((rendered_content, data_content))
     }
 }
 
@@ -1316,9 +968,10 @@ impl SutRenderer for E2ESut {
 /// - `props` = kind-specific scalar fields canonicalised to strings
 ///   (StateToggle.field/current/label/states, EditableText.field/content, etc.).
 /// - `operations` = canonical form `<op_name>:<affected_fields_csv>:<param_names_csv>`,
-///   one per `OperationWiring`. Invariants match by prefix
-///   (`set_field:task_state:` etc.).
-fn view_model_to_snapshot(
+///   one per `OperationWiring`. Invariants match on this form — e.g. by op-name
+///   prefix, or (for "an op that changes field X") by the affected-fields segment
+///   (`set_state:task_state:…` / `cycle_task_state:task_state:…`).
+pub(crate) fn view_model_to_snapshot(
     vm: &holon_frontend::view_model::ViewModel,
 ) -> holon_pbt_core::capabilities::WidgetSnapshot {
     use holon_frontend::view_model::ViewKind;
@@ -1397,7 +1050,7 @@ fn view_model_to_snapshot(
 
 // ─── SutLayout ────────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutLayout for E2ESut {
     /// Snapshot the whole BoundsRegistry into the pbt-core
     /// [`RenderedElement`] mirror. `holon-frontend`-only verdicts are
@@ -1452,8 +1105,9 @@ impl SutLayout for E2ESut {
     /// unconditionally calls `window.refresh()`, so a scroll request for an
     /// id that matches no row is a pure frame pump.
     async fn rendered_elements_fresh(&self) -> Vec<RenderedElement> {
+        let driver = self.driver.borrow().clone();
         if self.render.frontend_geometry.is_some()
-            && let Some(driver) = self.driver.as_ref()
+            && let Some(driver) = driver
         {
             let pump_uri = holon_api::EntityUri::block("__pbt-frame-pump__");
             if let Err(e) = driver.scroll_to_entity(&pump_uri).await {
@@ -1604,7 +1258,7 @@ impl E2ESut {
             let focused = self
                 .ctx
                 .reactive_engine
-                .as_ref()
+                .get()
                 .and_then(|e| e.ui_state().focused_block());
             if let Some(block) = focused.as_ref() {
                 if self
@@ -1628,12 +1282,7 @@ impl E2ESut {
     /// editor, if any. `None` when headless, unfocused, or not yet mounted.
     fn focused_editor_displayed_text(&self) -> Option<String> {
         let geometry = self.render.frontend_geometry.as_deref()?;
-        let focused = self
-            .ctx
-            .reactive_engine
-            .as_ref()?
-            .ui_state()
-            .focused_block()?;
+        let focused = self.ctx.reactive_engine.get()?.ui_state().focused_block()?;
         geometry.all_elements().into_iter().find_map(|(_, info)| {
             (info.entity_id.as_deref() == Some(focused.as_str())
                 && info.widget_type.as_ref() == "editable_text")
@@ -1678,16 +1327,16 @@ impl E2ESut {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutEditorMirrorWrite for E2ESut {
-    async fn apply_type_chars(&mut self, text: &str) {
+    async fn apply_type_chars(&self, text: &str) {
         tracing::trace!("[apply] TypeChars: {:?}", text);
         self.wait_for_active_editor_window_focus("TypeChars").await;
         for ch in text.chars() {
             let keystroke = ch.to_string();
             let before = self.focused_editor_displayed_text();
-            self.driver
-                .as_ref()
-                .expect("driver not installed")
+            let driver = self.driver.borrow().clone().expect("driver not installed");
+            driver
                 .send_raw_keystroke(&keystroke, &[])
                 .await
                 .expect("TypeChars: send_raw_keystroke failed");
@@ -1695,7 +1344,7 @@ impl SutEditorMirrorWrite for E2ESut {
         }
     }
 
-    async fn apply_delete_backward(&mut self, count: usize) {
+    async fn apply_delete_backward(&self, count: usize) {
         tracing::trace!("[apply] DeleteBackward: count={count}");
         self.wait_for_active_editor_window_focus("DeleteBackward")
             .await;
@@ -1709,9 +1358,8 @@ impl SutEditorMirrorWrite for E2ESut {
                     .await;
             }
             let before = self.focused_editor_displayed_text();
-            self.driver
-                .as_ref()
-                .expect("driver not installed")
+            let driver = self.driver.borrow().clone().expect("driver not installed");
+            driver
                 .send_raw_keystroke("backspace", &[])
                 .await
                 .expect("DeleteBackward: backspace failed");
@@ -1720,7 +1368,7 @@ impl SutEditorMirrorWrite for E2ESut {
         }
     }
 
-    async fn apply_move_cursor(&mut self, byte_position: usize) {
+    async fn apply_move_cursor(&self, byte_position: usize) {
         tracing::trace!("[apply] MoveCursor: byte_position={byte_position}");
         // `byte_position` is a byte offset into the active editor text;
         // each `right` keystroke advances one CHAR. Convert against the
@@ -1746,7 +1394,7 @@ impl SutEditorMirrorWrite for E2ESut {
             text[..byte_position].chars().count()
         };
         self.wait_for_active_editor_window_focus("MoveCursor").await;
-        let driver = self.driver.as_ref().expect("driver not installed");
+        let driver = self.driver.borrow().clone().expect("driver not installed");
         driver
             .send_raw_keystroke("home", &[])
             .await
@@ -1768,7 +1416,7 @@ impl SutEditorMirrorWrite for E2ESut {
 /// keystrokes mutate. Both resolve ref-model synthetic ids first.
 impl SutEditorMirrorRead for E2ESut {
     fn editor_caret_byte(&self, block_id: &EntityUri) -> Result<Option<usize>, String> {
-        let driver = self.driver.as_ref().ok_or_else(|| {
+        let driver = self.driver.borrow().clone().ok_or_else(|| {
             "SutEditorMirrorRead::editor_caret_byte: driver not installed".to_string()
         })?;
         let resolved = self.resolve_uri(block_id);
@@ -1802,9 +1450,9 @@ impl SutEditorMirrorRead for E2ESut {
 /// so the E2E enum's `S: SutHandle` dispatch still satisfies the
 /// SplitBlock / JoinBlock / Indent / Outdent / MoveUp / MoveDown variants
 /// that narrow to `S: SutBlockTreeWrite`.
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutBlockTreeWrite for E2ESut {
-    async fn apply_split_block(&mut self, block_id: &EntityUri, position: usize) {
+    async fn apply_split_block(&self, block_id: &EntityUri, position: usize) {
         tracing::trace!("[apply] SplitBlock: block={block_id} position={position}");
         let resolved_id = self.resolve_uri(block_id);
 
@@ -1924,7 +1572,7 @@ impl SutBlockTreeWrite for E2ESut {
         .await;
     }
 
-    async fn apply_join_block(&mut self, block_id: &EntityUri) {
+    async fn apply_join_block(&self, block_id: &EntityUri) {
         tracing::trace!("[apply] JoinBlock: block={block_id}");
         let resolved_id = self.resolve_uri(block_id);
         let mut extra_params = std::collections::HashMap::new();
@@ -1933,28 +1581,28 @@ impl SutBlockTreeWrite for E2ESut {
             .await;
     }
 
-    async fn apply_indent(&mut self, block_id: &EntityUri) {
+    async fn apply_indent(&self, block_id: &EntityUri) {
         tracing::trace!("[apply] Indent: block={block_id}");
         let resolved_id = self.resolve_uri(block_id);
         self.dispatch_block_op_via_chord("indent", resolved_id.as_str(), Default::default())
             .await;
     }
 
-    async fn apply_outdent(&mut self, block_id: &EntityUri) {
+    async fn apply_outdent(&self, block_id: &EntityUri) {
         tracing::trace!("[apply] Outdent: block={block_id}");
         let resolved_id = self.resolve_uri(block_id);
         self.dispatch_block_op_via_chord("outdent", resolved_id.as_str(), Default::default())
             .await;
     }
 
-    async fn apply_move_up(&mut self, block_id: &EntityUri) {
+    async fn apply_move_up(&self, block_id: &EntityUri) {
         tracing::trace!("[apply] MoveUp: block={block_id}");
         let resolved_id = self.resolve_uri(block_id);
         self.dispatch_block_op_via_chord("move_up", resolved_id.as_str(), Default::default())
             .await;
     }
 
-    async fn apply_move_down(&mut self, block_id: &EntityUri) {
+    async fn apply_move_down(&self, block_id: &EntityUri) {
         tracing::trace!("[apply] MoveDown: block={block_id}");
         let resolved_id = self.resolve_uri(block_id);
         self.dispatch_block_op_via_chord("move_down", resolved_id.as_str(), Default::default())
@@ -1962,6 +1610,7 @@ impl SutBlockTreeWrite for E2ESut {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutDriver for E2ESut {
     /// Send a raw key chord to the currently focused entity.
     /// Not wired: SutDriver::driver_send_key_chord needs a KeyChord
@@ -1971,7 +1620,7 @@ impl SutDriver for E2ESut {
     /// bridge would need parsing + focus resolution not yet exposed. Wire
     /// in Phase 7 alongside the SutFocus trait (which will expose
     /// `current_focus` from the reference model).
-    async fn driver_send_key_chord(&mut self, _: &str) {
+    async fn driver_send_key_chord(&self, _: &str) {
         unimplemented!(
             "SutDriver::driver_send_key_chord on E2ESut: requires a focused entity id \
              and a parsed KeyChord; E2ESut::send_key_chord already provides this with \
@@ -1982,7 +1631,7 @@ impl SutDriver for E2ESut {
     /// Click an entity by id via the installed UserDriver. Defaults to
     /// region "main" — the convenience wrapper around `click_entity` used
     /// by SplitBlock / ClickBlock-style transitions.
-    async fn driver_click(&mut self, id: &EntityUri) {
+    async fn driver_click(&self, id: &EntityUri) {
         <Self as SutDriver>::click_entity(self, id, "main")
             .await
             .unwrap_or_else(|e| panic!("SutDriver::driver_click failed for {id}: {e}"));
@@ -1991,10 +1640,11 @@ impl SutDriver for E2ESut {
     /// Region-aware click via the installed UserDriver. Returns the
     /// driver error verbatim so callers attach their own
     /// transition-specific diagnostic.
-    async fn click_entity(&mut self, id: &EntityUri, region: &str) -> Result<(), String> {
+    async fn click_entity(&self, id: &EntityUri, region: &str) -> Result<(), String> {
         let driver = self
             .driver
-            .as_ref()
+            .borrow()
+            .clone()
             .ok_or_else(|| "SutDriver::click_entity: driver not installed".to_string())?;
         driver
             .click_entity(id, region)
@@ -2060,10 +1710,11 @@ impl SutDriver for E2ESut {
     /// Delegate to the installed UserDriver. Returns the driver error
     /// verbatim so callers attach their own transition-specific
     /// diagnostic.
-    async fn send_raw_keystroke(&mut self, key: &str, modifiers: &[&str]) -> Result<(), String> {
+    async fn send_raw_keystroke(&self, key: &str, modifiers: &[&str]) -> Result<(), String> {
         let driver = self
             .driver
-            .as_ref()
+            .borrow()
+            .clone()
             .ok_or_else(|| "SutDriver::send_raw_keystroke: driver not installed".to_string())?;
         driver
             .send_raw_keystroke(key, modifiers)
@@ -2072,81 +1723,27 @@ impl SutDriver for E2ESut {
     }
 }
 
-// ─── SutOrgRender ─────────────────────────────────────────────────────
+// ─── SutOrgRender: DELETED (E3) ───────────────────────────────────────
+// Relocated onto `HeadlessFrontendComponent`'s production `CacheBlockReader` +
+// `OrgRenderer` (E1). Its last native consumer — the standalone
+// `org_render_fixed_point_pbt` regression slice — was removed, so the composed
+// `frontend_slice` is now its sole host (`frontend_slice_org_render_fixed_point_bites`
+// drives `inv-org-render-fixed-point` to both arms). The native runner no longer
+// dispatches it (see `NATIVE_ONLY_EXCLUDED`).
 
-#[allow(async_fn_in_trait)]
-impl SutOrgRender for E2ESut {
-    /// Delegates straight to `TestContext::snapshot_org_render_pairs`
-    /// (the same path the `InvOrgRenderFixedPoint` body uses).
-    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
-        let pairs = self
-            .ctx
-            .snapshot_org_render_pairs()
-            .await
-            .expect("SutOrgRender::snapshot_org_render_pairs: TestContext call failed");
-        pairs
-            .into_iter()
-            .map(|(path, (disk, rendered))| (path.to_string_lossy().to_string(), disk, rendered))
-            .collect()
-    }
-}
+// ─── SutOrgRead: DELETED (E3) ─────────────────────────────────────────
+// Relocated onto `HeadlessFrontendComponent`'s production `holon_orgmode`
+// parser (E1). The `/org` block-equivalence invariant now runs only via the
+// composed `frontend_slice`; the native runner no longer dispatches it (see
+// `NATIVE_ONLY_EXCLUDED`). No standalone slice consumed it.
 
-// ─── SutOrgRead ───────────────────────────────────────────────────────
+// ─── SutQueryCompile ── E3: deleted off `E2ESut` (2026-06-24). Fully vestigial —
+// the impl was never wired (`unimplemented!()`); no transition/generator ever bound
+// it. Trait removed from pbt-core; re-add when a query-content generator needs it.
 
-#[allow(async_fn_in_trait)]
-impl SutOrgRead for E2ESut {
-    /// Wait for the FileSyncController's background re-render to settle, then
-    /// parse every tracked org file on disk. Folds
-    /// `wait_for_org_files_stable` + `parse_org_file_blocks(None)` into the
-    /// single snapshot the `/org` body reads.
-    async fn org_block_snapshot(&self) -> Vec<holon_api::Block> {
-        self.ctx
-            .wait_for_org_files_stable(25, Duration::from_millis(5000))
-            .await;
-        self.ctx
-            .parse_org_file_blocks(None)
-            .await
-            .expect("SutOrgRead::org_block_snapshot: failed to parse org files")
-    }
-}
-
-// ─── SutQueryCompile ──────────────────────────────────────────────────
-
-#[allow(async_fn_in_trait)]
-impl SutQueryCompile for E2ESut {
-    /// Not wired: query compilation (PRQL/GQL) requires access to the
-    /// holon query-compiler helpers. The compilation path lives in
-    /// `crates/holon/src/` and is not currently exposed via `E2ESut` or
-    /// `TestContext`. This trait is bound by GENERATORS (not invariants),
-    /// so slices without it simply produce no query-content blocks — no
-    /// regression. Wire in Phase 7 when a generator actually needs it.
-    async fn compile_query(&self, _: &str, _: &str) -> Result<String, String> {
-        unimplemented!(
-            "SutQueryCompile::compile_query on E2ESut: query compiler helpers are in \
-             crates/holon/src/ and not yet exposed via TestContext. Wire in Phase 7 \
-             when a generator needs this path."
-        )
-    }
-}
-
-// ─── SutSpanMetrics (otel-testing only) ───────────────────────────────
-
-#[cfg(feature = "otel-testing")]
-#[allow(async_fn_in_trait)]
-impl crate::pbt::invariants::bodies::sql_budget::SutSpanMetrics for E2ESut {
-    /// Port of the inline `inv-sql-budget` block (sut_check_invariants.rs §13):
-    /// snapshot span metrics for the last transition, emit all telemetry
-    /// side-effects (summary line, N+1 list, flamegraph, detail, memory
-    /// diagnosis), and return the budget pass/fail decision. Error violations
-    /// are returned only when `HOLON_PERF_BUDGET` enforcement is on; otherwise
-    /// they're logged as `BUDGET OFF` (the inline default-off behaviour).
-    async fn sql_budget_report(
-        &self,
-        ref_state: &super::reference_state::ReferenceState,
-    ) -> crate::pbt::invariants::bodies::sql_budget::SqlBudgetReport {
-        // All span/RSS state + formatting live in `MetricsSut`; `last_transition`
-        // is owned by `E2ESut` (it's not a metric) and passed through.
-        self.metrics
-            .sql_budget_report(&self.last_transition, ref_state)
-    }
-}
+// ─── SutSpanMetrics — DELETED (E3) ────────────────────────────────────
+// The native `inv-sql-budget` cap was relocated off `E2ESut` onto the composed
+// slice (`composed::span_metrics::ComposedSpanMetrics` hosts a `ComposedBudget`
+// over the same `MetricsSut`, with the `ComposedSut` harness driving its
+// reset/freeze lifecycle). `MetricsSut::sql_budget_report` is retained (the
+// composed host calls it); only this `E2ESut` impl + the native dispatch are gone.

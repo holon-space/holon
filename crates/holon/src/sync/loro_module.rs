@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::core::SqlOperationProvider;
-use crate::core::datasource::OperationProvider;
+use crate::core::datasource::OriginTaggedWrites;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
 use crate::storage::schema_modules::BlockSchemaModule;
@@ -134,7 +134,7 @@ impl Module for LoroModule {
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
                 ));
-                let command_bus: Arc<dyn OperationProvider> = sql_ops;
+                let command_bus: Arc<dyn OriginTaggedWrites> = sql_ops;
                 let sink_reader: Arc<dyn crate::sync::SinkReader> =
                     Arc::new(crate::storage::TursoSinkReader::new(db_handle));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));

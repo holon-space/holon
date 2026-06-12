@@ -102,6 +102,12 @@ pub fn outdent_apply_to_ref<
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
 impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for Outdent {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         outdent_weighted_generator(state)

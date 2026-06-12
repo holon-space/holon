@@ -74,16 +74,21 @@ holon_macros::widget_builder! {
         let __trailing_slot = build_trailing_slot(&ba);
         match (__template, ba.ctx.data_source.clone()) {
             (Some(tmpl), Some(ds)) => {
-                // When the new `creation_slot` path produced a `__trailing_slot`,
-                // suppress the legacy `virtual_child` row injection so we don't
-                // render two placeholders for the same collection.
-                let virtual_child = if __trailing_slot.is_some() {
-                    None
-                } else {
-                    virtual_child_slot_from_arg(&ba)
-                };
+                // Inject the creation placeholder as a REACTIVE virtual row
+                // (VirtualChildRowProvider) rather than a static `TrailingSlot`
+                // snapshot. A snapshot is interpreted once (unfocused →
+                // read-only `rendered_text`) and never re-resolves on focus, so
+                // clicking the trailing placeholder set focus but it never
+                // became an editable `EditorView` — no caret, typing did
+                // nothing. As a real row it re-resolves `rendered_text` →
+                // `editable_text` on focus exactly like the other rows. The
+                // static `TrailingSlot` is still used for the no-data_source
+                // (live-query/static) branch below, where reactive injection
+                // isn't available.
+                let _ = &__trailing_slot;
+                let virtual_child = virtual_child_slot_from_arg(&ba);
                 let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
-                ViewModel::streaming_collection("tree", tmpl, ds, 4.0, __sort_key, __parent_space, None, virtual_child, __trailing_slot, __rules)
+                ViewModel::streaming_collection("tree", tmpl, ds, 4.0, __sort_key, __parent_space, None, virtual_child, None, __rules)
             }
             _ => {
                 let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =

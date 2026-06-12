@@ -1,41 +1,49 @@
-mod prelude;
-mod stub;
+//! Widget builder registry for the dioxus desktop snapshot renderer.
+//!
+//! Uses `holon_macros::builder_registry!` in `node_dispatch` mode, pointing
+//! at the static `view_model::ViewKind` enum (not the live
+//! `reactive_view_model::ReactiveViewModel` that GPUI uses — see the
+//! `node_type` arg below).
+//!
+//! Each file in this directory exports `pub fn render(node, ctx) -> Element`
+//! and matches its own `ViewKind` variant. The macro generates a `render_node`
+//! that dispatches on `node.widget_name()` to the matching builder.
 
-holon_macros::builder_registry!("src/render/builders",
-    skip: [prelude, stub],
-    register: Element
-);
+pub mod dispatch;
+pub mod prelude;
+pub mod util;
 
 use dioxus::prelude::*;
-use holon_frontend::render_interpreter::{BuilderArgs, RenderInterpreter};
+pub use holon_frontend::view_model::ViewModel;
 
-pub(crate) type BA<'a> = BuilderArgs<'a, Element>;
+pub use super::DioxusRenderContext;
 
-pub fn create_interpreter() -> RenderInterpreter<Element> {
-    let mut interp = RenderInterpreter::new();
+// ── Macro-generated dispatch ──────────────────────────────────────────────
+//
+// `render_node(node, ctx) -> Element` is produced by walking the directory
+// for `*.rs` files other than `mod` / `prelude` / `util` and emitting one
+// match arm per file. The `empty:` arg supplies the empty/None expression
+// (the macro defaults that arm to a GPUI element, which is wrong here).
+holon_macros::builder_registry!(
+    "src/render/builders",
+    skip: [prelude, util, dispatch],
+    node_dispatch: Element,
+    context: DioxusRenderContext,
+    node_type: holon_frontend::view_model::ViewModel,
+    empty: rsx! {},
+);
 
-    register_all(&mut interp);
+/// Top-level render entry point. A thin `#[component]` wrapper around the
+/// macro-generated `render_node` so rsx! consumers can write
+/// `RenderNode { node: child.clone() }` idiomatically.
+#[component]
+pub fn RenderNode(node: ViewModel) -> Element {
+    render_node(&node, &DioxusRenderContext)
+}
 
-    interp.register("source_editor", source_block::build);
-
-    for name in [
-        "block_operations",
-        "pie_menu",
-        "drop_zone",
-        "query_result",
-        "draggable",
-    ] {
-        interp.register(name, stub::build);
-    }
-
-    interp.set_annotator(|element, _builder_name, ctx| {
-        if let Some(id) = ctx.row().get("id").and_then(|v| v.as_string()) {
-            let id = id.to_string();
-            rsx! { div { id: "{id}", {element} } }
-        } else {
-            element
-        }
-    });
-
-    interp
+/// Default arm emitted by `builder_registry!` when a widget name has no
+/// matching builder file. `Empty` / `Loading` route here by design — they
+/// render as nothing.
+pub fn render_unsupported(_: &str, _: &DioxusRenderContext) -> Element {
+    rsx! {}
 }

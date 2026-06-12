@@ -47,7 +47,7 @@ pub struct WorkerBridge(Rc<BridgeInner>);
 impl WorkerBridge {
     /// Spawn the worker at `worker_url` and wait for it to emit `{ kind: 'ready' }`.
     pub async fn spawn(worker_url: &str) -> Result<Self, String> {
-        let mut opts = WorkerOptions::new();
+        let opts = WorkerOptions::new();
         opts.set_type(WorkerType::Module);
         let worker = Worker::new_with_options(worker_url, &opts)
             .map_err(|e| format!("Worker::new failed: {e:?}"))?;
@@ -148,7 +148,12 @@ impl WorkerBridge {
         // a broken worker (wasm 404, instantiation crash, missing import
         // stubs) surfaces as a BootState::Failed instead of hanging the
         // UI at "booting…" forever.
-        const READY_TIMEOUT_MS: u32 = 10_000;
+        //
+        // The dev/debug worker wasm is ~640 MB (see README "Known
+        // limitations"); downloading + compiling + thread-initialising it on a
+        // cold load can take well over 10 s, so allow generous headroom. The
+        // release-official worker (~21 MB) is far faster and won't approach this.
+        const READY_TIMEOUT_MS: u32 = 90_000;
         let ready_result = futures::future::select(
             ready_rx,
             gloo_timers::future::TimeoutFuture::new(READY_TIMEOUT_MS),

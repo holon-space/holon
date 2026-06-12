@@ -349,10 +349,10 @@ fn error_render_expr(message: &str) -> RenderExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holon_loro::LoroBackend;
     use crate::api::repository::{CoreOperations, Lifecycle};
     use crate::sync::loro_block_query_source::LoroBlockQuerySource;
     use holon_api::BlockContent;
+    use holon_loro::LoroBackend;
 
     /// The V2 paint-proof gate, headless at the `watch_ui` seam: a pure-Loro
     /// `BlockQuerySource` snapshot drives the same `UiEvent::Structure` +

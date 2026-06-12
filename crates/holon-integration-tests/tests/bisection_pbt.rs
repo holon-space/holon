@@ -191,8 +191,8 @@ fn editor_transition_skips_purely_under_storeless_node() {
 /// structurally available under Turso-only wiring (where the on-blur `set_field`
 /// path persists it), not only under Loro — so the editor path is bisectable
 /// across the storage axis. (Headless Turso-only slices stay unaffected: the
-/// transition's `preconditions` still require `enable_loro() ||
-/// real_editor_enabled()`, gating it dynamically without a real editor.)
+/// transition's `preconditions` gate on `has_editor_buffer()` — the editor
+/// capability — so without a wired editor buffer the transition deselects.)
 #[test]
 fn editor_transitions_gate_on_any_of_loro_or_turso() {
     use holon_integration_tests::pbt::ReferenceState;

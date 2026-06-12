@@ -114,7 +114,7 @@ mod remove_watch;
 mod setup_watch;
 mod simulate_restart;
 pub mod split_block;
-mod start_app;
+pub(crate) mod start_app;
 mod switch_view;
 mod sync_with_peer;
 mod toggle_collapse;
@@ -380,14 +380,22 @@ mod arch_tests {
 
         let mut registered_modules: Vec<String> = Vec::new();
         for line in module_source.lines() {
-            let trimmed = line.trim();
-            let decl = trimmed
-                .strip_prefix("pub mod ")
-                .or_else(|| trimmed.strip_prefix("mod "));
-            if let Some(rest) = decl
+            // Strip an optional visibility modifier (`pub`, `pub(crate)`,
+            // `pub(super)`, `pub(in path)`) before the `mod` keyword, so a
+            // `pub(crate) mod start_app;` is recognized like a plain `mod`.
+            let mut s = line.trim();
+            if let Some(rest) = s.strip_prefix("pub") {
+                s = rest.trim_start();
+                if s.starts_with('(')
+                    && let Some(close) = s.find(')')
+                {
+                    s = s[close + 1..].trim_start();
+                }
+            }
+            if let Some(rest) = s.strip_prefix("mod ")
                 && let Some((name, _)) = rest.split_once(';')
             {
-                registered_modules.push(name.to_string());
+                registered_modules.push(name.trim().to_string());
             }
         }
 
@@ -417,5 +425,125 @@ mod arch_tests {
             orphan_files.len(),
             orphan_files.join("\n  ")
         );
+    }
+}
+
+/// PCG-3 guard: each transition's `required_caps()` matches the capability its
+/// `TransitionImpl` is bound on, so the cap gate (PCG-2) admits a transition into a
+/// composed `CapMap`'s alphabet only when `apply_to_sut`'s cap is present — never
+/// generating one that would panic on an absent `expect`. For the 43 fine-grained-bound
+/// transitions the body is type-guaranteed to use only that cap; the 5 peer ops defer to
+/// PCG-4 (`SutLoro` isn't dyn-compatible yet, and they're already wiring-gated on
+/// `HasStorage(Loro)`); `Nothing`/`DeliverBlockContent` use no cap.
+#[cfg(test)]
+mod required_caps_guard {
+    use super::*;
+    use crate::pbt::reference_state::ReferenceState;
+    use holon_pbt_core::TransitionFactory;
+    use holon_pbt_core::composition::CapId;
+
+    fn caps<T: TransitionFactory<ReferenceState>>() -> Vec<CapId> {
+        T::required_caps()
+    }
+
+    #[test]
+    fn required_caps_match_transition_impl_bounds() {
+        use crate::pbt::local_caps as lc;
+        use holon_frontend::pbt_caps as fe;
+        use holon_pbt_core::capabilities as c;
+
+        macro_rules! one {
+            ($t:ty, $cap:path) => {
+                assert_eq!(
+                    caps::<$t>(),
+                    vec![CapId::of::<dyn $cap>()],
+                    concat!(
+                        stringify!($t),
+                        ": required_caps must be exactly [",
+                        stringify!($cap),
+                        "]"
+                    )
+                );
+            };
+        }
+        macro_rules! none {
+            ($t:ty) => {
+                assert!(
+                    caps::<$t>().is_empty(),
+                    concat!(stringify!($t), ": required_caps must be empty")
+                );
+            };
+        }
+
+        // BlockTreeWrite
+        // SplitBlock omitted: migrated to `cap_transition!`, which single-sources the
+        // cap, so its required_caps and `S: SutBlockTreeWrite` bound cannot drift —
+        // no guard entry needed. (The drop-out the macro is designed to produce.)
+        one!(JoinBlock, c::SutBlockTreeWrite);
+        one!(Indent, c::SutBlockTreeWrite);
+        one!(Outdent, c::SutBlockTreeWrite);
+        one!(MoveUp, c::SutBlockTreeWrite);
+        one!(MoveDown, c::SutBlockTreeWrite);
+        // EditorMirrorWrite
+        one!(TypeChars, c::SutEditorMirrorWrite);
+        one!(DeleteBackward, c::SutEditorMirrorWrite);
+        one!(MoveCursor, c::SutEditorMirrorWrite);
+        // FocusWrite
+        one!(NavigateFocus, c::SutFocusWrite);
+        one!(FocusEditableText, c::SutFocusWrite);
+        // NavHistoryWrite
+        one!(NavigateHome, c::SutNavHistoryWrite);
+        // NavHistoryDrive
+        one!(NavigateBack, c::SutNavHistoryDrive);
+        one!(NavigateForward, c::SutNavHistoryDrive);
+        one!(PinBlock, c::SutNavHistoryDrive);
+        one!(UnpinBlock, c::SutNavHistoryDrive);
+        // WatchRegister
+        one!(SetupWatch, c::SutWatchRegister);
+        one!(RemoveWatch, c::SutWatchRegister);
+        // ViewControl / McpEmit / HistoryWrite
+        one!(SwitchView, c::SutViewControl);
+        one!(EmitMcpData, c::SutMcpEmit);
+        one!(Redo, c::SutHistoryWrite);
+        one!(UndoLastMutation, c::SutHistoryWrite);
+        // BlockInteract
+        one!(ClickBlock, c::SutBlockInteract);
+        one!(DragDropBlock, c::SutBlockInteract);
+        one!(ExpandToggle, c::SutBlockInteract);
+        one!(PressKey, c::SutBlockInteract);
+        one!(SwitchViewMode, c::SutBlockInteract);
+        one!(ToggleCollapse, c::SutBlockInteract);
+        one!(ToggleDrawer, c::SutBlockInteract);
+        one!(TriggerSlashCommand, c::SutBlockInteract);
+        // ArrowNavigate (holon-frontend)
+        one!(ArrowNavigate, fe::SutArrowNavigate);
+        // Mutate (test-local)
+        one!(ToggleState, lc::SutMutate);
+        // SeamMutate (test-local) — ApplyMutation/BulkExternalAdd moved off `SutMutate`
+        // to `SutSeamMutate` in Swap increment 4; the guard was left stale (pre-existing red).
+        one!(ApplyMutation, lc::SutSeamMutate);
+        one!(BulkExternalAdd, lc::SutSeamMutate);
+        // FixtureFs (test-local)
+        one!(CreateDirectory, lc::SutFixtureFs);
+        one!(CreateStaleLoro, lc::SutFixtureFs);
+        one!(GitInit, lc::SutFixtureFs);
+        one!(JjGitInit, lc::SutFixtureFs);
+        one!(WriteOrgFile, lc::SutFixtureFs);
+        // AppLifecycle (test-local)
+        one!(ConcurrentSchemaInit, lc::SutAppLifecycle);
+        one!(CreateDocument, lc::SutAppLifecycle);
+        one!(SimulateRestart, lc::SutAppLifecycle);
+        one!(StartApp, lc::SutAppLifecycle);
+
+        // Loro peer ops — PCG-4 flipped `SutLoro` to `&self` + dyn-compatible, so `dyn
+        // SutLoro`/`CapId::of` now exist. Also wiring-gated on `HasStorage(Loro)`.
+        one!(AddPeer, c::SutLoro);
+        one!(PeerEdit, c::SutLoro);
+        one!(PeerCharEdit, c::SutLoro);
+        one!(SyncWithPeer, c::SutLoro);
+        one!(MergeFromPeer, c::SutLoro);
+        // No SUT capability needed.
+        // Nothing omitted: migrated to `cap_transition!` (no-cap form) — single-sourced.
+        none!(DeliverBlockContent);
     }
 }

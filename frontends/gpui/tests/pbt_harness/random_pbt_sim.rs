@@ -108,7 +108,11 @@ pub fn run(wiring: holon_pbt_core::Wiring, slice_name: &'static str) {
     start_rt.block_on(async { env.start_app(true).await.expect("start_app") });
 
     let session = env.session_arc();
-    let engine = env.reactive_engine.clone().expect("reactive engine");
+    let engine = env.reactive_engine.get().cloned().expect("reactive engine");
+    // Under TestPlatform the in-launch pre-warm time-skips its timer and
+    // misses the real-time tokio watcher — warm the root signal here so the
+    // window opens with real data instead of the loading placeholder.
+    super::sim_windowed_replay::warm_root_signal(&engine, start_rt.handle());
     let debug = env.debug_services().cloned().expect("debug services");
     let bounds = BoundsRegistry::new();
     let nav = NavigationState::new();
@@ -135,6 +139,7 @@ pub fn run(wiring: holon_pbt_core::Wiring, slice_name: &'static str) {
         rebind_handle,
         bounds.clone(),
         start_rt.handle().clone(),
+        debug.clone(),
     );
 
     // ---- Proptest loop (inline, no bg thread) ----
@@ -186,6 +191,86 @@ pub fn run(wiring: holon_pbt_core::Wiring, slice_name: &'static str) {
         Err(e) => panic!("[{slice_name}] PBT failed (shrunk): {e}"),
     }
 
-    // Cleanup (SimReplayer owns TestApp; its Drop cleans up).
-    drop(replayer);
+    // Cleanup: shutdown + leak (see SimReplayer::dispose).
+    replayer.dispose();
+}
+
+/// Deterministically replay a single capture's steps ONCE through the sim window
+/// — NO proptest generation, so the SAME sequence runs every time (a locked,
+/// debuggable reproduction). Reads the capture path from `HOLON_CAPTURE`, else
+/// `default_capture`. Panics (re-raising the replay payload) if the sequence
+/// reproduces a failure, so the failing tick can be inspected under a breakpoint.
+/// Mirrors `run`'s TestPlatform setup exactly; the only difference is the steps
+/// come from the capture instead of the proptest strategy.
+pub fn replay_capture(default_capture: &str) {
+    set_memory_multiplier_if_unset("15");
+    set_loro_peer_id_if_unset("1");
+    for (k, v) in [
+        ("PBT_ATOMIC_EDITOR", "1"),
+        ("PBT_MUTABLE_TEXT", "1"),
+        ("PBT_REAL_EDITOR", "1"),
+        ("PBT_PAUSE_SECONDS", "0"),
+    ] {
+        if std::env::var(k).is_err() {
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
+
+    let path = std::env::var("HOLON_CAPTURE").unwrap_or_else(|_| default_capture.to_string());
+    let fixture =
+        holon_integration_tests::pbt::fixtures::json::load_file(std::path::Path::new(&path));
+    fixture.apply_recorded_env_flags();
+    let wiring = fixture
+        .wiring
+        .clone()
+        .unwrap_or_else(holon_pbt_core::Wiring::full);
+    let steps: Vec<FixtureStep> = fixture.steps;
+    eprintln!("[sim-replay] capture {path} ({} steps)", steps.len());
+
+    // ---- TestPlatform setup (mirrors `run`) ----
+    let text_system = real_text_system();
+    let assets: Arc<dyn AssetSource> = Arc::new(());
+    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let window_rt = tokio::runtime::Runtime::new().expect("window-lifetime tokio runtime");
+    let _window_rt_guard = window_rt.enter();
+    let start_rt = Arc::new(tokio::runtime::Runtime::new().expect("start tokio runtime"));
+    let mut env = start_rt.block_on(async { TestEnvironment::new(start_rt.clone()).unwrap() });
+    start_rt.block_on(async { env.start_app(true).await.expect("start_app") });
+    let session = env.session_arc();
+    let engine = env.reactive_engine.get().cloned().expect("reactive engine");
+    super::sim_windowed_replay::warm_root_signal(&engine, start_rt.handle());
+    let debug = env.debug_services().cloned().expect("debug services");
+    let bounds = BoundsRegistry::new();
+    let nav = NavigationState::new();
+    let rebind_handle = app
+        .update(|cx| {
+            launch_holon_window_rebindable(
+                session.clone(),
+                engine.clone(),
+                start_rt.handle().clone(),
+                nav,
+                bounds.clone(),
+                Some(debug.clone()),
+                "Holon PBT Sim Replay",
+                cx,
+            )
+        })
+        .expect("window opened");
+    let replayer = SimReplayer::new(
+        app,
+        rebind_handle,
+        bounds.clone(),
+        start_rt.handle().clone(),
+        debug.clone(),
+    );
+
+    let result = replayer.replay(wiring, steps, None);
+    replayer.dispose();
+    match result {
+        Ok(()) => eprintln!("[sim-replay] capture replayed GREEN (no failure)"),
+        Err(payload) => panic!(
+            "[sim-replay] capture reproduced a failure:\n{}",
+            super::panic_message(&payload)
+        ),
+    }
 }

@@ -11,8 +11,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::local_caps::SutAppLifecycle;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -23,6 +23,12 @@ use crate::pbt::transition_budgets::ExpectedSql;
 pub struct ConcurrentSchemaInit;
 
 impl TransitionFactory<ReferenceState> for ConcurrentSchemaInit {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutAppLifecycle,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: this exercises concurrent Turso IVM schema/matview init
@@ -65,9 +71,9 @@ impl TransitionRef<ReferenceState> for ConcurrentSchemaInit {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ConcurrentSchemaInit {
+impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for ConcurrentSchemaInit {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_concurrent_schema_init().await;
+        sut.concurrent_schema_init().await;
     }
 }
 

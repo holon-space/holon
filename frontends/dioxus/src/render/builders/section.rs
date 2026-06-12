@@ -1,33 +1,21 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn build(ba: BA<'_>) -> Element {
-    let title = ba
-        .args
-        .get_positional_string(0)
-        .or(ba.args.get_string("title"))
-        .unwrap_or("Section")
-        .to_string();
-
-    let mut views: Vec<Element> = Vec::new();
-
-    if let Some(tmpl) = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"))
-    {
-        if ba.ctx.data_rows.is_empty() {
-            views.push((ba.interpret)(tmpl, ba.ctx));
-        } else {
-            for row in &ba.ctx.data_rows {
-                views.push((ba.interpret)(tmpl, &ba.ctx.with_row(row.clone())));
-            }
-        }
-    }
-
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Section { title, children } = &node.kind else {
+        return rsx! {};
+    };
+    let title = title.clone();
     rsx! {
-        div { padding: "8px", display: "flex", flex_direction: "column", gap: "8px",
-            span { font_size: "18px", font_weight: "bold", {title} }
-            {views.into_iter()}
+        div {
+            style: "display: flex; flex-direction: column; gap: 0px;",
+            div {
+                style: "font-weight: bold; color: #aaa; font-size: 0.85em; padding: 4px 0;",
+                "{title}"
+            }
+            for (i, child) in children.items.iter().enumerate() {
+                RenderNode { key: "{i}", node: child.clone() }
+            }
         }
     }
 }

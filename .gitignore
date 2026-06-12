@@ -52,3 +52,6 @@ specs/.current-epic
 
 # PBT capture-on-panic scratch output (hand-promote into tests/fixtures/<slice>/)
 **/tests/.captures/
+
+# archidoc IR scratch output
+_context/

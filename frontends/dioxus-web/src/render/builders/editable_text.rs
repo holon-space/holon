@@ -1,12 +1,12 @@
 use super::prelude::*;
 use crate::editor::EditorCell;
 use crate::render::EntityContext;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(
-    content: &String,
-    _: &String,
-    _: &DioxusRenderContext,
-) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::EditableText { content, .. } = &node.kind else {
+        return rsx! {};
+    };
     let content = content.clone();
     rsx! { EditableTextNode { content } }
 }

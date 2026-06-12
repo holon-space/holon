@@ -1,12 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(
-    language: &String,
-    content: &String,
-    _: &String,
-    _: &bool,
-    _: &DioxusRenderContext,
-) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::SourceBlock { language, content, .. } = &node.kind else {
+        return rsx! {};
+    };
     let lang = language.clone();
     let content = content.clone();
     rsx! {

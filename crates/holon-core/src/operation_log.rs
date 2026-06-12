@@ -59,6 +59,8 @@ impl std::fmt::Display for OperationStatus {
 /// operation is active, undone, or synced.
 ///
 /// Table name: `operations`
+///
+/// @c4 code
 #[derive(Debug, Clone, Serialize, Deserialize, Entity)]
 #[entity(name = "operation", short_name = "op")]
 pub struct OperationLogEntry {
@@ -93,7 +95,7 @@ pub struct OperationLogEntry {
 impl OperationLogEntry {
     /// Create a new operation log entry
     pub fn new(operation: Operation, inverse: Option<Operation>) -> Self {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = holon_api::clock::now_millis();
         Self {
             id: 0, // Will be set by database
             display_name: operation.display_name.clone(),

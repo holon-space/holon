@@ -404,7 +404,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         content: holon_api::BlockContent,
         properties: &std::collections::HashMap<String, holon_api::Value>,
         tags: &Tags,
-        requires: &[String],
+        requires: &[EntityUri],
     ) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -508,9 +508,9 @@ impl EntityCellRegistry for BlockCellRegistry {
     /// Drivers: the org reconciler and `join_block`'s merged-away-block
     /// delete. SqlOnly mode returns `Ok(false)` so the caller falls back to
     /// the direct SQL delete path. Loro mode: checks tree membership first
-    /// and returns `Ok(false)` for unseeded blocks (caller falls through to
-    /// SQL fallback — transitional; after sole-writer all blocks originate in
-    /// Loro). `delete_block` is idempotent on the tree side, so the TOCTOU
+    /// and returns `Ok(false)` for unseeded blocks (caller falls through to the
+    /// direct SQL delete path — transitional; after sole-writer all blocks
+    /// originate in Loro). `delete_block` is idempotent on the tree side, so the TOCTOU
     /// between the resolve_ check and the call is harmless.
     async fn delete_entity(&self, uri: &EntityUri) -> Result<bool> {
         let backend = match &self.backing_source {

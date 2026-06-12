@@ -1,3 +1,18 @@
+//! @c4 component
+//! @c4 layer Testing
+//! Pattern: Test Harness
+//! @c4 uses holon "core orchestration" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-app "DI composition root" "Rust"
+//! @c4 uses holon-block-roundtrip-testing "block round-trip generators" "Rust"
+//! @c4 uses holon-filesystem "filesystem ports" "Rust"
+//! @c4 uses holon-frontend "frontend session abstraction" "Rust"
+//! @c4 uses holon-layout-testing "layout PBT primitives" "Rust"
+//! @c4 uses holon-mcp "MCP frontend" "Rust"
+//! @c4 uses holon-mcp-client "MCP client providers" "Rust"
+//! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
+//! @c4 uses holon-pbt-core "PBT transition traits" "Rust"
+//!
 //! Shared test infrastructure for Holon integration tests
 //!
 //! This module provides reusable components for both property-based tests

@@ -113,6 +113,12 @@ pub fn move_up_apply_to_ref<
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
 impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for MoveUp {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         move_up_weighted_generator(state)

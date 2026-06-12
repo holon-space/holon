@@ -74,6 +74,7 @@ crates/
 ├── holon-app/                   # DI assembly crate (composition root — names concrete backends)
 ├── holon-core/                  # Core traits, Cell<T>, block ordering, file-format seam
 ├── holon-engine/                # Standalone Petri-net engine CLI (YAML nets, WSJF ranking)
+├── holon-expr/                  # Compiled Rhai expressions shared by holon-api + holon-engine
 ├── holon-frontend/              # Platform-agnostic ViewModel layer (MVVM)
 ├── holon-turso/                 # Turso (SQLite-IVM) storage adapter
 ├── holon-macros/                # Procedural macros for code generation
@@ -100,28 +101,26 @@ frontends/
 └── waterui/     # WaterUI frontend (excluded from workspace — upstream compatibility issues)
 ```
 
+> The tree above is the at-a-glance layout. The authoritative, machine-checked
+> inventory (with each crate's purpose and C4 level) is generated to
+> [CrateMap.md](Architecture/CrateMap.md) — see below.
+
 ### Crate Responsibilities
+
+The per-crate inventory is **generated**, not hand-maintained here. Each crate's
+purpose is the `@c4` annotation at the top of its `src/lib.rs` (the single source
+of truth); [archidoc](https://github.com/GitSmart86/archidoc) projects those into
+**[CrateMap.md](Architecture/CrateMap.md)** (plus C4 PlantUML diagrams under
+`Architecture/c4/`) and `just arch-validate` fails CI if the crate/frontend structure
+drifts from the committed baseline. Regenerate the map and diagrams with
+`just arch-docs` after editing an annotation.
+
+To change a crate's description, edit its `src/lib.rs` `@c4` block — not this file.
+
+External (non-workspace) crates, for reference:
 
 | Crate | Purpose |
 |-------|---------|
-| `holon` | Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, DI modules |
-| `holon-api` | Value types, Operation descriptors, Change/CDC types, `TypeDefinition`, `IntoEntity`/`TryFromEntity` traits. No frontend-specific deps. |
-| `holon-app` | DI assembly (composition root). Owns every wiring that names concrete backends: registers Loro/OrgMode/Turso modules, MCP integrations, `FrontendSession`. See `src/wiring.rs` (`FrontendInjectorExt::add_frontend`) and `src/no_turso.rs`. |
-| `holon-core` | Core traits (DataSource, CrudOperations, BlockOperations, OperationRegistry), `Cell<T>` + cell-registry seam, block ordering, file-format adapter trait. |
-| `holon-engine` | Standalone Petri-net engine CLI. YAML-defined nets with Rhai guards, WSJF-based ranking, what-if analysis. No dependency on `holon` crate. |
-| `holon-frontend` | Platform-agnostic MVVM layer: `ReactiveViewModel`, `ReactiveView`, `ReactiveEngine`, shadow builders, input triggers. Shared by all frontends. No Loro/Turso imports. |
-| `holon-turso` | Turso (SQLite-IVM) storage adapter: `TursoBackend`, `DbHandle`, materialized-view manager, SQL/GQL transform layer, `SchemaModule` lifecycle. |
-| `holon-macros` | `#[operations_trait]`, `#[affects(...)]`, entity derives |
-| `holon-mcp-client` | Reusable MCP client: connects to any MCP server, converts tool schemas to `OperationDescriptor`s, executes tools via `OperationProvider`. YAML sidecar for UI annotations. `McpSyncEngine` for cache sync; `McpForeignDataWrapper` for query-time FDW. |
-| `holon-orgmode` | Org-mode file watching, `FileSyncController` (formerly `OrgSyncController`; it serves all `FileFormatAdapter` formats), DI wiring. Depends on `holon-org-format` for parsing/rendering. |
-| `holon-org-format` | Pure org-mode parsing, rendering, and block diffing. No disk I/O, no DI. |
-| `holon-markdown` | Obsidian-style Markdown parsing + `MarkdownFormatAdapter` impl of `holon-core::FileFormatAdapter`. |
-| `holon-filesystem` | `FileSystem` + `FileChangeSource` ports (ADR 0011): `RealFileSystem`, `InMemoryFileSystem`, `NotifyWatcher`. |
-| `holon-pbt-core` | `TransitionFactory<Ref>` + `TransitionImpl<Ref, Sut>` traits shared across PBT crates. |
-| `holon-layout-testing` | Shared layout-testing primitives: `BoundsSnapshot`, layout invariants, `BlockTreeRegistry`, `UiInteraction`, proptest strategies. |
-| `holon-block-roundtrip-testing` | Block round-trip generators + `NormalizedDocument` comparison shape, reused by org/markdown/turso round-trip PBTs. |
-| `holon-architecture-tests` | `cargo test` wrapper that shells out to `archlint --all` (no Rust deps, ~2 s full-repo sweep). |
-| `holon-integration-tests` | Cross-crate integration tests and property-based tests (PBTs) |
 | `gql-parser` (external) | GQL (ISO/IEC 39075) parsing to AST |
 | `gql-transform` (external) | GQL AST → SQL compilation via EAV schema |
 
@@ -133,12 +132,12 @@ frontends/
 pub trait DataSource<T>: MaybeSendSync {
     async fn get_all(&self) -> Result<Vec<T>>;
     async fn get_by_id(&self, id: &str) -> Result<Option<T>>;
-    async fn get_children(&self, parent_id: &str) -> Result<Vec<T>>; // BlockEntity
+    async fn get_children(&self, parent_id: &EntityUri) -> Result<Vec<T>>; // where T: BlockEntity
 }
 
 pub trait CrudOperations<T>: MaybeSendSync {
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
-    async fn create(&self, fields: HashMap<String, Value>) -> Result<(String, OperationResult)>;
+    async fn create(&self, fields: StorageEntity) -> Result<(String, OperationResult)>;
     async fn delete(&self, id: &str) -> Result<OperationResult>;
 }
 ```
@@ -147,11 +146,12 @@ pub trait CrudOperations<T>: MaybeSendSync {
 
 ```rust
 pub trait BlockEntity: MaybeSendSync {
-    fn id(&self) -> &str;
-    fn parent_id(&self) -> Option<&str>;
-    fn sort_key(&self) -> &str;     // Fractional index for ordering
+    fn id(&self) -> &EntityUri;
+    fn parent_id(&self) -> Option<&EntityUri>;
     fn depth(&self) -> i64;
     fn content(&self) -> &str;
+    fn tags(&self) -> Tags;            // the `"Page"` tag marks an org-file root
+    fn is_page(&self) -> bool;         // default impl: tags().contains("Page")
 }
 
 pub trait TaskEntity: MaybeSendSync {

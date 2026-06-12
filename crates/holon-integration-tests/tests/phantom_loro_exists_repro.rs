@@ -131,7 +131,7 @@ fn two_consecutive_bulk_batches_under_one_parent() {
     init_tracing();
     let rt = runtime();
     rt.block_on(async {
-        let mut env = TestEnvironmentBuilder::new()
+        let env = TestEnvironmentBuilder::new()
             .build(rt.clone())
             .await
             .expect("Failed to build environment");

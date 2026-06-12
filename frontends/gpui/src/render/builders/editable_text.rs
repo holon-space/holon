@@ -74,24 +74,31 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     // backend even after the event-driven subscription has been orphaned.
     let (displayed_text, is_window_focused): (std::sync::Arc<str>, bool) = ctx.with_gpui(|window, cx| {
         use gpui::Focusable;
-        let view = entity.read(cx);
-        let input = view.input_entity().clone();
-        let is_focused = input.focus_handle(cx).is_focused(window);
-        // `just_focused` is the false→true window-focus edge (e.g. click-to-edit).
-        let just_focused = view.focus_arrived(is_focused);
-        let current = input.read(cx).value().to_string();
-        // Reconcile a stale `InputState` to the live row content when the user
-        // cannot be mid-typing: either the editor is unfocused, or focus *just*
+        // Read phase: gather focus state, then DROP the `entity.read` borrow
+        // before mutating the entity. `converge_input` takes `&mut self` (→
+        // `entity.update`), which panics on a still-live `entity.read` borrow.
+        let (input, is_focused, just_focused) = {
+            let view = entity.read(cx);
+            let input = view.input_entity().clone();
+            let is_focused = input.focus_handle(cx).is_focused(window);
+            // `just_focused` is the false→true window-focus edge (e.g. click-to-edit).
+            let just_focused = view.focus_arrived(is_focused);
+            (input, is_focused, just_focused)
+        };
+        // Reconcile a stale `InputState` to the authority when the user cannot
+        // be mid-typing: either the editor is unfocused, or focus *just*
         // arrived this frame (no keystroke yet). A continuously-focused editor
-        // is left alone so in-flight typing is never yanked.
-        if current != content && (!is_focused || just_focused) {
-            input.update(cx, |state, cx| {
-                state.set_value(&content, window, cx);
+        // is left alone so in-flight typing is never yanked. `converge_input`
+        // prefers the Loro cell authority over the SQL-lagged `content`
+        // (curing the projection lag) and keeps `previous_text` in lockstep.
+        if !is_focused || just_focused {
+            entity.update(cx, |this, cx| {
+                this.converge_input(&content, window, cx);
             });
-            (std::sync::Arc::from(content.as_str()), is_focused)
-        } else {
-            (std::sync::Arc::from(current.as_str()), is_focused)
         }
+        // Snapshot the post-convergence value for the PBT staleness invariants.
+        let displayed = input.read(cx).value().to_string();
+        (std::sync::Arc::from(displayed.as_str()), is_focused)
     });
     let inner = entity.into_any_element();
 

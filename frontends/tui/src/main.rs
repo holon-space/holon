@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use holon_tui::app_main::{AppMain, TuiState, NO_FOCUS};
-use holon_tui::render::RenderRegistry;
 
 #[tokio::main]
 async fn main() -> CommonResult<()> {

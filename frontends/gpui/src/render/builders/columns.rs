@@ -115,7 +115,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             let is_last_shrink = Some(i) == last_shrink && first_shrink != last_shrink;
 
             if is_first_shrink || is_last_shrink {
-                let is_open = ctx.services.widget_state(&block_id).open;
+                let is_open = ctx.services.drawer_open(&block_id, DrawerMode::Shrink);
 
                 let rendered = child.map(|c| super::render(c, ctx));
                 let mut inner = div()
@@ -146,7 +146,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 // (typically left sidebar) the toggle sits on the
                 // right of the panel; for the `last_shrink` (right
                 // sidebar) it sits on the left.
-                let tracked_toggle = super::drawer::drawer_toggle_widget(&block_id, "col", ctx);
+                let tracked_toggle =
+                    super::drawer::drawer_toggle_widget(&block_id, "col", DrawerMode::Shrink, ctx);
                 let toggle_w = super::drawer::DRAWER_TOGGLE_WIDTH;
 
                 // Container layout differs by open/closed: when open,

@@ -130,6 +130,13 @@ pub trait GeometryProvider: Send + Sync {
     fn generation(&self) -> u64 {
         0
     }
+
+    /// Clone into a boxed trait object. `SharedBoundsRegistry` is `Arc`-backed,
+    /// so the clone reads the SAME live registry — used by the per-tick windowed
+    /// composed check (`E2ESut::run_invariant_registry_gated`) to build a
+    /// `GpuiWindowComponent` over the SUT's already-installed geometry without
+    /// consuming the stored `Box`.
+    fn clone_box(&self) -> Box<dyn GeometryProvider>;
 }
 
 /// Framework-agnostic shared bounds registry.
@@ -206,6 +213,10 @@ impl GeometryProvider for SharedBoundsRegistry {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
+    }
+
+    fn clone_box(&self) -> Box<dyn GeometryProvider> {
+        Box::new(self.clone())
     }
 }
 

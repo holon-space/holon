@@ -1,70 +1,76 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 
+use holon_api::render_eval::cycle_state;
+use holon_api::Value;
+use holon_frontend::operations::{find_set_field_op, OperationIntent};
+use holon_frontend::view_model::ViewKind;
+use holon_frontend::FrontendSession;
+
+use super::dispatch::dispatch_intent;
 use super::prelude::*;
-use holon_api::render_eval::{cycle_state, resolve_states, state_display};
 
-pub fn build(ba: BA<'_>) -> Element {
-    let field = ba
-        .args
-        .get_positional_string(0)
-        .or_else(|| ba.args.get_string("field"))
-        .unwrap_or("task_state");
+const STYLE: &str = "cursor: pointer; font-size: 0.85em; color: #7fdf7f; \
+                     padding: 1px 4px; border: 1px solid #3a3a3a; border-radius: 3px;";
 
-    let current = ba
-        .ctx
-        .row()
-        .get(field)
-        .and_then(|v| v.as_string())
-        .unwrap_or("")
-        .to_string();
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::StateToggle { .. } = &node.kind else {
+        return rsx! {};
+    };
+    rsx! { StateToggleNode { node: node.clone() } }
+}
 
-    let states = resolve_states(ba.args, ba.ctx.row());
-    let (label, semantic) = state_display(&current);
-    let color = semantic_to_css(semantic);
-    let label = label.to_string();
+/// A task-state badge that cycles its state (TODO → DOING → DONE → …) on click
+/// by dispatching `set_field`. Mirrors gpui `state_toggle.rs`; falls back to a
+/// static badge when no `set_field` op is wired onto the node.
+#[component]
+fn StateToggleNode(node: ViewModel) -> Element {
+    // Hooks first (unconditional) so the early returns below can't reorder them.
+    let session: Arc<FrontendSession> = use_context();
+    let rt: tokio::runtime::Handle = use_context();
 
-    let Some(op) = holon_frontend::operations::find_set_field_op(field, &ba.ctx.operations) else {
-        return rsx! { span { font_size: "13px", color: color, {label} } };
+    let ViewKind::StateToggle {
+        field,
+        current,
+        label,
+        states,
+    } = &node.kind
+    else {
+        return rsx! {};
+    };
+    let display = if label.is_empty() {
+        current.clone()
+    } else {
+        label.clone()
     };
 
-    let row_id = holon_frontend::operations::get_row_id(ba.ctx);
-    let entity_name =
-        holon_frontend::operations::get_entity_name(ba.ctx).unwrap_or_else(|| op.entity_name.to_string());
+    // No set_field op or no row id → static badge (no dispatch, no fake action).
+    let (Some(op), Some(row_id)) = (find_set_field_op(field, &node.operations), node.row_id())
+    else {
+        return rsx! { span { style: STYLE, "{display}" } };
+    };
+
+    let entity_name = node.entity_name().unwrap_or_else(|| op.entity_name.clone());
     let op_name = op.name.clone();
-    let field_owned = field.to_string();
-    let session = ba.ctx.session().clone();
+    let field = field.clone();
+    let current = current.clone();
+    let states_vec: Vec<String> = states.split(',').map(|s| s.trim().to_string()).collect();
 
     rsx! {
         span {
-            font_size: "13px",
-            color: color,
-            cursor: "pointer",
-            onclick: move |_| {
-                let next = cycle_state(&current, &states);
-                let Some(ref id) = row_id else { return };
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), Value::String(id.clone()));
-                params.insert("field".to_string(), Value::String(field_owned.clone()));
-                params.insert("value".to_string(), Value::String(next));
-                crate::operations::dispatch_operation(
-                    &session,
-                    entity_name.clone(),
-                    op_name.clone(),
-                    params,
+            style: STYLE,
+            onmousedown: move |evt| {
+                evt.stop_propagation();
+                let next = cycle_state(&current, &states_vec);
+                let intent = OperationIntent::set_field(
+                    &entity_name,
+                    &op_name,
+                    &row_id,
+                    &field,
+                    Value::String(next),
                 );
+                dispatch_intent(&rt, &session, intent);
             },
-            {label}
+            "{display}"
         }
-    }
-}
-
-fn semantic_to_css(name: &str) -> &str {
-    match name {
-        "muted" => "var(--text-muted)",
-        "warning" => "var(--warning)",
-        "info" => "var(--info)",
-        "success" => "var(--success)",
-        "primary" => "var(--text-primary)",
-        _ => "inherit",
     }
 }

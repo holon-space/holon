@@ -19,7 +19,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::{OpenPinEntry, ReferenceState};
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutNavHistoryDrive;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -35,6 +35,12 @@ pub struct PinBlock {
 }
 
 impl TransitionFactory<ReferenceState> for PinBlock {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutNavHistoryDrive,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: pin/unpin dispatch `navigation` ops backed by the
@@ -137,9 +143,9 @@ impl TransitionRef<ReferenceState> for PinBlock {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for PinBlock {
+impl<S: SutNavHistoryDrive> TransitionImpl<ReferenceState, S> for PinBlock {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_pin_block(self.region, &self.block_id).await;
+        sut.pin_block(self.region, &self.block_id).await;
     }
 }
 

@@ -16,8 +16,8 @@ use validated::Validated;
 
 use crate::pbt::reference_state::OpenPinEntry;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use holon_layout_testing::LayoutRefState;
+use holon_pbt_core::capabilities::{CapRegion, SutFocusWrite};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 /// Canonical block id of the default LeftSidebar panel — the drawer whose
@@ -38,6 +38,12 @@ pub struct NavigateFocus {
 }
 
 impl TransitionFactory<ReferenceState> for NavigateFocus {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutFocusWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: this navigates by clicking a LeftSidebar page entry and
@@ -229,9 +235,16 @@ impl TransitionRef<ReferenceState> for NavigateFocus {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for NavigateFocus {
+impl<S: SutFocusWrite> TransitionImpl<ReferenceState, S> for NavigateFocus {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_navigate_focus(self.region, &self.block_id).await;
+        // The generator only ever emits `Region::Main` (sidebar nav-focus binds
+        // `region: "main"`); map it to the cap's `CapRegion`. Any other region is
+        // a generator bug, not a runtime case to handle.
+        let region = match self.region {
+            Region::Main => CapRegion::Main,
+            other => panic!("NavigateFocus generator must only emit Main; got {other:?}"),
+        };
+        sut.apply_navigate_focus(region, &self.block_id).await;
     }
 }
 

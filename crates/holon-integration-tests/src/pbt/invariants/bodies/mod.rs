@@ -7,7 +7,9 @@
 
 pub mod active_watches_match_ref;
 pub mod block_content_matches_ref;
+pub mod block_content_matches_ref_backend;
 pub mod block_ids_match_ref;
+pub mod block_parent_matches_ref_backend;
 pub mod block_tags_references_exist;
 pub mod blocks_match_ref;
 pub mod displayed_text;

@@ -1,9 +1,16 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Code Generation
+//!
+//! Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives.
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{DeriveInput, FnArg, ItemFn, ItemTrait, Meta, Pat, Type, parse_macro_input};
 
 pub(crate) mod attr_parser;
 mod builder_registry;
+mod capmap;
 mod entity;
 mod operations_trait;
 mod widget_builder;
@@ -51,6 +58,15 @@ pub fn operations_trait(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(operations_trait::operations_trait_impl(
         &attr_str, trait_def,
     ))
+}
+
+/// Make a SUT read-cap trait usable in `holon_pbt_core::composition::CapMap`:
+/// emits the trait (object-safe via `#[async_trait(?Send)]`), its `CapName`
+/// registration, and a forwarding `impl Trait for CapMap`. See `capmap.rs`.
+#[proc_macro_attribute]
+pub fn capmap_adapter(_: TokenStream, item: TokenStream) -> TokenStream {
+    let trait_def = parse_macro_input!(item as ItemTrait);
+    TokenStream::from(capmap::capmap_adapter_impl(trait_def))
 }
 
 /// Extract doc comments from attributes

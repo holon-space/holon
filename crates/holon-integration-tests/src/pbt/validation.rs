@@ -59,7 +59,11 @@ pub enum Reason {
     NoNextSibling,
 
     // ---------- editor / atomic editor ----------
-    AtomicEditorDisabled,
+    /// The reference owns no editor buffer (`RefLifecycle::has_editor_buffer`
+    /// is false) — the editor transitions are inapplicable. Replaces the old
+    /// `AtomicEditorDisabled` (env gate) + the editor arm of
+    /// `LoroRequiredForAtomicEditor` (storage gate).
+    NoEditorBuffer,
     LoroRequiredForAtomicEditor,
     NoActiveEditor,
     EditorContentEmpty,

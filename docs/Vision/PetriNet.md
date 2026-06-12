@@ -1265,6 +1265,38 @@ The feedback loop (user reorders → system adjusts weights) is valuable but com
 
 ---
 
+## Evaluate Later: Behaviour Trees as a Policy Layer
+
+> Status: **open question, not decided.** Captured so it can be evaluated when "the user (or AI) reads the WSJF ranking and picks" stops being good enough.
+
+[Behaviour Trees](https://github.com/Sollimann/bonsai) (BTs, as used in game AI / robotics) keep coming up as an "alternative" to the Petri Net. They are **not** an alternative — they answer a different question, and the two compose.
+
+- **The Petri Net answers "what is the world's state, what becomes possible, and how good is each option?"** It is data/marking-centric: typed tokens (Digital Twins), a clock driving urgency/discounting, transitions enabled by Rhai preconditions, and WSJF ranking of enabled transitions. It deliberately has **no built-in notion of "what to do next"** — choice is delegated to the objective function and ultimately to the human/AI.
+- **A Behaviour Tree answers "given the options, which do I commit to, in what order, reactively?"** It is control-flow-centric: Sequence / Selector(fallback) / Parallel / decorators, ticked depth-first, each node returning Success / Failure / Running, with a blackboard for shared state. It has **no built-in notion of global state, resources, conservation, or time** — those would have to be faked in the blackboard.
+
+So they are complementary: the PN is the **world model + scorer**; a BT would be the **decision policy** that currently lives implicitly in "the `/petri` skill / human eyeballs the ranking."
+
+**If we ever add one, the recommended shape (architecture #1):** keep the net as the source of truth (state, enabled set, WSJF scores); add a *small, optional, pluggable* BT as the selection policy over already-ranked transitions — e.g. `Selector[ If(energy < 0.3 → low-effort task), If(deadline imminent → urgent task), Fallback → highest-WSJF ]`. BT condition-leaves query the marking; BT action-leaves fire a transition. This makes the selection strategy auditable, testable, and reusable instead of improvised.
+
+**Tension to weigh against our design philosophy** (principles should *emerge* from primitives, not be *imposed*): a BT is by nature imposed policy — the opposite of emergence. The WSJF ranking is emergent; a BT is hand-authored. Therefore, if added, the BT's job must stay **narrow** (context gating like energy/deadline, tie-breaking) and must **not** become a parallel ranking system that fights the emergent WSJF order.
+
+Quick trade-off table:
+
+| Dimension | Petri Net (current) | Behaviour Tree |
+|---|---|---|
+| Models | State, resources, time, concurrency | Control flow / policy |
+| Decision-making | None built-in (external scorer) | Native, priority-ordered, reactive |
+| Time / urgency | First-class (clock, discounting, deadlines) | Must be faked in blackboard |
+| Formal analysis | Reachability, deadlock, invariants | Essentially none |
+| Authoring legibility of *strategy* | Low (one scalar objective) | High (reads like a plan) |
+| Emergence (our design goal) | Strong — WSJF/Lean emerge from primitives | Weak — behaviour is imposed |
+
+**Decision rule:** only worth introducing a BT once we want a deterministic, reusable, testable selection strategy over the ranked transitions. Until then, WSJF ranking + human/AI choice is sufficient, and a BT is net machinery for little gain.
+
+(Note: not to be confused with the unrelated PBT test-harness state machine, which also uses the word "transitions" but is test infrastructure, not this productivity model.)
+
+---
+
 ## Related Documents
 
 - [../Vision.md](../Vision.md) — Technical vision and phased roadmap

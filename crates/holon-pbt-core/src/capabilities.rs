@@ -68,6 +68,12 @@ pub struct CapCursor {
 
 /// Read-side block-tree queries used by Phase 5 T0 transitions and their
 /// generators.
+///
+/// `#[capmap_adapter]` hosts this on `CapMap`. The trait is fully sync, so no
+/// `#[async_trait]` wrapper is emitted (existing `impl RefBlockTree for
+/// ReferenceState` is untouched); the borrow-returning `block_content ->
+/// Option<&str>` forwards through `CapMap::expect_ref` so it doesn't dangle.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait; emits CapName + `impl … for CapMap`
 pub trait RefBlockTree {
     /// Returns block content text. `None` if the block does not exist.
     fn block_content(&self, id: &EntityUri) -> Option<&str>;
@@ -187,6 +193,11 @@ pub trait RefBlockTreeMut: RefBlockTree {
 // ─── Reference-side: EditorMirror ────────────────────────────────────
 
 /// Read-side active-editor state.
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (sync trait → no `#[async_trait]`,
+/// `impl RefEditorMirror for ReferenceState` untouched). The borrow-returning
+/// `active_editor_text -> Option<&str>` forwards through `CapMap::expect_ref`.
+#[holon_macros::capmap_adapter]
 pub trait RefEditorMirror {
     /// Block id whose editor is currently active, or `None` if no editor
     /// is open. Pure slice typically has this populated by a setup
@@ -227,6 +238,12 @@ pub trait RefEditorMirrorMut: RefEditorMirror {
 // ─── Reference-side: Focus ───────────────────────────────────────────
 
 /// Read-side focus queries.
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (fully sync, owned returns → no
+/// `#[async_trait]` wrapper; the existing `impl RefFocus for ReferenceState` is
+/// untouched). Needed so `inv-navigation-focus` / `inv-focus-roots` can select
+/// on `CapId::of::<dyn RefFocus>()` from a composed ref `CapMap`.
+#[holon_macros::capmap_adapter]
 pub trait RefFocus {
     /// Expected focus-root ids per region as `(region_string, [root_id])`, for
     /// `inv-focus-roots`. Region strings match the `focus_roots` matview;
@@ -287,6 +304,20 @@ pub trait RefLifecycle {
     fn is_properly_setup(&self) -> bool;
     fn enable_loro(&self) -> bool;
 
+    /// Whether this reference owns an **editor buffer** carrying uncommitted
+    /// text — the headless atomic-editor capability. This is the single gate
+    /// for the editor transitions (TypeChars / DeleteBackward / MoveCursor /
+    /// FocusEditableText / PressKey), replacing the old pairing of
+    /// `atomic_editor_enabled()` (env-var gated) and `enable_loro() ||
+    /// real_editor_enabled()` (storage-coupled). Editor buffering is a property
+    /// of the wired editor component, independent of *Loro-as-storage* (the CRDT
+    /// can buffer text regardless of where blocks persist) and of any process
+    /// env var. Defaults to `false`: a ref with no editor buffer never
+    /// generates editor transitions.
+    fn has_editor_buffer(&self) -> bool {
+        false
+    }
+
     /// Whether a block-interaction transition (indent / drag / chord / …) can
     /// dispatch against `block_id` under the active main-panel layout: the block
     /// must be in the layout query's rendered set AND rendered with an
@@ -310,13 +341,6 @@ pub trait RefLifecycle {
     /// The previous-transition kind, for Markov weighting. Returns
     /// `None` on the first step or when the impl doesn't track history.
     fn last_transition_kind(&self) -> Option<&'static str>;
-
-    /// Mirror of `ReferenceState::atomic_editor_enabled` (env-var gated).
-    /// Pure slice always returns `true` — pure-logic editor is the
-    /// reason the slice exists.
-    fn atomic_editor_enabled() -> bool
-    where
-        Self: Sized;
 }
 
 // ─── SUT-side traits (mirror of reference-side write traits) ─────────
@@ -324,21 +348,45 @@ pub trait RefLifecycle {
 /// SUT mutations on the block tree. Methods do NOT take `ref_state` —
 /// concrete impls (e.g. wide-PBT `E2ESut`) keep any needed ref→SUT id
 /// mapping in interior state (e.g. `doc_uri_map`).
-#[allow(async_fn_in_trait)]
+///
+/// `&self` + interior mutability (not `&mut self`): the underlying stores are
+/// already interior-mutable (`MemoryBackend` = `Arc<RwLock>`, `E2ESut`'s
+/// `Arc<Mutex>` fields), so `#[capmap_adapter]` hosts the write cap on `CapMap`
+/// exactly like the read caps — the composed slice's `CapMap` *is* the
+/// `SutTransitionTarget`.
+#[holon_macros::capmap_adapter]
 pub trait SutBlockTreeWrite {
-    async fn apply_split_block(&mut self, id: &EntityUri, position: usize);
-    async fn apply_join_block(&mut self, id: &EntityUri);
-    async fn apply_indent(&mut self, id: &EntityUri);
-    async fn apply_outdent(&mut self, id: &EntityUri);
-    async fn apply_move_up(&mut self, id: &EntityUri);
-    async fn apply_move_down(&mut self, id: &EntityUri);
+    async fn apply_split_block(&self, id: &EntityUri, position: usize);
+    async fn apply_join_block(&self, id: &EntityUri);
+    async fn apply_indent(&self, id: &EntityUri);
+    async fn apply_outdent(&self, id: &EntityUri);
+    async fn apply_move_up(&self, id: &EntityUri);
+    async fn apply_move_down(&self, id: &EntityUri);
 }
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutEditorMirrorWrite {
-    async fn apply_type_chars(&mut self, text: &str);
-    async fn apply_delete_backward(&mut self, count: usize);
-    async fn apply_move_cursor(&mut self, byte_position: usize);
+    async fn apply_type_chars(&self, text: &str);
+    async fn apply_delete_backward(&self, count: usize);
+    async fn apply_move_cursor(&self, byte_position: usize);
+}
+
+/// Drive an `Arc`-shared write component through `SutTransitionTarget::apply_to_sut`
+/// (which takes `&mut S`). The editor write component is held behind `Arc` because
+/// the SAME instance is also registered as the read-side `SutEditorMirrorRead` cap;
+/// the write methods are `&self` (interior mutability), so forwarding through the
+/// shared `Arc` is sound.
+#[async_trait::async_trait(?Send)]
+impl<T: SutEditorMirrorWrite + ?Sized> SutEditorMirrorWrite for std::sync::Arc<T> {
+    async fn apply_type_chars(&self, text: &str) {
+        (**self).apply_type_chars(text).await
+    }
+    async fn apply_delete_backward(&self, count: usize) {
+        (**self).apply_delete_backward(count).await
+    }
+    async fn apply_move_cursor(&self, byte_position: usize) {
+        (**self).apply_move_cursor(byte_position).await
+    }
 }
 
 /// Read-side editor-mirror state: the SUT's tracked caret byte and live
@@ -346,6 +394,10 @@ pub trait SutEditorMirrorWrite {
 /// — impls resolve synthetic ids themselves (mirroring
 /// `SutDriver::resolve_ref_block_id`). Binds
 /// `inv-editor-caret-matches-ref` and `inv-editor-text-matches-ref`.
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (sync, owned `Result` returns →
+/// no `#[async_trait]`; existing `E2ESut` impl untouched).
+#[holon_macros::capmap_adapter]
 pub trait SutEditorMirrorRead {
     /// `Err(reason)` = caret unobservable in this SUT/driver medium (the
     /// invariant reports a disclosed Skip); `Ok(None)` = observable medium
@@ -359,17 +411,111 @@ pub trait SutEditorMirrorRead {
     fn editor_live_text(&self, block_id: &EntityUri) -> Result<String, String>;
 }
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutFocusWrite {
-    async fn apply_navigate_focus(&mut self, region: CapRegion, id: &EntityUri);
-    async fn apply_focus_editable_text(&mut self, id: &EntityUri);
+    async fn apply_navigate_focus(&self, region: CapRegion, id: &EntityUri);
+    async fn apply_focus_editable_text(&self, id: &EntityUri);
+}
+
+/// Navigation-history writes (`go_home`/`go_back`/`go_forward`) — distinct from
+/// `SutFocusWrite` (focus → a specific block) because these traverse the
+/// navigation history. `go_home` is `navigation.focus(region, None)`: it *clears*
+/// current focus and the region's open pins (so it moves both current focus and
+/// focus roots). `apply_navigate_back`/`apply_navigate_forward` are deferred to the
+/// windowed `GpuiWindowComponent` (E4) — headless prod does not yet mirror them
+/// (see `maybe_mirror_navigation_focus`), so only `apply_navigate_home` lands now.
+#[holon_macros::capmap_adapter]
+pub trait SutNavHistoryWrite {
+    async fn apply_navigate_home(&self, region: CapRegion);
+}
+
+/// Watch registration — the `setup_watch` write path decomposed off `SutHandle`
+/// (SutHandle decomposition INC 3). Takes the **already-compiled** query
+/// (`source` + `lang`) rather than the integration-test-local `TestQuery`, which
+/// pbt-core cannot name; the `SetupWatch` transition compiles `TestQuery` at the
+/// boundary (`compile_for`) and passes the result here. The read side
+/// (`SutWatchRows`) and the watch invariants already exist and bite headlessly
+/// (`frontend_slice` B5 teeth) — this is the missing **write** cap that lets a
+/// composed `CapMap` drive `SetupWatch`, so the watch invariants run over a
+/// composed-driven watch, not only an `E2ESut`-driven one. `&self` (like every
+/// cap): the E2ESut realization is sound because its watch state is now
+/// interior-mutable (`TestEnvironment::setup_watch` is `&self`).
+#[holon_macros::capmap_adapter]
+pub trait SutWatchRegister {
+    async fn register_watch(&self, query_id: &str, source: &str, lang: holon_api::QueryLanguage);
+
+    /// Tear down a previously-registered watch by its `query_id`. Drives the
+    /// `RemoveWatch` PBT transition.
+    async fn unregister_watch(&self, query_id: &str);
+}
+
+/// SUT capability: switch the active view/mode by name. Drives the `SwitchView`
+/// PBT transition. Names only primitives, so it lives in `holon-pbt-core`.
+#[holon_macros::capmap_adapter]
+pub trait SutViewControl {
+    async fn switch_view(&self, view_name: &str);
+}
+
+/// SUT capability: emit the current state over the MCP integration. Drives the
+/// `EmitMcpData` PBT transition (no payload, no `ref_state`).
+#[holon_macros::capmap_adapter]
+pub trait SutMcpEmit {
+    async fn emit_mcp_data(&self);
+}
+
+/// SUT capability: undo/redo the last committed mutation. Drives the
+/// `UndoLastMutation` / `Redo` PBT transitions. The block-convergence settle is
+/// `ref_state`-dependent and lives in the harness seam (`block_tree_post_action`),
+/// so the cap itself is a pure `&self` action over the engine's undo stack.
+#[holon_macros::capmap_adapter]
+pub trait SutHistoryWrite {
+    async fn undo_last_mutation(&self);
+    async fn redo(&self);
+}
+
+/// SUT capability: drive nav-history navigation and sidebar pinning through the
+/// UI driver (leader chords / synthetic dispatch). Drives the `NavigateBack`,
+/// `NavigateForward`, `PinBlock`, `UnpinBlock` PBT transitions. These are
+/// driver-realized only (the headless `frontend_slice` does not drive them), so
+/// the cap keeps the concrete `holon_api::Region` — `pin_block` forwards the
+/// region string into the dispatch params, so the lossy `CapRegion` abstraction
+/// would not round-trip.
+#[holon_macros::capmap_adapter]
+pub trait SutNavHistoryDrive {
+    async fn navigate_back(&self, region: holon_api::Region);
+    async fn navigate_forward(&self, region: holon_api::Region);
+    async fn pin_block(&self, region: holon_api::Region, block_id: &holon_api::EntityUri);
+    async fn unpin_block(&self, history_id: i64);
+}
+
+/// SUT capability: block-level UI interactions driven through the UI driver —
+/// clicking, drag-and-drop re-parenting, expand/collapse chevrons, the slash
+/// command menu, and raw key chords. Drives the `ClickBlock`, `DragDropBlock`,
+/// `ExpandToggle`, `CollapseToggle`, `TriggerSlashCommand`, `PressKey`
+/// transitions. Driver-realized only (no headless `frontend_slice` driver), so
+/// `E2ESut` is the sole impl; names only `holon_api` types. The `PressKey`
+/// Enter-split reconciliation is `ref_state`-dependent and lives in the harness
+/// seam (`block_tree_post_action`), so the cap action is a pure keystroke send.
+#[holon_macros::capmap_adapter]
+pub trait SutBlockInteract {
+    async fn click_block(&self, region: holon_api::Region, block_id: &holon_api::EntityUri);
+    async fn drag_drop_block(&self, source: &holon_api::EntityUri, target: &holon_api::EntityUri);
+    async fn expand_toggle(&self, block_id: &holon_api::EntityUri);
+    async fn collapse_toggle(&self, block_id: &holon_api::EntityUri);
+    async fn trigger_slash_command(&self, block_id: &holon_api::EntityUri);
+    async fn press_key(&self, chord: &holon_api::KeyChord);
+    /// Click a rendered element by its bounds-registry id (a plain block
+    /// `EntityUri` or a geometry handle `<kind>::<block-uri>`). Drives the shared
+    /// `holon_layout_testing` bodies (`ToggleCollapse`/`ToggleDrawer`/
+    /// `SwitchViewMode`) via `SutClickAdapter`.
+    async fn click_at_element(&self, element_id: &str);
 }
 
 /// Uniform quiescence abstraction. Pure slice: no-op. Wide PBT: drains
 /// CDC, flushes reactive engine, awaits Loro sync.
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutQuiesce {
-    async fn quiesce(&mut self);
+    async fn quiesce(&self);
 }
 
 /// Umbrella trait for the seven T0 transitions' SUT target. Blanket-impl
@@ -484,24 +630,30 @@ pub enum PeerEditOp {
 /// SUT-side peer-Loro write surface. Methods are `async` because the
 /// wide-PBT SUT performs real LoroDoc imports/exports + reactive-engine
 /// quiescence between ops.
-#[allow(async_fn_in_trait)]
+///
+/// `&self` (not `&mut self`): the peer mesh's only structurally-mutated state is the
+/// `peers` vec (one `push` in `apply_add_peer`, never across an `.await`), so its
+/// provider holds it behind interior mutability. This makes the trait object-safe so
+/// `#[capmap_adapter]` can host it on `CapMap` (the `&self`/`Arc<dyn SutLoro>` adapter),
+/// which is what lets a composed `CapMap` satisfy `SutHandle` (PCG-4).
+#[holon_macros::capmap_adapter]
 pub trait SutLoro {
-    async fn apply_add_peer(&mut self);
+    async fn apply_add_peer(&self);
 
     async fn apply_peer_create(
-        &mut self,
+        &self,
         peer_idx: usize,
         parent_stable_id: Option<&str>,
         content: &str,
         stable_id: &str,
     );
 
-    async fn apply_peer_update(&mut self, peer_idx: usize, stable_id: &str, content: &str);
+    async fn apply_peer_update(&self, peer_idx: usize, stable_id: &str, content: &str);
 
-    async fn apply_peer_delete(&mut self, peer_idx: usize, stable_id: &str);
+    async fn apply_peer_delete(&self, peer_idx: usize, stable_id: &str);
 
     async fn apply_peer_char_insert(
-        &mut self,
+        &self,
         peer_idx: usize,
         stable_id: &str,
         pos_codepoint: usize,
@@ -509,16 +661,16 @@ pub trait SutLoro {
     );
 
     async fn apply_peer_char_delete(
-        &mut self,
+        &self,
         peer_idx: usize,
         stable_id: &str,
         pos_codepoint: usize,
         len_codepoint: usize,
     );
 
-    async fn apply_sync_with_peer(&mut self, peer_idx: usize);
+    async fn apply_sync_with_peer(&self, peer_idx: usize);
 
-    async fn apply_merge_from_peer(&mut self, peer_idx: usize);
+    async fn apply_merge_from_peer(&self, peer_idx: usize);
 
     /// Construct a fresh peer holding a STALE snapshot (lag-N export).
     /// Wide PBT replays N pre-recorded snapshots; pure slice no-ops.
@@ -526,13 +678,13 @@ pub trait SutLoro {
     /// Named distinctly from `SutHandle::apply_create_stale_loro` (the
     /// file-corruption variant) to avoid an ambiguous-method collision now
     /// that `SutHandle: SutLoro`.
-    async fn apply_create_stale_peer(&mut self, lag_steps: usize);
+    async fn apply_create_stale_peer(&self, lag_steps: usize);
 
     /// Post-startup: edit a block on a peer's LoroDoc directly.
-    async fn apply_peer_edit(&mut self, peer_idx: usize, op: &PeerEditOp);
+    async fn apply_peer_edit(&self, peer_idx: usize, op: &PeerEditOp);
 
     /// Post-startup: edit a block's LoroText container on a peer at character level.
-    async fn apply_peer_char_edit(&mut self, peer_idx: usize, block_id: &str, op: &TextOp);
+    async fn apply_peer_char_edit(&self, peer_idx: usize, block_id: &str, op: &TextOp);
 }
 
 /// App-runtime error log — the SUT's general "did anything error during the
@@ -542,7 +694,7 @@ pub trait SutLoro {
 /// errors logged during the initial document sync; `inv-no-errors` asserts the
 /// count is zero. This is the home for any future non-component-specific error
 /// source.
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutErrorLog {
     /// Number of app-level error events logged since startup.
     async fn app_error_count(&self) -> usize;
@@ -555,7 +707,7 @@ pub trait SutErrorLog {
 /// Read-side observation of Loro state for invariants.
 /// Phase 7 will bind `inv-loro-no-errors`, `inv-live-children-match-ref`
 /// on this trait.
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutLoroLog {
     /// True if the LoroSyncController logged any error since startup.
     async fn loro_had_errors(&self) -> bool;
@@ -580,7 +732,7 @@ pub trait SutLoroLog {
 
 /// SUT-side SQL projection read surface. Methods reflect Turso state
 /// AFTER CDC quiescence — invariants must call `quiesce()` first.
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutSqlProjection {
     /// Read a hydrated `block` matview row by id. `None` = row not
     /// present (deleted or never inserted). The flat Vec is the row's
@@ -646,6 +798,7 @@ pub trait SutSqlProjection {
 /// [`holon_api::Block`] values support. Coupling *this* trait to `Block`
 /// keeps `SutSqlProjection`'s String surface intact.
 #[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter] // emits async-trait + CapName + `impl … for CapMap`
 pub trait SutBackend {
     /// Snapshot of the CDC-driven `block` matview mirror (`live_blocks`)
     /// as fully-hydrated `Block` values. Read AFTER CDC quiescence — the
@@ -672,36 +825,22 @@ pub trait SutBackend {
 /// `inv-task-state-storage-coherence`. Separate from `SutLoroLog` to
 /// keep the Loro-tree surface (children snapshot) isolated from the
 /// property-projection surface.
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutLoroTaskState {
-    /// Task state string for `block_id` as projected from Loro tags.
-    ///
-    /// Not yet wired on `E2ESut`: the LoroSyncController's tag projection
-    /// is not yet exposed through `TestContext`. Returns `unimplemented!()`
-    /// until Phase 8 wires the plumbing.
+    /// Task state string for `block_id` as projected from the Loro block's
+    /// `properties["task_state"]` scalar — the same value the SQL sibling
+    /// [`SutSqlProjection::block_task_state`] reads via
+    /// `json_extract(properties,'$.task_state')`, so the two are directly
+    /// comparable by `inv-task-state-storage-coherence`. `None` when Loro
+    /// isn't enabled, the block is absent, or it carries no `task_state`.
     async fn loro_task_state_of(&self, block_id: &str) -> Option<String>;
 }
 
-/// SUT-side write surface for org-file-driven mutations (WriteOrgFile,
-/// BulkExternalAdd). External-source-of-truth path that bypasses the
-/// reactive engine and writes via OrgFileWatcher.
-#[allow(async_fn_in_trait)]
-pub trait SutOrgFileWrite {
-    /// Write `contents` to `path`. Wide-PBT impl invokes the real
-    /// OrgFileWatcher's scan; pure slice writes to an in-memory map.
-    async fn write_org_file(&mut self, path: &str, contents: &str);
-}
-
-/// SUT-side CDC observation surface.
-#[allow(async_fn_in_trait)]
-pub trait SutCdc {
-    /// True if any CDC stage is mid-flight (used by `live_blocks_stale`
-    /// classifier). Wide PBT: checks WatermarkState; pure slice: false.
-    async fn cdc_in_flight(&self) -> bool;
-
-    /// Drain pending CDC events into the projection. Idempotent.
-    async fn drain_cdc(&mut self);
-}
+// ─── SutOrgFileWrite ── DELETED (E3, 2026-06-24) ─────────────────────
+// Was a thin redundant wrapper that delegated straight to
+// `local_caps::SutFixtureFs::write_org_file`; the `WriteOrgFile` transition
+// binds `SutFixtureFs` directly, so this coarse trait had zero callers,
+// transitions, invariants, or composed hosts. Fully vestigial → removed.
 
 // ─── Phase 6c — ViewModel/Renderer cluster ───────────────────────────
 //
@@ -761,7 +900,7 @@ pub struct FrontendRootVm {
     pub entity_ids: Vec<EntityUri>,
 }
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutViewModel {
     /// Drain pending ViewModel emissions. Drain-once semantics —
     /// after drain, subsequent calls return `Vec::new` until next emit.
@@ -905,7 +1044,7 @@ impl<'a> Iterator for WidgetSnapshotIter<'a> {
     }
 }
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutRenderer {
     /// Stringified render-tree for a block id (debug-formatted).
     /// Used by `inv-displayed-text` and OrgRender fixed-point checks.
@@ -1024,7 +1163,7 @@ pub struct RenderedElement {
     pub focused: Option<bool>,
 }
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutLayout {
     /// Snapshot every tracked element in the rendered window's geometry
     /// registry. Empty when no geometry provider is installed (headless
@@ -1123,16 +1262,16 @@ pub enum EngineFocus {
     Focused(EntityUri),
 }
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter] // mixed trait (7 async + 1 sync) → async-trait(?Send); emits CapName + `impl … for CapMap`
 pub trait SutDriver {
-    async fn driver_send_key_chord(&mut self, chord: &str);
-    async fn driver_click(&mut self, id: &EntityUri);
+    async fn driver_send_key_chord(&self, chord: &str);
+    async fn driver_click(&self, id: &EntityUri);
     /// Region-aware click. Mirrors `UserDriver::click_entity(entity_id,
     /// region)` (`region` is "main", "left_sidebar", ...). `driver_click`
     /// is the region-defaulted convenience wrapper that panics on error;
     /// `click_entity` returns the result so callers can attach their own
     /// transition-specific diagnostic.
-    async fn click_entity(&mut self, id: &EntityUri, region: &str) -> Result<(), String>;
+    async fn click_entity(&self, id: &EntityUri, region: &str) -> Result<(), String>;
     /// Poll until `engine_focused_block` returns `Some(id)` or `timeout`
     /// elapses. Used as a post-click barrier — GPUI's mouse-click goes
     /// through `dispatch_intent` (fire-and-forget), so subsequent
@@ -1142,7 +1281,7 @@ pub trait SutDriver {
     /// `"home"`, `"right"`, `"enter"`, `"backspace"`, or a single
     /// character (`"a"`). `modifiers` is a slice of `"cmd"`, `"ctrl"`,
     /// `"alt"`, `"shift"`. Mirrors `UserDriver::send_raw_keystroke`.
-    async fn send_raw_keystroke(&mut self, key: &str, modifiers: &[&str]) -> Result<(), String>;
+    async fn send_raw_keystroke(&self, key: &str, modifiers: &[&str]) -> Result<(), String>;
     async fn driver_current_focus(&self) -> Option<EntityUri>;
     /// The globally focused block id as tracked by the reactive/frontend
     /// engine (distinct from the per-region SQL `current_focus` matview).
@@ -1161,7 +1300,7 @@ pub trait SutDriver {
 //
 // Binds: `inv-org-render-fixed-point`.
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter] // emits async-trait + CapName + `impl … for CapMap`
 pub trait SutOrgRender {
     /// Snapshot every tracked org file as `(path, disk_text, rendered_text)`
     /// where `disk_text` is the bytes currently on disk and `rendered_text`
@@ -1180,7 +1319,7 @@ pub trait SutOrgRender {
 // the render-vs-disk fixed point. This one parses the on-disk org files
 // back into blocks so they can be compared against the reference.
 
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutOrgRead {
     /// Wait for the FileSyncController's background re-render to settle, then
     /// parse every tracked org file on disk back into `holon_api::Block`s.
@@ -1194,32 +1333,12 @@ pub trait SutOrgRead {
     async fn org_block_snapshot(&self) -> Vec<holon_api::Block>;
 }
 
-// ─── Phase 6g — QueryCompile cluster ─────────────────────────────────
-//
-// Bound by GENERATORS that synthesize query-content blocks (PRQL/SQL/GQL
-// `query_source`). Transitions creating query-bearing blocks gate on
-// this; slices without it produce no query-content. No invariants today.
-
-#[allow(async_fn_in_trait)]
-pub trait SutQueryCompile {
-    /// Compile a query source string to its canonical form. `Err` on
-    /// parse/typecheck failure. Generators use this to filter the
-    /// proposed query string space to valid inputs.
-    async fn compile_query(&self, language: &str, source: &str) -> Result<String, String>;
-}
-
-// ─── Phase 6h — Lifecycle cluster (discovered P1.2) ──────────────────
-//
-// SUT-side counterpart to RefLifecycle. Wide PBT: real app start; pure
-// slice: synchronous no-op. Phase 7 binds the `app_started`/setup gates
-// invariants reference today.
-
-#[allow(async_fn_in_trait)]
-pub trait SutLifecycle {
-    async fn apply_start_app(&mut self);
-    async fn apply_simulate_restart(&mut self);
-    async fn is_app_started(&self) -> bool;
-}
+// ─── SutQueryCompile / SutLifecycle ── DELETED (E3, 2026-06-24) ──────
+// Both fully vestigial. `SutQueryCompile` was never wired (the E2ESut impl
+// was `unimplemented!()`); no transition/generator ever bound it. `SutLifecycle`
+// (coarse `&mut self` start/restart) was superseded by the finer
+// `local_caps::SutAppLifecycle`, which is what the `StartApp`/`SimulateRestart`
+// transitions actually bind — the coarse trait had zero method callers. Removed.
 
 // ─── Reference-side: extended caps added in Phase 7 (Stage B) ───────
 //
@@ -1237,6 +1356,7 @@ pub trait RefFocusRoots {
 }
 
 /// Layout-block metadata needed by matview + ViewModel invariants.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait; emits CapName + `impl … for CapMap`
 pub trait RefLayout {
     /// All block ids that are part of the layout scaffolding (headline,
     /// query-source, render-source). `is_layout_block` on `RefBlockTree`
@@ -1282,6 +1402,11 @@ pub trait RefLayout {
 }
 
 /// Render-expression metadata exposed for ViewModel invariants.
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (fully sync, owned returns → no
+/// `#[async_trait]`, emits `CapName` + `impl RefRender for CapMap`). The
+/// production `ReferenceState` provides it; the composed ref `CapMap` forwards.
+#[holon_macros::capmap_adapter]
 pub trait RefRender {
     /// Name of the active render expression for `region` (e.g. "tree",
     /// "list"). `None` when no render source block is set up yet.
@@ -1343,6 +1468,7 @@ pub trait RefRender {
 pub type WatchRow = std::collections::HashMap<String, Option<String>>;
 
 /// Active watched queries on the reference model.
+#[holon_macros::capmap_adapter] // sync owned-return → emits CapName + `impl … for CapMap`
 pub trait RefWatches {
     /// Query ids of currently registered watches (stable, sorted).
     /// Wide PBT: keys of `ReferenceState::active_watches`; pure slice: empty.
@@ -1372,7 +1498,7 @@ pub trait RefWatches {
 /// per-id String surface there stays focused; this trait carries the
 /// keyed [`WatchRow`] shape the watch comparison needs plus the two
 /// `block_raw` truth-check reads the CDC-lag classifier performs.
-#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
 pub trait SutWatchRows {
     /// Query ids of the watches currently registered on the SUT
     /// (`ui_model` keys). Wide PBT: keys of `TestContext::ui_model`.
@@ -1400,6 +1526,10 @@ pub trait SutWatchRows {
 /// Global engine-focused block (distinct from the per-region navigation
 /// focus). Set by click handlers in the reactive engine; read by
 /// `inv-focus-matches-ref` to compare against `ReactiveEngine::focused_block`.
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (sync, owned return). The
+/// production `ReferenceState` provides it; the composed ref `CapMap` forwards.
+#[holon_macros::capmap_adapter]
 pub trait RefGlobalFocus {
     /// The globally focused block id, or `None` if nothing is focused.
     /// Wide PBT: `ReferenceState::focused_block`; pure slice: `None`.
@@ -1408,6 +1538,10 @@ pub trait RefGlobalFocus {
 
 /// Task-state read-side projection. Used by `inv-viewmodel-state-toggle-correct`
 /// to compare block task_state values against ViewModel StateToggle nodes.
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (sync, owned return). The
+/// production `ReferenceState` provides it; the composed ref `CapMap` forwards.
+#[holon_macros::capmap_adapter]
 pub trait RefTaskState {
     /// Task state string for `id` (`"TODO"`, `"DONE"`, etc.), or `None`
     /// if the block has no task_state property.
@@ -1423,6 +1557,7 @@ pub trait RefTaskState {
 /// the same reason as [`SutBackend`]: the deep field-level comparison
 /// needs typed values, not the format-agnostic id/content surface of
 /// [`RefBlockTree`].
+#[holon_macros::capmap_adapter] // sync trait → no async-trait; emits CapName + `impl … for CapMap`
 pub trait RefBackend {
     /// All reference blocks EXCLUDING seed blocks (those whose document is
     /// `no_parent`/`sentinel` — inserted via direct SQL, never reverse-synced

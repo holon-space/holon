@@ -1,4 +1,12 @@
-//! Frontend session abstraction for Holon
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: MVVM ViewModel
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-filesystem "filesystem ports" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
+//! Frontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.
 //!
 //! Uses `premortem` for layered config (Defaults → TOML → CLI/env) and `clap` for
 //! CLI parsing. Configuration is defined once in [`config::HolonConfig`] and automatically
@@ -56,6 +64,7 @@ pub mod focus_path;
 pub mod geometry;
 pub mod render_services;
 pub use geometry::{drawer_toggle_id_for, expand_toggle_id_for, vms_button_id_for};
+pub mod editor_caret;
 pub mod headless_editor_mirror;
 pub mod input;
 pub mod input_trigger;
@@ -66,6 +75,10 @@ pub mod mutable_tree;
 pub mod navigation;
 pub(crate) mod operation_matcher;
 pub mod operations;
+/// PBT SUT capability traits owned by the frontend (cap home-rule). Gated behind
+/// the `pbt` feature so production builds never pull `holon-pbt-core`.
+#[cfg(feature = "pbt")]
+pub mod pbt_caps;
 pub mod popup_menu;
 pub mod preferences;
 pub mod provider_cache;
@@ -107,7 +120,7 @@ pub use user_driver::{ReactiveEngineDriver, UserDriver};
 pub use view_model::ViewModel;
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -217,7 +230,6 @@ impl SessionParts {
             ui_watcher,
             profiles,
             error_tracker: PublishErrorTracker::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             ready_signal: None,
             preference_defs,
             theme_registry,
@@ -240,7 +252,6 @@ impl FrontendSession<()> {
             ui_watcher: parts.ui_watcher,
             profiles: parts.profiles,
             error_tracker: parts.error_tracker,
-            #[cfg(not(target_arch = "wasm32"))]
             ready_signal: parts.ready_signal,
             extras: (),
             _memory_monitor: memory_monitor::MemoryMonitorHandle::start(),
@@ -341,6 +352,15 @@ impl<T> FrontendSession<T> {
 
     /// Look up widget state by block ID. Returns default (open=true) if not found.
     pub fn widget_state(&self, block_id: &str) -> WidgetState {
+        self.widget_state_explicit(block_id).unwrap_or_default()
+    }
+
+    /// Look up the *explicitly stored* widget state, or `None` when the user has
+    /// never toggled this widget. Callers that need a mode-aware default (e.g.
+    /// overlay drawers, which must start closed) use this instead of
+    /// [`Self::widget_state`], whose `unwrap_or_default` collapses "never set"
+    /// into `open = true`.
+    pub fn widget_state_explicit(&self, block_id: &str) -> Option<WidgetState> {
         self.holon_config
             .lock()
             .unwrap()
@@ -348,7 +368,16 @@ impl<T> FrontendSession<T> {
             .widgets
             .get(block_id)
             .cloned()
-            .unwrap_or_default()
+    }
+
+    /// Effective open state for a drawer in the given mode. Mirrors
+    /// [`crate::reactive::BuilderServices::drawer_open`] for callers that hold a
+    /// `FrontendSession` directly (e.g. the GPUI toolbar toggles): explicit user
+    /// state wins; otherwise `Overlay` drawers default closed, `Shrink` open.
+    pub fn drawer_open(&self, block_id: &str, mode: crate::view_model::DrawerMode) -> bool {
+        self.widget_state_explicit(block_id)
+            .map(|s| s.open)
+            .unwrap_or_else(|| mode.default_open())
     }
 
     /// Toggle a widget's open state and persist.

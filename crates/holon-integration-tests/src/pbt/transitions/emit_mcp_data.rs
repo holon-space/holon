@@ -12,7 +12,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutMcpEmit;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -24,6 +24,12 @@ use crate::pbt::transition_budgets::{ExpectedSql, docs_tolerance};
 pub struct EmitMcpData;
 
 impl TransitionFactory<ReferenceState> for EmitMcpData {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutMcpEmit,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: the navigation / CDC-watch / MCP providers this transition
@@ -58,9 +64,9 @@ impl TransitionRef<ReferenceState> for EmitMcpData {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for EmitMcpData {
+impl<S: SutMcpEmit> TransitionImpl<ReferenceState, S> for EmitMcpData {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_emit_mcp_data().await;
+        sut.emit_mcp_data().await;
     }
 }
 

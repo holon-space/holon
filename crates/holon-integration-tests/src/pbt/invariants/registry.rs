@@ -1051,10 +1051,12 @@ mod tests {
     /// future addition; this runtime check catches the regression early.
     ///
     /// Slices currently consume:
-    ///   - `storage_consistency_pbt`: `inv-loro-no-errors`,
-    ///     `inv-block-tags-references-exist`
     ///   - `cdc_delivery_pbt`: `inv-loro-no-errors`,
     ///     `inv-block-tags-references-exist`
+    ///
+    /// (`storage_consistency_pbt` was retired — its `storage` preset is now
+    /// covered by the convergence harness `subsystem_convergence_pbt`, which
+    /// runs the full registry over a generated Turso/Loro wiring.)
     ///
     /// Each id MUST also appear in the wide registry.
     #[test]
@@ -1111,23 +1113,40 @@ mod tests {
     fn every_body_file_has_a_registry_entry() {
         use std::collections::BTreeSet;
         use std::path::PathBuf;
+
+        use crate::pbt::composed::composed_invariant_catalog;
+
         let bodies_dir =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/pbt/invariants/bodies");
-        let reg = register_default();
-        let registered_stems: BTreeSet<String> = reg
+
+        // The base stem of an invariant id: drop the `/variant` discriminator,
+        // strip the `inv-` prefix, and dash→underscore. `inv-block-content-
+        // matches-ref/block_raw` → `block_content_matches_ref`.
+        let id_to_stem = |id: &str| -> String {
+            id.split('/')
+                .next()
+                .expect("non-empty id")
+                .strip_prefix("inv-")
+                .expect("invariant ids start with 'inv-'")
+                .replace('-', "_")
+        };
+
+        // A body is "covered" if it is dispatched by EITHER the native registry
+        // OR the composed catalog. The store-variant bodies (`*_backend.rs`,
+        // realizing the `/block_raw` SUT-backend check) are composed-only for
+        // `block_parent` and native+composed for `block_content` — both are real
+        // coverage paths, so the orphan check must consult both registries.
+        let mut covered_stems: BTreeSet<String> = register_default()
             .all()
             .iter()
-            .map(|inv| {
-                inv.id
-                    .0
-                    .split('/')
-                    .next()
-                    .expect("non-empty id")
-                    .strip_prefix("inv-")
-                    .expect("invariant ids start with 'inv-'")
-                    .replace('-', "_")
-            })
+            .map(|inv| id_to_stem(inv.id.0))
             .collect();
+        covered_stems.extend(
+            composed_invariant_catalog()
+                .iter()
+                .map(|c| id_to_stem(c.id().0)),
+        );
+
         for entry in std::fs::read_dir(&bodies_dir).expect("read bodies dir") {
             let path = entry.expect("dir entry").path();
             let stem = path
@@ -1139,12 +1158,15 @@ mod tests {
             if stem == "mod" {
                 continue;
             }
+            // A `<base>_backend.rs` file realizes the `/block_raw` variant of the
+            // base invariant; match it against the base stem.
+            let base = stem.strip_suffix("_backend").unwrap_or(&stem);
             assert!(
-                registered_stems.contains(&stem),
-                "body file {} has no registered invariant 'inv-{}' — register it \
-                 (and add to NATIVE_ONLY_EXCLUDED if slice-only) or delete the file",
+                covered_stems.contains(&stem) || covered_stems.contains(base),
+                "body file {} is dispatched by neither register_default() nor the \
+                 composed catalog — wire it (native and/or composed, + NATIVE_ONLY_EXCLUDED \
+                 if slice-only) or delete the file",
                 path.display(),
-                stem.replace('_', "-")
             );
         }
     }

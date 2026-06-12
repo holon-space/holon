@@ -289,10 +289,15 @@ impl LazyReactiveSlot {
 
 // ── ReactiveViewModel ──────────────────────────────────────────────────
 
-/// A persistent reactive ViewModel node.
+/// The ViewModel of Holon's MVVM UI — a persistent reactive node.
+///
+/// @c4 code
 ///
 /// Each node owns its render expression and data row as reactive Mutables.
 /// When either changes, the node self-interprets and pushes updates to children.
+/// The **View** layer — the GPUI and TUI render functions in the frontend
+/// crates — observes these Mutables and rebuilds the platform widgets, so the
+/// same ViewModel tree drives every frontend.
 ///
 /// This replaces the old snapshot-based `ReactiveViewModel` + `ReactiveViewKind`
 /// enum. Widget type is determined by the `expr` function name, not an enum tag.

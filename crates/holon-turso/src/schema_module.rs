@@ -49,6 +49,7 @@ pub struct EdgeFieldDescriptor {
 /// should be created together. Dependency ordering between modules is
 /// handled by FluxDI's `DbReady<R>` providers in `di::schema_providers`.
 #[async_trait]
+/// @c4 code
 pub trait SchemaModule: Send + Sync {
     /// Unique name for this module (used in logging and error messages).
     fn name(&self) -> &str;

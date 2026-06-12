@@ -9,9 +9,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::Reason;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -44,11 +43,11 @@ impl TransitionRef<ReferenceState> for Nothing {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for Nothing {
-    async fn apply_to_sut(&self, _: &ReferenceState, _: &mut S) {
-        // No-op: SUT is unchanged
-    }
+// No-op SUT dispatch (no cap → bound on the full `SutHandle` bundle; `required_caps`
+// stays the trait default of empty).
+crate::cap_transition! {
+    Nothing,
+    |_me, _state, _sut| {}
 }
 
 #[cfg(feature = "otel-testing")]

@@ -6,7 +6,6 @@ use holon_api::EntityUri;
 use holon_core::traits::MaybeSendSync;
 use holon_macros::Entity;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;

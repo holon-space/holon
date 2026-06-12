@@ -11,11 +11,22 @@ description = "workspace-hack package, managed by hakari"
 # You can choose to publish this crate: see https://docs.rs/cargo-hakari/latest/cargo_hakari/publishing.
 publish = false
 
+# HOLON wasm note: the two universal hakari tables below (`[dependencies]` and
+# `[build-dependencies]`) are intentionally gated to
+# `[target.'cfg(not(target_arch = "wasm32"))'.…]`. workspace-hack is a native
+# build-speed optimization that pulls native-only crates (tokio `full` → mio,
+# reqwest, rmcp); leaving it unconditional breaks the wasm frontends
+# (dioxus-web) and the wasm worker (holon-worker), which depend on workspace
+# members via path. On native every `cfg(not(wasm32))` is true, so behavior is
+# unchanged. ⚠️ `cargo hakari generate` rewrites the managed section and will
+# revert these two table headers to bare `[dependencies]` / `[build-dependencies]`
+# — re-apply the `cfg(not(target_arch = "wasm32"))` gate after regenerating.
+
 # The parts of the file between the BEGIN HAKARI SECTION and END HAKARI SECTION comments
 # are managed by hakari.
 
 ### BEGIN HAKARI SECTION
-[dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7" }
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -97,7 +108,7 @@ uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
 winnow = { version = "0.7" }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
-[build-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.build-dependencies]
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7" }
 bitflags = { version = "2", default-features = false, features = ["std"] }

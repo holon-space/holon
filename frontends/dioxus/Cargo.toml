@@ -18,6 +18,7 @@ dioxus = { version = "0.7", features = ["desktop"] }
 
 # Holon workspace crates
 holon.workspace = true
+holon-app.workspace = true
 holon-frontend.workspace = true
 holon-api.workspace = true
 holon-macros.workspace = true
@@ -30,6 +31,7 @@ serde_json.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+futures.workspace = true
 
 # Error handling
 anyhow.workspace = true

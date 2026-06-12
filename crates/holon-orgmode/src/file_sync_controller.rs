@@ -1284,7 +1284,7 @@ impl FileSyncController {
         // we'd incorrectly re-ingest the on-disk file — which can revert the
         // user's just-issued UPDATE if the file watcher hasn't yet delivered the
         // initial WriteOrgFile event. The watcher will catch up on its own.
-        let disk_content = self.fs.read_to_string(&path).await.unwrap_or_default();
+        let disk_content = read_disk_or_empty(&self.fs, &path).await?;
         let last = self
             .last_projection
             .get(&canonical)
@@ -1314,7 +1314,7 @@ impl FileSyncController {
         // (concurrent external write). Writing `rendered` here — derived
         // from the CDC cache which may lag behind the new disk content —
         // would wipe the external write. Re-read and bail if changed.
-        let disk_at_write = self.fs.read_to_string(&path).await.unwrap_or_default();
+        let disk_at_write = read_disk_or_empty(&self.fs, &path).await?;
         if disk_at_write != disk_content {
             tracing::debug!(
                 "[ORGSYNC_TOCTOU on_block_changed] {} disk changed during processing \
@@ -1535,7 +1535,7 @@ impl FileSyncController {
             // `rendered` — derived from a potentially stale CDC cache —
             // would wipe that new content. Skip this file; the next
             // on_file_changed will pick up the external delta.
-            let disk_at_write = self.fs.read_to_string(&path).await.unwrap_or_default();
+            let disk_at_write = read_disk_or_empty(&self.fs, &path).await?;
             if disk_at_write != disk_content {
                 tracing::debug!(
                     "[ORGSYNC_TOCTOU re_render_all_tracked] {} disk changed during processing \
@@ -1790,6 +1790,18 @@ impl FileSyncController {
     }
 }
 
+/// Read a file's content, treating a missing file as empty content (a legitimate
+/// "no baseline yet" state for org sync) but propagating any other IO error loudly.
+/// Distinguishing absence from a real read failure prevents a transient IO error
+/// from masquerading as empty disk content and wiping the user's data on write-back.
+async fn read_disk_or_empty(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<String> {
+    match fs.read_to_string(path).await {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {} for org sync", path.display())),
+    }
+}
+
 /// Convert a relative path (e.g. "projects/todo.org") to a name chain (["projects", "todo"]).
 fn path_to_name_chain(rel_path: &Path) -> Vec<String> {
     let doc_path = rel_path.with_extension("");
@@ -1819,12 +1831,12 @@ fn strip_unchanged_edge_fields(
     }
 }
 
-fn set_eq(a: &[String], b: &[String]) -> bool {
+fn set_eq<T: Eq + std::hash::Hash>(a: &[T], b: &[T]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let sa: HashSet<&str> = a.iter().map(String::as_str).collect();
-    let sb: HashSet<&str> = b.iter().map(String::as_str).collect();
+    let sa: HashSet<&T> = a.iter().collect();
+    let sb: HashSet<&T> = b.iter().collect();
     sa == sb
 }
 

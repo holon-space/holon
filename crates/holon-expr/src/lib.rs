@@ -1,5 +1,8 @@
-//! Compiled Rhai expressions — shared vocabulary between holon-api entity
-//! definitions and the holon-engine Petri-net guard evaluator.
+//! @c4 component
+//! @c4 layer Engine
+//! Pattern: Interpreter
+//!
+//! Compiled Rhai expressions — the shared vocabulary between holon-api entity definitions and the holon-engine Petri-net guard evaluator.
 
 use rhai::{Engine, AST};
 use serde::{Deserialize, Serialize};

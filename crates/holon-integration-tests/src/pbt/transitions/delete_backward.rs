@@ -35,11 +35,7 @@ pub fn delete_backward_preconditions<R: RefEditorMirror + RefFocus + RefLifecycl
 ) -> Validated<(), Reason> {
     let in_memory_len = state.active_editor_text().map(|t| t.len()).unwrap_or(0);
     let checks: Vec<Validated<(), Reason>> = vec![
-        check(R::atomic_editor_enabled(), Reason::AtomicEditorDisabled),
-        check(
-            state.enable_loro() || ReferenceState::real_editor_enabled(),
-            Reason::LoroRequiredForAtomicEditor,
-        ),
+        check(state.has_editor_buffer(), Reason::NoEditorBuffer),
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
         check(
@@ -137,18 +133,19 @@ where
     // points", docs/Architecture/UI.md — split/join/indent flush first,
     // both in prod and in the ref applies), so the only remaining
     // pending-vs-committed divergence window is mid-transition. CAUTION:
-    // a windowed replay on a machine where the user clicks elsewhere
-    // blurs the test window mid-step, fires the on-blur set_field, and
-    // lands the pending text in SQL early — re-run on an idle machine
-    // before believing such a divergence.
-    if state.enable_loro() {
-        commit_active_editor_if_changed(state);
-    }
+    // The GPUI editor now always commits typed text (see TypeChars fix).
+    commit_active_editor_if_changed(state);
 }
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
 impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for DeleteBackward {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutEditorMirrorWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // ADR 0009 asymmetry #1 (same as TypeChars/PressKey): editor primitives

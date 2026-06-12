@@ -130,6 +130,10 @@ impl GeometryProvider for TuiGeometry {
         let notify = self.install_notify.clone();
         Box::pin(async move { notify.notified().await })
     }
+
+    fn clone_box(&self) -> Box<dyn GeometryProvider> {
+        Box::new(self.clone())
+    }
 }
 
 #[cfg(test)]

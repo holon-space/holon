@@ -345,12 +345,7 @@ impl<'a> EvalContext<'a> {
     /// IDs that `block` requires. Reads the typed `block.requires` field
     /// (edge-typed, hydrated from `block_requires`).
     fn required_ids_of(&self, block: &Block) -> Vec<EntityUri> {
-        block
-            .requires
-            .iter()
-            // ALLOW(entity_uri_from_raw): block.requires Vec<String> hydrated from SQL block_requires table
-            .map(|s| EntityUri::from_raw(s.as_str()))
-            .collect()
+        block.requires.clone()
     }
 
     fn get_prop_for(
@@ -573,8 +568,17 @@ pub fn now_query_ast() -> QueryAst {
 mod tests {
     use super::*;
 
+    /// Collapse formatting so the comparison is token-level, not layout-level:
+    /// runs of whitespace → one space, then drop whitespace immediately inside
+    /// parentheses (the compiler emits tight `(SELECT …)` while the readable
+    /// canonical literal pretty-prints the subquery on its own indented line,
+    /// which would otherwise collapse to `( SELECT … )`).
     fn norm_ws(s: &str) -> String {
-        s.split_whitespace().collect::<Vec<_>>().join(" ")
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("( ", "(")
+            .replace(" )", ")")
     }
 
     #[test]
@@ -616,11 +620,17 @@ LIMIT 10";
             // array, mirroring how the org parser populates it.
             if *k == "requires" {
                 match v {
-                    Value::String(s) => b.requires = vec![s.clone()],
+                    Value::String(s) => {
+                        b.requires =
+                            vec![EntityUri::parse(s).expect("requires test value must be a URI")]
+                    }
                     Value::Array(arr) => {
                         b.requires = arr
                             .iter()
-                            .filter_map(|item| item.as_string().map(|s| s.to_string()))
+                            .filter_map(|item| item.as_string())
+                            .map(|s| {
+                                EntityUri::parse(s).expect("requires test value must be a URI")
+                            })
                             .collect();
                     }
                     _ => {}

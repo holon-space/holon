@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Testing
+//! Pattern: Test Harness
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-frontend "frontend session abstraction" "Rust"
+//! @c4 uses holon-pbt-core "PBT transition traits" "Rust"
+//!
 //! Shared layout-testing primitives for Holon's property-based UI tests.
 //!
 //! This crate contains everything needed to write layout property tests

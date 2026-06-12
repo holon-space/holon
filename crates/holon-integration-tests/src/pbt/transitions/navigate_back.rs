@@ -14,7 +14,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutNavHistoryDrive;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -32,6 +32,12 @@ pub struct NavigateBack {
 }
 
 impl TransitionFactory<ReferenceState> for NavigateBack {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutNavHistoryDrive,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = NavigateBack {
@@ -73,7 +79,7 @@ impl TransitionRef<ReferenceState> for NavigateBack {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for NavigateBack {
+impl<S: SutNavHistoryDrive> TransitionImpl<ReferenceState, S> for NavigateBack {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
         sut.navigate_back(self.region).await;
     }

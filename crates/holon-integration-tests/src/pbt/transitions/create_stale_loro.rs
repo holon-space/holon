@@ -12,8 +12,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::LoroCorruptionType;
+use crate::pbt::local_caps::SutFixtureFs;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -29,6 +29,12 @@ pub struct CreateStaleLoro {
 }
 
 impl TransitionFactory<ReferenceState> for CreateStaleLoro {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutFixtureFs,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
@@ -114,9 +120,9 @@ impl TransitionRef<ReferenceState> for CreateStaleLoro {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for CreateStaleLoro {
+impl<S: SutFixtureFs> TransitionImpl<ReferenceState, S> for CreateStaleLoro {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_create_stale_loro(&self.org_filename, self.corruption_type)
+        sut.create_stale_loro(&self.org_filename, self.corruption_type)
             .await;
     }
 }

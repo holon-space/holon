@@ -188,21 +188,19 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
              VALUES ('{id}', '{parent_id}', '{content_escaped}', '{content_type}'{lang_val}, \
                      '{sort_key}', '{properties}', {now}, {now})",
         );
+        // ALLOW(sole_block_writer): bootstrap seed for the bundled default
+        // layout. The wasm worker can't use the org/Loro block-creation path
+        // (holon-orgmode doesn't build on wasm — see this module's doc), so the
+        // initial layout is written via hand-rolled SQL. Runs once on a fresh
+        // in-memory DB before any BlockOperations writer exists.
         db.execute(&sql, vec![]).await?;
     }
 
-    // `name` is a top-level column on `block` (not in properties JSON). The
-    // left-sidebar PRQL filters on `name`, so docs need it set.
-    db.execute(
-        &format!("UPDATE {BLOCK_WRITE_TABLE} SET name = 'Welcome' WHERE id = 'block:welcome'"),
-        vec![],
-    )
-    .await?;
-    db.execute(
-        &format!("UPDATE {BLOCK_WRITE_TABLE} SET name = 'Journals' WHERE id = 'block:journals'"),
-        vec![],
-    )
-    .await?;
+    // `name` is carried in the `properties` JSON (set in the INSERTs above:
+    // `{"name":"Welcome",…}` / `{"name":"Journals",…}`); the `block` read view
+    // derives the `name` column from it. The write table no longer has a
+    // top-level `name` column, so the old per-doc name-update statements were
+    // removed — they tripped a "no such column" parse error during seeding.
 
     // FU-10 browser parity: land first-launch users on `block:journals`. Going
     // through `navigation::focus` (rather than raw INSERT into navigation_history)
@@ -210,10 +208,10 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
     // focus_roots / current_focus matviews resolve correctly on first render.
     // Reached only on the fresh-DB path (after the early return above), so
     // existing DBs preserve whatever the user last navigated to.
-    let mut nav_params: HashMap<String, Value> = HashMap::new();
-    nav_params.insert("region".to_string(), Value::from(Region::Main));
+    let mut nav_params: holon_api::StorageEntity = HashMap::new();
+    nav_params.insert("region".into(), Value::from(Region::Main));
     nav_params.insert(
-        "block_id".to_string(),
+        "block_id".into(),
         Value::String(EntityUri::block("journals").as_str().to_string()),
     );
     engine

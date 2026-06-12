@@ -1,3 +1,9 @@
+//! @c4 container
+//! @c4 layer UI
+//! Pattern: MVVM View
+//!
+//! Terminal UI frontend — the MVVM **View** layer; its render functions build ratatui widgets from holon-frontend's `ReactiveViewModel`.
+
 pub mod app_main;
 pub mod di;
 pub mod geometry;

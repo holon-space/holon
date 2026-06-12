@@ -1,5 +1,9 @@
-//! Cross-PBT primitives shared between `holon-layout-testing` and
-//! `holon-integration-tests`.
+//! @c4 component
+//! @c4 layer Testing
+//! Pattern: Strategy
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//!
+//! Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`.
 //!
 //! Defines the two PBT transition traits — `TransitionFactory<Ref>` and
 //! `TransitionImpl<Ref, Sut>` — generic over reference-state and SUT,
@@ -23,6 +27,11 @@
 //! permits this — at least one of the type parameters is local to the
 //! implementing crate).
 
+// Lets `#[holon_macros::capmap_adapter]`-generated impls use the absolute path
+// `::holon_pbt_core::composition::CapMap` even when expanded *inside* this crate —
+// so the same macro works for cap traits hosted in domain crates (the cap home-rule).
+extern crate self as holon_pbt_core;
+
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
@@ -30,6 +39,7 @@ pub mod bisect;
 pub mod caching_proxy;
 pub mod capabilities;
 pub mod component_set;
+pub mod composition;
 pub mod fixture;
 pub mod interactions;
 pub mod invariant;
@@ -39,7 +49,10 @@ pub use bisect::{bisect, bisect_downward, bisect_upward, Localization};
 pub use caching_proxy::{cached, CachingProxy};
 pub use component_set::{Component, ComponentSet, ComponentSetError, Projection};
 pub use invariant::{Invariant, InvariantId, InvariantResult, RunMode};
-pub use wiring::{Actor, RequiredWiring, StorageAdapter, SyncAdapter, Wiring, WiringError};
+pub use wiring::{
+    any_valid_wiring, wiring_axes, Actor, RequiredWiring, StorageAdapter, SyncAdapter, Wiring,
+    WiringError,
+};
 
 pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};
 
@@ -63,6 +76,20 @@ pub trait TransitionFactory<Ref>: Sized {
     /// here so the generator can read it off the factory it already names.
     fn required_wiring() -> crate::wiring::RequiredWiring {
         crate::wiring::RequiredWiring::Any
+    }
+
+    /// Capability requirement: the cap-analog of [`required_wiring`](Self::required_wiring).
+    /// Where `required_wiring` gates the alphabet on a manifest's *subsystem wiring*, this
+    /// gates it on the *providers a composed `CapMap` actually supplies* — a transition is
+    /// excluded from a composed SUT's alphabet unless every cap here is present in the
+    /// map's [`cap_set`](crate::composition::CapMap::cap_set). Each entry is the capability
+    /// this transition's [`TransitionImpl`] impl is bound on (e.g. `SplitBlock` →
+    /// `[CapId::of::<dyn SutBlockTreeWrite>()]`), so a partial config (e.g. Loro-only) drops
+    /// the transitions whose `apply_to_sut` caps it lacks rather than panicking on an absent
+    /// `expect`. **Necessary, not sufficient** — `weighted_generator` still gates
+    /// dynamically. Default: no requirement (always cap-feasible).
+    fn required_caps() -> Vec<crate::composition::CapId> {
+        Vec::new()
     }
 }
 

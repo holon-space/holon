@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use holon_api::render_types::OperationWiring;
@@ -54,6 +55,15 @@ impl DrawerMode {
             "overlay" => Self::Overlay,
             _ => Self::Shrink,
         }
+    }
+
+    /// Whether a drawer of this mode starts open when the user has no stored
+    /// preference. `Shrink` drawers (desktop sidebars that reserve width) start
+    /// open; `Overlay` drawers (narrow/phone layouts that float over the main
+    /// panel) start closed — an open-by-default overlay would obscure the
+    /// content on first paint.
+    pub fn default_open(self) -> bool {
+        matches!(self, DrawerMode::Shrink)
     }
 }
 
@@ -453,6 +463,146 @@ fn default_task_state_field() -> String {
     "task_state".to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Widget-kind enums — parse the builder-supplied widget name into a typed,
+// closed vocabulary at the `ViewModel` constructor boundary. Every string that
+// reaches these constructors is a builder-controlled literal (the render DSL
+// dispatches its function names through a builder registry first), so an
+// unknown name is a programmer error, not untrusted input — hence parsing is
+// fail-loud (panic) rather than the old silent `_ => <default>`. The
+// exhaustive match below also makes adding a `ViewKind` variant a compile
+// error until each constructor handles it.
+// ---------------------------------------------------------------------------
+
+/// Parse a builder widget name into a typed kind, failing loud on an unknown
+/// name (a builder bug, never untrusted input).
+fn parse_widget<T: FromStr>(category: &str, allowed: &str, widget: &str) -> T {
+    widget.parse().unwrap_or_else(|_| {
+        panic!("unknown {category} widget {widget:?}; expected one of {allowed}")
+    })
+}
+
+/// Widget names accepted by [`ViewModel::collection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionWidget {
+    List,
+    Tree,
+    Table,
+    Outline,
+    QueryResult,
+}
+
+impl FromStr for CollectionWidget {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "list" => Self::List,
+            "tree" => Self::Tree,
+            "table" => Self::Table,
+            "outline" => Self::Outline,
+            "query_result" => Self::QueryResult,
+            _ => return Err(()),
+        })
+    }
+}
+
+/// Widget names accepted by [`ViewModel::layout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutWidget {
+    Row,
+    Columns,
+    Column,
+    Section,
+    TreeItem,
+    Card,
+    ChatBubble,
+    Collapsible,
+    ExpandToggle,
+    BottomDock,
+}
+
+impl FromStr for LayoutWidget {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "row" => Self::Row,
+            "columns" => Self::Columns,
+            "column" => Self::Column,
+            "section" => Self::Section,
+            "tree_item" => Self::TreeItem,
+            "card" => Self::Card,
+            "chat_bubble" => Self::ChatBubble,
+            "collapsible" => Self::Collapsible,
+            "expand_toggle" => Self::ExpandToggle,
+            "bottom_dock" => Self::BottomDock,
+            _ => return Err(()),
+        })
+    }
+}
+
+/// Widget names accepted by [`ViewModel::element`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementWidget {
+    SourceBlock,
+    SourceEditor,
+    BlockOperations,
+    StateToggle,
+    ExpandToggle,
+    PrefField,
+    TableRow,
+}
+
+impl FromStr for ElementWidget {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "source_block" => Self::SourceBlock,
+            "source_editor" => Self::SourceEditor,
+            "block_operations" => Self::BlockOperations,
+            "state_toggle" => Self::StateToggle,
+            "expand_toggle" => Self::ExpandToggle,
+            "pref_field" => Self::PrefField,
+            "table_row" | "row" => Self::TableRow,
+            _ => return Err(()),
+        })
+    }
+}
+
+/// Widget names accepted by [`ViewModel::leaf`]. `Dropdown`/`SecretText`/
+/// `PlatformAction` are preference-field leaves the snapshot tree has no rich
+/// variant for; they render as plain text here while the live
+/// `ReactiveViewModel` path renders them properly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafWidget {
+    Text,
+    Badge,
+    Icon,
+    Checkbox,
+    EditableText,
+    RenderedText,
+    Dropdown,
+    SecretText,
+    PlatformAction,
+}
+
+impl FromStr for LeafWidget {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "text" => Self::Text,
+            "badge" => Self::Badge,
+            "icon" => Self::Icon,
+            "checkbox" => Self::Checkbox,
+            "editable_text" => Self::EditableText,
+            "rendered_text" => Self::RenderedText,
+            "dropdown" => Self::Dropdown,
+            "secret_text" => Self::SecretText,
+            "platform_action" => Self::PlatformAction,
+            _ => return Err(()),
+        })
+    }
+}
+
 impl Default for ViewModel {
     fn default() -> Self {
         Self {
@@ -480,19 +630,19 @@ impl ViewModel {
     pub fn collection(widget: impl Into<String>, items: Vec<ViewModel>) -> Self {
         let widget = widget.into();
         let children = LazyChildren::fully_materialized(items);
-        let kind = match widget.as_str() {
-            "list" => ViewKind::List {
+        let kind = match parse_widget::<CollectionWidget>(
+            "collection",
+            "list|tree|table|outline|query_result",
+            &widget,
+        ) {
+            CollectionWidget::List => ViewKind::List {
                 gap: default_list_gap(),
                 children,
             },
-            "tree" => ViewKind::Tree { children },
-            "table" => ViewKind::Table { children },
-            "outline" => ViewKind::Outline { children },
-            "query_result" => ViewKind::QueryResult { children },
-            _ => ViewKind::List {
-                gap: default_list_gap(),
-                children,
-            },
+            CollectionWidget::Tree => ViewKind::Tree { children },
+            CollectionWidget::Table => ViewKind::Table { children },
+            CollectionWidget::Outline => ViewKind::Outline { children },
+            CollectionWidget::QueryResult => ViewKind::QueryResult { children },
         };
         Self {
             entity: Arc::new(HashMap::new()),
@@ -528,48 +678,52 @@ impl ViewModel {
     pub fn layout(widget: impl Into<String>, children: Vec<ViewModel>) -> Self {
         let widget = widget.into();
         let lazy = LazyChildren::fully_materialized(children);
-        let kind = match widget.as_str() {
-            "row" => ViewKind::Row {
+        let kind = match parse_widget::<LayoutWidget>(
+            "layout",
+            "row|columns|column|section|tree_item|card|chat_bubble|collapsible|expand_toggle|bottom_dock",
+            &widget,
+        ) {
+            LayoutWidget::Row => ViewKind::Row {
                 gap: default_row_gap(),
                 children: lazy,
             },
-            "columns" => ViewKind::Columns {
+            LayoutWidget::Columns => ViewKind::Columns {
                 gap: default_columns_gap(),
                 children: lazy,
             },
-            "column" => ViewKind::Column {
+            LayoutWidget::Column => ViewKind::Column {
                 gap: 0.0,
                 children: lazy,
             },
-            "section" => ViewKind::Section {
+            LayoutWidget::Section => ViewKind::Section {
                 title: String::new(),
                 children: lazy,
             },
-            "tree_item" => ViewKind::TreeItem {
+            LayoutWidget::TreeItem => ViewKind::TreeItem {
                 depth: 0,
                 has_children: false,
                 children: lazy,
             },
-            "card" => ViewKind::Card {
+            LayoutWidget::Card => ViewKind::Card {
                 accent: String::new(),
                 children: lazy,
             },
-            "chat_bubble" => ViewKind::ChatBubble {
+            LayoutWidget::ChatBubble => ViewKind::ChatBubble {
                 sender: String::new(),
                 time: String::new(),
                 children: lazy,
             },
-            "collapsible" => ViewKind::Collapsible {
+            LayoutWidget::Collapsible => ViewKind::Collapsible {
                 header: String::new(),
                 icon: String::new(),
                 children: lazy,
             },
-            "expand_toggle" => ViewKind::ExpandToggle {
+            LayoutWidget::ExpandToggle => ViewKind::ExpandToggle {
                 target_id: String::new(),
                 expanded: false,
                 children: lazy,
             },
-            "bottom_dock" => {
+            LayoutWidget::BottomDock => {
                 assert_eq!(
                     lazy.items.len(),
                     2,
@@ -578,10 +732,6 @@ impl ViewModel {
                 );
                 ViewKind::BottomDock { children: lazy }
             }
-            _ => ViewKind::Column {
-                gap: 0.0,
-                children: lazy,
-            },
         };
         Self {
             entity: Arc::new(HashMap::new()),
@@ -597,8 +747,12 @@ impl ViewModel {
         children: Vec<ViewModel>,
     ) -> Self {
         let widget = widget.into();
-        let kind = match widget.as_str() {
-            "source_block" => ViewKind::SourceBlock {
+        let kind = match parse_widget::<ElementWidget>(
+            "element",
+            "source_block|source_editor|block_operations|state_toggle|expand_toggle|pref_field|table_row|row",
+            &widget,
+        ) {
+            ElementWidget::SourceBlock => ViewKind::SourceBlock {
                 language: data
                     .get("language")
                     .and_then(|v| v.as_string())
@@ -619,7 +773,7 @@ impl ViewModel {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
             },
-            "source_editor" => ViewKind::SourceEditor {
+            ElementWidget::SourceEditor => ViewKind::SourceEditor {
                 language: data
                     .get("language")
                     .and_then(|v| v.as_string())
@@ -631,14 +785,14 @@ impl ViewModel {
                     .unwrap_or("")
                     .to_string(),
             },
-            "block_operations" => ViewKind::BlockOperations {
+            ElementWidget::BlockOperations => ViewKind::BlockOperations {
                 operations: data
                     .get("operations")
                     .and_then(|v| v.as_string())
                     .unwrap_or("")
                     .to_string(),
             },
-            "state_toggle" => ViewKind::StateToggle {
+            ElementWidget::StateToggle => ViewKind::StateToggle {
                 field: data
                     .get("field")
                     .and_then(|v| v.as_string())
@@ -660,7 +814,7 @@ impl ViewModel {
                     .unwrap_or("")
                     .to_string(),
             },
-            "expand_toggle" => ViewKind::ExpandToggle {
+            ElementWidget::ExpandToggle => ViewKind::ExpandToggle {
                 target_id: data
                     .get("target_id")
                     .and_then(|v| v.as_string())
@@ -672,7 +826,7 @@ impl ViewModel {
                     .unwrap_or(false),
                 children: LazyChildren::fully_materialized(children),
             },
-            "pref_field" => ViewKind::PrefField {
+            ElementWidget::PrefField => ViewKind::PrefField {
                 key: data
                     .get("key")
                     .and_then(|v| v.as_string())
@@ -698,8 +852,7 @@ impl ViewModel {
                 },
                 children: LazyChildren::fully_materialized(children),
             },
-            "table_row" | "row" => ViewKind::TableRow { data },
-            _ => ViewKind::TableRow { data },
+            ElementWidget::TableRow => ViewKind::TableRow { data },
         };
         Self {
             entity: Arc::new(HashMap::new()),
@@ -711,37 +864,47 @@ impl ViewModel {
     /// Create a leaf node. Maps widget name to typed variant.
     pub fn leaf(widget: impl Into<String>, value: Value) -> Self {
         let widget = widget.into();
-        let kind = match widget.as_str() {
-            "text" => ViewKind::Text {
+        let kind = match parse_widget::<LeafWidget>(
+            "leaf",
+            "text|badge|icon|checkbox|editable_text|rendered_text|dropdown|secret_text|platform_action",
+            &widget,
+        ) {
+            LeafWidget::Text => ViewKind::Text {
                 content: value.to_display_string(),
                 bold: false,
                 size: default_text_size(),
                 color: None,
             },
-            "badge" => ViewKind::Badge {
+            LeafWidget::Badge => ViewKind::Badge {
                 label: value.to_display_string(),
             },
-            "icon" => ViewKind::Icon {
+            LeafWidget::Icon => ViewKind::Icon {
                 name: value.as_string().unwrap_or("circle").to_string(),
                 size: default_icon_size(),
             },
-            "checkbox" => ViewKind::Checkbox {
+            LeafWidget::Checkbox => ViewKind::Checkbox {
                 checked: value.as_bool().unwrap_or(false),
             },
-            "editable_text" => ViewKind::EditableText {
+            LeafWidget::EditableText => ViewKind::EditableText {
                 content: value.to_display_string(),
                 field: default_editable_field(),
             },
-            "rendered_text" => ViewKind::RenderedText {
+            LeafWidget::RenderedText => ViewKind::RenderedText {
                 content: value.to_display_string(),
                 field: default_editable_field(),
             },
-            _ => ViewKind::Text {
-                content: value.to_display_string(),
-                bold: false,
-                size: default_text_size(),
-                color: None,
-            },
+            // Snapshot tree has no rich variant for these preference-field
+            // leaves; render the underlying value as plain text (the live
+            // `ReactiveViewModel` path renders them properly). This preserves
+            // the pre-enum `_ => Text` behavior, now made explicit.
+            LeafWidget::Dropdown | LeafWidget::SecretText | LeafWidget::PlatformAction => {
+                ViewKind::Text {
+                    content: value.to_display_string(),
+                    bold: false,
+                    size: default_text_size(),
+                    color: None,
+                }
+            }
         };
         Self {
             entity: Arc::new(HashMap::new()),
@@ -1055,19 +1218,21 @@ impl ViewModel {
         }
     }
 
-    /// Collect drawer block IDs from the tree, in depth-first order.
-    pub fn collect_drawer_ids(&self) -> Vec<String> {
-        let mut ids = Vec::new();
-        self.collect_drawers_recursive(&mut ids);
-        ids
+    /// Collect drawer `(block_id, mode)` pairs from the tree, in depth-first
+    /// order. The mode lets callers (e.g. the toolbar drawer toggles) compute a
+    /// drawer's mode-aware default open state.
+    pub fn collect_drawers(&self) -> Vec<(String, DrawerMode)> {
+        let mut drawers = Vec::new();
+        self.collect_drawers_recursive(&mut drawers);
+        drawers
     }
 
-    fn collect_drawers_recursive(&self, ids: &mut Vec<String>) {
-        if let ViewKind::Drawer { block_id, .. } = &self.kind {
-            ids.push(block_id.clone());
+    fn collect_drawers_recursive(&self, drawers: &mut Vec<(String, DrawerMode)>) {
+        if let ViewKind::Drawer { block_id, mode, .. } = &self.kind {
+            drawers.push((block_id.clone(), *mode));
         }
         for child in self.children() {
-            child.collect_drawers_recursive(ids);
+            child.collect_drawers_recursive(drawers);
         }
     }
 
@@ -1295,6 +1460,35 @@ fn format_data_inline(data: &HashMap<String, Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawer_mode_default_open() {
+        // Desktop sidebars (shrink) start open; phone overlays start closed so
+        // they don't cover the main panel on first paint.
+        assert!(DrawerMode::Shrink.default_open());
+        assert!(!DrawerMode::Overlay.default_open());
+    }
+
+    #[test]
+    fn collect_drawers_reports_id_and_mode() {
+        let tree = ViewModel::layout(
+            "columns",
+            vec![
+                ViewModel::drawer("left", DrawerMode::Overlay, 260.0, ViewModel::empty()),
+                ViewModel::live_block("main", ViewModel::empty()),
+                ViewModel::drawer("right", DrawerMode::Shrink, 260.0, ViewModel::empty()),
+            ],
+        );
+
+        let drawers = tree.collect_drawers();
+        assert_eq!(
+            drawers,
+            vec![
+                ("left".to_string(), DrawerMode::Overlay),
+                ("right".to_string(), DrawerMode::Shrink),
+            ]
+        );
+    }
 
     #[test]
     fn pretty_print_nested() {

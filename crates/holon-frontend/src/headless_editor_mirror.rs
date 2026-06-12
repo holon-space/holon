@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::cell::TextOp;
+use crate::editor_caret;
 use anyhow::{Context, Result};
 use holon_api::Value;
 
@@ -227,20 +228,16 @@ impl HeadlessEditorMirror {
                 self.set_cursor(&block_id, current_text.len());
             }
             "right" if !has_ctrl_alt_cmd => {
-                let advance = current_text[cursor_byte..]
-                    .chars()
-                    .next()
-                    .map(char::len_utf8)
-                    .unwrap_or(0);
-                self.set_cursor(&block_id, cursor_byte + advance);
+                self.set_cursor(
+                    &block_id,
+                    editor_caret::move_right(&current_text, cursor_byte),
+                );
             }
             "left" if !has_ctrl_alt_cmd => {
-                let retreat = current_text[..cursor_byte]
-                    .chars()
-                    .next_back()
-                    .map(char::len_utf8)
-                    .unwrap_or(0);
-                self.set_cursor(&block_id, cursor_byte - retreat);
+                self.set_cursor(
+                    &block_id,
+                    editor_caret::move_left(&current_text, cursor_byte),
+                );
             }
             "backspace" if cursor_byte == 0 && !has_ctrl_alt_cmd && !has_shift => {
                 let intent = structural_block_action(EditorKey::Backspace, &block_id, 0)
@@ -249,21 +246,14 @@ impl HeadlessEditorMirror {
                 self.forget(&block_id);
             }
             "backspace" if cursor_byte > 0 && !has_ctrl_alt_cmd && !has_shift => {
-                let prev_char_byte_len = current_text[..cursor_byte]
-                    .chars()
-                    .next_back()
-                    .map(char::len_utf8)
-                    .with_context(|| {
-                        format!(
-                            "backspace at cursor_byte={cursor_byte} in text of \
-                             len={} but no preceding char",
-                            current_text.len()
-                        )
-                    })?;
-                let new_cursor_byte = cursor_byte - prev_char_byte_len;
+                // `cursor_byte > 0` guarantees a preceding char, so `move_left`
+                // always retreats by exactly one codepoint here.
+                let new_cursor_byte = editor_caret::move_left(&current_text, cursor_byte);
                 if let Some(cell) = mt.as_ref() {
-                    let pos_codepoint = current_text[..new_cursor_byte].chars().count();
-                    let len_codepoint = current_text[new_cursor_byte..cursor_byte].chars().count();
+                    let pos_codepoint =
+                        editor_caret::byte_to_codepoint(&current_text, new_cursor_byte);
+                    let len_codepoint =
+                        editor_caret::codepoint_len(&current_text, new_cursor_byte, cursor_byte);
                     cell.apply_text_op(TextOp::Delete {
                         pos_codepoint,
                         len_codepoint,
@@ -312,7 +302,7 @@ impl HeadlessEditorMirror {
                 };
                 let inserted = ch.to_string();
                 if let Some(cell) = mt.as_ref() {
-                    let pos_codepoint = current_text[..cursor_byte].chars().count();
+                    let pos_codepoint = editor_caret::byte_to_codepoint(&current_text, cursor_byte);
                     cell.apply_text_op(TextOp::Insert {
                         pos_codepoint,
                         text: inserted.clone(),

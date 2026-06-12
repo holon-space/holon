@@ -1,12 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(
-    content: &String,
-    bold: &bool,
-    _: &f32,
-    color: &Option<String>,
-    _: &DioxusRenderContext,
-) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Text { content, bold, color, .. } = &node.kind else {
+        return rsx! {};
+    };
     let color_css = color
         .as_ref()
         .map(|c| format!("color: {c};"))

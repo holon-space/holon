@@ -117,6 +117,7 @@ enum DemuxCommand {
 /// task per `subscribe_cdc()` call. The demux task reads from the broadcast
 /// channel and routes batches to registered subscribers by `relation_name`.
 /// Closed subscribers are pruned automatically.
+/// @c4 code
 pub struct MatviewManager {
     db_handle: DbHandle,
     demux_cmd_tx: mpsc::Sender<DemuxCommand>,

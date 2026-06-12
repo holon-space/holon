@@ -45,7 +45,10 @@ impl TursoCredentialStore {
 }
 
 fn now_utc() -> String {
-    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+        .expect("now within range")
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 #[async_trait]

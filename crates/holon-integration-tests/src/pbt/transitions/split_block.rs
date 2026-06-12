@@ -49,7 +49,7 @@ use validated::Validated;
 /// a byte offset — callers convert `SplitBlock.position` (bytes) against the
 /// pre-transition content before calling.
 pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
-    sut: &mut S,
+    sut: &S,
     id: &EntityUri,
     right_presses: usize,
 ) {
@@ -129,7 +129,7 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
 
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -266,6 +266,12 @@ pub fn split_block_apply_to_ref<
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
 impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for SplitBlock {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        // Single-sourced from the `cap_transition!` below — cannot drift with the
+        // `S: SutBlockTreeWrite` dispatch bound (both come from the one cap token).
+        Self::declared_caps()
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         split_block_weighted_generator(state)
@@ -286,10 +292,10 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocusMut + RefEditorMirrorMut + RefF
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for SplitBlock {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_split_block(&self.block_id, self.position).await;
+crate::cap_transition! {
+    SplitBlock: SutBlockTreeWrite,
+    |me, _state, sut| {
+        sut.apply_split_block(&me.block_id, me.position).await;
     }
 }
 

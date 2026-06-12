@@ -62,7 +62,7 @@ fn main() {
         "Holon Capture Replay",
         "gpui_capture",
         move |_driver, on_ready| {
-            replay_fixture_with_driver_sync_callback(wiring, steps, on_ready, None)
+            replay_fixture_with_driver_sync_callback(wiring, steps, on_ready, |_, _| {}, None)
         },
     );
 }

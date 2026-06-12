@@ -250,7 +250,7 @@ impl HolonService {
             .db_handle()
             .query("PRAGMA materialized_views", HashMap::new())
             .await
-            .unwrap_or_default();
+            .context("querying PRAGMA materialized_views for schema listing")?;
 
         let materialized_views = matview_rows
             .iter()

@@ -11,8 +11,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::capabilities::SutBlockInteract;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -30,6 +30,12 @@ pub struct DragDropBlock {
 }
 
 impl TransitionFactory<ReferenceState> for DragDropBlock {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let drag_source: Option<EntityUri> = state.focused_main_editable();
@@ -197,9 +203,9 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for DragDropBlock {
+impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for DragDropBlock {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_drag_drop_block(&self.source, &self.target).await;
+        sut.drag_drop_block(&self.source, &self.target).await;
     }
 }
 

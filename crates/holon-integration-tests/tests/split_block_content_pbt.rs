@@ -187,3 +187,24 @@ fn split_block_content_pbt_gherkin_corrupt_id_panics() {
         "/tests/fixtures/_gherkin_negative/split_corrupt_id.feature"
     ));
 }
+
+/// E3 MIGRATION PROOF (2026-06-25): the SAME gherkin replay over `ComposedSut<WideE2E>`
+/// (born-booted `full_headless` CapMap) instead of `E2ESut`. The feature is re-authored
+/// onto the wide seed (no `Given org file` / `app is started` ceremony — born-booted),
+/// focuses + splits `c1`; the split-routing regression is caught by the per-tick composed
+/// catalog (`inv-block-content-matches-ref`, in `WIDE_REQUIRED_INVARIANTS` → non-vacuous),
+/// and the assert vocabulary runs via `impl FixtureAssertable for ComposedSut`. Once the
+/// remaining features are ported (handoff), the `E2ESut` `component_pbt!` halves + the old
+/// `.feature` corpus above are deleted and `SutSqlProjection` comes off `E2ESut`.
+#[test]
+fn split_block_content_composed_gherkin() {
+    holon_integration_tests::pbt::fixtures::run_feature_strict::<
+        holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine,
+        holon_integration_tests::pbt::composed::harness::ComposedSut<
+            holon_integration_tests::pbt::composed::wide_e2e::WideE2E,
+        >,
+    >(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/composed_split_gherkin/split_routes_prefix_suffix.feature"
+    ));
+}

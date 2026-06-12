@@ -1,3 +1,9 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//!
 //! `holon-turso` — the Turso (SQLite-IVM) storage adapter.
 //!
 //! This crate owns everything specific to the Turso substrate: the

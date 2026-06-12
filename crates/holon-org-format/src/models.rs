@@ -537,7 +537,7 @@ impl OrgBlockExt for Block {
         } else {
             self.content = title;
         }
-        self.updated_at = chrono::Utc::now().timestamp_millis();
+        self.updated_at = holon_api::clock::now_millis();
     }
 
     fn task_state(&self) -> Option<TaskState> {
@@ -711,11 +711,7 @@ impl OrgBlockExt for Block {
             let bare: Vec<String> = self
                 .requires
                 .iter()
-                .map(|r| {
-                    holon_api::EntityUri::parse(r)
-                        .map(|uri| uri.id().to_string())
-                        .unwrap_or_else(|_| r.clone())
-                })
+                .map(|uri| uri.id().to_string())
                 .collect();
             result.insert("REQUIRES".to_string(), bare.join(" "));
         }

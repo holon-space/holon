@@ -1,0 +1,584 @@
+<!-- Authoritative design (2026-06-14). SUPERSEDES docs/Testing/PbtSlicing.md
+     and docs/Testing/PbtSlicing_Trivialization_Handoff.md. -->
+
+# PBT Composition — making an arbitrary system slice trivial to test
+
+**Status:** design accepted; PoC + sizing spike landed (§7); Step 0 ✅, Step 1 🟡 (full-e2e parity pending), Step 2 🟢 first composed memory slice landed via path B (§8 Step 2, 2026-06-15).
+**Supersedes:** `PbtSlicing.md` (drifted from code — §4/§12/§13 describe `MemBlockStore`/`MemEditorMirror` that don't exist) and `PbtSlicing_Trivialization_Handoff.md` (its Move-B `unimplemented!()` macro is rejected here — see §3).
+**Evidence in tree:** `crates/holon-pbt-core/src/composition.rs` (compiling PoC, 5 green tests).
+
+---
+
+## 1. Goal
+
+Testing *any* slice of the system should be a matter of **listing components**:
+
+```rust
+// "GPUI with the memory backend" — and that is the whole per-slice surface.
+let config = Config::new().with(MemoryBackend::new()).with(GpuiFrontend::test());
+```
+
+The framework then **derives** which generators/transitions and which invariants apply to that slice, runs them, and discloses what it skipped. No god-type, no per-slice invariant list, no per-combination boilerplate.
+
+Today this holds only for *narrow* hand-written slices (`tests/editor_pure_pbt.rs`). A slice that wants the **wide invariant registry** (the ~35 cross-subsystem bodies the big E2E slices share) pays a ~2000-line capability tax (`pbt/sut_capabilities.rs`). This design removes that tax.
+
+---
+
+## 2. The model (sets & relations)
+
+Think in capabilities, not Rust types.
+
+- **Capability** `c` — a named bundle of operations. These already exist in the code as the `Sut*` traits (what a SUT does/observes) and `Ref*` traits (what the reference model exposes). Let `C` be the full set.
+- **Component** `k` (a sub-SUT or sub-Ref) **provides** `prov(k) ⊆ C` and may **require** `req(k) ⊆ C` (e.g. the Turso projection requires a backend's CDC stream).
+- **Configuration** — a chosen set of components. Provided set `P = ⋃ prov(k)`. **Valid** iff `req(k) ⊆ P` for all `k`. An invalid config (e.g. "Turso without a backend") must **fail loud at construction**, not silently drop invariants. *The current system has no such check; this design adds one.*
+- **Consumer** — an invariant `i` or a transition `g` declares a **need-set** on two axes: `need_sut` and `need_ref`. (An invariant compares a SUT projection against a Ref projection; a transition needs ref-mutation caps to model the change and sut-apply caps to execute it.)
+
+**Selection rule (positive + negative containment):**
+
+```
+i runs  ⟺  need_sut⁺(i) ⊆ P_sut  ∧  need_sut⁻(i) ∩ P_sut = ∅  ∧  need_ref⁺(i) ⊆ P_ref
+```
+
+The **negative** half (`need_sut⁻`) is the one new primitive vs today's runtime selection. It lets a *degraded-mode* invariant run only when a capability is **absent** (see §5).
+
+Two asymmetries that matter:
+
+- **The SUT composes as a union of independent components** (backend ⊕ frontend ⊕ projection).
+- **The Ref does not.** `ReferenceState` is one *coupled* model (a `SplitBlock` mutates block-state *and* editor cursor atomically). On the Ref side, "sub-Ref" means a *capability-view/projection of one coherent model*, not a union of parts. (The transitions are already written generic over `Ref` capability traits — `split_block_apply_to_ref<R: RefBlockTreeMut + RefFocusMut + …>` — so Ref-side composition for *generators* already works.)
+
+---
+
+## 3. Why the status quo is hard, and the design theorem
+
+The pain is **not** selection — `PbtSuiteSpec::select` already does `min_sut ⊆ subsystems` at runtime. The pain is the **Rust typing of composition + dispatch**: today a single statically-typed `Vec<Box<dyn DynInvariant<R, S>>>` names *every* body, so the one `S` must satisfy the **union** of every body's capability bound. That union is the ~2000-line tax, and "faking" the missing caps with `unimplemented!()` (the handoff's Move B) just relocates it and trades a compile error for a runtime panic — against this repo's "make illegal states unrepresentable / fail loud at the boundary" rules.
+
+**Theorem.** Once you stop naming all bodies in one statically-typed list, you are forced into exactly one of two worlds:
+
+- **ζ — compile-time filter, static provider.** Bodies stay `fn check<S: need(i)>(&S)`; a macro filters *which bodies exist* per SUT by the SUT's declared cap-set. No faking, but every configuration needs its own combined SUT type, and arbitrary composition is not free.
+- **γ — runtime filter, dynamic provider (typemap).** The SUT is a `CapMap: cap → Arc<dyn Cap>`; bodies look up the caps they declared; selection runs *before* dispatch so every lookup is a proven containment. Composition is `.with(component)` — **no per-combination type at all**, even E2E.
+
+The status-quo "static provider + runtime list" is the worst of both: it's what *creates* the union requirement.
+
+**Decision: γ.** It is the only option where an *arbitrary* slice is genuinely "list the components." See §4. (ζ remains a fallback if the async-trait object-safety work in §4.4 ever proves unworkable — it didn't; see §7.)
+
+---
+
+## 4. Chosen design: γ (capability typemap)
+
+### 4.1 `CapMap` — the composed SUT/Ref
+
+A map keyed by each capability's trait-object `TypeId`, storing the provider as `Arc<dyn Cap>` (one component's `Arc` backs every cap it provides via unsizing coercion). `get`/`expect`/`cap_set` round-trip trait objects through `Any`. `expect` panics loud with the present-set on a *selected-but-absent* cap — an assertion of an already-proven fact (selection ran first), never an `unimplemented!()` stand-in.
+
+The single "implements every cap by lookup" surface lives **once**, generically, on `CapMap`/the caching wrapper — it does **not** recur per new SUT. That is the structural difference from the rejected macro.
+
+### 4.2 Components & `Config`
+
+```rust
+trait CapProvider { fn register(self: Arc<Self>, caps: &mut CapMap); }
+
+struct Config { /* … */ }
+impl Config { fn with<P: CapProvider>(self, c: P) -> Self; fn build(self) -> CapMap; }
+```
+
+A configuration is just a component list. `build` also runs the **validity check** (`req ⊆ P`) and fails loud on an impossible wiring.
+
+### 4.3 Single-sourced invariants (`cap_invariant!`)
+
+One declaration drives **both** the selection metadata (`needs()`) **and** the in-body cap lookups, so the declared need-set and the actual reads cannot drift:
+
+```rust
+cap_invariant! {
+    name: InvNoOrphanBlocks, id: "inv-no-orphan-blocks", mode: Strict,
+    sut: { backend: dyn SutBackend },        // → needs() AND `let backend = sut.expect::<dyn SutBackend>()`
+    sut_absent: [],                          // negative needs (degraded twins)
+    ref: { tree: dyn RefBlockTree },
+    check: { for id in backend.live_block_ids().await { /* … uses backend, tree … */ } }
+}
+```
+
+### 4.4 Read caps vs write caps (proven by the §7 spike)
+
+The real `Sut*` traits use native `async fn` (**not** object-safe → `dyn SutBackend` illegal) and some take `&mut self`. The typemap forces `dyn`. Resolution, confirmed compiling:
+
+- **Read caps** (snapshots that invariants read — `live_block_snapshot`, `cdc_in_flight`, …) are already `&self`. Make them object-safe with **`#[async_trait(?Send)]`** (`?Send` because `E2ESut` futures hold non-Send gpui/Rc state) and put them in the `CapMap`.
+- **Write / drain / quiesce caps** (`drain_cdc`, `quiesce`, `apply_split_block` — all `&mut self`) **stay `&mut self` on the concrete SUT** and run only in `apply`, which *owns* the SUT. They never enter the Arc-shared map, so they need **no** `&mut → &self` conversion.
+
+So the migration is dominated by "add `#[async_trait]` to the read-cap traits" — not a sweeping signature rewrite. (The PoC additionally proves a *write* cap can live in the map via `&self` + interior mutability, should a slice ever want apply-free mutation — but that is not required for the standard design.)
+
+### 4.5 The runner & caching
+
+`run_selected(registry, sut: &CapMap, ref_: &CapMap)` (async) is the extracted, SUT-agnostic core (the handoff's "Move A"): select by §2's predicate, dispatch survivors, disclose `deselected`. The per-tick memoisation that today lives on `CachingProxy<S>` becomes one generic lookup-and-memoise wrapper over `CapMap` — written once.
+
+`StateMachineTest` glue is unchanged in shape: `apply` mutates the concrete SUT through write caps; the **sync** `check_invariants` does `runtime.block_on(run_selected(...))` (exactly as `E2ESut` does today).
+
+---
+
+## 5. The Ref side
+
+### 5.1 Omnipotent core + projection caps
+
+- **State core: one omnipotent, coupled model.** Holds every dimension (blocks, editor, focus, peers, watches, files). Unexercised dimensions rest at identity — *don't generate the transition and the capability stays hidden* (your peer/`AddPeer` intuition, which holds exactly for additive/orthogonal caps).
+- **Transitions: cap-generic, backend-agnostic, mutate the core.** Generated iff their `Ref*` cap-bounds ⊆ config. Already true in code.
+- **Projections: caps over the core.** Invariants read `ref_.expect::<dyn RefBlockTree>()` etc.
+
+### 5.2 Config-variance audit result: zero in-body variant projections
+
+Audited all 40 invariant bodies (see git history / the analysis that produced this doc). **No body computes a Ref-expected value that branches on the capability set.** Config-variance is handled entirely by (a) selection and (b) SUT-internal coherence checks that self-skip. Specifically:
+
+- **Degraded query rendering** (GPUI shows a query block's *source* when no query engine is wired — real prod path: `loro_ui_watcher.rs` `source_editor_expr` via `holon-app/no_turso.rs`) is **not** a branching projection. The Ref doesn't model query results at all (`viewmodel_decompiled_rows_match_query` is SUT-internal: `root_content_comparison` returns *both* sides). It decomposes into **complementary invariants selected by the query cap's presence/absence** — which is exactly what negative selection (`sut_absent`) provides.
+- **Windowing** (blur/commit bimodality, `EngineFocus`) produces **no** Ref-value-variance: `focus_matches_ref`/`editor_text_matches_ref`/`editor_caret_matches_ref` compute the expected value as an unconditional `ref_.*` read. The bimodality lives in the transition (`commit_active_editor_if_dirty`, dirty-gated) and SUT-side settle, plus selection.
+
+**Soundness rule:** whenever the SUT degrades on capability-absence, the Ref must degrade through the *same* `CapSet`, or you manufacture a false divergence. γ gives this for free (one `Config` drives both) — provided degraded behaviour is routed through capabilities, not hard-coded on either side.
+
+### 5.3 Validity: hard vs soft (degrading) dependency edges
+
+- **Hard req** — component is nonsense without the cap (Turso projection ⊸ a CDC source). Missing → config invalid, fail loud at `Config::build`.
+- **Soft / degrading req** — component functions in a *disclosed* degraded mode (GPUI ⊸ query result → shows source; outliner tree still works). Missing → both SUT and Ref take the degraded projection; the harness should assert the degraded banner shows so degradation can't masquerade as full mode.
+
+---
+
+## 6. What a new slice costs (the payoff)
+
+`crates/holon-integration-tests/tests/memory_wide_pbt.rs` (target):
+
+```rust
+// Components are reusable; a slice is the component list + the StateMachineTest shell.
+fn memory_wide() -> CapMap {
+    Config::new().with(MemoryBackend::new()).with(InMemEditor::new()).build()
+}
+// StateMachineTest: apply drives the wide transitions on the concrete SUT;
+// check_invariants block_on's run_selected(REGISTRY, &sut, &ref).
+```
+
+Three configs, one shared registry, selection does the rest:
+
+| Config | Components | Selects |
+|---|---|---|
+| memory-wide | `MemoryBackend` (+`InMemEditor`) | block-tree + editor + cdc invariants (~8–12) |
+| gpui + memory (degraded) | `MemoryBackend` + `GpuiFrontend` | + viewmodel/frontend; **+ "shows source" twin** (query absent); − "decompiled rows" |
+| full E2E | `LoroBackend` + `TursoProjection` + `GpuiFrontend(real)` + `FileSyncBackend` | all 35 (≡ today's `general_e2e`/`gpui_ui`) |
+
+`E2ESut` stops being a 2152-line god-type — its cap impls relocate onto the four components, and "E2E" becomes the full config.
+
+---
+
+## 7. Evidence already in tree
+
+**PoC — `crates/holon-pbt-core/src/composition.rs` (5 green tests).** Permanent generic spine in place; throwaway toy caps/components in `#[cfg(test)] mod poc`. Proves:
+- the async trait-object typemap round-trips, one `Arc` backs many caps, an async cap read works through `Arc<dyn Cap>`;
+- selected-but-absent lookup panics loud (not `None`, not faked);
+- `cap_invariant!` single-sources needs + lookups; bodies `.await` cap reads;
+- positive + negative selection drives three configs from one registry; degraded/full twins are mutually exclusive;
+- the sync→async `StateMachineTest` glue (`block_on(run_selected)`) and a `&self` write cap mutating through `Arc`.
+
+**Sizing spike — `SutCdc` converted end-to-end, compiled green (`holon-pbt-core` + `holon-integration-tests --features pbt --tests`), then reverted.** Findings:
+- `#[async_trait(?Send)]` makes `dyn SutCdc` object-safe (the blocker for `CapMap`) — confirmed via an `_assert_object_safe(_: &dyn SutCdc)`.
+- Total change ≈ **5 lines**, **no caller changes, no `&mut→&self`**. `drain_cdc(&mut self)` stays as-is (apply-only); `CachingProxy` doesn't even `impl SutCdc` (inherent `cdc_in_flight_cached`), so its call site is unchanged.
+- Extrapolated step-0 cost: ~3 lines per read-cap trait × ~15–18 traits ≈ **50–70 mechanical lines, incrementally compilable**, no logic churn. Per-trait watch-item: a cap whose `E2ESut` future is rejected by `?Send` (none seen).
+
+---
+
+## 8. Migration plan (incremental; keep the suite GREEN after each step)
+
+**Step 0 — make the read-cap traits object-safe. ✅ LANDED.** Added `async-trait` to `holon-pbt-core`; the 10 read caps in `capabilities.rs` and their `E2ESut` impls (`sut_capabilities.rs`), the `CachingProxy` impls, and the ToySut test impls are all `#[async_trait(?Send)]`. `SutCdc` keeps plain `#[async_trait(?Send)]` (its `drain_cdc(&mut self)` is apply-only, not proxy-forwarded). *Gate met:* `cargo check -p holon-integration-tests --features pbt --tests` green.
+
+**Step 1 — introduce `CapMap` + generic runner, E2E as the first config (parity gate). 🟡 SUBSTANTIALLY LANDED; full-`general_e2e` confirm outstanding.** What's in tree:
+- `composition.rs` spine promoted (not yet driving prod, but compiled-in with 5 green PoC tests).
+- **`#[holon_macros::capmap_adapter]`** (new proc-macro, `holon-macros/src/capmap.rs`) generates the read-cap union-adapter on `CapMap`: for each read cap it emits the `#[async_trait(?Send)]` trait, the `CapName` impl, and the forwarding `impl Trait for CapMap` (`&self` async → `self.expect::<dyn Trait>().method(args).await`; `&mut self` → `unimplemented!`). All 10 read caps carry the one-line attribute — the ~50 hand-written forwards are gone. Adding a read cap is now a single attribute swap.
+- **Generic runner seam extracted:** `run_proxy_registry<S: WideProxyCaps>` (free fn in `invariant_runner.rs`) is the SUT-generic core — builds the caching proxy, dispatches every read-only proxy-body, returns findings. `E2ESut::run_invariant_registry_gated` now wraps it (settle → `run_proxy_registry(self, …)` → append the 4+1 `&mut self` self-bodies → `report_findings`). `WideProxyCaps` (the 10-cap union) is the bound; `native_self_invariants()` (focus/caret/text/window-focus + otel `inv-sql-budget`) stays `E2ESut`-only because those bodies need `&mut SutDriver`.
+- **De-risk asserts (compile-only):** `_assert_capmap_hosts_proxy_bodies` (body list type-checks over `CapMap`) **and** `_assert_capmap_drives_runner` (the whole `run_proxy_registry::<CapMap>` seam monomorphises). Both green ⇒ a composed slice can call the exact runner the E2ESut path uses.
+- *Gates met so far:* `holon-pbt-core` 24+2+1+5 tests green; `invariant_runner::tests` 7/7 incl. `native_runner_dispatches_exactly_the_registry` (dispatch set unchanged ⇒ extraction behaviour-preserving); **post-extraction fast-slice parity (2026-06-15): `storage_consistency_pbt` green 29.1s + `general_e2e_pbt_sql_only` green 133.4s (both 32 cases, exit 0).**
+- **Still outstanding (the real parity risk):** full `general_e2e` (Full/Loro twin) confirm — too slow to land in-session (>580s) and carries known pre-existing reds (deletebackward/linkmark families), so an unattended run is low-signal without a baseline diff. Run attended before deleting any old path.
+- **Deliberately deferred (not built):** a `RegistryHost` trait abstracting *settle + suite-selection* was scoped in Task #6 but **not** introduced — a `CapMap` memory slice's settle is fundamentally different (no async Loro→SQL projection to await) and its `ComponentSet`/`has_window` inputs differ, so a shared trait now would be speculative. `run_proxy_registry` is the honest minimal seam; `RegistryHost` waits until Step 2 reveals what the memory slice actually provides.
+
+**Step 2 — add the memory-wide slice. 🟢 FIRST VERTICAL SLICE LANDED (2026-06-15, path B).** `crates/holon-integration-tests/src/pbt/memory_slice.rs` — a composed `CapMap` slice with a single `MemoryBackendComponent` (over `holon::api::MemoryBackend`) that provides the `SutBackend` cap, and runs **real registry invariant bodies** selected by **capability presence** via the γ runner (`run_selected`), with no Turso, no `min_sut`, no `Subsystem`, no E2ESut. Three tests green sub-second (`cargo test -p holon-integration-tests --features pbt --lib memory_slice`, 0.00s): the positive run over a real `MemoryBackend` tree, plus both §6 fast-localization gates — the slice *catches* an injected parent cycle and a `Source`-without-`source_language` corruption.
+- **The key enabler (`BridgedInvariant<I>`, now permanent in `composition.rs`):** wraps a statically-typed body `Invariant<CapMap, CapMap>` into an object-safe `CapInvariant`, with its cap `Needs` declared as *data* beside it (the runtime analog of the body's `where S: …` bound). Bodies that ignore the ref (`check(&self, _: &R, sut)`) impose no bound on `R`, so `R = CapMap` needs **no** Ref-cap adapter — the two structural invariants (`no_parent_cycles`, `source_language_iff_source`) bridge today with only `SutBackend` hosted.
+- **Why path B beats §8.6's "corrected sequence":** because the slice provides its **own** `SutBackend` over `MemoryBackend` and selects by hosted caps, it needs neither the `min_sut` reclassification (§8.6, would break `loro_backend_pbt`) **nor** a non-Turso `SutBackend` realization on E2ESut. The two selection mechanisms (legacy `Subsystem`/`min_sut` for E2ESut; γ cap-presence for composed slices) coexist; `loro_backend_pbt` is untouched.
+- **Ref side now composes too (2026-06-15, same session).** `#[capmap_adapter]` learned to skip `#[async_trait]` for fully-sync traits (it forced it before), so the sync `RefBackend` (owned returns → already object-safe) carries the one-line attribute without rippling onto its existing `impl RefBackend for ReferenceState`. `CapMap` now hosts `dyn RefBackend`, and the slice runs `inv-blocks-match-ref/block_raw` (`R: RefBackend, S: SutBackend`) when a ref map is wired — proven by three more tests: deselected when no ref is wired (§2 negative containment, disclosed not faked), selected + passing when the ref matches, and *catches* a `block_raw`-vs-ref content divergence. The ref map is a fixture today; §5.1's omnipotent `ReferenceState` registered under each `Ref*` cap is the production form.
+- **`no_orphan_blocks` added (2026-06-15, same session) via the §8.6 refactor.** Took the cleaner option: dropped `no_orphan`'s spurious `SutSqlProjection` bound by deriving the `block_raw` id set from `block_raw_snapshot()` (`SutBackend`) instead of `all_block_ids()` — identical id set (both read `block_raw`), one fewer cap, and one fewer SQL query on the E2E path. Body-only change (no `min_sut`/registry edit → E2E selection unchanged). Now in the memory slice (needs `SutBackend` + `RefBackend`); 6 tests green incl. a negative that *catches* a dangling parent. **Parity-gated:** `storage_consistency_pbt` green 17.6s + `general_e2e_pbt_sql_only` green 68.9s (both exercise `no_orphan` over real Turso). Full/Loro-twin `general_e2e` remains the only un-run parity slice (slow + known pre-existing reds), same status as Step 1.
+- **The dynamic dimension landed (2026-06-15, same session): mutation-sequence PBT.** `memory_slice_mutation_sequence_preserves_invariants` (proptest, 48 cases, 0.06s) drives a random sequence of create/update/delete-leaf ops against the production `MemoryBackend` (SUT) and an **independent** reference model in lockstep, running the cap-selected invariants after every tick. The ref is computed from intent, never read back from the SUT, so `blocks-match-ref` + `no-orphan` genuinely cross-check the real store each tick — this is what makes the slice bug-*finding*, not just bug-*catching*. (Delete is leaf-only because `MemoryBackend::delete_block` doesn't cascade — deleting a parent orphans its children, a real divergence the invariants would otherwise flag.) `memory_slice.rs` is now **7 tests green sub-second**. Used a plain `proptest!` + apply-loop rather than `proptest_state_machine::StateMachineTest`; the latter remains the path once mutations need the shared transition/generator machinery.
+- **`RefBlockTree` now hosts — the borrow-returning-cap gotcha is SOLVED (2026-06-15, same session).** The blocker was that `#[capmap_adapter]`'s forward read `self.expect::<dyn T>().method(args)`, and `expect` *clones* the `Arc` into a temporary — so a method returning a borrow (`RefBlockTree::block_content -> Option<&str>`) dangled off that temporary. Fix: `CapMap::expect_ref<C>() -> &C` hands out a reference rooted in `&self` (downcasts the stored `Box<dyn Any>` to `&Arc<C>`, derefs to `&C`); the macro's **sync** forward now uses it (async stays on owned-`Arc` `expect`, the proven path). One method on `CapMap` + a two-line macro branch unblocks the *entire* borrow-returning `Ref*` family — no per-cap special-casing. `RefBlockTree` carries the one-line `#[capmap_adapter]` (sync trait → still no `#[async_trait]`, `impl RefBlockTree for ReferenceState` untouched). Two new bodies bridge into the slice (both `SutBackend + RefBlockTree`): `inv-block-content-matches-ref/block_raw` (reads the borrowing `block_content`) and `inv-block-parent-matches-ref/block_raw` (reads `parent_of`). The latter closes a real gap — `inv-blocks-match-ref/block_raw` compares only `{content, properties}` (it **excludes the `Parent` facet**, since the wide E2E path remaps doc-level parents across id spaces) and `no_orphan`/`no_parent_cycles` only check the parent *exists* / the chain *terminates*, so a block re-parented under a *different-but-valid* parent slipped through; the pure-memory slice has no doc-id remapping, so `parent_id` is directly comparable there. **`memory_slice.rs` is now 11 tests green sub-second** — positives (caps select them, values match), a negative-containment (content invariant deselected when only `RefBackend` is wired, disclosed not faked), a content-divergence catch, and a re-parent catch that asserts *isolation* (the existence/termination/content invariants stay green — only the parent linkage diverged); the mutation-sequence loop now cross-checks content **and** parent via `RefBlockTree` every tick. Gate met: `holon-pbt-core` 24+2+5 tests green (the `expect_absent` fail-loud panic test still passes) and `invariant_runner` 7/7 incl. the `_assert_capmap_*` compile proofs — so the `expect_ref` switch is sound across all 10 SUT read caps, not just the new ref one. `RefBlockTree` is now meaningfully exercised across three methods (`block_content`, `all_non_seed_block_ids`, `parent_of`).
+- **SECOND SUT COMPONENT LANDED — the §6 "memory-wide" config is real (2026-06-15).** `InMemEditorComponent` (`memory_slice.rs`) is a headless active-editor running the same byte-offset, UTF-8-boundary caret math as production's `holon-frontend/headless_editor_mirror.rs::handle_keystroke`, minus the `ReactiveEngine`/Loro coupling that ties the real one to Turso. It provides the `SutEditorMirrorRead` cap (interior-mutable `Mutex` so the one `Arc` is both driven through `&self` writes in apply and hosted as the read cap — §4.4). Both editor read caps now carry `#[capmap_adapter]`: `SutEditorMirrorRead` (sync, owned `Result`) and `RefEditorMirror` (sync; its `active_editor_text -> Option<&str>` is the **second** cap to exercise `expect_ref`). `memory_wide_with_editor()` is two `.with`/`.register` calls — the payoff. Two real registry bodies select on the new caps: `inv-editor-text-matches-ref` + `inv-editor-caret-matches-ref` (`SutEditorMirrorRead + RefEditorMirror`). **`memory_slice.rs` is now 16 tests green sub-second:** editor invariants *deselected* without an editor (negative containment), a two-component positive (SUT editor agrees with the reference after a multi-byte open+type), a live-text catch + a caret catch (off-by-one — the named `MoveCursor` byte/keystroke-conflation class), and a **differential op-sequence proptest** driving random type/delete/move ops against the production-parity SUT editor (`String` + byte caret) and an *independent* reference (`EditorModel`: `Vec<char>` + codepoint caret) in lockstep — different representations, so a byte/codepoint conflation in either surfaces as a divergence (a genuine differential test, not two copies of one impl). `structural_block_registry` → renamed `memory_slice_registry`. Gates: `holon-pbt-core` 24+2+5 green, `invariant_runner` 7/7 — the editor cap adapters don't ripple onto `E2ESut`/`ReferenceState`'s existing impls.
+- **Remaining for a full memory-*wide* slice:** wire the editor's commit into `MemoryBackend` so `blocks-match` cross-checks committed content end-to-end; structural editor ops (split/join at the caret) where the block-tree and editor interact; `RefFocus`/`RefLayout`/`RefRender`/`RefWatches` owned-return caps (host directly, but each needs its SUT counterpart — `SutViewModel`/`SutRenderer` ⇒ a third component — to select anything); the degraded "shows source" twin (`sut_absent: [dyn SutQueryResults]`, needs a query-engine component).
+- **Note on the SutBackend-only block-tree boundary:** that invariant set is saturated (existence/acyclicity/source-lang/content/properties/id-set/parent); further block-tree invariants bind caps the pure-memory store lacks or need an ordered-children cap (`children_by_parent` is a `HashMap` → children-*order* off the flat snapshot is root-order-flaky). This is why coverage growth now comes from *more components* (the editor above), not more ref caps on the backend.
+- **SECOND SLICE LANDED — `loro_slice` over a real CRDT proves the §6 "free re-run" claim (2026-06-15).** `pbt/loro_slice/` wraps a real `holon-loro` `LoroBackend` in a `LoroBackendComponent` providing `SutBackend` (over `get_all_blocks`) **and** `SutLoroLog`. It runs the **same** `composed_invariant_catalog()` the memory slice runs — zero catalog duplication — and selection lights up all six block-tree invariants over the CRDT *for free* (a selection test, not an invariant-add), plus a Loro mutation-sequence proptest that cross-checks the CRDT against an independent model each tick. Two Loro-specific invariants were added to the shared catalog: `inv-loro-no-errors` (`SutLoroLog`; honest-`false` in the standalone CRDT, teeth in the fixture catch + the E2E counter) and `inv-loro-children-match-ref` (`SutLoroLog + RefBlockTree`; the CRDT's fractional-index sibling order vs the ref's document order — real teeth, runs live in the proptest). `loro_children_of` reads the tree's authoritative order via `list_children`; `loro_had_errors` is honest-`false` because a standalone tree has no `LoroSyncController` (§5.1 hidden capability). Also added the **E0b selection-regression guard** (`memory_slice_selects_exactly_the_full_catalog`): it asserts the memory slice selects exactly its 8 applicable ids and *discloses* the 2 Loro invariants as deselected — and it immediately caught the catalog growth when the Loro invariants landed, doing its job. All gates green: composed+memory+loro 28/28, `holon-pbt-core` 24+2+1+5, `invariant_runner` 7/7.
+
+- **THIRD SLICE LANDED — `sql_slice` over a real Turso `BackendEngine` (2026-06-15).** `pbt/sql_slice/` wraps the production storage + IVM matview layer in a `SqlProjectionComponent` providing `SutBackend` (over `block_raw`, via the shared `parse_block_row`) **and** `SutSqlProjection`. It is explicitly the **storage-layer slice of the future `E2ESut` replacement** (§F2 convergence): the plan is to retire the monolithic `E2ESut`, so overlapping its SQL realization is the *point* — the component reuses `E2ESut`'s own `block_raw` queries so the eventual swap is clean, while being genuinely lean (no reactive engine / frontend / navigation / CDC). The engine is built via `create_test_engine_with_setup` + a block-CRUD `SqlOperationProvider` over `BLOCK_WRITE_TABLE` (structural block ops like `indent`/`split_block` live on `SqlBlockOperations`/`EventInfraModule` and are out of this slice's scope). All six block-tree invariants run over Turso *for free* (selection, not invariant-add) + a Turso mutation-sequence proptest. One SQL-projection invariant added to the shared catalog: `inv-block-content-matches-ref` (`SutSqlProjection + RefBlockTree`, the direct `block_raw.content` column read — distinct id from the `…/block_raw` typed-snapshot variant), triad via `FixtureSqlProjection`. The navigation/focus/watch members of `SutSqlProjection` are honest-empty (no navigation in this slice, §5.1). E0b updated to disclose the SQL invariant as deselected in the memory slice. All gates green: sql_slice 4/4 (incl. Turso proptest), composed+memory+loro triads, `holon-pbt-core` 24+2+1+5, `invariant_runner` 7/7.
+
+- **FOURTH SLICE LANDED — `frontend_slice` over a real headless render pipeline (2026-06-15).** `pbt/frontend_slice/` stands up a **windowless** production `FrontendSession` + `ReactiveEngine` over a Turso `BackendEngine` via `holon_app::new_from_config_with_di` (the exact DI path the GPUI/CLI frontends use), seeded with an org file — no GPUI, no geometry, no display link. `HeadlessFrontendComponent` provides `SutRenderer` (the real `ensure_watching`→`snapshot`→`interpret_pure`→`view_model_to_snapshot` pipeline — faithful port of `E2ESut`'s render methods, reusing the now-`pub(crate)` shared helpers), `SutViewModel` (real `headless_error_node_count`; gpui-frontend-engine-specific methods are honest-`None` — this slice has a headless engine, not a separate gpui *frontend engine*), and `SutBackend` (over `block_raw`, so the block-tree catalog runs over this fourth realization too). `Config::with_arc` added for the once-built session. One frontend invariant wired into the shared catalog: `inv-viewmodel-no-error-widgets` (`SutViewModel`, no ref — a SUT-internal render-liveness property), triad via `FixtureViewModel`, running over the **real** rendered tree (a valid layout has 0 error widgets); teeth verified. The headless render path is **not** GPUI-window-flaky (that was window/geometry/focus-specific); `resolve_watch` polls until loaded with a 3s ceiling. The `SutLayout`/geometry + gpui-frontend-engine invariants stay `E2ESut`-only (no window). Catalog 11→12. All gates green: frontend_slice 2/2, composed triads 22, memory 19 (E0b updated), loro 3, sql 4, `holon-pbt-core` 24, `invariant_runner` 7.
+
+- **FIFTH SLICE LANDED — `sql_loro_slice`, the combined SQL+Loro SUT (2026-06-15).** `pbt/sql_loro_slice/` is the only non-redundant consumer of `SutLoroTaskState`: it composes the **existing** `SqlProjectionComponent` (real Turso) and `LoroBackendComponent` (real Loro CRDT) — no new component — so `inv-task-state-storage-coherence` can cross-check a block's `task_state` across two independent storage realizations (SQL `json_extract(properties,'$.task_state')` vs Loro `properties["task_state"]`). `SutLoroTaskState` was hosted on `CapMap` (`#[capmap_adapter]`) and added to `LoroBackendComponent`. **Composition choice (honesty):** both components provide `SutBackend` and `CapMap` is one-provider-per-cap, so registering both fully would *silently* shadow one block store; the `sql_loro_wide` builder instead registers SQL fully (canonical block store) and Loro for **only** its `SutLoroTaskState` cap. The catalog invariant + `Needs` + the fixture-driven catch triad live in `composed/` (reused, not re-authored); the slice's `integration_tests.rs` is deliberately minimal — a positive (both stores agree ⇒ selected + passes) and a catch (stores diverge ⇒ caught) over the **real** combined SUT, reusing `sql_slice::builders::new_sql_engine` (hoisted out of the SQL slice's tests, no copy-paste) and driving no bespoke generator. Catalog 12→13; E0b updated. Teeth verified. Gates green: sql_loro_slice 2/2, sql_slice 4/4, memory 19 (E0b), composed triads 25, `holon-pbt-core` 24+2+1+5, `invariant_runner` 7.
+
+- **Shared-generation attempt (F5) → folded into the F2 convergence (2026-06-15).** A first cut introduced a bespoke `SliceDriver` trait + CRUD generator to dedupe the per-slice mutation loops, but that **reinvented the write-cap mechanism** the design already specifies (§4.4/§5.1/§6: `apply` drives the concrete SUT through `SutBlockTreeWrite`/`SutTransitionTarget`, and a slice is the component list). It was reverted. The correct shared-generation is to reuse the existing `E2ETransition` + `aggregate_transitions` + `ReferenceState` by having each composed slice be a concrete SUT impl'ing `SutTransitionTarget` — i.e. **Step 1 / the F2 convergence**, started on the memory slice.
+
+**Step 3 — backfill caching + retire `sut_capabilities.rs`.** Move per-tick memoisation onto the `CapMap` wrapper; delete the absent-sentinel tax as components absorb the real impls.
+
+### 8.5 Step-2 audit (2026-06-15): `min_sut` is realization-coupled, not capability-coupled — the central Step-2 decision
+
+Goal of the audit: for a minimal memory-wide slice (`ComponentSet {BlockTree, Cdc, EditorState}`), which read caps must `CapMap` host, and what does `MemoryBackend` (`crates/holon/src/api/memory_backend.rs`) supply?
+
+**`MemoryBackend` surface** is a pure block-tree store + change stream: `get_block` / `get_all_blocks(Traversal)` / `list_children` / `create|update|delete|move_block` / `watch_changes_since(StreamPosition) -> Stream<Change<Block>>`. No Turso, no Loro, no ViewModel/Renderer/Layout/Org. So it natively backs **BlockTree** (+ a **Cdc**-shaped change stream); the other subsystems are absent.
+
+**The blocking finding.** Filtering the registry by `min_sut ⊆ {BlockTree, Cdc, EditorState}` selects almost nothing — only `inv-no-errors` (`[Cdc]`), `inv-active-watches-match-ref` (`[Cdc]`), `inv-editor-text-matches-ref` (`[EditorState]`). Every *structural block* invariant is excluded because its `min_sut` carries **`TursoProjection`**:
+- `inv-no-orphan-blocks` `[BlockTree, TursoProjection]`, `inv-no-parent-cycles` `[BlockTree, TursoProjection]`, `inv-source-language-iff-source` `[BlockTree, TursoProjection]`, `inv-blocks-match-ref/block_raw` `[BlockTree, TursoProjection]`, `inv-live-children-match-ref` `[BlockTree, Loro, TursoProjection]`, …
+
+But inspecting the **bodies**, these read **`SutBackend`** caps — `sut.live_block_snapshot()` (no_orphan_blocks) and `sut.block_raw_snapshot()` (no_parent_cycles) — *not* `SutSqlProjection`. The `TursoProjection` in `min_sut` is there only because **`E2ESut`'s realization of `SutBackend` reads Turso**: `live_block_snapshot` snapshots the CDC `live_blocks` matview mirror; `block_raw_snapshot` runs `query_sql("… FROM block_raw")`. The capability called is backend-level; the *storage it happens to read* is Turso, and that leaked into the declaration.
+
+So the structural block invariants are **capability-portable in principle** — a slice can satisfy them by realizing `SutBackend::{live_block_snapshot, block_raw_snapshot}` over a non-Turso store. But "portable in principle" is **not** "safe to reclassify now" — see the correction below.
+
+**Decision for Step 2 (original recommendation — now SUPERSEDED, see §8.6): reclassify `min_sut` from realization to capability.** Drop `TursoProjection` from invariants whose bodies call only `SutBackend` (no_orphan_blocks, no_parent_cycles, source_language_iff_source → `[BlockTree]`). Keep `TursoProjection` where the body genuinely reads a `SutSqlProjection` method or asserts projection-consistency (`inv-matview-consistent-with-ref`, `inv-blocks-match-ref/matview`, `inv-navigation-focus`, `inv-focus-roots`). This is the concrete resolution of §9's open "unify on the capability" question — and it is the same kind of *parse-don't-validate* boundary fix the project favours (declare the logical need, not an incidental storage path).
+- *Risk (UNDERSTATED — see §8.6):* the audit claimed this "does **not** change blessed-slice selection (E2E carries `TursoProjection` anyway … `sql_only`/`storage` presets unaffected)". **That is wrong.** It overlooked the `loro_backend_pbt` slice.
+- *Alternative (heavier, rejected as first move):* give the memory slice a real `TursoProjection` component mirroring `MemoryBackend`. Keeps `min_sut` untouched but defeats the point of a *pure-memory* fast slice and re-introduces the async-projection settle the memory path is meant to avoid.
+
+**Caps the reclassified memory slice must host on `CapMap`** (everything else stays absent — no selected body calls it, so `expect::<dyn …>()` is never reached, exactly the §5.1 hidden-capability model on the SUT side): `SutBackend` (over `MemoryBackend`), plus the `Cdc`/editor write caps that `apply` needs (these live on the concrete slice SUT, not the Arc map — §4.4). `SutWatchRows` only if `inv-active-watches-match-ref` is kept in-slice.
+
+### 8.6 Step-2 verification (2026-06-15): the reclassification is NOT selection-safe — `loro_backend_pbt` breaks it
+
+Re-verifying §8.5's central recommendation against the code before editing the registry surfaced a parity-breaking error in the audit. **Do not reclassify `min_sut` to `[BlockTree]` as a standalone step.**
+
+**The error.** §8.5 asserted the reclassification is "selection-safe for ALL existing slices" because "every existing slice wires Turso." Two facts falsify this:
+1. **`BlockTree` is always-on** (`registry.rs::subsystems`, line 78 — "intrinsic observer, present in every run"). So `min_sut = [BlockTree]` ⟹ the invariant is selected by **every** slice, including non-Turso ones.
+2. **A non-Turso slice is actually run.** `tests/loro_backend_pbt.rs` drives `ComponentSet::loro_vm_fast()` = `Wiring::loro_backend()` = `[Loro]` storage only. `state_machine.rs::storage_selector_for_wiring` maps Loro-only → `StorageSelector::LoroMemory`, which `di/lifecycle.rs` builds with **"no Turso connection"**. The existing test `registry.rs::scoped_set_checks_fewer_subsystems` even *asserts* `subsystems(loro_vm_fast)` contains no `TursoProjection`.
+
+**Why it breaks.** All three bodies read the SUT through `SutBackend::block_raw_snapshot()` (and `no_orphan` also `live_block_snapshot()`). E2ESut's *only* `SutBackend` realization (`sut_capabilities.rs`) executes these as Turso SQL (`query_sql("… FROM block_raw")`) / a CDC matview read. On the `LoroMemory` SUT there is no connection and no `block_raw` table, so the queries fail. Today these invariants are correctly gated **out** of `loro_backend_pbt` by the `TursoProjection` in their `min_sut`. Reclassify to `[BlockTree]` and they get selected there and panic. (Note: this kills the "two clean ones" idea too — the clean-vs-not split I drew on the *trait bound* `SutSqlProjection` is irrelevant; the parity risk is `block_raw_snapshot` itself being Turso-realized, which all three share.)
+
+**Root cause (refines §8.5, doesn't reverse it).** `min_sut` genuinely *is* realization-coupled — but the realization coupling is real, not nominal: there is exactly one `SutBackend` impl and it needs Turso. The destination (`[BlockTree]`) is right **only once a working non-Turso `SutBackend` realization exists on every slice that would then select these invariants.** The reclassification must therefore follow, not precede, that realization.
+
+**Corrected Step-2 sequence** (supersedes the §8.5 list):
+1. **Provide a non-Turso `SutBackend` realization first.** Either (a) make E2ESut's `SutBackend` read from the Loro store / `BlockQuerySource` when on `LoroMemory` (so `block_raw_snapshot`/`live_block_snapshot` work without Turso), or (b) build the memory `Component` (`MemoryBackend`) with its own `SutBackend` cap and *only* reclassify once the new slice — not the existing E2ESut loro slice — is the consumer. **Open decision — see the choice posed to the user.** Until one lands, `loro_backend_pbt` is the blocker.
+2. **Then** reclassify `min_sut` → `[BlockTree]`, and update `scoped_set_checks_fewer_subsystems` / run `loro_backend_pbt` + the full parity gate. The change is only honest once every newly-selecting slice has a backend that answers the call.
+3. Production `Component` wrapping `MemoryBackend` providing `SutBackend` + the Cdc change-stream cap (if not already done in step 1b).
+4. `StateMachineTest` shell building the `CapMap`, restricting the `ComponentSet`, driving `run_proxy_registry` (the Step-1 seam, generic over `S: WideProxyCaps`).
+5. Degraded "shows source" twin (`sut_absent: [dyn SutQueryResults]`) for the gpui+memory config.
+6. *Gate:* new slice green + sub-second; reproduce a known structural bug on it to prove fast localization.
+
+---
+
+## 8.7 Subsystem-config shrinking (architectural delta-debugging) — spike landed 2026-06-16
+
+The γ typemap turns the *active subsystem set* into **test input that proptest can
+shrink**, so a failing case auto-minimizes to the minimal `(set of subsystems,
+transition sequence)` that still reproduces — "fails with `{Loro}` only" vs "fails
+with `{EditorState}` only" vs "fails regardless, empty set". Spike module:
+`crates/holon-integration-tests/src/pbt/subsystem_shrink.rs` (run `cargo test -p
+holon-integration-tests --features pbt --lib subsystem_shrink`).
+
+**The `(Config, sequence)` model.** The config is part of the
+`ReferenceStateMachine::State`, not a fixed slice choice. It is a
+`BTreeSet<Subsystem>` over the *existing* `invariants::registry::Subsystem` enum
+(not a fork, not a struct-of-bools), generated in `init_state` with
+`proptest::sample::subsequence` over an env-scoped optional universe
+(`HOLON_PBT_SUBSYSTEMS`, default `loro,editor`). `subsequence` shrinks toward the
+shorter subsequence, so a present subsystem shrinks toward absent — minimization
+direction is "fewer subsystems = the minimal causal set" for free. `init_test`
+builds the `CapMap` *from* the generated set; `check_invariants` runs the **same**
+`run_selected(&composed_invariant_catalog(), …)`, so selection lights up exactly
+the applicable subset.
+
+**The axes are REAL components, not fixtures** (no throwaway scaffolding that F6
+would delete): `Loro` ⇒ a real `LoroBackendComponent` (the store *is* a live Loro
+CRDT; `SutBackend` + `SutLoroLog`), absent ⇒ a real `MemoryBackend`; `EditorState`
+⇒ a real `InMemEditorComponent`. `BlockTree` (a real store) is the always-on
+substrate. Two real optional axes = a genuine *subset* to minimize, not one bool.
+
+**Real components are correct, so planted bugs are wrong *reference* data** (the
+same technique the catch triads use — never a faked component): `loro_order`
+reverses the reference's two children → `inv-loro-children-match-ref` fails iff
+real Loro is wired; `editor` diverges the reference editor text → editor invariant
+fails iff the editor is wired; `content` diverges reference content → block
+invariants fail regardless. The reference is built from the store's *returned* ids
+so the Loro stable-id ↔ reference-`EntityUri` mapping is the identity.
+
+**Config-in-state + precondition replay is the mechanism — and it works.** The
+make-or-break unknown (is `init_state` shrinking mature enough to *invalidate
+downstream transitions* during replay?) is resolved **yes**: the editor
+transitions (`Type`/`Delete`) gate on `EditorState` in `preconditions`, and their
+SUT `apply` panics if ever run without a wired editor (a tripwire). The
+`loro_order`/`content` plants shrink `EditorState` **off**, yet across the entire
+shrink the tripwire fired **zero** times — every removal correctly dropped the
+now-invalid editor transitions. None of the handoff's three fallbacks were needed.
+
+**Evidence — proptest minimized counterexamples (`cases: 128`):**
+- `loro_order` → `{BlockTree, Loro}`, `ops: []`, transitions `[]`. Loro retained
+  (causal), editor dropped (irrelevant).
+- `editor` → `{BlockTree, EditorState}`. Editor retained, Loro dropped.
+- `content` → causal minimum is `{BlockTree}` (proven deterministically by the
+  `content_bug_is_independent_of_the_optionals` regression test). The proptest
+  *greedy* shrink lands at `{BlockTree, EditorState}` (it drops Loro but not the
+  causally-irrelevant editor) — a greedy-not-ddmin artifact, see "Greedy ≠ ddmin"
+  below and the open question in §8.8.
+
+This isolates a distinct minimal subset per bug across the powerset of a
+two-element real-subsystem universe — the real "minimal causal *set*", not a bool.
+
+**The evidence is *committed green tests*, not manual failing runs.** A
+`regression` module hand-drives the shared `evaluate` seam to assert the causal
+structure deterministically (`loro_order` fails iff Loro / passes on memory /
+editor irrelevant; `editor` fails iff editor; `content` fails for every config;
+`none` green for the whole powerset), plus `selection_follows_config` (the
+subsystem-specific invariants run iff their subsystem is wired — non-vacuity) and
+`editor_transitions_gated_on_editor_state` (criterion 4 at the precondition
+level). A `universe` module unit-tests `parse_universe` (incl. fail-loud on an
+unknown name) and that `init_state` exercises each optional on and off.
+
+**Greedy ≠ ddmin (state honestly).** proptest shrinking is a greedy hill-climb,
+not full delta-debugging: you get a *local* minimal config — in practice the right
+culprit, but not a provable global minimum. Do not sell it as exhaustive.
+
+**Cost-asymmetry scoping rule.** Loro/memory/editor are cheap to rebuild per case;
+Turso/Org and frontend/GPUI real-window are not. The `HOLON_PBT_SUBSYSTEMS`
+universe bound is the lever: keep the *default* universe to in-process subsystems
+(cheap, the mechanism stays provable), widen it deliberately only once an expensive
+subsystem is worth its per-case cost — no code change. Also avoid Org-off
+normalization cross-cuts by preferring editor-mirror invariants while proving the
+mechanism (the spike does; it never commits editor text, so committed-content
+invariants stay at the consistent seed).
+
+---
+
+## 8.8 Oracle integrated onto the real `ReferenceState` — 2026-06-16 (pm)
+
+The spike's first cut used a **bespoke** oracle (`SpikeRef` + a hand-rolled
+`RefEditor`) — a parallel reference model, exactly the kind §5/§6 want to retire.
+That oracle is now **swapped for the production `ReferenceState`**. This is the
+reusable keystone for the whole F2 convergence, not a spike-local detail.
+
+**The keystone: `impl CapProvider for ReferenceState`.** `ReferenceState` already
+implements every `Ref*` trait; the missing piece was a `CapProvider` so it can
+*be* the ref `CapMap` that `run_selected` consumes. Added in
+`reference_capabilities.rs`, plus `reference_state_ref_caps(Arc<ReferenceState>) ->
+CapMap`. It registers exactly the read caps the catalog consumes today
+(`RefBackend` + `RefBlockTree` + `RefEditorMirror`) — the *same* surface
+`FixtureRef` + `FixtureEditorRef` expose, so invariant **selection is identical**
+to the fixture path (no catalog scope creep). Selection is an AND over the SUT
+*and* ref cap sets (`Needs::selected_against`), so registering ref caps
+unconditionally is safe — the editor invariants still deselect when the SUT has no
+editor.
+
+**State = `ReferenceState`.** `init_state` maps the generated `subsequence` →
+`Wiring::custom([Loro?], [], [UI?])` → `started_reference_state(wiring)` (app
+started + a minimal seed-classified layout query block to satisfy
+`is_properly_setup`) → seeds `parent/c1/c2` with **fixed shared ids**
+(`block:parent|c1|c2`; both `MemoryBackend` and `LoroBackend::create_block` honor a
+provided id, so no store-returned-id round-trip — the ref tree is fixed at
+generation time, before the SUT store exists). The editor is opened **only when
+`wiring.has_actor(UI)`** — opening it unconditionally would let editor transitions
+generate for `{Loro}`/`{}` configs and trip the editor-less-SUT tripwire.
+*Gotcha:* `current_focus(Main)` reads `navigation_history`, **not** the
+`focused_entity_id` that `set_focus` writes — the bootstrap must push a nav-history
+entry (as production `NavigateFocus` does) or the editor preconditions silently
+fail and typing never fires.
+
+**Mirror-only `apply`; plants injected at observation.** The ref-side `apply`
+calls `RefEditorMirrorMut::{type_chars,delete_backward,move_cursor}` **directly** —
+never the production `*_apply_to_ref`, which commits the typed text into block
+content (the SUT's `InMemEditorComponent` is detached and never writes the store, so
+a committing ref would diverge). Plants are injected into a **clone** of the ref
+state inside `check_invariants`, so the live proptest state stays correct across the
+whole transition sequence.
+
+**Teeth — the integration is not vacuous.** Temporarily breaking
+`editor_caret::insert_at` (drop the caret advance) turns the *default `none`-plant*
+run RED on `inv-editor-caret-matches-ref`, with the reference editor showing real
+multi-byte typed text (`"中😀中"`, `"c1€"`). This proves two things at once: editor
+transitions **actually fire** with real content (not all-`Touch`), and the
+reference's independent-codepoint math genuinely cross-checks the SUT's shared
+`editor_caret` (the byte/codepoint bug class). Stronger than `selection_follows_config`,
+which only proves the invariant is *selected*.
+
+**Editor gating is now purely capability-based — two env side-channels removed.**
+The editor-transition preconditions gate solely on `has_editor_buffer()` (the
+capability, = `wiring.has_actor(UI)`). Consequently:
+- `PBT_ATOMIC_EDITOR` / `RefLifecycle::atomic_editor_enabled()` was **dead** and is
+  removed (trait method + all impls + the env static + `enable_atomic_editor_if_unset`
+  and its callers). The capability *is* the gate.
+- `PBT_REAL_EDITOR` / `ReferenceState::real_editor_enabled()` had one live effect —
+  commit-on-blur in `blur_active_editor` — now a `ReferenceState.real_editor: bool`
+  field set by the real-editor driver harness (`phased.rs`), which builds the ref
+  state directly. No process-global env; deterministic and capture/replay-faithful
+  via the construction path. `fixture::CAPTURE_ENV_FLAGS` shrinks to
+  `["PBT_MUTABLE_TEXT"]`.
+
+**Open question (shrink quality).** The `content` plant's greedy shrink retains the
+causally-irrelevant `EditorState` (lands at `{BlockTree, EditorState}`, not the
+deterministic causal minimum `{BlockTree}`). Worth checking whether
+`proptest-state-machine` shrinks `init_state` (the subsequence) at all for failures
+that reproduce *before* any transition — that is precisely the architectural-delta
+minimization this PBT sells.
+
+**Next steps (toward F2), each unblocked by this keystone:** (1) committed-content
+parity — the deferred half of mirror-only (per-keystroke/on-blur commit on both
+sides, the `block_raw` editor invariant, matched normalization); (2) structural
+transitions (Split/Join/Indent/Outdent/Move) — now viable since `ReferenceState`
+carries a real tree + honest `apply_to_ref`; (3) widen the universe past in-process
+subsystems; (4) migrate the five slices off `FixtureRef`/`FixtureEditorRef` onto
+`reference_state_ref_caps`, then **delete `FixtureRef`/`EditorModel`/`EditorPureRef`**;
+(5) retire `E2ESut`. See the Backlog.
+
+---
+
+## 8.9 Authoring seam: `cap_transition!` — decouple *how a transition is written* from *how it's dispatched* (2026-06-22)
+
+The closed `E2ETransition` enum is the right **dispatch** substrate *today*: it monomorphises
+the same `impl<S: SutHandle> TransitionImpl` to both `E2ESut<V>` (the live `general_e2e_pbt`)
+and `&mut CapMap` (the `general_e2e_composed_pbt` swap), and a `Box<dyn Transition>` could not —
+it would have to erase to one SUT type while the two coexist through E5. But "closed enum" is a
+property of the central `declare_e2e_transitions!` macro + the generic dispatch — **not** of the
+52 per-transition files. Keeping the *authoring surface* behind a macro keeps the open-vs-closed
+choice **reversible** instead of baked into every file. This section is the standing answer to
+the implicit "closed enum forever" reading of §9: the enum is kept *for now, behind a seam we
+can flip*, not as a permanent commitment.
+
+**`cap_transition!`** (in `transition_dispatch.rs`) is that seam. It generates a transition's
+`TransitionImpl<ReferenceState, S>` block — bound on exactly one fine-grained cap — **and** the
+matching `required_caps()` (`declared_caps()`) from the *same* cap token. Two forms:
+
+```rust
+// single cap: required_caps() body becomes `Self::declared_caps()`
+cap_transition! {
+    SplitBlock: SutBlockTreeWrite,
+    |me, _state, sut| { sut.apply_split_block(&me.block_id, me.position).await; }
+}
+// no cap: bound on the full SutHandle bundle; required_caps stays the empty default
+cap_transition! { Nothing, |_me, _state, _sut| {} }
+```
+
+**Immediate payoff (landed).** The cap is stated **once**, so `required_caps()` and the
+`S: Cap` dispatch bound cannot drift → a migrated transition needs **no entry** in the
+`required_caps_match_transition_impl_bounds` guard test. `split_block` (single-cap) and
+`nothing` (no-cap) are migrated; both guard entries removed; suite green. Migrating the rest is
+mechanical, after which the guard test is deleted outright.
+
+**Seam payoff (future, reversible).** The body calls `sut.<cap-method>(…)`, which type-checks
+identically whether `sut: &mut S` (`S: Cap`, today) or `sut: &mut CapMap` (`CapMap` implements
+every cap via `#[capmap_adapter]`). So retargeting the macro's expansion later — e.g. to a
+`#[typetag::serde]` + `inventory` open registry once `CapMap` is the **sole** SUT post-E5 —
+changes only this macro's body, **never** the transition files. The dispatch decision becomes a
+one-macro flip (optionally a cargo feature gating the two backends), not a 52-file rewrite.
+
+**What it deliberately does NOT do.** It does not replace the enum or `aggregate_transitions`;
+closed dispatch stays (load-bearing while E2ESut and CapMap coexist). The seam only makes the
+eventual decision cheap and local.
+
+**Adjacent moves it unlocks (options, not commitments):**
+- migrate the remaining single-cap transitions → delete the drift-guard entirely;
+- a `build.rs` glob of `transitions/*.rs` to generate the `declare_e2e_transitions!` variant
+  list — removing the *last* central edit (drop a file = a new variant) while keeping closed
+  dispatch, native async, serde and exhaustiveness. This is the "open authoring + closed
+  dispatch" point neither the enum nor a full open registry occupies;
+- key the bisect/replay record (ADR 0009) on `variant_name()` rather than the enum's derived
+  serde, so a later typetag flip doesn't invalidate the saved counterexample corpus.
+
+**Worked reference for the open encoding.** `experiments/open-registry-poc/` is a standalone,
+runnable PoC of the fully-open `Box<dyn Transition>` + `inventory` + `typetag` encoding (with the
+`CapMap` SUT, cap-gated alphabet+invariants, and §8.7 shrinking). Its README carries the
+**staged migration path** (Tier 1 = `cap_transition!`, landed; Tier 1.5 = `build.rs` glob for
+open-authoring/closed-dispatch; Tier 2 = the open encoding, which needs E5 because a trait object
+must erase to a single SUT type and `E2ESut`+`CapMap` coexist until then). Treat it as the
+reference for *if/when* we flip the seam — not as a plan of record.
+
+---
+
+## 8.10 Convergence rule — discharge an `E2ESut` cap consumer by DELETION, not by a new composed slice (2026-06-25)
+
+This is the standing answer to a drift the E-track is prone to, and it overrides the
+mechanical instinct of the earlier E3 increments. **State it once, follow it always.**
+
+**The North Star (Backlog ★) has exactly one surviving PBT:** the configurable
+`general_e2e_composed_pbt` (`WideE2E`), parameterized by active subsystems. Every
+`*_slice`, `*_pbt`, and per-cap `ComposedSlice` is **scaffolding scheduled for deletion**.
+So the *only* progress that counts is **a capability landing in the ONE PBT and a slice
+dying** — never a slice being *born*.
+
+**The hazard.** E3 deletes an `E2ESut` cap impl, which is blocked while any test consumes
+that cap over `E2ESut`. The tempting discharge is: rewrite that test's standalone slice as
+a `ComposedSut<NewSlice>` (same boot, narrowed alphabet, the one invariant), then delete the
+impl. That *does* unblock the deletion — but it **grows** scaffolding: the new slice is itself
+on the deletion list, so a future session must migrate/delete it too. That is the
+"temporary-PBT churn loop" — discharging temporary work by minting more temporary work.
+
+**The rule.** Before discharging an `E2ESut` cap consumer, ask: **does the swap config
+(`full_headless`, the SUT `WideE2E` already drives) provide this cap?**
+
+- **YES (the common case)** — the ONE PBT *already* runs the cap's invariants via the shared
+  `composed_invariant_catalog()` selected by cap-presence. So:
+  1. **Delete the standalone test outright.** Do **not** build a `ComposedSlice` for it.
+  2. If the invariant must be *guaranteed* exercised (not merely selectable), add its id to
+     `WIDE_REQUIRED_INVARIANTS` (`wide_e2e.rs`) — one line — so the ONE PBT runs it every tick.
+  3. If the invariant has a real-SUT **non-vacuity / teeth** proof that only the deleted slice
+     carried (e.g. "a real `ToggleState` moves *both* the SQL and Loro projection in lockstep"),
+     relocate just that test into the invariant's own file
+     (`composed/invariants/<name>.rs`) next to its fixture triad — its durable home,
+     independent of any slice's lifetime.
+  4. Then delete the `E2ESut` cap impl (E3) and record the `E1_RELOCATED` row in `parity.rs`.
+
+  Net: **−1 test, −1 cap impl, +0 scaffolding.** `parity.rs` selection-parity is the static
+  proof that deleting the standalone test loses no coverage — consult it, don't build a
+  stand-in slice to "be safe."
+
+- **NO** — `WideE2E` genuinely cannot drive this cap yet (the windowed/GPUI/E4 input family:
+  `PressKey`/`ArrowNavigate`/drag, or any cap `full_headless` does not host). *Then* a focused
+  `ComposedSlice` is justified, because there is no ONE-PBT coverage to inherit. Mark it
+  explicitly as transient (it dies when E4 lands its component + axis).
+
+**Worked example (the rule's origin).** `task_state_coherence_pbt` consumed `SutLoroTaskState`
++ `SutSqlProjection` over `E2ESut`. The 2026-06-24 increment (jj `xk`) discharged it by minting
+`TaskStateSlice` — but `full_headless` already hosts both caps and `WideE2E` already runs
+`inv-task-state-storage-coherence` via the catalog, so the slice added **zero** coverage and one
+deletion obligation. The 2026-06-25 cleanup applied this rule: added the id to
+`WIDE_REQUIRED_INVARIANTS`, relocated the SQL↔Loro lockstep teeth into
+`composed/invariants/task_state_storage_coherence.rs`, and deleted `TaskStateSlice` +
+`tests/task_state_coherence_pbt.rs`. Same impl-deletion, no new scaffolding.
+
+**Litmus test for any E-track increment:** *did total scaffolding (slices + standalone PBTs) go
+DOWN?* If an increment leaves it flat or up, it is churn unless the cap is in the "NO" branch
+above. Judge by deletions, not by green slices.
+
+---
+
+## 9. Risks, gotchas, open questions
+
+- **Step 1 parity is the real risk.** Everything else is mechanical. Land it behind the existing `E2ESut` entry point and diff selection against the blessed slices before deleting the old path.
+- **`?Send` per trait.** Watch for an `E2ESut` cap future that captures non-`?Send`-compatible state; none appeared in the spike but verify per trait.
+- **Ref coupling.** The omnipotent core is monolithic *by necessity* — do not try to "union" Ref state from parts. Sub-Refs are projections, not parts.
+- **Degraded twins must be routed through the `CapSet`** on both SUT and Ref, or false divergence (§5.2 soundness rule).
+- **Caching adapter union impl** lives once on `CapMap`; do not let it regress into per-SUT panicking impls (that's the rejected Move B).
+- **Open → resolving:** exact split of `Subsystem` (coarse, ~9) vs `Sut*` caps (fine, ~23). Recommendation stands: unify on the capability as the single unit for both `prov` and `need`. **The §8.5 audit gives the first concrete instance:** `min_sut` today encodes *realization* (the structural block invariants carry `TursoProjection` because `E2ESut::SutBackend` reads Turso) rather than the *capability* their bodies actually call (`SutBackend`). **But §8.6 shows this is not a free re-label:** there is only one `SutBackend` realization and it *needs* Turso, so the `TursoProjection` in `min_sut` is currently load-bearing — it gates these invariants out of the non-Turso `loro_backend_pbt` slice, where the SQL would fail. The reclassification (realization→capability) must wait until a non-Turso `SutBackend` realization exists; only then does the parity gate hold. The broader `Subsystem`-vs-cap unification follows from there.
+
+---
+
+## Backlog
+
+The sliced, dependency-ordered task list for extending this — with a 🧠 smart /
+🤖 cheap split built for distributing the mechanical work to fast/cheap agents —
+lives in [`PbtCompositionBacklog.md`](PbtCompositionBacklog.md). Key finding there:
+with the current two components the catalog is *complete*, so coverage now grows by
+adding **components** (each a 🧠 scope task that unlocks a batch of 🤖 invariant-adds),
+not ref caps.
+
+The step-by-step **how** — copy-paste recipes for adding an invariant, a component,
+or hosting a cap, with the Needs-from-bounds rule, the test-triad patterns, and the
+anti-patterns that fail review — is [`PbtCompositionContributing.md`](PbtCompositionContributing.md).
+
+## 10. File map
+
+- `crates/holon-pbt-core/src/composition.rs` — the spine (PoC + production seam). Hosts `CapMap` (incl. `expect` = cloned `Arc`, `expect_ref` = borrowed `&C` for borrow-returning cap methods), the read-cap union-adapter (macro-generated), the γ runner (`run_selected` + `Needs::selected_against`), and `BridgedInvariant<I>` (real body → `CapInvariant`).
+- `crates/holon-integration-tests/src/pbt/composed/` — **the shared γ catalog** (slice-agnostic; every composed slice runs it). `catalog.rs` = `composed_invariant_catalog()` (one `wire()` line per invariant); `invariants/<name>.rs` = **one file per invariant**: its `Needs`+bridge `wire()` (intrinsic to the body's cap bounds, *not* to any slice) and its `#[cfg(test)]` positive/negative-containment/catch triad driven by `fixtures.rs`'s hand-crafted doubles (no real backend — runs without Turso/Loro/MemoryBackend); `invariants.rs` carries the add-an-invariant recipe. **Adding an invariant = one new `invariants/` file + one `catalog.rs` line**, and it lights up in *every* slice whose components satisfy its `Needs` — the unit a fast/cheap agent owns without touching shared code or any slice.
+- `crates/holon-integration-tests/src/pbt/memory_slice/` — Step-2B composed slice = **components only** (the per-slice cost is genuinely different code, not catalog duplication). `components.rs` (`MemoryBackendComponent` over `MemoryBackend` + `InMemEditorComponent` headless editor), `builders.rs` (`memory_wide`/`memory_wide_with_editor`), `integration_tests.rs` (selection-count tests over a real `MemoryBackend`; the block-tree mutation-sequence and editor differential op-sequence proptests; and the **editor commit round-trip** — `take_commit()` → `MemoryBackend::update_block` → `blocks-match` re-reads the store, grounding the editor's text math in real storage). Runs the shared catalog via `run_selected(&composed_invariant_catalog(), &these_components, &ref)`. 8 invariants select; 18 tests green sub-second. A second slice (e.g. Loro) ≈ a new `components.rs` + builder + selection tests — zero catalog repetition.
+- `crates/holon-frontend/src/editor_caret.rs` — **pure caret/text arithmetic, the single source of truth** for the byte-offset/UTF-8-boundary math (move-left/right, clamp-to-boundary, byte↔codepoint conversions, insert/delete). Production `headless_editor_mirror::handle_keystroke` calls it (and it dedups the formerly-triplicated inline `chars().count()` conversions); the PBT `InMemEditorComponent` is a thin `String` wrapper over the same primitives — so the editor slice exercises the *real* math, not a parallel copy. The differential oracle (`EditorModel`, `Vec<char>`/codepoint) stays an independent implementation that cross-checks it.
+- `crates/holon-integration-tests/src/pbt/loro_slice/` — the **second slice**: a real `holon-loro` `LoroBackend` CRDT (`components.rs` = `LoroBackendComponent` providing `SutBackend` + `SutLoroLog`; `builders.rs` = `loro_wide`; `integration_tests.rs` = selection tests proving the catalog runs over Loro + a Loro mutation-sequence proptest). Same shared catalog, zero duplication — the §6 payoff demonstrated.
+- `crates/holon-integration-tests/src/pbt/composed/invariants/loro_no_errors.rs`, `…/loro_children_match_ref.rs` — the two Loro-specific catalog invariants (`SutLoroLog`, and `SutLoroLog + RefBlockTree`); fixture-driven triads via `FixtureLoroLog` (a `SutLoroLog` double that can report an error or mis-order children).
+- `crates/holon-integration-tests/src/pbt/invariants/bodies/block_content_matches_ref_backend.rs` — `inv-block-content-matches-ref/block_raw` (`SutBackend + RefBlockTree`); the first body reading the reference via the borrow-returning `RefBlockTree::block_content`.
+- `crates/holon-integration-tests/src/pbt/sql_slice/` — the **third slice**: a real Turso `BackendEngine` (production storage + IVM matview layer, **no** reactive engine/frontend/navigation), the storage-layer slice of the future `E2ESut` replacement. `components.rs` = `SqlProjectionComponent` providing `SutBackend` (over `block_raw`, via the shared `parse_block_row`) + `SutSqlProjection` (base-table family real; nav/focus/watch honest-empty); `builders.rs` = `sql_wide` + `new_sql_engine` (the Turso `BackendEngine` with a block-CRUD `SqlOperationProvider`, via `create_test_engine_with_setup`; hoisted here so the combined `sql_loro_slice` reuses it, no copy-paste); `integration_tests.rs` = selection tests proving the catalog runs over Turso + a Turso mutation-sequence proptest. `composed/invariants/block_content_sql.rs` = the SQL-projection content invariant (`SutSqlProjection + RefBlockTree`, id `inv-block-content-matches-ref`), triad via `FixtureSqlProjection`.
+- `crates/holon-integration-tests/src/pbt/frontend_slice/` — the **fourth slice**: a real **windowless** `FrontendSession` + `ReactiveEngine` (the production render pipeline via `holon_app::new_from_config_with_di`, no GPUI/geometry), the ViewModel/Renderer slice of the future `E2ESut` replacement. `components.rs` = `HeadlessFrontendComponent` providing `SutRenderer` (real `ensure_watching`→`snapshot`→`interpret_pure`→`view_model_to_snapshot` path), `SutViewModel` (real `headless_error_node_count`; gpui-engine-specific methods honest-`None`), and `SutBackend` (over `block_raw`). `builders.rs` = `frontend_wide` (uses `Config::with_arc` for the once-built session). `composed/invariants/viewmodel_no_error_widgets.rs` = the no-error-widgets invariant (`SutViewModel`, no ref), triad via `FixtureViewModel`. Shared helpers `view_model_to_snapshot` + `override_org_fs_bindings` were made `pub(crate)` for reuse.
+- `crates/holon-integration-tests/src/pbt/sql_loro_slice/` — the **fifth slice**: the combined SQL+Loro SUT, the only non-redundant consumer of `SutLoroTaskState`. No new component — `builders.rs` `sql_loro_wide` composes the existing `SqlProjectionComponent` (canonical block store; registers `SutBackend` + `SutSqlProjection`) and `LoroBackendComponent` (registered for **only** `SutLoroTaskState`, avoiding the silent one-provider-per-cap `SutBackend` shadow). `integration_tests.rs` is minimal (positive + catch over the real two-store SUT), reusing the hoisted `sql_slice::builders::new_sql_engine`. The coherence invariant + triad live in `composed/invariants/task_state_storage_coherence.rs` (`SutSqlProjection + SutLoroTaskState`, no ref), triad via `FixtureSqlProjection.task_state` + the new `FixtureLoroTaskState` double.
+- `crates/holon-integration-tests/src/pbt/invariants/bodies/block_parent_matches_ref_backend.rs` — `inv-block-parent-matches-ref/block_raw` (`SutBackend + RefBlockTree::parent_of`); closes the re-parent-divergence gap (`blocks-match` skips `Parent`; orphan/cycle only check existence/termination). Sound only where there's no doc-id remapping (the pure-memory slice).
+- `crates/holon-macros/src/capmap.rs` — `#[capmap_adapter]`; emits `#[async_trait]` only for traits with async methods (sync `RefBackend`/`RefBlockTree` adapt without it); sync forwards use `CapMap::expect_ref` so borrow-returning methods don't dangle.
+- `crates/holon-pbt-core/src/capabilities.rs` — the `Sut*`/`Ref*` cap traits; the SUT read caps carry `#[holon_macros::capmap_adapter]` (Step 0 ✅, + `SutLoroTaskState` for B6), plus the sync caps `RefBackend`, `RefBlockTree`, `RefEditorMirror`, and `SutEditorMirrorRead` (the two `*EditorMirror*` ones host the editor component; `RefBlockTree`/`RefEditorMirror` exercise the `expect_ref` borrow path via `Option<&str>` returns).
+- `crates/holon-macros/src/capmap.rs` — the `#[capmap_adapter]` proc-macro that emits the async trait + `CapName` impl + forwarding `impl Trait for CapMap`.
+- `crates/holon-pbt-core/src/caching_proxy.rs` — today's per-tick memoisation (→ `CapMap` wrapper).
+- `crates/holon-integration-tests/src/pbt/invariant_runner.rs` — the runner. `run_proxy_registry<S>` is the extracted SUT-generic seam (Step 1 ✅); the two `_assert_capmap_*` fns are the compile-only de-risk proofs.
+- `crates/holon-integration-tests/src/pbt/sut_capabilities.rs` — `E2ESut`'s cap impls (the tax to dissolve).
+- `crates/holon-integration-tests/src/pbt/reference_state.rs` — the omnipotent Ref core.
+- `crates/holon-integration-tests/tests/editor_pure_pbt.rs` — narrow hand-written slice (mini-Ref reference).
+- `crates/holon/src/api/memory_backend.rs` — Step 2 SUT backing.

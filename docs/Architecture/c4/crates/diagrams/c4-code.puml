@@ -1,0 +1,42 @@
+@startuml c4-code
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title Code Diagram (@c4 code elements)
+
+Container_Boundary(holon_api_code, "holon-api") {
+    Component(holon_api__EntityName, "EntityName", "enum", "Typed entity name — the canonical name for a domain entity (e.g., 'block', 'document').")
+    Component(holon_api__OperationDescriptor, "OperationDescriptor", "struct", "Complete metadata for an operation")
+    Component(holon_api__Operation, "Operation", "struct", "An executable operation with all parameters")
+    Component(holon_api__Value, "Value", "enum", "Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility): FRB constrains the variant shape")
+    Component(holon_api__Change, "Change", "enum", "Change notification event.")
+}
+
+Container_Boundary(holon_core_code, "holon-core") {
+    Component(holon_core__OperationLogEntry, "OperationLogEntry", "struct", "A logged operation with undo/redo and sync metadata.")
+    Component(holon_core__FileFormatAdapter, "FileFormatAdapter", "trait", "Pluggable parse + render adapter for a single vault file format.")
+    Component(holon_core__EventOrigin, "EventOrigin", "enum", "Write provenance — which system originated a write.")
+    Component(holon_core__OperationProvider, "OperationProvider", "trait", "Common operation provider interface.")
+    Component(holon_core__OperationResult, "OperationResult", "struct", "Result of an operation, containing changes for propagation and undo action.")
+}
+
+Container_Boundary(holon_frontend_code, "holon-frontend") {
+    Component(holon_frontend__ReactiveViewModel, "ReactiveViewModel", "struct", "The ViewModel of Holon's MVVM UI — a persistent reactive node.")
+}
+
+Container_Boundary(holon_markdown_code, "holon-markdown") {
+    Component(holon_markdown__MarkdownFormatAdapter, "MarkdownFormatAdapter", "struct", "Markdown implementation of `holon_core::FileFormatAdapter`.")
+}
+
+Container_Boundary(holon_turso_code, "holon-turso") {
+    Component(holon_turso__MatviewManager, "MatviewManager", "struct", "Manages the full lifecycle of Turso materialized views.")
+    Component(holon_turso__DbHandle, "DbHandle", "struct", "Handle for sending commands to the database actor")
+    Component(holon_turso__TursoBackend, "TursoBackend", "struct", "")
+    Component(holon_turso__SchemaModule, "SchemaModule", "trait", "A module that manages a set of database schema objects.")
+}
+
+Rel(holon_api__Operation, holon_api__OperationDescriptor, "describes the op", "call")
+Rel(holon_core__OperationProvider, holon_core__OperationResult, "operation outcome", "returns")
+Rel(holon_turso__TursoBackend, holon_turso__DbHandle, "actor handle", "call")
+Rel(holon_markdown__MarkdownFormatAdapter, holon_core__FileFormatAdapter, "implements", "trait")
+
+@enduml

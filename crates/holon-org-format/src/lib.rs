@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
 //! Org-mode format: pure parsing, rendering, and diffing.
 //!
 //! This crate contains the format-level concerns for org-mode files:

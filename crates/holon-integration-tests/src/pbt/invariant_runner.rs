@@ -20,48 +20,22 @@ use holon_pbt_core::caching_proxy::{CachingProxy, cached};
 use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
-use crate::pbt::invariants::bodies::active_watches_match_ref::InvActiveWatchesMatchRef;
-use crate::pbt::invariants::bodies::blocks_match_ref::{
-    InvBlocksMatchRefBlockRaw, InvBlocksMatchRefLoro, InvBlocksMatchRefMatview,
-    InvBlocksMatchRefOrg,
-};
 use crate::pbt::invariants::bodies::displayed_text::{
     InvDisplayedTextViewModel, InvDisplayedTextWidget,
 };
-use crate::pbt::invariants::bodies::editable_text_has_draggable::InvEditableTextHasDraggable;
 use crate::pbt::invariants::bodies::editor_caret_matches_ref::InvEditorCaretMatchesRef;
 use crate::pbt::invariants::bodies::editor_text_matches_ref::InvEditorTextMatchesRef;
 use crate::pbt::invariants::bodies::focus_matches_ref::InvFocusMatchesRef;
-use crate::pbt::invariants::bodies::focus_roots::InvFocusRoots;
 use crate::pbt::invariants::bodies::frontend_bounds_rendered::InvFrontendBoundsRendered;
 use crate::pbt::invariants::bodies::frontend_engine::InvFrontendEngine;
 use crate::pbt::invariants::bodies::frontend_no_error_widgets::InvFrontendNoErrorWidgets;
 use crate::pbt::invariants::bodies::frontend_root_not_error::InvFrontendRootNotError;
-use crate::pbt::invariants::bodies::live_children_match_ref::InvLiveChildrenMatchRef;
 use crate::pbt::invariants::bodies::live_tree_matches_fresh::InvLiveTreeMatchesFresh;
-use crate::pbt::invariants::bodies::loro_children_match_ref::InvLoroChildrenMatchRef;
-use crate::pbt::invariants::bodies::loro_no_errors::InvLoroNoErrors;
-use crate::pbt::invariants::bodies::matview_consistent_with_ref::InvMatviewConsistentWithRef;
 use crate::pbt::invariants::bodies::navigation_focus::InvNavigationFocus;
-use crate::pbt::invariants::bodies::no_errors::InvNoErrors;
-use crate::pbt::invariants::bodies::no_orphan_blocks::InvNoOrphanBlocks;
-use crate::pbt::invariants::bodies::no_parent_cycles::InvNoParentCycles;
-use crate::pbt::invariants::bodies::org_render_fixed_point::InvOrgRenderFixedPoint;
-use crate::pbt::invariants::bodies::source_language_iff_source::InvSourceLanguageIffSource;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::invariants::bodies::sql_budget::InvSqlBudget;
 use crate::pbt::invariants::bodies::value_fn_provider_arg_variance_13::InvValueFnProviderArgVariance13;
 use crate::pbt::invariants::bodies::value_fn_provider_identity::InvValueFnProviderIdentity;
 use crate::pbt::invariants::bodies::view_selection::InvViewSelection;
-use crate::pbt::invariants::bodies::viewmodel_decompiled_rows_match_query::InvViewmodelDecompiledRowsMatchQuery;
-use crate::pbt::invariants::bodies::viewmodel_editable_text_triggers::InvViewmodelEditableTextTriggers;
-use crate::pbt::invariants::bodies::viewmodel_entity_ids_subset_of_data::InvViewmodelEntityIdsSubsetOfData;
 use crate::pbt::invariants::bodies::viewmodel_no_error_widgets::InvViewmodelNoErrorWidgets;
-use crate::pbt::invariants::bodies::viewmodel_root_matches_render_expr::InvViewmodelRootMatchesRenderExpr;
-use crate::pbt::invariants::bodies::viewmodel_snapshot::InvViewmodelSnapshot;
-use crate::pbt::invariants::bodies::viewmodel_state_toggle_correct::InvViewmodelStateToggleCorrect;
-use crate::pbt::invariants::bodies::viewmodel_tree_virtual_slots::InvViewmodelTreeVirtualSlots;
-use crate::pbt::invariants::bodies::watch_rows_match_ref::InvWatchRowsMatchRef;
 use crate::pbt::invariants::bodies::window_focus_matches_engine_focus::InvWindowFocusMatchesEngineFocus;
 use crate::pbt::invariants::registry::{
     InvariantSpec, ModeOverride, PbtSuiteSpec, RunMode, Subsystem, register_default, subsystems,
@@ -296,7 +270,7 @@ impl E2ESut {
 
         // Shared settle: wait for the convergent `block_raw` projection to catch
         // up to the reference before any body reads storage.
-        self.settle_before_invariants(&resolved).await;
+        self.settle_before_invariants(resolved.get()).await;
 
         // Freeze the budget window here: everything up to (and including)
         // settle is the transition's cost; everything after is invariant-body
@@ -337,43 +311,28 @@ impl E2ESut {
         let suite = PbtSuiteSpec::new(suite_name, subsystems(&set));
         let selected = suite.select(&registry);
 
-        let proxy = cached(self);
-
-        // Dispatch the native invariant set straight from its tables (defined
-        // above this `impl`). The bodies are read-only, so their order is
-        // irrelevant — each invariant's own registry metadata decides whether it
-        // runs this tick: `run_one` consults its `TickGate` (the former
-        // `if !nav_only` / `if is_properly_setup` structure), its RequiredWiring,
-        // and its `RunMode`, all looked up by id. The tables carry only bodies.
-        // The proxy memoises expensive snapshot reads across the whole loop. The
-        // two `_self_` bodies (focus-matches-ref, sql-budget) dispatch against
-        // `self` because they need `&mut self`-bearing `SutDriver` methods the
-        // proxy can't forward.
         let properly_setup = ref_state.is_properly_setup();
-        // Collect every body's disposition this tick instead of panicking on the
-        // first strict failure: `report_findings` then emits one cross-layer
-        // report so a failure shows which layers held and where divergence enters
-        // (Proposals 1+2). All bodies run regardless of order; the extra work
-        // over the old panic-on-first only materialises on a *failing* tick.
-        let mut findings: Vec<InvariantFinding> = Vec::new();
-        for body in native_proxy_invariants() {
-            if let Some(f) = run_one(
-                &selected,
-                &resolved,
-                &proxy,
-                body.as_ref(),
-                nav_only,
-                properly_setup,
-            )
-            .await
-            {
-                findings.push(f);
-            }
-        }
+        // Dispatch the native *proxy* registry via the SUT-generic core. The
+        // bodies are read-only, so their order is irrelevant — each invariant's
+        // own registry metadata decides whether it runs this tick (`run_one`
+        // consults its `TickGate`, RequiredWiring, and `RunMode`, all looked up
+        // by id). `run_proxy_registry` owns no E2ESut specifics, so a composed
+        // `CapMap` slice plugs into the very same seam (Step 2). It collects every
+        // body's disposition this tick instead of panicking on the first strict
+        // failure: `report_findings` then emits one cross-layer report so a
+        // failure shows which layers held and where divergence enters
+        // (Proposals 1+2). The extra work over panic-on-first only materialises
+        // on a *failing* tick.
+        let mut findings =
+            run_proxy_registry(self, &selected, resolved.get(), nav_only, properly_setup).await;
+        // The four `_self_` bodies (focus-matches-ref, editor caret/text, window-
+        // focus) plus the otel `inv-sql-budget` dispatch against `self`: they need
+        // `&mut self`-bearing `SutDriver` methods the (`&self`) proxy can't
+        // forward, so they stay E2ESut-only and are appended here.
         for body in native_self_invariants() {
             if let Some(f) = run_one(
                 &selected,
-                &resolved,
+                resolved.get(),
                 self,
                 body.as_ref(),
                 nav_only,
@@ -385,6 +344,81 @@ impl E2ESut {
             }
         }
         report_findings(self.last_transition.variant_name(), &findings);
+
+        // E4: ALSO drive the windowed invariants through the COMPOSED runner
+        // (`run_selected` over a `GpuiWindowComponent`-hosted `CapMap`), over the
+        // SAME live geometry/engine this tick already settled. This is the windowed
+        // analogue of `general_e2e_composed_pbt` — it proves the windowed invariants
+        // (`inv-frontend-bounds-rendered`, `inv-displayed-text/*`, `inv-window-focus`)
+        // hold on the COMPOSITION path per generated tick, not only via `E2ESut`'s
+        // native registry. SHARED by both the xcap real-window and the TestPlatform
+        // sim harnesses — both reach here through `replay_steps::<_, E2ESut>`. Gated
+        // on a window being installed, so the headless `general_e2e_pbt` (no
+        // geometry) is unaffected.
+        if has_window {
+            self.run_windowed_composed_check(&resolved).await;
+        }
+    }
+
+    /// The E4 windowed composition-path check (see the call site in
+    /// [`Self::run_invariant_registry_gated`]). Builds a `CapMap` hosting the
+    /// windowed caps (`SutLayout`/`SutViewModel`/`SutRenderer`/`SutDriver`) over the
+    /// SUT's installed live geometry + engine, and runs the composed catalog against
+    /// the per-tick reference oracle. Selection picks exactly the windowed invariants
+    /// (the block/storage invariants deselect — the windowed `CapMap` has no
+    /// `SutBackend`). Panics on a composed failure: a windowed divergence the
+    /// composition path catches is a real bug, even when the native run passed.
+    ///
+    /// The cloned `ReferenceState`'s `Arc<Runtime>` is a shared clone of the live
+    /// one (like the native `resolved`), so dropping `ref_caps` here is a refcount
+    /// decrement — safe inside this async context (no off-thread drop needed).
+    async fn run_windowed_composed_check(
+        &self,
+        resolved: &crate::pbt::reference_state::Resolved<ReferenceState>,
+    ) {
+        let geometry = self
+            .render
+            .frontend_geometry
+            .as_ref()
+            .expect("run_windowed_composed_check: frontend_geometry installed (has_window)")
+            .clone_box();
+        let engine = self
+            .render
+            .frontend_engine
+            .as_ref()
+            .expect("run_windowed_composed_check: frontend_engine installed (has_window)")
+            .clone();
+        let sut_caps = crate::pbt::window_slice::builders::window_focus_wide(geometry, engine);
+        let ref_caps = crate::pbt::reference_capabilities::reference_state_ref_caps(
+            crate::pbt::reference_state::Resolved::identity(resolved.get().clone())
+                .map(std::sync::Arc::new),
+        );
+        let report = holon_pbt_core::composition::run_selected(
+            &crate::pbt::composed::composed_invariant_catalog(),
+            &sut_caps,
+            &ref_caps,
+        )
+        .await;
+        let failures = report.failures();
+        assert!(
+            failures.is_empty(),
+            "[E4 windowed composed check] run_selected over the GpuiWindowComponent CapMap \
+             diverged after `{}` — the windowed invariants fail on the COMPOSITION path even \
+             though the native E2ESut registry passed:\n{:#?}",
+            self.last_transition.variant_name(),
+            failures,
+        );
+        // Non-vacuity floor: the core windowed geometry invariant must SELECT + run
+        // every tick (it binds `SutLayout + SutViewModel` on the SUT and `RefLayout`
+        // on the ref, all present here), so a future regression that silently
+        // deselects the windowed family — turning "green" into "ran nothing" — fails
+        // HERE rather than passing vacuously.
+        assert!(
+            report.ran_ids().contains(&"inv-frontend-bounds-rendered"),
+            "[E4 windowed composed check] non-vacuity: inv-frontend-bounds-rendered must run \
+             on the composition path each tick (ran: {:?})",
+            report.ran_ids(),
+        );
     }
 }
 
@@ -448,8 +482,118 @@ impl<R, S, T: Invariant<R, S>> DynInvariant<R, S> for T {
     }
 }
 
-/// A boxed native invariant dispatched against the per-tick `CachingProxy`.
-type ProxyInvariant<'a> = Box<dyn DynInvariant<ReferenceState, CachingProxy<'a, E2ESut>>>;
+/// The union of read caps every native proxy-body needs — exactly the set
+/// `CachingProxy` forwards. Any SUT satisfying it (E2ESut today; `CapMap` for a
+/// composed slice tomorrow) can host the whole proxy registry. This is the
+/// single place the union lives (Step 1: unhardcode the body list from E2ESut).
+pub trait WideProxyCaps:
+    holon_pbt_core::capabilities::SutSqlProjection
+    + holon_pbt_core::capabilities::SutViewModel
+    + holon_pbt_core::capabilities::SutLayout
+{
+}
+impl<T> WideProxyCaps for T where
+    T: holon_pbt_core::capabilities::SutSqlProjection
+        + holon_pbt_core::capabilities::SutViewModel
+        + holon_pbt_core::capabilities::SutLayout
+{
+}
+
+/// A boxed native invariant dispatched against the per-tick `CachingProxy` over
+/// any `S: WideProxyCaps` (E2ESut today; `CapMap` for composed slices).
+type ProxyInvariant<'a, S> = Box<dyn DynInvariant<ReferenceState, CachingProxy<'a, S>>>;
+
+/// STEP 1 DE-RISK (compile-only): the ENTIRE native proxy registry dispatches,
+/// UNCHANGED, against `CachingProxy<CapMap>` — i.e. the composed capability map
+/// hosts the wide registry with zero body rewrite, and a composed slice needs
+/// no per-SUT cap impls (the read-cap union lives on `CapMap`, generated by
+/// `#[capmap_adapter]`). If this compiles, `CapMap: WideProxyCaps` holds for
+/// all 10 read caps and every proxy-body accepts the composed map as its SUT.
+#[allow(dead_code)]
+fn _assert_capmap_hosts_proxy_bodies()
+-> Vec<ProxyInvariant<'static, holon_pbt_core::composition::CapMap>> {
+    native_proxy_invariants::<holon_pbt_core::composition::CapMap>()
+}
+
+/// STEP 1 DE-RISK (compile-only): the SUT-generic runner seam itself accepts a
+/// composed `CapMap`. Where `_assert_capmap_hosts_proxy_bodies` proves the
+/// *body list* type-checks, this proves the whole `run_proxy_registry` entry
+/// point does — a composed slice can call the exact runner the E2ESut path uses,
+/// passing only `selected` + a resolved ref (no E2ESut settle / doc-uri / self-
+/// invariants). Never executed; coercing the fn to a pointer is enough to force
+/// monomorphisation over `CapMap` at type-check time.
+#[allow(dead_code)]
+fn _assert_capmap_drives_runner() {
+    // Referencing the generic fn item with explicit turbofish forces it to be
+    // type-checked (monomorphised) over `CapMap`; the async return type is
+    // unnameable, so we bind the fn item itself rather than a fn pointer.
+    let _seam = run_proxy_registry::<holon_pbt_core::composition::CapMap>;
+}
+
+/// E0c-(a) DE-RISK (compile-only): the windowed **geometry** invariant bodies
+/// (`frontend_bounds_rendered`, `displayed_text`) monomorphise as `Invariant<R, S>`
+/// over a composed `CapMap` SUT **directly** — `S = CapMap`, not the
+/// `CachingProxy<CapMap>` the wide-path asserts above use. This is the form a
+/// composed windowed slice runs them in (`run_selected(catalog, &capmap, &ref)`
+/// drives bodies against the raw map, not the proxy). It proves the **hosting
+/// half** of E4 (Bundle E in `docs/Testing/PbtCompositionBacklog.md`) *before any
+/// geometry realization exists*: `CapMap: SutLayout + SutViewModel + SutRenderer`
+/// already holds (the `#[capmap_adapter]` read-cap union — same fact
+/// `_assert_capmap_hosts_proxy_bodies` relies on), so the *only* thing E4 still
+/// needs from the windowed component is a realization that returns non-`None`
+/// geometry (the E0c-(b) `TestPlatform` make-or-break spike).
+///
+/// `InvWindowFocusMatchesEngineFocus` is now **included** (E4 inc4): `SutDriver`
+/// is `#[capmap_adapter]`-hosted (all-`&self` since Stage 1), so `CapMap: SutDriver`
+/// holds and `S: SutDriver + SutLayout` monomorphises over a raw `CapMap`. This box
+/// is the compile-time proof that the windowed `window_focus` body runs on the
+/// composition path — the last windowed cap-host gap closed.
+#[allow(dead_code)]
+fn _assert_capmap_hosts_windowed_bodies()
+-> Vec<Box<dyn DynInvariant<ReferenceState, holon_pbt_core::composition::CapMap>>> {
+    vec![
+        Box::new(InvFrontendBoundsRendered),
+        Box::new(InvDisplayedTextWidget),
+        Box::new(InvDisplayedTextViewModel),
+        Box::new(InvWindowFocusMatchesEngineFocus),
+    ]
+}
+
+/// The SUT-generic core of the native runner. Given any `S: WideProxyCaps`,
+/// build the caching proxy over `sut` and dispatch every read-only proxy-body,
+/// returning each body's [`InvariantFinding`]. This is the seam a composed
+/// `CapMap` slice plugs into (Step 2): it owns no E2ESut specifics — no settle,
+/// no doc-uri resolution, no `&mut self` self-invariants — so a slice supplies
+/// only the suite-`selected` specs and a resolved reference and gets the entire
+/// read-only registry. The E2ESut method `run_invariant_registry_gated` wraps
+/// this, prepending its async settle and appending the four `&mut self`
+/// self-bodies it alone can host. The proxy memoises expensive snapshot reads
+/// across the whole loop.
+async fn run_proxy_registry<S: WideProxyCaps>(
+    sut: &S,
+    selected: &[&InvariantSpec],
+    resolved: &ReferenceState,
+    nav_only: bool,
+    properly_setup: bool,
+) -> Vec<InvariantFinding> {
+    let proxy = cached(sut);
+    let mut findings: Vec<InvariantFinding> = Vec::new();
+    for body in native_proxy_invariants::<S>() {
+        if let Some(f) = run_one(
+            selected,
+            resolved,
+            &proxy,
+            body.as_ref(),
+            nav_only,
+            properly_setup,
+        )
+        .await
+        {
+            findings.push(f);
+        }
+    }
+    findings
+}
 /// A boxed native invariant dispatched against the raw `E2ESut` (the two bodies
 /// that need `&mut self`-bearing `SutDriver` methods the proxy can't forward).
 type SelfInvariant = Box<dyn DynInvariant<ReferenceState, E2ESut>>;
@@ -463,41 +607,20 @@ type SelfInvariant = Box<dyn DynInvariant<ReferenceState, E2ESut>>;
 /// looks them up by id. Each `Box::new(InvFoo)` is statically checked to
 /// implement `Invariant` for the proxy, so a deleted/renamed body fails to
 /// compile here. Order is irrelevant (read-only bodies).
-fn native_proxy_invariants<'a>() -> Vec<ProxyInvariant<'a>> {
+fn native_proxy_invariants<'a, S: WideProxyCaps>() -> Vec<ProxyInvariant<'a, S>> {
     vec![
-        Box::new(InvNoErrors),
-        Box::new(InvLoroNoErrors),
-        Box::new(InvBlocksMatchRefMatview),
-        Box::new(InvBlocksMatchRefLoro),
-        Box::new(InvBlocksMatchRefBlockRaw),
-        Box::new(InvNoOrphanBlocks),
-        Box::new(InvNoParentCycles),
-        Box::new(InvSourceLanguageIffSource),
-        Box::new(InvActiveWatchesMatchRef),
+        // E3: the `SutBackend`-bound bodies (matview, block_raw, no-orphan,
+        // no-parent-cycles, source-language, focus-roots) were removed when
+        // `impl SutBackend for E2ESut` was deleted — they are composed-catalog
+        // hosted (see `NATIVE_ONLY_EXCLUDED` + `E1_RELOCATED_CAP_COVERAGE`).
         Box::new(InvViewSelection),
         Box::new(InvNavigationFocus),
-        Box::new(InvFocusRoots),
-        Box::new(InvLiveChildrenMatchRef),
-        Box::new(InvLoroChildrenMatchRef),
-        Box::new(InvBlocksMatchRefOrg),
-        Box::new(InvOrgRenderFixedPoint),
         Box::new(InvDisplayedTextWidget),
-        Box::new(InvDisplayedTextViewModel),
         Box::new(InvValueFnProviderArgVariance13),
         Box::new(InvValueFnProviderIdentity),
-        Box::new(InvWatchRowsMatchRef),
-        Box::new(InvMatviewConsistentWithRef),
-        Box::new(InvViewmodelSnapshot),
         Box::new(InvViewmodelNoErrorWidgets),
         Box::new(InvFrontendRootNotError),
         Box::new(InvFrontendNoErrorWidgets),
-        Box::new(InvEditableTextHasDraggable),
-        Box::new(InvViewmodelTreeVirtualSlots),
-        Box::new(InvViewmodelRootMatchesRenderExpr),
-        Box::new(InvViewmodelEntityIdsSubsetOfData),
-        Box::new(InvViewmodelDecompiledRowsMatchQuery),
-        Box::new(InvViewmodelEditableTextTriggers),
-        Box::new(InvViewmodelStateToggleCorrect),
         Box::new(InvLiveTreeMatchesFresh),
         Box::new(InvFrontendEngine),
         Box::new(InvFrontendBoundsRendered),
@@ -508,18 +631,16 @@ fn native_proxy_invariants<'a>() -> Vec<ProxyInvariant<'a>> {
 /// proxy: their bodies call `SutDriver` methods that take `&mut self`, which the
 /// (`&self`) proxy can't forward. Same data-only shape; gates live in the registry.
 fn native_self_invariants() -> Vec<SelfInvariant> {
-    #[allow(unused_mut)]
-    let mut v: Vec<SelfInvariant> = vec![
+    // `inv-sql-budget` was dispatched here over `E2ESut` until E3 relocated it onto
+    // the composed slice (`composed::span_metrics`); it is now in
+    // `NATIVE_ONLY_EXCLUDED`. The remaining self-invariants take `&mut self` (driver
+    // ops the `&self` proxy can't forward) and stay native until E5.
+    vec![
         Box::new(InvFocusMatchesRef),
         Box::new(InvWindowFocusMatchesEngineFocus),
         Box::new(InvEditorCaretMatchesRef),
         Box::new(InvEditorTextMatchesRef),
-    ];
-    // Per-transition SQL/wall/memory budget — otel-only (the `pbt` feature always
-    // enables otel-testing). Reads SUT-local span metrics, so it needs `self`.
-    #[cfg(feature = "otel-testing")]
-    v.push(Box::new(InvSqlBudget));
-    v
+    ]
 }
 
 /// Registry invariants the native runner deliberately does **not** dispatch —
@@ -531,16 +652,78 @@ fn native_self_invariants() -> Vec<SelfInvariant> {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const NATIVE_ONLY_EXCLUDED: &[&str] = &[
     // set-equality; subsumed natively by inv-live-children-match-ref +
-    // inv-blocks-match-ref/* — covered standalone by storage_consistency_pbt.
+    // inv-blocks-match-ref/* — covered by subsystem_convergence_pbt (full registry).
     "inv-block-ids-match-ref",
-    // covered by storage_consistency_pbt + task_state_coherence_pbt.
+    // covered by subsystem_convergence_pbt + task_state_coherence_pbt.
     "inv-task-state-storage-coherence",
-    // covered by cdc_delivery_pbt + storage_consistency_pbt (`storage` preset).
+    // covered by cdc_delivery_pbt + subsystem_convergence_pbt (`storage` preset).
     "inv-block-tags-references-exist",
     // per-block content equality on stable ids; covered natively by
     // inv-blocks-match-ref/* field comparison — covered standalone by
     // split_block_content_pbt.
     "inv-block-content-matches-ref",
+    // E3: `SutBackend` deleted off `E2ESut` (the headless `block_raw`/`block`-matview
+    // read surface). Its 6 structural bodies now run only via the composed catalog
+    // (`HeadlessFrontendComponent` / `SqlProjectionComponent` host `SutBackend`) —
+    // see `E1_RELOCATED_CAP_COVERAGE`.
+    "inv-blocks-match-ref/matview",
+    "inv-blocks-match-ref/block_raw",
+    "inv-no-orphan-blocks",
+    "inv-no-parent-cycles",
+    "inv-source-language-iff-source",
+    "inv-focus-roots",
+    // E3: the `SutWatchRows` cap was deleted off `E2ESut` (B5/E1 relocation onto
+    // `HeadlessFrontendComponent`'s production reactive watch surface), so the
+    // native runner no longer dispatches the watch invariants — the composed
+    // `frontend_slice` is now their sole host.
+    "inv-active-watches-match-ref",
+    "inv-watch-rows-match-ref",
+    // E3: `SutOrgRead` deleted off `E2ESut` (E1 relocation onto
+    // `HeadlessFrontendComponent`'s production `holon_orgmode` parser). The
+    // org-read block-equivalence invariant now runs only via the composed
+    // `frontend_slice`.
+    "inv-blocks-match-ref/org",
+    // E3: `SutOrgRender` deleted off `E2ESut` — the standalone
+    // `org_render_fixed_point_pbt` regression slice (its last native consumer) was
+    // removed, so the composed `frontend_slice` is now its sole host. Coverage is
+    // preserved with teeth: `frontend_slice_org_render_fixed_point_bites` drives
+    // `inv-org-render-fixed-point` to both arms over the production
+    // `CacheBlockReader` + `OrgRenderer` (clean → Ok, overwrite garbage → Fail).
+    "inv-org-render-fixed-point",
+    // E3: `SutRenderer` deleted off `E2ESut` (the headless `widget_tree_*`
+    // surface). Its `WidgetSnapshot`/viewmodel-render invariants now run only via
+    // the composed `frontend_slice` (`HeadlessFrontendComponent` hosts
+    // `SutRenderer`) — see `E1_RELOCATED_CAP_COVERAGE`. `inv-displayed-text/widget`
+    // stays native (bound on `SutLayout`, which `E2ESut` keeps as the window shell).
+    "inv-viewmodel-snapshot",
+    "inv-viewmodel-tree-virtual-slots",
+    "inv-viewmodel-root-matches-render-expr",
+    "inv-viewmodel-entity-ids-subset-of-data",
+    "inv-viewmodel-decompiled-rows-match-query",
+    "inv-viewmodel-editable-text-triggers",
+    "inv-viewmodel-state-toggle-correct",
+    "inv-editable-text-has-draggable",
+    "inv-matview-consistent-with-ref",
+    "inv-displayed-text/viewmodel",
+    // E3: `SutLoroLog` deleted off `E2ESut` (the headless Loro-store read surface).
+    // The Loro-store invariants now run only via the composed `loro_slice` /
+    // `frontend_slice` full-headless Loro arm (`LoroBackendComponent` hosts
+    // `SutLoroLog`) — see `E1_RELOCATED_CAP_COVERAGE`.
+    "inv-loro-no-errors",
+    "inv-loro-children-match-ref",
+    "inv-blocks-match-ref/loro",
+    "inv-live-children-match-ref",
+    // E3: `SutErrorLog` deleted off `E2ESut` (the app-level publish-error surface).
+    // `inv-no-errors` now runs only via the composed `frontend_slice`
+    // (`HeadlessFrontendComponent` hosts `SutErrorLog` over the production
+    // `FrontendSession` publish-error tracker) — see `E1_RELOCATED_CAP_COVERAGE`.
+    "inv-no-errors",
+    // E3: the native `SutSpanMetrics` budget cap was deleted off `E2ESut`. The
+    // per-transition budget now runs only via the composed slice
+    // (`composed::span_metrics` hosts a `ComposedBudget` over the same `MetricsSut`,
+    // with the harness driving its reset/freeze lifecycle) — see
+    // `E1_RELOCATED_CAP_COVERAGE`.
+    "inv-sql-budget",
 ];
 
 /// One invariant's disposition for a single tick, retained so the runner can
@@ -1026,7 +1209,7 @@ mod tests {
     /// tables `run_invariant_registry` iterates, so this can never disagree with
     /// what runs. No hand-maintained string list.
     fn dispatched_ids() -> Vec<&'static str> {
-        native_proxy_invariants()
+        native_proxy_invariants::<crate::pbt::E2ESut>()
             .iter()
             .map(|b| b.id().0)
             .chain(native_self_invariants().iter().map(|b| b.id().0))

@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::{Change, Value};
 use anyhow::Result;
 use futures_signals::signal_map::{MutableBTreeMap, MutableBTreeMapLockRef, MutableSignalMap};
-use crate::{Change, Value};
 use tokio::sync::Notify;
 
 use crate::StorageEntity;
@@ -308,7 +308,10 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     pub fn subscribe<C, S>(self: &Arc<Self>, source_name: &'static str, mut stream: S)
     where
         C: Into<Change<StorageEntity>> + Send + 'static,
-        S: tokio_stream::Stream<Item = crate::streaming::BatchWithMetadata<C>> + Send + Unpin + 'static,
+        S: tokio_stream::Stream<Item = crate::streaming::BatchWithMetadata<C>>
+            + Send
+            + Unpin
+            + 'static,
     {
         let live = Arc::clone(self);
         tokio::spawn(async move {
@@ -359,8 +362,8 @@ mod tests {
     use super::*;
     use std::task::{Context, Poll};
 
-    use futures_signals::signal_map::{MapDiff, SignalMapExt};
     use crate::Value;
+    use futures_signals::signal_map::{MapDiff, SignalMapExt};
 
     fn make_row(id: &str, content: &str) -> StorageEntity {
         let mut row: StorageEntity = crate::StorageEntity::new();

@@ -109,7 +109,7 @@ struct ToySut {
     root: WidgetSnapshot,
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutRenderer for ToySut {
     async fn render_tree_of(&self, _: &EntityUri) -> Option<String> {
         None
@@ -131,7 +131,7 @@ impl SutRenderer for ToySut {
     }
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutSqlProjection for ToySut {
     async fn block_row(&self, _: &EntityUri) -> Option<Vec<String>> {
         None
@@ -168,7 +168,7 @@ impl SutSqlProjection for ToySut {
     }
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl SutLoroTaskState for ToySut {
     async fn loro_task_state_of(&self, _: &str) -> Option<String> {
         None

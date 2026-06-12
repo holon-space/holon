@@ -25,13 +25,13 @@ use holon_core::storage::block_query::Result;
 use holon_core::storage::{BlockQuerySource, BlockSnapshot};
 use tokio::sync::RwLock;
 
-use holon_loro::LoroBackend;
 use crate::api::operation_dispatcher::OperationDispatcher;
-use holon_api::repository::CoreOperations;
 use crate::api::{DispatchingOperationEngine, OperationEngine};
-use holon_core::OperationProvider;
 use crate::sync::loro_block_operations::LoroBlockOperations;
 use crate::sync::loro_document_store::LoroDocumentStore;
+use holon_api::repository::CoreOperations;
+use holon_core::OperationProvider;
+use holon_loro::LoroBackend;
 
 /// Captures blocks straight from a [`LoroBackend`] tree, with no Turso
 /// connection, into a [`BlockSnapshot`].
@@ -162,9 +162,9 @@ pub fn register_loro_operation_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holon_api::repository::Lifecycle;
     use crate::di::lifecycle::build_no_turso_container;
     use holon_api::BlockContent;
+    use holon_api::repository::Lifecycle;
     use holon_core::storage::BlockQuery;
 
     async fn seed_backend() -> (Arc<LoroBackend>, EntityUri, Vec<EntityUri>, EntityUri) {
@@ -337,8 +337,8 @@ mod tests {
     /// guarantee the prod wiring relies on.
     #[tokio::test]
     async fn loro_block_op_persists_across_store_reopen() {
-        use holon_core::CrudOperations;
         use holon_api::Value;
+        use holon_core::CrudOperations;
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();

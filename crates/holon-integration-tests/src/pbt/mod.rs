@@ -5,13 +5,19 @@
 
 pub mod action_actor_state;
 pub mod bisect_driver;
+pub mod composed;
 pub mod fixtures;
+pub mod frontend_slice;
 pub mod generators;
 pub mod invariant_runner;
 pub mod invariants;
 pub mod layout_bridge;
+pub mod local_caps;
+pub mod loro_slice;
 pub mod loro_sync;
 pub mod mcp_server_actor_state;
+pub mod memory_slice;
+pub mod op_write_cap;
 pub mod org_markdown_file_state;
 pub mod panic_diag;
 pub mod peer_ops;
@@ -23,13 +29,15 @@ pub mod reference_domain_state;
 pub mod reference_state;
 pub mod retry;
 pub mod slice;
+pub mod sql_loro_slice;
+pub mod sql_slice;
 pub mod state_machine;
 pub mod stepper;
 pub mod sut;
 pub mod sut_capabilities;
-mod sut_cdc_mirrors;
 mod sut_check_invariants;
 mod sut_handle;
+pub mod sut_handle_decomp_spike;
 mod sut_keybindings;
 pub mod sut_loro;
 mod sut_metrics;
@@ -45,6 +53,7 @@ pub mod ui_harness;
 pub mod ui_interaction;
 pub mod validation;
 pub mod value_fn_invariants;
+pub mod window_slice;
 
 /// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
 /// real UUID. Only split suffixes are: `reference_state.rs::split_block`
@@ -75,9 +84,8 @@ pub use transitions::E2ETransition;
 pub use types::*;
 pub use ui_actor_state::{UIActorState, UITabState, UIUserState};
 pub use ui_harness::{
-    DEFAULT_FRONTEND_MEMORY_MULTIPLIER, enable_atomic_editor_if_unset,
-    install_rejection_histogram_panic_hook, screenshot_dir, set_loro_peer_id_if_unset,
-    set_memory_multiplier_if_unset, spawn_quit_on_pbt_finish, standard_pbt_config,
-    try_start_embedded_mcp, wait_for_geometry_ready,
+    DEFAULT_FRONTEND_MEMORY_MULTIPLIER, install_rejection_histogram_panic_hook, screenshot_dir,
+    set_loro_peer_id_if_unset, set_memory_multiplier_if_unset, spawn_quit_on_pbt_finish,
+    standard_pbt_config, try_start_embedded_mcp, wait_for_geometry_ready,
 };
 pub use ui_interaction::UiInteraction;

@@ -1,11 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn build(ba: BA<'_>) -> Element {
-    let checked = ba.args.get_bool("checked").unwrap_or(false);
-    let (symbol, color) = if checked {
-        ("[x]", "var(--success)")
-    } else {
-        ("[ ]", "var(--text-muted)")
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Checkbox { checked } = &node.kind else {
+        return rsx! {};
     };
-    rsx! { span { font_size: "14px", color: color, {symbol} } }
+    let checked = *checked;
+    rsx! { input { r#type: "checkbox", checked, disabled: true } }
 }

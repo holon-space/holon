@@ -11,27 +11,15 @@
 //! Build with [`cached`] (read-only, no eager drain) or [`cached_with_drain`]
 //! (drains VM emissions up front; needs `&mut S`). Each call starts a
 //! fresh tick; cache state never bleeds across ticks.
-//!
-//! ## `SutCdc::drain_cdc` is intentionally NOT forwarded
-//!
-//! `drain_cdc` flushes the CDC pipeline — a persistent SUT side effect
-//! that belongs to the transition executor, not invariant evaluation.
-//! Flush before constructing the proxy:
-//!
-//! ```text
-//! sut.drain_cdc().await;          // flush
-//! let proxy = cached(&sut);       // snapshot
-//! invariants.check(&ref_, &proxy).await;
-//! ```
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::capabilities::{
-    EntityUri, FrontendRootVm, ProviderStabilityReport, RenderedElement, SutBackend, SutCdc,
-    SutErrorLog, SutLayout, SutLoroLog, SutOrgRead, SutOrgRender, SutRenderer, SutSqlProjection,
-    SutViewModel, SutWatchRows, ViewportHint, WatchRow, WidgetSnapshot,
+    EntityUri, FrontendRootVm, ProviderStabilityReport, RenderedElement, SutBackend, SutErrorLog,
+    SutLayout, SutLoroLog, SutOrgRead, SutOrgRender, SutRenderer, SutSqlProjection, SutViewModel,
+    SutWatchRows, ViewportHint, WatchRow, WidgetSnapshot,
 };
 
 /// `widget_tree_snapshot()` runs the expensive headless `interpret_pure`
@@ -50,7 +38,6 @@ pub struct CachingProxy<'a, S> {
     /// eager drain, and `drain_vm_emissions` will return an empty Vec
     /// (the caller already drained, or there's nothing to drain).
     vm_emissions_cache: Option<Vec<String>>,
-    cdc_in_flight_cache: RefCell<Option<bool>>,
     all_block_ids_cache: RefCell<Option<BTreeSet<EntityUri>>>,
     root_data_row_ids_cache: RefCell<Option<BTreeSet<EntityUri>>>,
     live_block_snapshot_cache: RefCell<Option<Vec<holon_api::Block>>>,
@@ -73,7 +60,6 @@ pub fn cached<S>(sut: &S) -> CachingProxy<'_, S> {
     CachingProxy {
         inner: sut,
         vm_emissions_cache: None,
-        cdc_in_flight_cache: RefCell::new(None),
         all_block_ids_cache: RefCell::new(None),
         root_data_row_ids_cache: RefCell::new(None),
         live_block_snapshot_cache: RefCell::new(None),
@@ -90,7 +76,6 @@ pub async fn cached_with_drain<S: SutViewModel>(sut: &mut S) -> CachingProxy<'_,
     CachingProxy {
         inner: sut,
         vm_emissions_cache: Some(emissions),
-        cdc_in_flight_cache: RefCell::new(None),
         all_block_ids_cache: RefCell::new(None),
         root_data_row_ids_cache: RefCell::new(None),
         live_block_snapshot_cache: RefCell::new(None),
@@ -102,7 +87,7 @@ pub async fn cached_with_drain<S: SutViewModel>(sut: &mut S) -> CachingProxy<'_,
 
 // ─── SutViewModel ─────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
     /// Returns the eagerly-drained snapshot if the proxy was built with
     /// [`cached_with_drain`], else an empty Vec.
@@ -153,27 +138,9 @@ impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
     }
 }
 
-// ─── SutCdc (read-only subset only) ───────────────────────────────────
-
-impl<'a, S: SutCdc> CachingProxy<'a, S> {
-    /// Memoised `cdc_in_flight`. The proxy intentionally does NOT
-    /// implement `SutCdc::drain_cdc` — see module-level doc.
-    pub async fn cdc_in_flight_cached(&self) -> bool {
-        {
-            let guard = self.cdc_in_flight_cache.borrow();
-            if let Some(v) = *guard {
-                return v;
-            }
-        }
-        let v = self.inner.cdc_in_flight().await;
-        *self.cdc_in_flight_cache.borrow_mut() = Some(v);
-        v
-    }
-}
-
 // ─── SutSqlProjection ─────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
     /// Per-id read — no drain-once issue, uncached.
     async fn block_row(&self, id: &EntityUri) -> Option<Vec<String>> {
@@ -232,7 +199,7 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
 
 // ─── SutBackend ───────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutBackend> SutBackend for CachingProxy<'a, S> {
     /// Memoised typed block snapshot — both the id-set lag check and the
     /// deep field comparison in `inv-backend-blocks-match-ref` read it in
@@ -260,7 +227,7 @@ impl<'a, S: SutBackend> SutBackend for CachingProxy<'a, S> {
 
 // ─── SutErrorLog ──────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutErrorLog> SutErrorLog for CachingProxy<'a, S> {
     async fn app_error_count(&self) -> usize {
         self.inner.app_error_count().await
@@ -273,7 +240,7 @@ impl<'a, S: SutErrorLog> SutErrorLog for CachingProxy<'a, S> {
 
 // ─── SutLoroLog ───────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutLoroLog> SutLoroLog for CachingProxy<'a, S> {
     async fn loro_had_errors(&self) -> bool {
         self.inner.loro_had_errors().await
@@ -290,7 +257,7 @@ impl<'a, S: SutLoroLog> SutLoroLog for CachingProxy<'a, S> {
 
 // ─── SutLayout ────────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutLayout> SutLayout for CachingProxy<'a, S> {
     /// Memoised geometry snapshot — the three FrontendBounds invariants
     /// (`inv-frontend-bounds-rendered`, `inv-displayed-text`,
@@ -357,7 +324,7 @@ impl<'a, S: SutLayout> SutLayout for CachingProxy<'a, S> {
 
 // ─── SutOrgRender ─────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutOrgRender> SutOrgRender for CachingProxy<'a, S> {
     async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
         self.inner.snapshot_org_render_pairs().await
@@ -366,7 +333,7 @@ impl<'a, S: SutOrgRender> SutOrgRender for CachingProxy<'a, S> {
 
 // ─── SutOrgRead ───────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutOrgRead> SutOrgRead for CachingProxy<'a, S> {
     async fn org_block_snapshot(&self) -> Vec<holon_api::Block> {
         self.inner.org_block_snapshot().await
@@ -375,7 +342,7 @@ impl<'a, S: SutOrgRead> SutOrgRead for CachingProxy<'a, S> {
 
 // ─── SutWatchRows ─────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutWatchRows> SutWatchRows for CachingProxy<'a, S> {
     async fn watch_query_ids(&self) -> Vec<String> {
         self.inner.watch_query_ids().await
@@ -396,7 +363,7 @@ impl<'a, S: SutWatchRows> SutWatchRows for CachingProxy<'a, S> {
 
 // ─── SutRenderer ──────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait(?Send)]
 impl<'a, S: SutRenderer> SutRenderer for CachingProxy<'a, S> {
     async fn render_tree_of(&self, id: &EntityUri) -> Option<String> {
         self.inner.render_tree_of(id).await

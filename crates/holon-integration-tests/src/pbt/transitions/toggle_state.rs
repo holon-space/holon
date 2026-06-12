@@ -12,8 +12,8 @@ use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
+use crate::pbt::local_caps::SutMutate;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
@@ -113,7 +113,7 @@ pub fn cycle_click_count(current: &str, target: CycleTarget) -> u8 {
 /// Click the state_toggle widget `click_count` times to advance the
 /// task_state cycle to the target.
 pub async fn apply_toggle_state_to_sut<S: SutLayout + SutDriver>(
-    sut: &mut S,
+    sut: &S,
     id: &EntityUri,
     click_count: u8,
 ) {
@@ -146,6 +146,12 @@ pub struct ToggleState {
 }
 
 impl TransitionFactory<ReferenceState> for ToggleState {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutMutate,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let owned_render_expr = state
@@ -301,9 +307,9 @@ impl TransitionRef<ReferenceState> for ToggleState {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ToggleState {
+impl<S: SutMutate> TransitionImpl<ReferenceState, S> for ToggleState {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_toggle_state(&self.block_id, self.new_state).await;
+        sut.toggle_state(&self.block_id, self.new_state).await;
     }
 }
 

@@ -33,6 +33,9 @@ uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+proptest.workspace = true
+proptest-state-machine.workspace = true
+serial_test.workspace = true
 tempfile.workspace = true
 
 # Disable iroh for Android - it pulls in OpenSSL which is complex to build for Android

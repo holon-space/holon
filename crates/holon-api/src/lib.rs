@@ -1,3 +1,11 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Shared Kernel
+//! @c4 uses holon-expr "compiled Rhai expressions" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
+//! Shared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -7,6 +15,7 @@ pub mod block;
 pub mod block_mutation;
 pub mod capability;
 pub mod change_set;
+pub mod clock;
 pub mod computed;
 pub mod entity;
 pub mod entity_profile;
@@ -69,11 +78,12 @@ pub use block::{
 
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
 pub use change_set::{agrees_with_ops, source_op_names, ChangeOp, ChangeSet, Provenance};
+pub use clock::{Clock, SystemClock, TestClock};
 
 // Re-export typed domain types
 pub use types::{
-    ContentType, DependsOn, EntityName, Priority, QueryLanguage, Region, SourceLanguage,
-    StateCategory, Tags, TaskState, Timestamp, UiInfo,
+    ContentType, DependsOn, EntityName, NavigationOp, Priority, QueryLanguage, Region,
+    SourceLanguage, StateCategory, Tags, TaskState, Timestamp, UiInfo,
 };
 
 // Re-export entity URI type
@@ -164,6 +174,7 @@ pub enum Number {
 /// flutter_rust_bridge:non_opaque
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
+/// @c4 code
 pub enum Value {
     String(String),
     Integer(i64),

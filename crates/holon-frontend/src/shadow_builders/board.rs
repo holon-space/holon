@@ -19,7 +19,7 @@ use std::collections::HashMap;
 //    (e.g. mode toggle / nav). Most kanban use cases pin lanes via
 //    `lane_order` so this is fine.
 //
-// 3. Static fallback: `board(item_template: card(...), lane_field: "status")`
+// 3. Static (non-streaming): `board(item_template: card(...), lane_field: "status")`
 //    with only `ctx.data_rows` (no streaming source). Same grouping as the
 //    streaming path but the cards are materialized once.
 //
@@ -32,8 +32,8 @@ use std::collections::HashMap;
 // - `lane_width` — pixel width override for each lane (default: GPUI side).
 //
 // The "static positional" shape (`board(board_lane(...), board_lane(...))`)
-// is also accepted as a fallback when no `item_template` is supplied; the
-// positional children are interpreted as pre-built lanes.
+// is also accepted when no `item_template` is supplied; the positional
+// children are interpreted as pre-built lanes.
 holon_macros::widget_builder! {
     raw fn board(ba: BA<'_>) -> ViewModel {
         tracing::info!(
@@ -111,7 +111,6 @@ holon_macros::widget_builder! {
                     &tmpl,
                     &rows,
                     &ba,
-                    &lane_field,
                     &lane_value_of,
                     &order_lanes,
                     board_props,
@@ -149,12 +148,11 @@ holon_macros::widget_builder! {
                 };
             }
 
-            // ── Shape 3: static fallback over ctx.data_rows ─────────────
+            // ── Shape 3: static (non-streaming) over ctx.data_rows ──────
             return interpret_static(
                 &tmpl,
                 &ba.ctx.data_rows,
                 &ba,
-                &lane_field,
                 &lane_value_of,
                 &order_lanes,
                 board_props,
@@ -179,12 +177,11 @@ holon_macros::widget_builder! {
 ///
 /// Used by:
 /// - Inline `rows: [...]` literal (gallery, tests).
-/// - The fallback path when no `data_source` is set.
+/// - The non-streaming path when no `data_source` is set.
 fn interpret_static(
     tmpl: &holon_api::render_types::RenderExpr,
     rows: &[Arc<HashMap<String, Value>>],
     ba: &BA<'_>,
-    lane_field: &str,
     lane_value_of: &dyn Fn(&HashMap<String, Value>) -> String,
     order_lanes: &dyn Fn(&HashMap<String, ()>) -> Vec<String>,
     board_props: HashMap<String, Value>,
@@ -205,7 +202,7 @@ fn interpret_static(
             let rows_in_lane = lane_rows.remove(&lane).unwrap_or_default();
             let cards: Vec<ViewModel> = rows_in_lane
                 .into_iter()
-                .map(|row| build_static_card(tmpl, row, ba, lane_field))
+                .map(|row| build_static_card(tmpl, row, ba))
                 .collect();
             let mut lane_props = HashMap::new();
             lane_props.insert("title".to_string(), Value::String(lane));
@@ -230,7 +227,6 @@ fn build_static_card(
     tmpl: &holon_api::render_types::RenderExpr,
     row: Arc<HashMap<String, Value>>,
     ba: &BA<'_>,
-    _lane_field: &str,
 ) -> ViewModel {
     let row_ctx = ba.ctx.with_row(row.clone());
     let card_vm = (ba.interpret)(tmpl, &row_ctx);

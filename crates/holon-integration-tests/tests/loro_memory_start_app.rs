@@ -63,7 +63,7 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         .clone();
     let reactive = env
         .reactive_engine
-        .as_ref()
+        .get()
         .expect("start_app(LoroMemory) must resolve a ReactiveEngine")
         .clone();
 

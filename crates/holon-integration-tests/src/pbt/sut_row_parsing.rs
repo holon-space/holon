@@ -17,6 +17,32 @@ use holon_orgmode::OrgBlockExt;
 
 use super::types::Mutation;
 
+/// Snapshot SQL for the `block` MATVIEW — the canonical projection that carries
+/// the junction edge fields (`tags`/`requires`) as `json_group_array` columns.
+/// Backs the `inv-blocks-match-ref/matview` reader (`SutBackend::live_block_snapshot`).
+/// Centralised here, next to [`parse_block_row`], so the column list and its
+/// parser stay in lockstep and the SQL isn't duplicated across SUT impls.
+pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, source_language, properties, tags, requires \
+     FROM block";
+
+/// Snapshot SQL for the write-side `block_raw` BASE TABLE. Native columns only —
+/// `block_raw` has no junction `tags`/`requires`, so [`parse_block_row`] leaves
+/// those empty and the `/block_raw` invariant compares a field subset. Backs
+/// `SutBackend::block_raw_snapshot`.
+pub(super) const BLOCK_RAW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, source_language, properties \
+     FROM block_raw";
+
+/// Parse a batch of snapshot rows into typed [`Block`]s, fail-loud on any row
+/// that won't parse (a malformed row is a bug, never silently skipped).
+pub(super) fn parse_block_rows(rows: &[holon::storage::types::StorageEntity]) -> Vec<Block> {
+    rows.iter()
+        .map(|r| {
+            parse_block_row(r)
+                .unwrap_or_else(|| panic!("parse_block_row returned None for row {r:?}"))
+        })
+        .collect()
+}
+
 /// Build a `Block` from a SQL row that includes id/content/content_type/
 /// source_language/parent_id/properties (and optionally tags + org fields).
 /// Used both by inv-backend-blocks-match-ref's SQL path and by the LiveData<Block> experiment so
@@ -24,8 +50,15 @@ use super::types::Mutation;
 pub(super) fn parse_block_row(row: &holon::storage::types::StorageEntity) -> Option<Block> {
     let id =
         EntityUri::parse(row.get("id")?.as_string()?).expect("block id from DB must be valid URI");
-    let parent_id = EntityUri::parse(row.get("parent_id")?.as_string()?)
-        .expect("block parent_id from DB must be valid URI");
+    // A NULL/missing `parent_id` in `block_raw` is a top-level block — semantically
+    // `no_parent()` (the sentinel `no_orphan`/`block_parent` already recognize as the
+    // valid root). Splitting a top-level block mints such a sibling; coalescing here
+    // (rather than returning `None`, which every caller treats as a hard error) lets
+    // the SQL slice parse top-level blocks instead of panicking.
+    let parent_id = match row.get("parent_id").and_then(|v| v.as_string()) {
+        Some(s) => EntityUri::parse(s).expect("block parent_id from DB must be valid URI"),
+        None => EntityUri::no_parent(),
+    };
     let content = row
         .get("content")
         .and_then(|v| v.as_string())
@@ -55,15 +88,20 @@ pub(super) fn parse_block_row(row: &holon::storage::types::StorageEntity) -> Opt
     // `inv-backend-blocks-match-ref` comparison.
     block.requires = row
         .get("requires")
-        .map(|v| match v {
-            Value::Array(arr) => arr
-                .iter()
-                .filter_map(|x| x.as_string().map(|s| s.to_string()))
-                .collect(),
-            Value::Json(s) | Value::String(s) => {
-                serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
-            }
-            _ => Vec::new(),
+        .map(|v| {
+            let raw: Vec<String> = match v {
+                Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|x| x.as_string().map(|s| s.to_string()))
+                    .collect(),
+                Value::Json(s) | Value::String(s) => {
+                    serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            raw.into_iter()
+                .map(|s| EntityUri::parse_owned(s).expect("stored requires must be a valid URI"))
+                .collect::<Vec<EntityUri>>()
         })
         .unwrap_or_default();
 

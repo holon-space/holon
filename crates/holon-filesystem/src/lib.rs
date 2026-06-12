@@ -1,6 +1,13 @@
-//! Filesystem utilities for Holon
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Adapter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //!
-//! This crate provides filesystem operations and utilities used by other Holon crates.
+//! FileSystem + FileChangeSource ports with in-memory and notify-based adapters (ADR 0011).
+//!
+//! This crate provides the filesystem port traits and their adapters used by other Holon crates.
 
 pub mod change_source;
 pub mod directory;

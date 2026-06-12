@@ -36,8 +36,7 @@ use std::path::Path;
 /// Editor-shape env flags that change the PBT transition alphabet and
 /// reference semantics but live outside the `ComponentSet` lattice
 /// (ADR 0009 §4 follow-up: captures must record them or replay is unfaithful).
-pub const CAPTURE_ENV_FLAGS: &[&str] =
-    &["PBT_ATOMIC_EDITOR", "PBT_MUTABLE_TEXT", "PBT_REAL_EDITOR"];
+pub const CAPTURE_ENV_FLAGS: &[&str] = &["PBT_MUTABLE_TEXT"];
 
 /// Execution environment a capture/fixture was recorded under.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, serde::Deserialize)]

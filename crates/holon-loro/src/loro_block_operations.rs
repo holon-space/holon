@@ -23,19 +23,19 @@ use tokio::sync::RwLock;
 use holon_api::block::{Block, BlockContent};
 use holon_api::{ContentType, EntityName, EntityUri, Operation, Value};
 
-use holon_api::repository::Traversal;
-use holon_api::repository::CoreOperations;
+use crate::LoroDocumentStore;
 use crate::loro_backend::LoroBackend;
-use holon_core::{
-    BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
-    CompletionStateInfo, CrudOperations, DataSource, MarkOperations,
-    OperationProvider, OperationRegistry, OperationResult, Result, TaskOperations, TextOperations,
-    UnknownOperationError,
-};
+use holon_api::ApiError;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
-use crate::LoroDocumentStore;
-use holon_api::ApiError;
+use holon_api::repository::CoreOperations;
+use holon_api::repository::Traversal;
+use holon_core::{
+    BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
+    CompletionStateInfo, CrudOperations, DataSource, MarkOperations, OperationProvider,
+    OperationRegistry, OperationResult, Result, TaskOperations, TextOperations,
+    UnknownOperationError,
+};
 
 /// Generic operations on Loro blocks.
 ///
@@ -468,7 +468,12 @@ impl TaskOperations<Block> for LoroBlockOperations {
     }
 
     async fn set_state(&self, id: &str, state: String) -> Result<OperationResult> {
-        self.set_field(id, "TODO", Value::String(state)).await
+        // The canonical task-state property key is `task_state` — the org parser
+        // (`block_params`), the SQL provider's `cycle_task_state`, and `Block::task_state()`
+        // all read/write `properties["task_state"]`. Writing `"TODO"` here stored a stray
+        // property the cycle never read back, so `cycle_task_state` (read `task_state`, write
+        // `TODO`) was a no-op in Loro mode — Cmd+Enter never advanced the keyword.
+        self.set_field(id, "task_state", Value::String(state)).await
     }
 
     async fn cycle_task_state(&self, id: &str) -> Result<OperationResult> {

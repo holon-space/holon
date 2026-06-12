@@ -113,9 +113,6 @@ impl RefLifecycle for EditorPureRef {
     fn last_transition_kind(&self) -> Option<&'static str> {
         self.last_transition_kind
     }
-    fn atomic_editor_enabled() -> bool {
-        true
-    }
 }
 
 impl RefBlockTree for EditorPureRef {
@@ -371,72 +368,90 @@ impl RefFocusMut for EditorPureRef {
 // ─────────────────────────────────────────────────────────────────
 
 pub struct EditorPureSut {
-    inner: EditorPureRef,
+    // Interior mutability so the write caps are `&self` (hostable on `CapMap`).
+    inner: std::cell::RefCell<EditorPureRef>,
 }
 
 impl EditorPureSut {
     fn new(seed: &EditorPureRef) -> Self {
         Self {
-            inner: seed.clone(),
+            inner: std::cell::RefCell::new(seed.clone()),
         }
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutEditorMirrorWrite for EditorPureSut {
-    async fn apply_type_chars(&mut self, text: &str) {
-        <EditorPureRef as RefEditorMirrorMut>::type_chars(&mut self.inner, text);
+    async fn apply_type_chars(&self, text: &str) {
+        <EditorPureRef as RefEditorMirrorMut>::type_chars(&mut self.inner.borrow_mut(), text);
     }
-    async fn apply_delete_backward(&mut self, count: usize) {
-        <EditorPureRef as RefEditorMirrorMut>::delete_backward(&mut self.inner, count);
+    async fn apply_delete_backward(&self, count: usize) {
+        <EditorPureRef as RefEditorMirrorMut>::delete_backward(&mut self.inner.borrow_mut(), count);
     }
-    async fn apply_move_cursor(&mut self, byte_position: usize) {
-        <EditorPureRef as RefEditorMirrorMut>::move_cursor(&mut self.inner, byte_position);
+    async fn apply_move_cursor(&self, byte_position: usize) {
+        <EditorPureRef as RefEditorMirrorMut>::move_cursor(
+            &mut self.inner.borrow_mut(),
+            byte_position,
+        );
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutBlockTreeWrite for EditorPureSut {
-    async fn apply_split_block(&mut self, id: &EntityUri, position: usize) {
-        let new_id = <EditorPureRef as RefBlockTreeMut>::split_block(&mut self.inner, id, position);
+    async fn apply_split_block(&self, id: &EntityUri, position: usize) {
+        let mut inner = self.inner.borrow_mut();
+        let new_id = <EditorPureRef as RefBlockTreeMut>::split_block(&mut inner, id, position);
         <EditorPureRef as RefFocusMut>::set_focus(
-            &mut self.inner,
+            &mut inner,
             CapRegion::Main,
             new_id,
             CapCursor::default(),
         );
     }
-    async fn apply_join_block(&mut self, id: &EntityUri) {
-        let _ = <EditorPureRef as RefBlockTreeMut>::join_block(&mut self.inner, id);
+    async fn apply_join_block(&self, id: &EntityUri) {
+        let _ = <EditorPureRef as RefBlockTreeMut>::join_block(&mut self.inner.borrow_mut(), id);
     }
-    async fn apply_indent(&mut self, id: &EntityUri) {
-        <EditorPureRef as RefBlockTreeMut>::indent(&mut self.inner, id);
+    async fn apply_indent(&self, id: &EntityUri) {
+        <EditorPureRef as RefBlockTreeMut>::indent(&mut self.inner.borrow_mut(), id);
     }
-    async fn apply_outdent(&mut self, id: &EntityUri) {
-        <EditorPureRef as RefBlockTreeMut>::outdent(&mut self.inner, id);
+    async fn apply_outdent(&self, id: &EntityUri) {
+        <EditorPureRef as RefBlockTreeMut>::outdent(&mut self.inner.borrow_mut(), id);
     }
-    async fn apply_move_up(&mut self, id: &EntityUri) {
-        if let Some(prev) = self.inner.previous_sibling(id) {
-            <EditorPureRef as RefBlockTreeMut>::swap_siblings(&mut self.inner, id, &prev);
+    async fn apply_move_up(&self, id: &EntityUri) {
+        let prev = self.inner.borrow().previous_sibling(id);
+        if let Some(prev) = prev {
+            <EditorPureRef as RefBlockTreeMut>::swap_siblings(
+                &mut self.inner.borrow_mut(),
+                id,
+                &prev,
+            );
         }
     }
-    async fn apply_move_down(&mut self, id: &EntityUri) {
-        if let Some(next) = self.inner.next_sibling(id) {
-            <EditorPureRef as RefBlockTreeMut>::swap_siblings(&mut self.inner, id, &next);
+    async fn apply_move_down(&self, id: &EntityUri) {
+        let next = self.inner.borrow().next_sibling(id);
+        if let Some(next) = next {
+            <EditorPureRef as RefBlockTreeMut>::swap_siblings(
+                &mut self.inner.borrow_mut(),
+                id,
+                &next,
+            );
         }
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutFocusWrite for EditorPureSut {
-    async fn apply_navigate_focus(&mut self, region: CapRegion, id: &EntityUri) {
+    async fn apply_navigate_focus(&self, region: CapRegion, id: &EntityUri) {
         <EditorPureRef as RefFocusMut>::set_focus(
-            &mut self.inner,
+            &mut self.inner.borrow_mut(),
             region,
             id.clone(),
             CapCursor::default(),
         );
     }
-    async fn apply_focus_editable_text(&mut self, id: &EntityUri) {
+    async fn apply_focus_editable_text(&self, id: &EntityUri) {
         <EditorPureRef as RefFocusMut>::set_focus(
-            &mut self.inner,
+            &mut self.inner.borrow_mut(),
             CapRegion::Main,
             id.clone(),
             CapCursor::default(),
@@ -444,8 +459,9 @@ impl SutFocusWrite for EditorPureSut {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutQuiesce for EditorPureSut {
-    async fn quiesce(&mut self) {}
+    async fn quiesce(&self) {}
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -745,10 +761,11 @@ impl StateMachineTest for EditorPureSut {
         sut: &Self::SystemUnderTest,
         _: &<Self::Reference as ReferenceStateMachine>::State,
     ) {
+        let inner = sut.inner.borrow();
         // inv-tree-cursor-within-text-len
         if let (Some(text), Some(cursor)) = (
-            <EditorPureRef as RefEditorMirror>::active_editor_text(&sut.inner),
-            <EditorPureRef as RefEditorMirror>::active_editor_cursor(&sut.inner),
+            <EditorPureRef as RefEditorMirror>::active_editor_text(&inner),
+            <EditorPureRef as RefEditorMirror>::active_editor_cursor(&inner),
         ) {
             assert!(
                 cursor <= text.len(),
@@ -758,8 +775,8 @@ impl StateMachineTest for EditorPureSut {
             );
         }
         // inv-tree-structural-integrity
-        let known: BTreeSet<&EntityUri> = sut.inner.blocks.keys().collect();
-        for (id, b) in &sut.inner.blocks {
+        let known: BTreeSet<&EntityUri> = inner.blocks.keys().collect();
+        for (id, b) in &inner.blocks {
             if let Some(parent) = &b.parent {
                 assert!(
                     known.contains(parent),
@@ -769,7 +786,7 @@ impl StateMachineTest for EditorPureSut {
                 );
             } else {
                 assert_eq!(
-                    id, &sut.inner.root_id,
+                    id, &inner.root_id,
                     "[inv-tree-structural-integrity] non-root block has no parent: {}",
                     id
                 );

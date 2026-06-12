@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use holon_pbt_core::capabilities::{EntityUri, RefBackend, SutBackend, SutSqlProjection};
+use holon_pbt_core::capabilities::{EntityUri, RefBackend, SutBackend};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvNoOrphanBlocks;
@@ -24,7 +24,7 @@ impl InvNoOrphanBlocks {
 impl<R, S> Invariant<R, S> for InvNoOrphanBlocks
 where
     R: RefBackend,
-    S: SutBackend + SutSqlProjection,
+    S: SutBackend,
 {
     fn id(&self) -> InvariantId {
         Self::ID
@@ -50,10 +50,16 @@ where
         // Staleness gate (reproduces `live_blocks_stale`): matview diverges
         // from the reference but `block_raw` matches it → CDC lag → Skip.
         if backend_ids != ref_ids {
+            // `block_raw` id set, derived from the same write-side snapshot the
+            // other structural invariants read (`block_raw_snapshot`) rather than
+            // a separate `SutSqlProjection::all_block_ids` query — identical id
+            // set (both are `block_raw`), one fewer cap dependency, so this body
+            // needs only `SutBackend`.
             let block_raw_ids: HashSet<EntityUri> = sut
-                .all_block_ids()
+                .block_raw_snapshot()
                 .await
                 .into_iter()
+                .map(|b| b.id)
                 .filter(|id| !seed_block_ids.contains(id))
                 .collect();
             if block_raw_ids == ref_ids {

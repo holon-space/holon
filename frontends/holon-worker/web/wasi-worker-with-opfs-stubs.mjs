@@ -24,6 +24,15 @@
 
 import { instantiateNapiModuleSync, MessageHandler, WASI } from '@napi-rs/wasm-runtime'
 
+// Forward fatal child-thread errors up to the main worker (which re-forwards to
+// the page) — child-worker error events are opaque cross-context otherwise.
+self.addEventListener('error', (ev) => {
+  self.postMessage({ __holon_fatal: String((ev.error && ev.error.stack) || ev.message || `${ev.filename}:${ev.lineno}`) })
+})
+self.addEventListener('unhandledrejection', (ev) => {
+  self.postMessage({ __holon_fatal: String((ev.reason && ev.reason.stack) || ev.reason) })
+})
+
 const panicChild = (name) => () => {
   throw new Error(
     `[holon-worker child thread] unexpectedly called OPFS import '${name}'. ` +

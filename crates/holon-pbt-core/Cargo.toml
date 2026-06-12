@@ -9,7 +9,9 @@ name = "holon_pbt_core"
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 holon-api = { workspace = true }
+holon-macros = { workspace = true }
 proptest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

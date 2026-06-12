@@ -21,6 +21,27 @@ use holon_core::cell::{
     CellBacking, CursorAnchor, CursorBias, DeltaOp, TextCellBacking, TextDelta, TextOp,
 };
 
+/// Commit origin stamped on the editor's *own keystroke* writes
+/// (`apply_text_op`). It is the **only** origin the subscribe filter
+/// suppresses: the editor already holds the value it just typed, and
+/// re-delivering its own echo would yank the caret to end via the absolute
+/// `set_value` convergence path (`editor_view::converge_input`).
+///
+/// Every *other* writer — structural ops / `set_field` (which reach Loro via
+/// `update_block_text` → `LoroDocument::with_write_origin("ui_local")`),
+/// `apply_replace`, and remote peer imports — is an **authoritative** write
+/// the editor must converge to, so those events pass the filter. Authority
+/// rationale: `docs/Architecture/UI.md` §"Field authority and intent capture".
+///
+/// CROSS-FRONTEND COUPLING: `apply_text_op` is called by every keystroke path
+/// (gpui, TUI, headless mirror). Stamping this origin is safe only because
+/// none of those consumers observe their *own* keystrokes via the
+/// `remote_deltas`/`signal` stream (TUI's stream loop only re-reads
+/// `current()`; headless never subscribes; gpui suppresses its own echo by
+/// design). Any future consumer that needs to *see* a local editor's
+/// keystrokes on the stream would silently miss them.
+pub(crate) const EDITOR_ECHO_ORIGIN: &str = "ui_editor_echo";
+
 pub struct LoroTextCellBacking {
     doc: Arc<LoroDoc>,
     text: LoroText,
@@ -44,8 +65,11 @@ impl LoroTextCellBacking {
         let subscription = doc.subscribe(
             &text_id,
             Arc::new(move |event| {
-                // Filter A: skip our own writes.
-                if event.origin == "ui_local" {
+                // Filter A: suppress ONLY the editor's own keystroke echo.
+                // Every other writer (structural `with_write`/`set_field`,
+                // `apply_replace`, peer imports) is authoritative and must
+                // reach the editor so it converges. See `EDITOR_ECHO_ORIGIN`.
+                if event.origin == EDITOR_ECHO_ORIGIN {
                     return;
                 }
                 // Filter B: only this container.
@@ -113,7 +137,11 @@ impl CellBacking<String> for LoroTextCellBacking {
 
 impl TextCellBacking for LoroTextCellBacking {
     fn apply_text_op(&self, op: TextOp) -> Result<()> {
-        self.doc.set_next_commit_origin("ui_local");
+        // The editor's own keystroke — stamp the echo origin so the subscribe
+        // filter drops it (the editor already holds this value; converging it
+        // back would yank the caret to end). All non-keystroke writers keep
+        // "ui_local" and therefore pass the filter.
+        self.doc.set_next_commit_origin(EDITOR_ECHO_ORIGIN);
         match op {
             TextOp::Insert {
                 pos_codepoint,
@@ -259,8 +287,27 @@ mod tests {
             pos_codepoint: 0,
             text: "x".into(),
         })?;
-        // Self-originated; should NOT have appeared on remote_tx.
+        // The editor's own keystroke is stamped EDITOR_ECHO_ORIGIN and must
+        // be dropped by the subscribe filter — it should NOT reach remote_tx.
         assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authoritative_replace_reaches_remote_tx() -> Result<()> {
+        // The fix: a NON-keystroke write (`apply_replace`, origin "ui_local" —
+        // the same origin structural `set_field`/`update_block_text` writes
+        // use) is authoritative and MUST pass the filter so a subscribed
+        // editor converges to it. This is what was previously (wrongly)
+        // swallowed, causing the join's merged content to be lost.
+        let (doc, text) = make_doc_with_text();
+        let backing = LoroTextCellBacking::new(doc, text)?;
+        let mut rx = backing.remote_tx.subscribe();
+        backing.apply_replace("8".to_string()).await?;
+        assert!(
+            rx.try_recv().is_ok(),
+            "authoritative apply_replace must reach remote_tx (editor convergence channel)"
+        );
         Ok(())
     }
 }

@@ -1,5 +1,10 @@
-//! Obsidian-flavored Markdown parsing, rendering, and the
-//! `MarkdownFormatAdapter` impl of `holon_core::FileFormatAdapter`.
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//!
+//! Obsidian-flavored Markdown parsing + rendering and the `MarkdownFormatAdapter` impl of `holon_core::FileFormatAdapter`.
 //!
 //! Second implementation of the file-format seam introduced in Phase 1 of
 //! `codev/specs/0006-pre-velocity-refactors.md`. Org-mode is the first impl

@@ -175,7 +175,15 @@ where
     let label = format!("fixtures:{kind} {:?}", fixture.name);
     // Headless replay needs no post-StartApp setup; the GPUI path passes a
     // hook here to launch a window + swap in a real driver.
-    let _sut = replay_steps::<M, S>(&label, &fixture.steps, ref_state, sut, |_| {}, None);
+    let _sut = replay_steps::<M, S>(
+        &label,
+        &fixture.steps,
+        ref_state,
+        sut,
+        |_| {},
+        |_, _| {},
+        None,
+    );
 
     eprintln!("[fixtures:{kind}] {:?} OK", fixture.name);
 }
@@ -195,6 +203,13 @@ pub fn replay_steps<M, S>(
     mut ref_state: M::State,
     mut sut: S,
     mut after_start_app: impl FnMut(&mut S),
+    // Per-tick hook fired after EVERY post-StartApp transition's invariants pass,
+    // with both the live SUT and reference state in scope (B-track E4: the windowed
+    // sim builds a windowed `CapMap` + ref from `(sut, ref_state)` and runs the
+    // composed catalog over it each tick). A no-op for the headless slices. Distinct
+    // from `after_start_app`, which fires ONCE. The pre-StartApp ticks are skipped
+    // (no rendered state to check) by gating on `ref_state.app_started()`.
+    mut per_tick: impl FnMut(&mut S, &M::State),
     seen_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 ) -> S
 where
@@ -239,6 +254,12 @@ where
                 }
                 if is_start_app {
                     after_start_app(&mut sut);
+                }
+                // Per-tick composed-catalog hook (E4). Fires only once the app is
+                // started (a rendered window exists to check) and after `after_start_app`
+                // has installed the driver/frontend on the StartApp tick.
+                if ref_state.app_started() {
+                    per_tick(&mut sut, &ref_state);
                 }
                 // Fault injection (mirrors the incremental generator's hook in
                 // `phased::run_driver_step`): a deterministic forced failure after

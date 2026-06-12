@@ -1,11 +1,11 @@
 use super::prelude::*;
 use crate::render::EntityContext;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(
-    block_id: &String,
-    content: &Box<ViewModel>,
-    _: &DioxusRenderContext,
-) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::LiveBlock { block_id, content } = &node.kind else {
+        return rsx! {};
+    };
     let block_id = block_id.clone();
     let content = (**content).clone();
     rsx! { LiveBlockNode { block_id, content } }

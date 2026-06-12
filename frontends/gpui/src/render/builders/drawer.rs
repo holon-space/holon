@@ -22,6 +22,7 @@ pub(super) const DRAWER_TOGGLE_WIDTH: f32 = 12.0;
 pub(super) fn drawer_toggle_widget(
     block_id: &str,
     el_id_suffix: &str,
+    mode: DrawerMode,
     ctx: &GpuiRenderContext,
 ) -> impl IntoElement {
     let services = ctx.services.clone();
@@ -35,7 +36,10 @@ pub(super) fn drawer_toggle_widget(
         .cursor_col_resize()
         .hover(|s| s.bg(gpui::rgba(0x00000018)))
         .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
-            let current = services.widget_state(&bid_for_click).open;
+            // Toggle relative to the *effective* state so the first tap on a
+            // closed-by-default overlay drawer opens it (rather than writing a
+            // redundant `false`).
+            let current = services.drawer_open(&bid_for_click, mode);
             services.set_widget_open(&bid_for_click, !current);
         });
     TransparentTracker::new(
@@ -52,7 +56,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let width = node.prop_f64("width").unwrap_or(300.0) as f32;
     let child = node.children.first().expect("drawer requires a child");
 
-    let is_open = ctx.services.widget_state(&block_id).open;
+    let is_open = ctx.services.drawer_open(&block_id, mode);
 
     let rendered = super::render(child, ctx);
     let inner = div()
@@ -69,7 +73,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         .border_color(tc(ctx, |t| t.border))
         .child(rendered);
 
-    let tracked_toggle = drawer_toggle_widget(&block_id, "drawer", ctx);
+    let tracked_toggle = drawer_toggle_widget(&block_id, "drawer", mode, ctx);
 
     // Toggle first so the `overflow_hidden` clip in the closed
     // `Shrink` arm preserves it (collapsed width = toggle width). When
@@ -113,7 +117,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 // Render only the toggle when closed so the user can
                 // re-open the drawer — same bounds-tracked element so
                 // tests can click it.
-                drawer_toggle_widget(&block_id, "drawer-overlay-closed", ctx).into_any_element()
+                drawer_toggle_widget(&block_id, "drawer-overlay-closed", mode, ctx).into_any_element()
             }
         }
     }

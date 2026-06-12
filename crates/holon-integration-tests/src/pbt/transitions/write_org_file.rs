@@ -10,8 +10,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::local_caps::SutFixtureFs;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::types::{apply_org_headline_tag_split, normalize_content_for_org_roundtrip};
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
@@ -89,6 +89,12 @@ impl WriteOrgFile {
 }
 
 impl TransitionFactory<ReferenceState> for WriteOrgFile {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutFixtureFs,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let pre_startup_file_count = state.files.documents.len();
@@ -317,7 +323,7 @@ impl TransitionRef<ReferenceState> for WriteOrgFile {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for WriteOrgFile {
+impl<S: SutFixtureFs> TransitionImpl<ReferenceState, S> for WriteOrgFile {
     async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
         let doc_name = std::path::Path::new(self.filename.as_str())
             .file_stem()
@@ -353,7 +359,7 @@ impl<S: SutHandle> TransitionImpl<ReferenceState, S> for WriteOrgFile {
             Some(ks) => format!("{}\n{}", ks.to_org_header(), content),
             None => content,
         };
-        sut.apply_write_org_file(&self.filename, &content).await;
+        sut.write_org_file(&self.filename, &content).await;
     }
 }
 

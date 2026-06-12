@@ -13,6 +13,7 @@
 //! This enables testing scenarios where files exist before the application starts,
 //! reproducing the Flutter startup bug where DDL operations race with sync of existing files.
 
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,6 +68,24 @@ fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server
     debug
 }
 
+/// Build a pre-filled `OnceCell` for a struct literal. Infallible: the cell is
+/// fresh, so `set` cannot fail.
+fn filled_once_cell<T>(value: T) -> OnceCell<T> {
+    let cell = OnceCell::new();
+    if cell.set(value).is_err() {
+        unreachable!("fresh OnceCell::set cannot fail");
+    }
+    cell
+}
+
+/// Build a `OnceCell` from an `Option`: filled when `Some`, empty when `None`.
+fn once_cell_from_option<T>(value: Option<T>) -> OnceCell<T> {
+    match value {
+        Some(value) => filled_once_cell(value),
+        None => OnceCell::new(),
+    }
+}
+
 /// Test environment with optional running application.
 ///
 /// Supports two phases:
@@ -79,67 +98,103 @@ pub struct TestEnvironment {
     /// Runtime for async operations
     pub runtime: Arc<tokio::runtime::Runtime>,
 
-    /// The running application (None before start_app())
-    session: Option<Arc<FrontendSession>>,
+    /// The running application (empty before start_app()).
+    ///
+    /// `OnceCell` so `start_app` can latch it via `&self` (the prerequisite for
+    /// an `&self` `apply_start_app`). `OnceCell::get()` hands out a borrow-guard-free
+    /// `&FrontendSession`, so the `session()`/`test_ctx()` accessors keep returning
+    /// `&T` and holding it across `.await` is sound. The rare config-change restart
+    /// (`stop_app`) resets via `OnceCell::take()` — available because `stop_app`
+    /// keeps `&mut self`.
+    session: OnceCell<Arc<FrontendSession>>,
 
     /// DI injector clone, captured during startup. Lets read-only inspection
     /// (e.g. `snapshot_org_render_pairs`) resolve the production
     /// `QueryableCache<Block>` and render through the *same* `CacheBlockReader`
     /// the `FileSyncController` uses — no bespoke query that could drift from
     /// production ordering. `None` before `start_app()`.
-    injector: Option<fluxdi::Injector>,
+    injector: OnceCell<fluxdi::Injector>,
 
-    /// Loro doc store, resolved from DI (None when Loro is disabled)
-    loro_doc_store: Option<Arc<RwLock<LoroDocumentStore>>>,
+    /// Loro doc store, resolved from DI (empty when Loro is disabled)
+    loro_doc_store: OnceCell<Arc<RwLock<LoroDocumentStore>>>,
 
     /// MCP DebugServices, resolved from DI and pre-populated via
     /// [`populate_debug_services`]. Threaded into the embedded MCP
     /// server (`try_start_embedded_mcp`) so inspection tools work in
     /// PBTs.
-    debug_services: Option<Arc<holon_mcp::server::DebugServices>>,
+    debug_services: OnceCell<Arc<holon_mcp::server::DebugServices>>,
 
     /// Loro sync controller handle, resolved from DI (None when Loro is disabled).
     /// Used by `wait_for_loro_quiescence` to poll until the controller has
     /// caught up with the current Loro state.
-    loro_sync_handle: Option<Arc<holon::sync::LoroSyncControllerHandle>>,
+    loro_sync_handle: OnceCell<Arc<holon::sync::LoroSyncControllerHandle>>,
 
     /// Reactive engine, resolved from DI (same instance as GPUI uses).
     /// Provides BuilderServices, keybinding registry, operation dispatch.
-    pub reactive_engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
+    pub reactive_engine: OnceCell<Arc<holon_frontend::reactive::ReactiveEngine>>,
 
     /// Idle signal for the FileSyncController loop. When present, lets
     /// `wait_for_org_files_stable` skip filesystem polling on the hot path.
-    org_sync_idle: Option<Arc<holon_orgmode::OrgSyncIdleSignal>>,
+    org_sync_idle: OnceCell<Arc<holon_orgmode::OrgSyncIdleSignal>>,
 
     /// The E2ETestContext for operations (wraps BackendEngine) - only valid after start_app()
-    ctx: Option<E2ETestContext>,
+    ctx: OnceCell<E2ETestContext>,
 
-    /// Created documents (doc_uri -> file path)
-    pub documents: HashMap<EntityUri, PathBuf>,
+    /// Created documents (doc_uri -> file path).
+    ///
+    /// Interior-mutable so the org-file write path (`write_org_file`,
+    /// `create_document`) and the post-ingest re-key in `apply_write_org_file`
+    /// can be `&self` — the prerequisite for decomposing those transitions onto
+    /// `&self` caps. Same soundness as [`Self::active_watches`]: no borrow ever
+    /// crosses an `.await` (each call takes/drops the guard around the await),
+    /// and `E2ESut` is never `Send`-bound.
+    pub documents: RefCell<HashMap<EntityUri, PathBuf>>,
 
-    /// Active CDC watches (query_id -> stream)
-    pub active_watches: HashMap<String, RowChangeStream>,
+    /// Active CDC watches (query_id -> stream).
+    ///
+    /// Interior-mutable so the watch-write path (`setup_watch`) can be `&self` —
+    /// the prerequisite for decomposing the `SetupWatch` transition onto the
+    /// fine-grained `SutWatchRegister` cap (`&self`, as all `capmap_adapter` caps
+    /// must be). No borrow is ever held across an `.await`, and `E2ESut` is never
+    /// `Send`-bound (all its async cap impls are `?Send`, driven via `block_on`),
+    /// so `RefCell` is sound here.
+    pub active_watches: RefCell<HashMap<String, RowChangeStream>>,
 
-    /// Watch query metadata for fallback re-query (query_id -> (source, language))
-    pub watch_queries: HashMap<String, (String, QueryLanguage)>,
+    /// Watch query metadata for fallback re-query (query_id -> (source, language)).
+    /// Interior-mutable for the same reason as [`Self::active_watches`].
+    pub watch_queries: RefCell<HashMap<String, (String, QueryLanguage)>>,
 
-    /// UI model built from CDC events (query_id -> accumulator)
-    pub ui_model: HashMap<String, CdcAccumulator<holon_api::StorageEntity>>,
+    /// UI model built from CDC events (query_id -> accumulator).
+    /// Interior-mutable for the same reason as [`Self::active_watches`].
+    pub ui_model: RefCell<HashMap<String, CdcAccumulator<holon_api::StorageEntity>>>,
 
-    /// Current view filter
-    pub current_view: String,
+    /// Current view filter. Interior-mutable so `switch_view` can be `&self`
+    /// (same soundness rationale as [`Self::active_watches`]).
+    pub current_view: RefCell<String>,
 
-    /// Region CDC streams from AppFrame (region_id -> stream)
-    pub region_streams: HashMap<String, RowChangeStream>,
+    /// Region CDC streams from AppFrame (region_id -> stream). Interior-mutable
+    /// so `setup_region_watch` (reached from the now-`&self` `apply_start_app`)
+    /// can insert via `&self`; same `?Send`/no-borrow-across-`.await` soundness
+    /// as [`Self::active_watches`].
+    pub region_streams: RefCell<HashMap<String, RowChangeStream>>,
 
-    /// Region data built from CDC events (region_id -> accumulator)
-    pub region_data: HashMap<String, CdcAccumulator<holon_api::StorageEntity>>,
+    /// Region data built from CDC events (region_id -> accumulator). Interior-mutable
+    /// for the same reason as [`Self::region_streams`].
+    pub region_data: RefCell<HashMap<String, CdcAccumulator<holon_api::StorageEntity>>>,
 
-    /// All-blocks CDC watch for invariant #1 (uses production CdcAccumulator)
-    pub all_blocks: Option<CdcAccumulator<holon_api::StorageEntity>>,
+    /// All-blocks CDC watch for invariant #1 (uses production CdcAccumulator).
+    ///
+    /// Interior-mutable so the block-convergence settle (`wait_for_blocks_synced`,
+    /// reached from `simulate_restart`) can be `&self`. The await-driven drain
+    /// loops `take()` the accumulator+stream into locals (dropping the guard)
+    /// before any `.await`, then restore them — no `RefCell` borrow ever crosses
+    /// a suspension point. Same `?Send`/single-threaded soundness as
+    /// [`Self::active_watches`].
+    pub all_blocks: RefCell<Option<CdcAccumulator<holon_api::StorageEntity>>>,
 
-    /// All-blocks CDC stream
-    all_blocks_stream: Option<RowChangeStream>,
+    /// All-blocks CDC stream. Interior-mutable for the same reason as
+    /// [`Self::all_blocks`].
+    all_blocks_stream: RefCell<Option<RowChangeStream>>,
 
     /// Number of production blocks that don't appear in `ref_state`
     /// (sentinel:no_parent, default sidebars, etc.). Captured by
@@ -147,13 +202,16 @@ pub struct TestEnvironment {
     /// into `all_blocks`. Used by `wait_for_blocks_synced` to detect
     /// pending deletes (subset alone can't — acc still holds the
     /// deleted block until the CDC delete event arrives).
-    seed_count: Option<usize>,
+    /// Interior-mutable (`Cell`) for the same reason as [`Self::all_blocks`].
+    seed_count: Cell<Option<usize>>,
 
-    /// Whether to enable Todoist fake mode (adds concurrent DDL during startup)
-    enable_fake_mcp: bool,
+    /// Whether to enable Todoist fake mode (adds concurrent DDL during startup).
+    /// `Cell` so `set_enable_fake_mcp` can write via `&self`.
+    enable_fake_mcp: Cell<bool>,
 
-    /// Whether to enable Loro CRDT layer (default: true for backward compat)
-    enable_loro: bool,
+    /// Whether to enable Loro CRDT layer (default: true for backward compat).
+    /// `Cell` so `set_enable_loro` can write via `&self`.
+    enable_loro: Cell<bool>,
 
     /// Which storage substrate `start_app` assembles (default: `Turso`).
     storage: StorageSelector,
@@ -162,13 +220,13 @@ pub struct TestEnvironment {
     /// adapter the SUT seeds / mutates directly (the no-Turso wiring has no
     /// engine dispatch). Created and registered into the DI container at
     /// `start_app`; `None` for a Turso session or before startup.
-    loro_backend: Option<Arc<LoroBackend>>,
+    loro_backend: OnceCell<Arc<LoroBackend>>,
 
     /// Idle signal + keepalive for the no-Turso `FileSyncController` loop spawned
     /// by `spawn_loro_org_sync`. Holding this strong `Arc` keeps the loop alive
     /// (the loop holds a `Weak` and exits when this drops). `None` for a Turso
     /// session or before startup.
-    loro_org_idle: Option<std::sync::Arc<holon_orgmode::di::OrgSyncIdleSignal>>,
+    loro_org_idle: OnceCell<std::sync::Arc<holon_orgmode::di::OrgSyncIdleSignal>>,
 
     /// Shared in-memory org filesystem (ADR 0011 P3). All harness org-file
     /// I/O goes through it, and `start_app` overrides the DI `FileSystem` /
@@ -191,7 +249,7 @@ impl std::fmt::Debug for TestEnvironment {
         f.debug_struct("TestEnvironment")
             .field("documents", &self.documents)
             .field("temp_dir", &self.temp_dir.path())
-            .field("is_running", &self.session.is_some())
+            .field("is_running", &self.session.get().is_some())
             .finish_non_exhaustive()
     }
 }
@@ -416,29 +474,29 @@ impl TestEnvironmentBuilder {
             org_root,
             temp_dir,
             runtime,
-            session: Some(session),
-            injector: Some(injector),
-            loro_doc_store: doc_store,
-            debug_services: Some(debug_services),
-            loro_sync_handle: sync_handle,
-            reactive_engine: Some(reactive_engine),
-            org_sync_idle: idle_signal,
-            ctx: Some(ctx),
-            documents,
-            active_watches: HashMap::new(),
-            watch_queries: HashMap::new(),
-            ui_model: HashMap::new(),
-            current_view: "all".to_string(),
-            region_streams: HashMap::new(),
-            region_data: HashMap::new(),
-            all_blocks: None,
-            all_blocks_stream: None,
-            seed_count: None,
-            enable_fake_mcp: self.enable_fake_mcp,
-            enable_loro,
+            session: filled_once_cell(session),
+            injector: filled_once_cell(injector),
+            loro_doc_store: once_cell_from_option(doc_store),
+            debug_services: filled_once_cell(debug_services),
+            loro_sync_handle: once_cell_from_option(sync_handle),
+            reactive_engine: filled_once_cell(reactive_engine),
+            org_sync_idle: once_cell_from_option(idle_signal),
+            ctx: filled_once_cell(ctx),
+            documents: RefCell::new(documents),
+            active_watches: RefCell::new(HashMap::new()),
+            watch_queries: RefCell::new(HashMap::new()),
+            ui_model: RefCell::new(HashMap::new()),
+            current_view: RefCell::new("all".to_string()),
+            region_streams: RefCell::new(HashMap::new()),
+            region_data: RefCell::new(HashMap::new()),
+            all_blocks: RefCell::new(None),
+            all_blocks_stream: RefCell::new(None),
+            seed_count: Cell::new(None),
+            enable_fake_mcp: Cell::new(self.enable_fake_mcp),
+            enable_loro: Cell::new(enable_loro),
             storage: StorageSelector::Turso,
-            loro_backend: None,
-            loro_org_idle: None,
+            loro_backend: OnceCell::new(),
+            loro_org_idle: OnceCell::new(),
         })
     }
 }
@@ -455,7 +513,7 @@ impl Default for TestEnvironmentBuilder {
 /// A write through this fs fires its change event synchronously on
 /// completion — org sync becomes deterministic (no fsevents debounce,
 /// no partial-write window, no 9s recursive-watch arming).
-fn override_org_fs_bindings(
+pub(crate) fn override_org_fs_bindings(
     injector: &fluxdi::Injector,
     org_fs: &Arc<holon_filesystem::InMemoryFileSystem>,
 ) {
@@ -486,29 +544,29 @@ impl TestEnvironment {
             org_root,
             temp_dir,
             runtime,
-            session: None,
-            injector: None,
-            loro_doc_store: None,
-            debug_services: None,
-            loro_sync_handle: None,
-            reactive_engine: None,
-            org_sync_idle: None,
-            ctx: None,
-            documents: HashMap::new(),
-            active_watches: HashMap::new(),
-            watch_queries: HashMap::new(),
-            ui_model: HashMap::new(),
-            current_view: "all".to_string(),
-            region_streams: HashMap::new(),
-            region_data: HashMap::new(),
-            all_blocks: None,
-            all_blocks_stream: None,
-            seed_count: None,
-            enable_fake_mcp: false,
-            enable_loro: true,
+            session: OnceCell::new(),
+            injector: OnceCell::new(),
+            loro_doc_store: OnceCell::new(),
+            debug_services: OnceCell::new(),
+            loro_sync_handle: OnceCell::new(),
+            reactive_engine: OnceCell::new(),
+            org_sync_idle: OnceCell::new(),
+            ctx: OnceCell::new(),
+            documents: RefCell::new(HashMap::new()),
+            active_watches: RefCell::new(HashMap::new()),
+            watch_queries: RefCell::new(HashMap::new()),
+            ui_model: RefCell::new(HashMap::new()),
+            current_view: RefCell::new("all".to_string()),
+            region_streams: RefCell::new(HashMap::new()),
+            region_data: RefCell::new(HashMap::new()),
+            all_blocks: RefCell::new(None),
+            all_blocks_stream: RefCell::new(None),
+            seed_count: Cell::new(None),
+            enable_fake_mcp: Cell::new(false),
+            enable_loro: Cell::new(true),
             storage: StorageSelector::Turso,
-            loro_backend: None,
-            loro_org_idle: None,
+            loro_backend: OnceCell::new(),
+            loro_org_idle: OnceCell::new(),
         })
     }
 
@@ -544,8 +602,8 @@ impl TestEnvironment {
     pub async fn wait_for_org_change_processed(&self, seq: u64, timeout: std::time::Duration) {
         let signal = self
             .org_sync_idle
-            .as_ref()
-            .or(self.loro_org_idle.as_ref())
+            .get()
+            .or(self.loro_org_idle.get())
             .expect("wait_for_org_change_processed: no org sync loop is running");
         if !signal.wait_for_change_seq(seq, timeout).await {
             panic!(
@@ -561,7 +619,7 @@ impl TestEnvironment {
     /// storage adapter to seed / mutate (the no-Turso wiring has no engine
     /// dispatch). `None` for Turso or before `start_app`.
     pub fn loro_backend(&self) -> Option<&Arc<LoroBackend>> {
-        self.loro_backend.as_ref()
+        self.loro_backend.get()
     }
 
     /// Create and immediately start (existing behavior for backward compatibility).
@@ -577,7 +635,7 @@ impl TestEnvironment {
     ///
     /// Can be called both before and after `start_app()`.
     /// When called before startup, the file will be synced when the app starts.
-    pub async fn write_org_file(&mut self, filename: &str, content: &str) -> Result<PathBuf> {
+    pub async fn write_org_file(&self, filename: &str, content: &str) -> Result<PathBuf> {
         let file_path = self.org_root.join(filename);
 
         // Create parent directories if needed
@@ -592,7 +650,9 @@ impl TestEnvironment {
             .map_err(|e| anyhow::anyhow!("Failed to write org file: {}", e))?;
 
         let doc_uri = EntityUri::file(filename);
-        self.documents.insert(doc_uri, file_path.clone());
+        self.documents
+            .borrow_mut()
+            .insert(doc_uri, file_path.clone());
 
         Ok(file_path)
     }
@@ -604,12 +664,12 @@ impl TestEnvironment {
     ///
     /// Can only be called BEFORE `start_app()`.
     pub async fn write_stale_loro_file(
-        &mut self,
+        &self,
         filename: &str,
         corruption_type: LoroCorruptionType,
     ) -> Result<PathBuf> {
         assert!(
-            self.session.is_none(),
+            self.session.get().is_none(),
             "Cannot create stale loro file after app started"
         );
 
@@ -641,18 +701,18 @@ impl TestEnvironment {
     /// concurrent DDL (cache-table creation) and an initial sync during startup.
     /// This widens the race window and exercises the real external-provider DI
     /// path.
-    pub fn set_enable_fake_mcp(&mut self, enable: bool) {
-        self.enable_fake_mcp = enable;
+    pub fn set_enable_fake_mcp(&self, enable: bool) {
+        self.enable_fake_mcp.set(enable);
     }
 
     /// Set whether to enable Loro CRDT layer for the next start_app() call.
-    pub fn set_enable_loro(&mut self, enable: bool) {
-        self.enable_loro = enable;
+    pub fn set_enable_loro(&self, enable: bool) {
+        self.enable_loro.set(enable);
     }
 
     /// Whether Loro is enabled for this environment.
     pub fn loro_enabled(&self) -> bool {
-        self.enable_loro
+        self.enable_loro.get()
     }
 
     /// The DI-resolved Loro doc store of a running Loro-enabled Turso session.
@@ -660,7 +720,7 @@ impl TestEnvironment {
     /// the authoritative Loro tree directly (e.g. assert a SQL-only block has
     /// no tree node).
     pub fn loro_doc_store(&self) -> Option<&Arc<RwLock<LoroDocumentStore>>> {
-        self.loro_doc_store.as_ref()
+        self.loro_doc_store.get()
     }
 
     /// Start the application.
@@ -670,8 +730,8 @@ impl TestEnvironment {
     /// # Arguments
     /// * `wait_for_ready` - If true, wait for file watcher to be ready before returning
     #[tracing::instrument(skip(self), fields(wait_for_ready), name = "test_env.start_app")]
-    pub async fn start_app(&mut self, wait_for_ready: bool) -> Result<()> {
-        assert!(self.session.is_none(), "App already started");
+    pub async fn start_app(&self, wait_for_ready: bool) -> Result<()> {
+        assert!(self.session.get().is_none(), "App already started");
         holon_frontend::shadow_builders::register_render_dsl_widget_names();
 
         if self.storage == StorageSelector::LoroMemory {
@@ -684,7 +744,11 @@ impl TestEnvironment {
                 root_directory: Some(self.temp_dir.path().to_path_buf()),
             },
             loro: holon_frontend::config::LoroPreferences {
-                enabled: if self.enable_loro { Some(true) } else { None },
+                enabled: if self.enable_loro.get() {
+                    Some(true)
+                } else {
+                    None
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -694,10 +758,10 @@ impl TestEnvironment {
         if !wait_for_ready {
             session_config = session_config.without_wait();
         }
-        let enable_fake_mcp = self.enable_fake_mcp;
+        let enable_fake_mcp = self.enable_fake_mcp.get();
         let org_fs_for_di = self.org_fs.clone();
 
-        let enable_loro = self.enable_loro;
+        let enable_loro = self.enable_loro.get();
         let (
             session,
             backend_engine,
@@ -762,14 +826,20 @@ impl TestEnvironment {
 
         let ctx = E2ETestContext::from_engine(backend_engine);
 
-        self.session = Some(session);
-        self.injector = Some(injector);
-        self.loro_doc_store = doc_store;
-        self.debug_services = Some(debug_services);
-        self.loro_sync_handle = sync_handle;
-        self.reactive_engine = Some(reactive_engine);
-        self.org_sync_idle = idle_signal;
-        self.ctx = Some(ctx);
+        self.latch_session(session);
+        self.latch_injector(injector);
+        if let Some(doc_store) = doc_store {
+            self.latch_loro_doc_store(doc_store);
+        }
+        self.latch_debug_services(debug_services);
+        if let Some(sync_handle) = sync_handle {
+            self.latch_loro_sync_handle(sync_handle);
+        }
+        self.latch_reactive_engine(reactive_engine);
+        if let Some(idle_signal) = idle_signal {
+            self.latch_org_sync_idle(idle_signal);
+        }
+        self.latch_ctx(ctx);
 
         Ok(())
     }
@@ -785,33 +855,36 @@ impl TestEnvironment {
     /// reactive-engine Arc cycle) would keep the WAL writer alive and stall
     /// the next open against the 30s busy_timeout.
     pub async fn stop_app(&mut self) -> Result<()> {
-        assert!(self.session.is_some(), "stop_app: app not started");
+        assert!(self.session.get().is_some(), "stop_app: app not started");
         // Drop CDC consumers before the actor goes away.
-        self.active_watches.clear();
-        self.watch_queries.clear();
-        self.ui_model.clear();
-        self.region_streams.clear();
-        self.region_data.clear();
-        self.all_blocks = None;
-        self.all_blocks_stream = None;
-        self.seed_count = None;
-        if let Some(ctx) = &self.ctx {
+        self.active_watches.borrow_mut().clear();
+        self.watch_queries.borrow_mut().clear();
+        self.ui_model.borrow_mut().clear();
+        self.region_streams.borrow_mut().clear();
+        self.region_data.borrow_mut().clear();
+        *self.all_blocks.borrow_mut() = None;
+        *self.all_blocks_stream.borrow_mut() = None;
+        self.seed_count.set(None);
+        if let Some(ctx) = self.ctx.get() {
             ctx.engine()
                 .db_handle()
                 .shutdown()
                 .await
                 .map_err(|e| anyhow::anyhow!("stop_app: Turso actor shutdown failed: {e}"))?;
         }
-        self.session = None;
-        self.injector = None;
-        self.loro_doc_store = None;
-        self.debug_services = None;
-        self.loro_sync_handle = None;
-        self.reactive_engine = None;
-        self.org_sync_idle = None;
-        self.loro_backend = None;
-        self.loro_org_idle = None;
-        self.ctx = None;
+        // `&mut self` here is what lets `OnceCell::take` reset these build-once
+        // fields for the rare config-change restart (the `&self` `start_app`
+        // re-latches them afterwards).
+        self.session.take();
+        self.injector.take();
+        self.loro_doc_store.take();
+        self.debug_services.take();
+        self.loro_sync_handle.take();
+        self.reactive_engine.take();
+        self.org_sync_idle.take();
+        self.loro_backend.take();
+        self.loro_org_idle.take();
+        self.ctx.take();
         Ok(())
     }
 
@@ -832,7 +905,7 @@ impl TestEnvironment {
     /// resolved once up front, the read seam snapshots it, and the operation
     /// engine's `LoroBlockOperations` mutates the same `Arc<LoroDocument>`, so a
     /// mutation is immediately visible to the next read.
-    async fn start_app_loro_memory(&mut self) -> Result<()> {
+    async fn start_app_loro_memory(&self) -> Result<()> {
         let storage_dir = self.temp_dir.path().join("loro-memory");
         std::fs::create_dir_all(&storage_dir)
             .map_err(|e| anyhow::anyhow!("create loro-memory dir: {e}"))?;
@@ -866,9 +939,9 @@ impl TestEnvironment {
         let services: Arc<dyn BuilderServices> = reactive_engine.clone();
         slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
 
-        self.injector = Some((*injector).clone());
-        self.session = Some(session);
-        self.reactive_engine = Some(reactive_engine);
+        self.latch_injector((*injector).clone());
+        self.latch_session(session);
+        self.latch_reactive_engine(reactive_engine);
 
         // Seed the default layout (journals page, `__default__`, the bundled
         // index.org root-layout/sidebars) as Block instances written straight
@@ -929,22 +1002,22 @@ impl TestEnvironment {
             Ok(()) => {}
             Err(msg) => anyhow::bail!("no-Turso org sync startup failed: {msg}"),
         }
-        self.loro_org_idle = Some(org_idle);
+        self.latch_loro_org_idle(org_idle);
 
-        self.loro_backend = Some(backend);
-        self.loro_doc_store = Some(shared_store);
+        self.latch_loro_backend(backend);
+        self.latch_loro_doc_store(shared_store);
         Ok(())
     }
 
     /// Check if app is running
     pub fn is_running(&self) -> bool {
-        self.session.is_some()
+        self.session.get().is_some()
     }
 
     /// Get the running session (panics if not started)
     pub fn session(&self) -> &FrontendSession {
         self.session
-            .as_ref()
+            .get()
             .expect("App not started - call start_app() first")
     }
 
@@ -952,7 +1025,7 @@ impl TestEnvironment {
     pub fn session_arc(&self) -> Arc<FrontendSession> {
         Arc::clone(
             self.session
-                .as_ref()
+                .get()
                 .expect("App not started - call start_app() first"),
         )
     }
@@ -962,8 +1035,70 @@ impl TestEnvironment {
     /// Use this for direct access to the test context operations.
     pub fn test_ctx(&self) -> &E2ETestContext {
         self.ctx
-            .as_ref()
+            .get()
             .expect("App not started - call start_app() first")
+    }
+
+    /// Latch a build-once session field via `&self`. Fail-loud if already set
+    /// (would mean `start_app` ran twice without an intervening `stop_app`).
+    fn latch_session(&self, value: Arc<FrontendSession>) {
+        self.session
+            .set(value)
+            .unwrap_or_else(|_| panic!("session already latched (start_app ran twice?)"));
+    }
+
+    fn latch_injector(&self, value: fluxdi::Injector) {
+        self.injector
+            .set(value)
+            .unwrap_or_else(|_| panic!("injector already latched (start_app ran twice?)"));
+    }
+
+    fn latch_loro_doc_store(&self, value: Arc<RwLock<LoroDocumentStore>>) {
+        self.loro_doc_store
+            .set(value)
+            .unwrap_or_else(|_| panic!("loro_doc_store already latched (start_app ran twice?)"));
+    }
+
+    fn latch_debug_services(&self, value: Arc<holon_mcp::server::DebugServices>) {
+        self.debug_services
+            .set(value)
+            .unwrap_or_else(|_| panic!("debug_services already latched (start_app ran twice?)"));
+    }
+
+    fn latch_loro_sync_handle(&self, value: Arc<holon::sync::LoroSyncControllerHandle>) {
+        self.loro_sync_handle
+            .set(value)
+            .unwrap_or_else(|_| panic!("loro_sync_handle already latched (start_app ran twice?)"));
+    }
+
+    fn latch_reactive_engine(&self, value: Arc<holon_frontend::reactive::ReactiveEngine>) {
+        self.reactive_engine
+            .set(value)
+            .unwrap_or_else(|_| panic!("reactive_engine already latched (start_app ran twice?)"));
+    }
+
+    fn latch_org_sync_idle(&self, value: Arc<holon_orgmode::OrgSyncIdleSignal>) {
+        self.org_sync_idle
+            .set(value)
+            .unwrap_or_else(|_| panic!("org_sync_idle already latched (start_app ran twice?)"));
+    }
+
+    fn latch_ctx(&self, value: E2ETestContext) {
+        self.ctx
+            .set(value)
+            .unwrap_or_else(|_| panic!("ctx already latched (start_app ran twice?)"));
+    }
+
+    fn latch_loro_backend(&self, value: Arc<LoroBackend>) {
+        self.loro_backend
+            .set(value)
+            .unwrap_or_else(|_| panic!("loro_backend already latched (start_app ran twice?)"));
+    }
+
+    fn latch_loro_org_idle(&self, value: std::sync::Arc<holon_orgmode::di::OrgSyncIdleSignal>) {
+        self.loro_org_idle
+            .set(value)
+            .unwrap_or_else(|_| panic!("loro_org_idle already latched (start_app ran twice?)"));
     }
 
     /// Check for startup errors (delegates to FrontendSession)
@@ -992,26 +1127,26 @@ impl TestEnvironment {
     /// Get the doc store (requires running app with Loro enabled).
     /// Returns None when Loro is disabled.
     pub fn doc_store(&self) -> Option<&Arc<RwLock<LoroDocumentStore>>> {
-        self.loro_doc_store.as_ref()
+        self.loro_doc_store.get()
     }
 
     /// DI-resolved + populated `DebugServices` for the embedded MCP
     /// server. `None` before `start_app()` runs.
     pub fn debug_services(&self) -> Option<&Arc<holon_mcp::server::DebugServices>> {
-        self.debug_services.as_ref()
+        self.debug_services.get()
     }
 
     /// The `LoroSyncController` handle, if Loro is enabled. Shared into
     /// `LoroSut` so peer-sync ops can wait for reactive quiescence.
     pub fn loro_sync_handle(&self) -> Option<&Arc<holon::sync::LoroSyncControllerHandle>> {
-        self.loro_sync_handle.as_ref()
+        self.loro_sync_handle.get()
     }
 
     /// Number of errors logged by the `LoroSyncController` since startup.
     /// Returns 0 when Loro is disabled (handle is None).
     pub fn loro_sync_error_count(&self) -> usize {
         self.loro_sync_handle
-            .as_ref()
+            .get()
             .map(|h| h.error_count())
             .unwrap_or(0)
     }
@@ -1035,7 +1170,7 @@ impl TestEnvironment {
         quiet_for: std::time::Duration,
         timeout: std::time::Duration,
     ) {
-        let Some(ctx) = self.ctx.as_ref() else { return };
+        let Some(ctx) = self.ctx.get() else { return };
         let start = tokio::time::Instant::now();
         let mut last = ctx.engine().db_handle().cdc_emitted_watermark();
         let mut stable_since = tokio::time::Instant::now();
@@ -1061,7 +1196,7 @@ impl TestEnvironment {
     /// No-op when Loro is disabled.
     pub async fn wait_for_loro_quiescence(&self, timeout: std::time::Duration) {
         let (Some(handle), Some(doc_store)) =
-            (self.loro_sync_handle.as_ref(), self.loro_doc_store.as_ref())
+            (self.loro_sync_handle.get(), self.loro_doc_store.get())
         else {
             return;
         };
@@ -1072,7 +1207,7 @@ impl TestEnvironment {
     ///
     /// When Loro is enabled, also loads the file into the LoroDocumentStore.
     /// When Loro is disabled, just writes the file and tracks it.
-    pub async fn create_document(&mut self, file_name: &str) -> Result<EntityUri> {
+    pub async fn create_document(&self, file_name: &str) -> Result<EntityUri> {
         let file_path = self.org_root.join(file_name);
         holon_filesystem::FileSystem::write(self.org_fs.as_ref(), &file_path, b"")
             .await
@@ -1104,7 +1239,9 @@ impl TestEnvironment {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
 
-        self.documents.insert(doc_uri.clone(), file_path);
+        self.documents
+            .borrow_mut()
+            .insert(doc_uri.clone(), file_path);
 
         Ok(doc_uri)
     }
@@ -1180,7 +1317,7 @@ impl TestEnvironment {
         if matches!(self.storage, StorageSelector::LoroMemory) {
             let session = self
                 .session
-                .as_ref()
+                .get()
                 .ok_or_else(|| anyhow::anyhow!("resolve_doc_uri_by_name: app not started"))?;
             let snapshot = session
                 .block_query()
@@ -1235,7 +1372,7 @@ impl TestEnvironment {
         if matches!(self.storage, StorageSelector::LoroMemory) {
             let session = self
                 .session
-                .as_ref()
+                .get()
                 .expect("non_page_block_rows: app not started");
             let snapshot = session
                 .block_query()
@@ -1322,8 +1459,8 @@ impl TestEnvironment {
     }
 
     /// Get path to a document by doc_uri
-    pub fn get_document_path(&self, doc_uri: &EntityUri) -> Option<&PathBuf> {
-        self.documents.get(doc_uri)
+    pub fn get_document_path(&self, doc_uri: &EntityUri) -> Option<PathBuf> {
+        self.documents.borrow().get(doc_uri).cloned()
     }
 
     /// Reload an org file from disk (removes from store and re-loads).
@@ -1537,8 +1674,8 @@ impl TestEnvironment {
     /// (no-Turso wiring / pre-StartApp) fall back to the former flat 5 ms —
     /// there is no watermark to consult, and producers (Loro sync) still
     /// need real wall time.
-    async fn drain_delivery_barrier(&self) {
-        if self.ctx.is_some() {
+    pub async fn drain_delivery_barrier(&self) {
+        if self.ctx.get().is_some() {
             self.wait_for_cdc_quiescent(
                 std::time::Duration::from_millis(5),
                 std::time::Duration::from_millis(500),
@@ -1568,13 +1705,17 @@ impl TestEnvironment {
         // actually delivered events by the time we poll.
         self.drain_delivery_barrier().await;
 
-        for (query_id, stream) in &mut self.active_watches {
+        // Hold the `active_watches` borrow for the loop; borrow `ui_model`
+        // (a distinct cell) inside each hit. No `.await` in this loop, so the
+        // guards never cross a suspension point; both drop before the
+        // `all_blocks_stream` (`&mut self`) access below.
+        for (query_id, stream) in self.active_watches.borrow_mut().iter_mut() {
             let mut event_count = 0;
             loop {
                 match stream.next().now_or_never() {
                     Some(Some(batch)) => {
                         event_count += batch.inner.items.len();
-                        if let Some(ui_data) = self.ui_model.get_mut(query_id) {
+                        if let Some(ui_data) = self.ui_model.borrow_mut().get_mut(query_id) {
                             for change in &batch.inner.items {
                                 if let holon_api::Change::Updated { id, data, .. } = &change.change
                                     && let Some(content) =
@@ -1601,7 +1742,10 @@ impl TestEnvironment {
             }
         }
 
-        if let (Some(stream), Some(acc)) = (&mut self.all_blocks_stream, &mut self.all_blocks) {
+        if let (Some(stream), Some(acc)) = (
+            self.all_blocks_stream.borrow_mut().as_mut(),
+            self.all_blocks.borrow_mut().as_mut(),
+        ) {
             loop {
                 match stream.next().now_or_never() {
                     Some(Some(batch)) => {
@@ -1622,13 +1766,17 @@ impl TestEnvironment {
 
         self.drain_delivery_barrier().await;
 
-        for (region_id, stream) in &mut self.region_streams {
+        // No `.await` inside the loop (`now_or_never` polls synchronously), so
+        // holding both RefCell borrows across it is sound.
+        let mut region_streams = self.region_streams.borrow_mut();
+        let mut region_data = self.region_data.borrow_mut();
+        for (region_id, stream) in region_streams.iter_mut() {
             let mut event_count = 0;
             loop {
                 match stream.next().now_or_never() {
                     Some(Some(batch)) => {
                         event_count += batch.inner.items.len();
-                        if let Some(region_data) = self.region_data.get_mut(region_id) {
+                        if let Some(region_data) = region_data.get_mut(region_id) {
                             for change in &batch.inner.items {
                                 region_data.apply_change(rekey_change(change.change.clone()));
                             }
@@ -1656,9 +1804,9 @@ impl TestEnvironment {
     pub async fn assert_cdc_quiescent(&mut self) {
         use futures::FutureExt;
 
-        if self.active_watches.is_empty()
-            && self.region_streams.is_empty()
-            && self.all_blocks_stream.is_none()
+        if self.active_watches.borrow().is_empty()
+            && self.region_streams.borrow().is_empty()
+            && self.all_blocks_stream.borrow().is_none()
         {
             return;
         }
@@ -1671,7 +1819,7 @@ impl TestEnvironment {
         // arriving during the wait IS the bug we want to assert against.
         let target_seq = self
             .ctx
-            .as_ref()
+            .get()
             .map(|c| c.engine().db_handle().cdc_emitted_watermark())
             .unwrap_or(0);
 
@@ -1709,7 +1857,7 @@ impl TestEnvironment {
         loop {
             let mut still_pending = false;
 
-            for (query_id, stream) in &mut self.active_watches {
+            for (query_id, stream) in self.active_watches.borrow_mut().iter_mut() {
                 let mut count = 0usize;
                 while let Some(Some(batch)) = stream.next().now_or_never() {
                     let batch_seq = batch.metadata.seq;
@@ -1726,7 +1874,7 @@ impl TestEnvironment {
                             ));
                         }
                     }
-                    if let Some(ui_data) = self.ui_model.get_mut(query_id) {
+                    if let Some(ui_data) = self.ui_model.borrow_mut().get_mut(query_id) {
                         for change in &batch.inner.items {
                             ui_data.apply_change(rekey_change(change.change.clone()));
                         }
@@ -1740,38 +1888,47 @@ impl TestEnvironment {
                 }
             }
 
-            for (region_id, stream) in &mut self.region_streams {
-                let mut count = 0usize;
-                while let Some(Some(batch)) = stream.next().now_or_never() {
-                    let batch_seq = batch.metadata.seq;
-                    let known_seq = region_seen.entry(region_id.clone()).or_insert(0);
-                    *known_seq = (*known_seq).max(batch_seq);
-                    if batch_seq > target_seq {
-                        count += batch.inner.items.len();
-                        last_post_target = Some(tokio::time::Instant::now());
-                        for change in &batch.inner.items {
-                            spurious_dump.push((
-                                format!("region:{region_id}"),
-                                batch_seq,
-                                summarize_change(&rekey_change(change.change.clone())),
-                            ));
+            {
+                // No `.await` in this loop (`now_or_never`), so holding both
+                // RefCell borrows across it is sound.
+                let mut region_streams = self.region_streams.borrow_mut();
+                let mut region_data = self.region_data.borrow_mut();
+                for (region_id, stream) in region_streams.iter_mut() {
+                    let mut count = 0usize;
+                    while let Some(Some(batch)) = stream.next().now_or_never() {
+                        let batch_seq = batch.metadata.seq;
+                        let known_seq = region_seen.entry(region_id.clone()).or_insert(0);
+                        *known_seq = (*known_seq).max(batch_seq);
+                        if batch_seq > target_seq {
+                            count += batch.inner.items.len();
+                            last_post_target = Some(tokio::time::Instant::now());
+                            for change in &batch.inner.items {
+                                spurious_dump.push((
+                                    format!("region:{region_id}"),
+                                    batch_seq,
+                                    summarize_change(&rekey_change(change.change.clone())),
+                                ));
+                            }
+                        }
+                        if let Some(region_data) = region_data.get_mut(region_id) {
+                            for change in &batch.inner.items {
+                                region_data.apply_change(rekey_change(change.change.clone()));
+                            }
                         }
                     }
-                    if let Some(region_data) = self.region_data.get_mut(region_id) {
-                        for change in &batch.inner.items {
-                            region_data.apply_change(rekey_change(change.change.clone()));
-                        }
+                    if count > 0 {
+                        spurious.push((format!("region:{region_id}"), count));
                     }
-                }
-                if count > 0 {
-                    spurious.push((format!("region:{region_id}"), count));
-                }
-                if region_seen.get(region_id).copied().unwrap_or(0) < target_seq {
-                    still_pending = true;
+                    if region_seen.get(region_id).copied().unwrap_or(0) < target_seq {
+                        still_pending = true;
+                    }
                 }
             }
 
-            if let (Some(stream), Some(acc)) = (&mut self.all_blocks_stream, &mut self.all_blocks) {
+            if let (Some(stream), Some(acc)) = (
+                self.all_blocks_stream.borrow_mut().as_mut(),
+                self.all_blocks.borrow_mut().as_mut(),
+            ) {
                 let mut count = 0usize;
                 while let Some(Some(batch)) = stream.next().now_or_never() {
                     let batch_seq = batch.metadata.seq;
@@ -1877,7 +2034,8 @@ impl TestEnvironment {
         let mut all_blocks = Vec::new();
         let root = self.org_root.as_path();
 
-        for file_path in self.documents.values() {
+        let file_paths: Vec<PathBuf> = self.documents.borrow().values().cloned().collect();
+        for file_path in &file_paths {
             let raw = self.org_fs.read_to_string(file_path).await?;
             let content = match todo_header {
                 Some(header) if !raw.contains("#+TODO:") => format!("{}\n{}", header, raw),
@@ -1890,92 +2048,9 @@ impl TestEnvironment {
         Ok(all_blocks)
     }
 
-    /// Render each tracked org file from the current SQL state and return
-    /// `{file_path: (disk_bytes, rendered_bytes)}`. Renders through the *same*
-    /// production code `FileSyncController::render_file_by_doc_id` uses —
-    /// `CacheBlockReader::get_blocks` (doc-scoped recursive CTE,
-    /// `ORDER BY sort_key, id`) feeding `OrgRenderer::render_document` — but
-    /// does not write to disk. The result is what `re_render_all_tracked`
-    /// *would* write next.
-    ///
-    /// Sibling order is the contract here: the renderer is order-trusting
-    /// (ADR 0005), so the test MUST source descendant order from the same
-    /// ordered read production uses, not re-derive it. A hand-rolled,
-    /// unordered query here would diverge from the controller and make the
-    /// invariant compare against the wrong order.
-    ///
-    /// The render-fixed-point invariant (`inv-org-render-fixed-point`)
-    /// asserts `disk_bytes == rendered_bytes` for every entry. That is the
-    /// bytes-level contract `FileSyncController`'s echo suppression depends
-    /// on: any divergence means the next `on_block_changed`-driven
-    /// re-render will write a different file, FSEvent will fire, and
-    /// `on_file_changed` will reprocess — the loop class observed on the
-    /// `Phase 6: Flow Optimization.org` shared-tree mount file (May 2026).
-    pub async fn snapshot_org_render_pairs(&self) -> Result<HashMap<PathBuf, (String, String)>> {
-        use holon_orgmode::di::CacheBlockReader;
-        use holon_orgmode::org_renderer::OrgRenderer;
-        use holon_orgmode::traits::BlockReader;
-
-        let injector = self.injector.as_ref().expect(
-            "[snapshot_org_render_pairs] DI injector not captured — start_app() must run first",
-        );
-        let block_cache = injector
-            .resolve_async::<holon::core::queryable_cache::QueryableCache<Block>>()
-            .await;
-        // di.rs builds the controller's reader the same way: `get_blocks` runs
-        // the doc-scoped recursive CTE ordered by `sort_key, id`, so
-        // descendants arrive in the exact order production renders them.
-        let reader = CacheBlockReader::new(block_cache);
-
-        // Doc blocks (Page rows) carry only the file header (#+TITLE / #+TODO),
-        // which is order-independent. `get_blocks` excludes pages (sub-document
-        // boundary), so resolve the header block by id once here; hydration
-        // matches the production read.
-        let header_sql = "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, \
-                   b.content_type, b.source_language, b.source_name, \
-                   b.properties, b.marks, b.collapsed, b.completed, \
-                   b.block_type, b.created_at, b.updated_at, \
-                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
-                   FROM block_raw b";
-        let doc_blocks: HashMap<String, Block> = self
-            .query_sql(header_sql)
-            .await?
-            .into_iter()
-            .map(|row| {
-                let row: holon_api::StorageEntity = row
-                    .into_iter()
-                    .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
-                    .collect();
-                Block::try_from(row).map_err(|e| anyhow::anyhow!("Block::try_from failed: {e}"))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .map(|b| (b.id.to_string(), b))
-            .collect();
-
-        let mut out = HashMap::new();
-        for (doc_uri, file_path) in &self.documents {
-            let doc_block = match doc_blocks.get(doc_uri.as_str()) {
-                Some(b) => b,
-                // Doc not yet projected — controller hasn't created the row
-                // (e.g. WriteOrgFile precedes startup ingest). Skip rather
-                // than panic; the post-startup invariant pass will catch it.
-                None => continue,
-            };
-
-            let descendants = reader.get_blocks(doc_uri).await?;
-            let rendered =
-                OrgRenderer::render_document(doc_block, &descendants, file_path, &doc_block.id);
-            let disk = self.org_fs.read_to_string(file_path).await?;
-            out.insert(file_path.clone(), (disk, rendered));
-        }
-        Ok(out)
-    }
-
     /// Set up a CDC-driven region watch that tracks `focus_roots JOIN block`.
     /// When navigation changes `focus_roots` via IVM, CDC propagates to this chained matview.
-    pub async fn setup_region_watch(&mut self, region: Region) -> Result<()> {
+    pub async fn setup_region_watch(&self, region: Region) -> Result<()> {
         let sql = format!(
             "SELECT fr.root_id AS id, b.content, b.parent_id \
              FROM focus_roots fr \
@@ -1990,19 +2065,20 @@ impl TestEnvironment {
 
         let region_key = region.as_str().to_string();
         self.region_data
+            .borrow_mut()
             .insert(region_key.clone(), CdcAccumulator::from_rows(vec![]));
-        self.region_streams.insert(region_key, stream);
+        self.region_streams.borrow_mut().insert(region_key, stream);
         Ok(())
     }
 
-    pub async fn setup_all_blocks_watch(&mut self) -> Result<()> {
+    pub async fn setup_all_blocks_watch(&self) -> Result<()> {
         let sql = "SELECT * FROM block";
         let stream = self
             .engine()
             .query_and_watch(sql.to_string(), HashMap::new(), None)
             .await?;
-        self.all_blocks = Some(CdcAccumulator::from_rows(vec![]));
-        self.all_blocks_stream = Some(stream);
+        *self.all_blocks.borrow_mut() = Some(CdcAccumulator::from_rows(vec![]));
+        *self.all_blocks_stream.borrow_mut() = Some(stream);
         Ok(())
     }
 
@@ -2028,8 +2104,13 @@ impl TestEnvironment {
     // =========================================================================
 
     /// Set up a CDC watch for a query in any supported language (prql/sql/gql).
+    ///
+    /// `&self` (not `&mut self`): the watch state is interior-mutable (see
+    /// [`Self::active_watches`]), so this write path can be driven through the
+    /// `&self` `SutWatchRegister` cap by the decomposed `SetupWatch` transition.
+    /// The `.await` happens before any borrow is taken, so no guard crosses it.
     pub async fn setup_watch(
-        &mut self,
+        &self,
         query_id: &str,
         source: &str,
         language: QueryLanguage,
@@ -2039,18 +2120,22 @@ impl TestEnvironment {
             .query_and_watch(source.to_string(), language, HashMap::new())
             .await?;
         self.ui_model
+            .borrow_mut()
             .insert(query_id.to_string(), CdcAccumulator::from_rows(vec![]));
-        self.active_watches.insert(query_id.to_string(), stream);
+        self.active_watches
+            .borrow_mut()
+            .insert(query_id.to_string(), stream);
         self.watch_queries
+            .borrow_mut()
             .insert(query_id.to_string(), (source.to_string(), language));
         Ok(())
     }
 
     /// Remove a watch.
-    pub fn remove_watch(&mut self, query_id: &str) {
-        self.active_watches.remove(query_id);
-        self.watch_queries.remove(query_id);
-        self.ui_model.remove(query_id);
+    pub fn remove_watch(&self, query_id: &str) {
+        self.active_watches.borrow_mut().remove(query_id);
+        self.watch_queries.borrow_mut().remove(query_id);
+        self.ui_model.borrow_mut().remove(query_id);
     }
 
     // =========================================================================
@@ -2058,8 +2143,8 @@ impl TestEnvironment {
     // =========================================================================
 
     /// Switch the active view filter.
-    pub fn switch_view(&mut self, view_name: &str) {
-        self.current_view = view_name.to_string();
+    pub fn switch_view(&self, view_name: &str) {
+        *self.current_view.borrow_mut() = view_name.to_string();
     }
 
     // =========================================================================
@@ -2186,7 +2271,7 @@ impl TestEnvironment {
     /// Event-driven: awaits the next CDC batch (no polling). The 100 ms
     /// per-event ceiling surfaces a wedged stream as a timeout.
     pub async fn wait_for_blocks_synced(
-        &mut self,
+        &self,
         expected_ids: &HashSet<EntityUri>,
         timeout: std::time::Duration,
     ) -> Vec<holon_api::StorageEntity> {
@@ -2203,7 +2288,7 @@ impl TestEnvironment {
     /// existing layout block ids, so id-presence alone returns before the
     /// file watcher ingests the new text and the invariants see stale rows.
     pub async fn wait_for_blocks_synced_with_content(
-        &mut self,
+        &self,
         expected_ids: &HashSet<EntityUri>,
         expected_contents: &HashMap<EntityUri, String>,
         timeout: std::time::Duration,
@@ -2211,9 +2296,15 @@ impl TestEnvironment {
         use tokio::time::{Duration, timeout as tokio_timeout};
 
         let start = std::time::Instant::now();
-        let seed_count = self.seed_count;
+        let seed_count = self.seed_count.get();
 
-        if let (Some(stream), Some(acc)) = (&mut self.all_blocks_stream, &mut self.all_blocks) {
+        // Take the accumulator + stream out of their cells into locals so the
+        // await-driven drain loop never holds a `RefCell` borrow across a
+        // suspension point (the soundness rule for the `&self` flip). They are
+        // restored before the method returns.
+        let mut stream_opt = self.all_blocks_stream.borrow_mut().take();
+        let mut acc_opt = self.all_blocks.borrow_mut().take();
+        if let (Some(stream), Some(acc)) = (stream_opt.as_mut(), acc_opt.as_mut()) {
             loop {
                 // Synthetic ref-side ids (`block::split-N`, `block:bulk-N-M`) are
                 // placeholders the SUT replaces with real UUIDs — by construction
@@ -2255,6 +2346,9 @@ impl TestEnvironment {
                 }
             }
         }
+        // Restore the accumulator + stream into their cells.
+        *self.all_blocks_stream.borrow_mut() = stream_opt;
+        *self.all_blocks.borrow_mut() = acc_opt;
 
         // Return non-page rows (callers that inspect this expect filtering).
         //
@@ -2282,7 +2376,7 @@ impl TestEnvironment {
     /// `wait_for_blocks_synced` calls can detect pending deletes via a
     /// length match. Call this once after StartApp's seeding settles.
     pub async fn prime_seed_count(
-        &mut self,
+        &self,
         expected_ids: &HashSet<EntityUri>,
         timeout: std::time::Duration,
     ) {
@@ -2290,7 +2384,12 @@ impl TestEnvironment {
 
         let start = std::time::Instant::now();
 
-        if let (Some(stream), Some(acc)) = (&mut self.all_blocks_stream, &mut self.all_blocks) {
+        // Take the accumulator + stream into locals so the await-driven drain
+        // loop never holds a `RefCell` borrow across a suspension point; restore
+        // them before returning.
+        let mut stream_opt = self.all_blocks_stream.borrow_mut().take();
+        let mut acc_opt = self.all_blocks.borrow_mut().take();
+        if let (Some(stream), Some(acc)) = (stream_opt.as_mut(), acc_opt.as_mut()) {
             while !expected_ids
                 .iter()
                 .all(|id| acc.state().contains_key(id.as_str()))
@@ -2309,16 +2408,24 @@ impl TestEnvironment {
                 }
             }
             let extras = acc.state().len().saturating_sub(expected_ids.len());
-            self.seed_count = Some(extras);
+            self.seed_count.set(Some(extras));
         }
+        *self.all_blocks_stream.borrow_mut() = stream_opt;
+        *self.all_blocks.borrow_mut() = acc_opt;
     }
 
     /// Simulate app restart by touching all org files to trigger re-parsing.
     /// This tests that re-parsing doesn't create orphan blocks.
-    pub async fn simulate_restart(&mut self, expected_ids: &HashSet<EntityUri>) -> Result<()> {
+    pub async fn simulate_restart(&self, expected_ids: &HashSet<EntityUri>) -> Result<()> {
         use std::time::Duration;
 
-        for (doc_uri, file_path) in &self.documents {
+        let documents: Vec<(EntityUri, PathBuf)> = self
+            .documents
+            .borrow()
+            .iter()
+            .map(|(uri, path)| (uri.clone(), path.clone()))
+            .collect();
+        for (doc_uri, file_path) in &documents {
             eprintln!(
                 "[simulate_restart] Re-triggering parse for: {} -> {}",
                 doc_uri,
@@ -2385,7 +2492,13 @@ impl TestEnvironment {
     /// * `expected_blocks` - All blocks that should exist after the mutation
     pub async fn apply_external_mutation(&self, expected_blocks: &[Block]) -> Result<()> {
         let grouped = holon_api::blocks_by_document(expected_blocks);
-        for (doc_uri, file_path) in &self.documents {
+        let documents: Vec<(EntityUri, PathBuf)> = self
+            .documents
+            .borrow()
+            .iter()
+            .map(|(uri, path)| (uri.clone(), path.clone()))
+            .collect();
+        for (doc_uri, file_path) in &documents {
             let doc_blocks: Vec<&Block> = grouped
                 .iter()
                 .find(|(uri, _)| uri == doc_uri)
@@ -2436,7 +2549,7 @@ impl TestEnvironment {
         // advances would only burn the full timeout.
 
         // Fast path: event-driven idle signal.
-        if let Some(signal) = &self.org_sync_idle {
+        if let Some(signal) = self.org_sync_idle.get() {
             // Use caller-supplied stability_ms instead of a hardcoded 5 ms —
             // the controller's event_bus delivery can have >5 ms latency
             // under PBT load (BulkExternalAdd flushes many events
@@ -2499,7 +2612,8 @@ impl TestEnvironment {
 
             let mut current_snapshot: HashMap<PathBuf, Option<std::time::SystemTime>> =
                 HashMap::new();
-            for file_path in self.documents.values() {
+            let file_paths: Vec<PathBuf> = self.documents.borrow().values().cloned().collect();
+            for file_path in &file_paths {
                 let mtime = self
                     .org_fs
                     .metadata(file_path)

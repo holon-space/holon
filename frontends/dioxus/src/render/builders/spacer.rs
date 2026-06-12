@@ -1,15 +1,13 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn build(ba: BA<'_>) -> Element {
-    let h = ba
-        .args
-        .get_f64("height")
-        .or(ba.args.get_f64("h"))
-        .unwrap_or(0.0);
-    if h > 0.0 {
-        let height = format!("{}px", h);
-        rsx! { div { height: "{height}" } }
-    } else {
-        rsx! { div { flex: "1" } }
-    }
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::Spacer { width, height, .. } = &node.kind else {
+        return rsx! {};
+    };
+    let w = *width;
+    let h = *height;
+    let style =
+        format!("display: inline-block; width: {w}px; height: {h}px; flex-shrink: 0;");
+    rsx! { div { style: "{style}" } }
 }

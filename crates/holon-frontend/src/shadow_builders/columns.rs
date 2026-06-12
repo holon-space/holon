@@ -132,7 +132,7 @@ holon_macros::widget_builder! {
                         ..ViewModel::from_widget("columns", std::collections::HashMap::new())
                     };
                 }
-                // No parent space known — static fallback for headless/snapshot.
+                // No parent space known — static (non-reactive) path for headless/snapshot.
                 None => {
                     let items: Vec<ViewModel> =
                         exprs.iter().map(|e| (ba.interpret)(e, ba.ctx)).collect();

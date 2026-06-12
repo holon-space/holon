@@ -149,11 +149,12 @@ impl RefLifecycle for EditorPureRef {
     fn enable_loro(&self) -> bool {
         false
     }
+    fn has_editor_buffer(&self) -> bool {
+        // The pure slice owns an editor buffer — that's the reason it exists.
+        true
+    }
     fn last_transition_kind(&self) -> Option<&'static str> {
         self.last_transition_kind
-    }
-    fn atomic_editor_enabled() -> bool {
-        true
     }
 }
 
@@ -343,8 +344,17 @@ impl RefEditorMirrorMut for EditorPureRef {
             if self.editor.cursor == 0 {
                 break;
             }
-            self.editor.cursor -= 1;
-            self.editor.text.remove(self.editor.cursor);
+            // Step back one full char, not one byte — multibyte content (the
+            // byte/codepoint bug class these transitions exist to catch) makes
+            // `String::remove` panic off a char boundary. Mirrors the
+            // production `ReferenceState::ActiveEditor::delete_backward`.
+            let prev = self.editor.text[..self.editor.cursor]
+                .char_indices()
+                .next_back()
+                .expect("cursor > 0 implies a preceding char")
+                .0;
+            self.editor.text.remove(prev);
+            self.editor.cursor = prev;
         }
     }
     fn move_cursor(&mut self, byte_position: usize) {

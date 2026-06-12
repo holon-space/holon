@@ -175,11 +175,7 @@ pub fn serialize_block_recursive(
         let bare: Vec<String> = block
             .requires
             .iter()
-            .map(|r| {
-                EntityUri::parse(r)
-                    .map(|uri| uri.id().to_string())
-                    .unwrap_or_else(|_| r.clone())
-            })
+            .map(|uri| uri.id().to_string())
             .collect();
         result.push_str(&format!(":REQUIRES: {}\n", bare.join(" ")));
     }

@@ -45,10 +45,12 @@ impl MemoryMonitorHandle {
             }
 
             #[cfg(feature = "heap-profile")]
-            let rss_abort_mb: f64 = std::env::var("HOLON_RSS_ABORT_MB")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_RSS_ABORT_MB);
+            let rss_abort_mb: f64 = match std::env::var("HOLON_RSS_ABORT_MB") {
+                Ok(s) => s
+                    .parse()
+                    .expect("HOLON_RSS_ABORT_MB must be a valid f64 (megabytes)"),
+                Err(_) => DEFAULT_RSS_ABORT_MB,
+            };
 
             let task = tokio::spawn(async move {
                 let mut prev_mb: Option<f64> = None;

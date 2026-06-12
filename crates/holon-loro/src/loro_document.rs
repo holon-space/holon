@@ -118,12 +118,22 @@ impl LoroDocument {
         self.doc.set_next_commit_origin(origin);
         let result = f(&self.doc)?;
 
+        // Flush the transaction so the origin-tagged commit actually fires and
+        // subscribers observe `origin`. Loro batches changes until an explicit
+        // `commit()` or an implicit one (export/import); tree/text ops alone do
+        // not commit. This used to happen implicitly via the diagnostic
+        // `export` below — once that was gated behind DEBUG (perf), non-debug
+        // log levels stopped committing here and silently dropped the origin
+        // tag. Commit explicitly; it is a no-op when the closure already
+        // committed (the pending origin is consumed by that commit).
+        self.doc.commit();
+
         // Diagnostic only: exporting the owned update log is O(doc-size), and
         // this ran on EVERY write purely to log a byte count — making bulk
         // writes O(N²) (a 614-block org-file scan spent ~11s here, dominating
         // cold start). Gate behind the debug level so production (warn/info)
-        // skips the export entirely; the commit itself already happened in the
-        // closure, so this has no functional effect.
+        // skips the export entirely; the commit above already flushed the
+        // transaction, so this is purely a byte-count log.
         if tracing::enabled!(tracing::Level::DEBUG) {
             let updates = self
                 .doc

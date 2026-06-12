@@ -1150,7 +1150,9 @@ impl HolonMcpServer {
             }
         }
 
-        let now_iso = chrono::Utc::now().to_rfc3339();
+        let now_iso = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+            .expect("now within range")
+            .to_rfc3339();
         let worktree = std::env::current_dir()
             .ok() // ALLOW(ok): best-effort metadata; missing CWD shouldn't block claim
             .map(|p| p.display().to_string());
@@ -1330,7 +1332,9 @@ impl HolonMcpServer {
             ));
         }
 
-        let completed_iso = chrono::Utc::now().to_rfc3339();
+        let completed_iso = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+            .expect("now within range")
+            .to_rfc3339();
         set_field(
             self.service(),
             &task_id,
@@ -1346,7 +1350,10 @@ impl HolonMcpServer {
         )
         .await?;
 
-        let datestamp = chrono::Utc::now().format("%Y-%m-%d-%H%M%S").to_string();
+        let datestamp = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+            .expect("now within range")
+            .format("%Y-%m-%d-%H%M%S")
+            .to_string();
         let slug = slugify_for_devlog(&params.task_id);
         let filename = if slug.is_empty() {
             format!("{datestamp}-{agent_id}.md")

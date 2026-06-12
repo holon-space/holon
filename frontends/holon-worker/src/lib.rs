@@ -1,3 +1,7 @@
+//! @c4 container
+//! @c4 layer Services
+//! Pattern: Worker
+//!
 //! Holon worker — Phase 1 spike.
 //!
 //! Goal: falsify or validate H2 (napi build from holon's repo) and H4 (tokio
@@ -103,15 +107,15 @@ pub fn spawn_check() -> napi::Result<String> {
 #[cfg(feature = "browser")]
 mod backend {
     use super::*;
-    use holon::api::backend_engine::{BackendEngine, QueryContext};
+    use holon::api::backend_engine::BackendEngine;
     use holon::api::holon_service::HolonService;
     use holon::di::lifecycle::create_backend_engine;
     use holon::storage::types::StorageEntity;
-    use holon_api::{Change, EntityName, EntityUri, QueryLanguage, Value};
+    use holon_api::{Change, EntityName, EntityUri, QueryContext, QueryLanguage, Value};
     use holon_frontend::command_provider::CommandProvider;
     use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
     use holon_frontend::shadow_builders::build_shadow_interpreter;
-    use holon_frontend::{interpret_pure, FrontendSession, ReactiveViewModel};
+    use holon_frontend::{interpret_pure, FrontendSession, ReactiveViewModel, SessionParts};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -169,7 +173,27 @@ mod backend {
             .block_on(async { super::seed::seed_default_layout(&engine).await })
             .map_err(|e| super::nerr("seed_default_layout", e))?;
 
-        let session = Arc::new(FrontendSession::from_engine(engine.clone()));
+        // Build the FrontendSession from the engine's capabilities, mirroring
+        // the production Turso wiring (holon-app `wiring.rs`): the BackendEngine
+        // provides the query/operation/ui-watcher capabilities, and the block
+        // read seam comes from `TursoBlockQuerySource::watch_default`.
+        let block_query = runtime
+            .block_on(async {
+                holon::sync::turso_block_query_source::TursoBlockQuerySource::watch_default(&engine)
+                    .await
+            })
+            .map_err(|e| super::nerr("block_query watch_default", e))?;
+        let profiles = engine.profile_resolver().clone();
+        let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
+        let operation_engine = Some(engine.clone() as Arc<dyn holon::api::OperationEngine>);
+        let ui_watcher = engine.clone() as Arc<dyn holon::api::UiWatcher>;
+        let session = Arc::new(FrontendSession::from_parts(SessionParts::with_capabilities(
+            query_engine,
+            Arc::new(block_query),
+            operation_engine,
+            ui_watcher,
+            profiles,
+        )));
 
         // OnceLock breaks the circular dep: ReactiveEngine needs itself as
         // BuilderServices inside interpret_fn, but exists only after construction.
@@ -227,7 +251,7 @@ mod backend {
     /// JSON string for the JS bridge.
     pub(super) fn execute_query(sql: String) -> napi::Result<String> {
         let (engine, runtime) = engine_and_rt("execute_query")?;
-        let rows: Vec<HashMap<String, Value>> = runtime
+        let rows: Vec<StorageEntity> = runtime
             .block_on(async {
                 engine
                     .execute_query(sql, HashMap::new(), Some(QueryContext::root()))
@@ -619,7 +643,7 @@ mod backend {
                     runtime.block_on(service.query_and_watch(&query, lang, params, None))?;
 
                 // First batch delivers initial data (Created items).
-                let initial_rows: Vec<HashMap<String, Value>> = runtime.block_on(async {
+                let initial_rows: Vec<StorageEntity> = runtime.block_on(async {
                     if let Some(first_batch) = stream.next().await {
                         first_batch
                             .inner
@@ -779,7 +803,7 @@ mod backend {
                     .and_then(|v| v.as_object())
                     .map(|obj| {
                         obj.iter()
-                            .map(|(k, v)| (k.clone(), Value::from_json_value(v.clone())))
+                            .map(|(k, v)| (k.as_str().into(), Value::from_json_value(v.clone())))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -805,13 +829,22 @@ mod backend {
                     HashMap::from([("1".to_string(), Value::String(block_uri.to_string()))]),
                 ))?;
 
-                let context_params: HashMap<String, Value> =
-                    block_result.rows.first().cloned().unwrap_or_default();
+                // `StorageEntity` keys are `Arc<str>`; the profile resolver and
+                // command builder take `&HashMap<String, Value>`, so re-key here.
+                let context_params: HashMap<String, Value> = block_result
+                    .rows
+                    .first()
+                    .map(|row| {
+                        row.iter()
+                            .map(|(k, v)| (k.to_string(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
                 let profile = block_result
                     .rows
                     .first()
-                    .map(|row| engine.profile_resolver().resolve(row));
+                    .map(|_| engine.profile_resolver().resolve(&context_params));
                 let entity_name = profile
                     .as_ref()
                     .map(|p| p.name.clone())
@@ -850,12 +883,12 @@ mod backend {
                     .and_then(|v| v.as_object())
                     .map(|obj| {
                         obj.iter()
-                            .map(|(k, v)| (k.clone(), Value::from_json_value(v.clone())))
+                            .map(|(k, v)| (k.as_str().into(), Value::from_json_value(v.clone())))
                             .collect()
                     })
                     .unwrap_or_default();
                 storage_entity
-                    .entry("id".to_string())
+                    .entry("id".into())
                     .or_insert_with(|| Value::String(block_id.clone()));
                 let result = runtime.block_on(service.execute_operation(
                     &EntityName::from(entity_name.as_str()),

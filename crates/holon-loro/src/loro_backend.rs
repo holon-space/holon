@@ -9,14 +9,14 @@
 //! CRDT, and is used as the SQL primary key — ensuring all peers share the
 //! same block identity.
 
-use crate::event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
-use holon_api::repository::{CoreOperations, Lifecycle, P2POperations};
-use holon_api::repository::NewBlock;
 use crate::LoroDocument;
+use crate::event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
 use crate::shared_tree::{SharedTreeStore, is_mount_node, read_mount_info};
 use async_trait::async_trait;
 use holon_api::EntityUri;
 use holon_api::block_mutation::{BlockMutation, BlockTreeView};
+use holon_api::repository::NewBlock;
+use holon_api::repository::{CoreOperations, Lifecycle, P2POperations};
 use holon_api::streaming::{ChangeNotifications, ChangeSubscribers};
 use holon_api::{
     ApiError, Block, BlockContent, Change, ChangeOrigin, ContentType, SourceBlock, StreamPosition,
@@ -437,20 +437,32 @@ pub struct SnapshotBlock {
 }
 
 /// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty
-/// `Vec` when the key is absent or malformed (treated as "no tags").
+/// `Vec` when the key is absent ("no tags"). Malformed JSON in a present value
+/// is a corruption of metadata we wrote ourselves — fail loud rather than
+/// silently dropping the tags.
 fn read_tags_from_meta(meta: &loro::LoroMap) -> Vec<String> {
     meta.get_typed("tags", |val| val.as_string().map(|s| s.to_string()))
-        .map(|s| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default())
+        .map(|s| {
+            serde_json::from_str::<Vec<String>>(&s)
+                .unwrap_or_else(|e| panic!("corrupt `tags` metadata JSON {s:?}: {e}"))
+        })
         .unwrap_or_default()
 }
 
 /// Read the `requires` JSON-encoded list (org-edna dependency edge field) from a
 /// node's metadata. Stored under a dedicated `requires` meta key — like `tags`,
 /// it is an edge field (the `block_requires` junction), never part of the
-/// generic `properties` blob. Returns an empty `Vec` when absent or malformed.
-fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<String> {
+/// generic `properties` blob. Returns an empty `Vec` when absent. Malformed
+/// JSON in a present value is corruption of our own metadata — fail loud.
+fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
     meta.get_typed("requires", |val| val.as_string().map(|s| s.to_string()))
-        .map(|s| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default())
+        .map(|s| {
+            serde_json::from_str::<Vec<String>>(&s)
+                .unwrap_or_else(|e| panic!("corrupt `requires` metadata JSON {s:?}: {e}"))
+                .into_iter()
+                .map(|r| EntityUri::parse_owned(r).expect("stored requires must be a valid URI"))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -786,6 +798,7 @@ pub struct LoroBackend {
     /// Cache: stable_id (UUID string) → TreeID. Populated eagerly on create,
     /// lazily on lookup, invalidated on delete.
     id_cache: Arc<Mutex<HashMap<String, loro::TreeID>>>,
+    clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
 impl Clone for LoroBackend {
@@ -796,6 +809,7 @@ impl Clone for LoroBackend {
             event_log: self.event_log.clone(),
             shared_trees: self.shared_trees.clone(),
             id_cache: self.id_cache.clone(),
+            clock: self.clock.clone(),
         }
     }
 }
@@ -808,7 +822,13 @@ impl LoroBackend {
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
+            clock: std::sync::Arc::new(holon_api::SystemClock),
         }
+    }
+
+    pub fn with_clock(mut self, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Attach a shared tree store for mount-node traversal.
@@ -831,8 +851,8 @@ impl LoroBackend {
         self.collab_doc.clone()
     }
 
-    fn now_millis() -> i64 {
-        holon_core::util::now_unix_millis()
+    fn now_millis(&self) -> i64 {
+        self.clock.now_millis()
     }
 
     pub(crate) fn emit_change(&self, change: Change<Block>) {
@@ -911,7 +931,7 @@ impl LoroBackend {
                     CONTENT_RAW
                 };
                 update_text_field(&meta, field, new_text)?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -990,7 +1010,7 @@ impl LoroBackend {
                         .map_err(|e| anyhow::anyhow!("LoroText mark {key}: {:?}", e))?;
                 }
 
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1051,7 +1071,7 @@ impl LoroBackend {
                 text.mark(range.clone(), key, value)
                     .map_err(|e| anyhow::anyhow!("LoroText mark {key}: {:?}", e))?;
 
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1095,7 +1115,7 @@ impl LoroBackend {
                 text.unmark(range.clone(), &key_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText unmark {key_owned}: {:?}", e))?;
 
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1197,7 +1217,7 @@ impl LoroBackend {
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 text.insert(pos, &s_owned)
                     .map_err(|e| anyhow::anyhow!("LoroText insert at {pos}: {:?}", e))?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1244,7 +1264,7 @@ impl LoroBackend {
                 let text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
                 text.delete(pos, len)
                     .map_err(|e| anyhow::anyhow!("LoroText delete {len} at {pos}: {:?}", e))?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1279,9 +1299,9 @@ impl LoroBackend {
         id: Option<EntityUri>,
         properties: &HashMap<String, Value>,
         tags: &Tags,
-        requires: &[String],
+        requires: &[EntityUri],
     ) -> Result<Block, ApiError> {
-        let now = Self::now_millis();
+        let now = self.now_millis();
         let stable_id = match &id {
             Some(uri) => uri.id().to_string(),
             None => uuid::Uuid::new_v4().to_string(),
@@ -1371,7 +1391,7 @@ impl LoroBackend {
                 let mut existing_props = read_properties_from_meta(&meta);
                 existing_props.extend(properties.clone());
                 write_properties_to_meta(&meta, &existing_props)?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1411,7 +1431,7 @@ impl LoroBackend {
                 // would silently keep the old blob when the new set is empty.
                 let json = serde_json::to_string(properties)?;
                 meta.insert(PROPERTIES, loro::LoroValue::from(json.as_str()))?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1451,7 +1471,7 @@ impl LoroBackend {
                     }
                 }
                 write_properties_to_meta(&meta, &properties)?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1494,7 +1514,7 @@ impl LoroBackend {
                 }
                 tree.mov(tree_id, new_parent)?;
                 let meta = tree.get_meta(tree_id)?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1592,7 +1612,7 @@ impl LoroBackend {
                     }
                 }
                 let meta = tree.get_meta(target)?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -1645,7 +1665,7 @@ impl LoroBackend {
     pub async fn set_block_requires(
         &self,
         tree_id_str: &str,
-        requires: &[String],
+        requires: &[EntityUri],
     ) -> anyhow::Result<()> {
         let tree_id = self.resolve_to_tree_id(tree_id_str).await.ok_or_else(|| {
             anyhow::anyhow!("set_block_requires: block not found: {}", tree_id_str)
@@ -1680,7 +1700,7 @@ impl LoroBackend {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
             meta.insert(SOURCE_LANGUAGE, loro::LoroValue::from(lang))?;
-            meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+            meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
             doc.commit();
             Ok(())
         })
@@ -1991,6 +2011,7 @@ impl Lifecycle for LoroBackend {
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
+            clock: std::sync::Arc::new(holon_api::SystemClock),
         })
     }
 
@@ -2237,21 +2258,15 @@ impl CoreOperations for LoroBackend {
 
                 // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
                 let parent_uri = EntityUri::from_raw(parent_id);
-                let children_tids = if parent_uri.is_no_parent() || parent_uri.is_sentinel() {
-                    tree.roots()
-                } else {
-                    let tree_id = uri_to_tree_id(&parent_uri)
-                        .or_else(|| {
-                            if parent_uri.is_block() {
-                                id_cache.lock().unwrap().get(parent_uri.id()).copied()
-                            } else {
-                                None
-                            }
-                        })
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("Cannot resolve parent_id to TreeID: {}", parent_id)
-                        })?;
-                    tree.children(tree_id).unwrap_or_default()
+                // Use the shared `resolve_parent_tree_id` (TreeID → id_cache → tree-walk,
+                // populating the cache on a hit) rather than a cache-only lookup: a backend
+                // attached via `from_document` (e.g. the composed PBT's Loro read cap over the
+                // frontend's authority doc, or a peer-merged doc) has an EMPTY id_cache, so a
+                // cache-only resolve fails for a block parent that is genuinely present in the
+                // tree. `Ok(None)` ⇒ no_parent/sentinel ⇒ the tree roots.
+                let children_tids = match resolve_parent_tree_id(&tree, &id_cache, &parent_uri)? {
+                    None => tree.roots(),
+                    Some(tree_id) => tree.children(tree_id).unwrap_or_default(),
                 };
 
                 let mut result = Vec::new();
@@ -2305,7 +2320,7 @@ impl CoreOperations for LoroBackend {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
                 write_content_to_meta(&meta, &content, None)?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -2419,7 +2434,7 @@ impl CoreOperations for LoroBackend {
                 }
 
                 let meta = tree.get_meta(tree_id)?;
-                meta.insert("updated_at", loro::LoroValue::from(Self::now_millis()))?;
+                meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
             })
@@ -2466,7 +2481,7 @@ impl CoreOperations for LoroBackend {
     }
 
     async fn create_blocks(&self, blocks: Vec<NewBlock>) -> Result<Vec<Block>, ApiError> {
-        let now = Self::now_millis();
+        let now = self.now_millis();
 
         let id_cache = self.id_cache.clone();
         let created_blocks = self
@@ -2612,4 +2627,3 @@ impl P2POperations for LoroBackend {
         })
     }
 }
-

@@ -2,7 +2,6 @@ use holon_api::block::Block;
 use holon_api::types::ContentType;
 use holon_api::EntityUri;
 use holon_api::Value;
-use std::collections::HashMap;
 
 use crate::models::OrgBlockExt;
 
@@ -41,7 +40,7 @@ pub fn build_block_params(
     // The blocks table DDL has `DEFAULT (datetime('now'))` which produces TEXT,
     // but Block::from_entity expects i64. Always provide integer timestamps
     // to avoid this mismatch.
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = holon_api::clock::now_millis();
     let created = if block.created_at > 0 {
         block.created_at
     } else {
@@ -66,7 +65,7 @@ pub fn build_block_params(
     let arr: Vec<Value> = block
         .requires
         .iter()
-        .map(|r| Value::String(r.clone()))
+        .map(|r| Value::String(r.to_string()))
         .collect();
     params.insert("requires".into(), Value::Array(arr));
 

@@ -74,7 +74,7 @@ fn watch_ui_emits_structure_event_for_block_with_query_source() {
 fn watch_ui_emits_data_events_after_structure() {
     let rt = runtime();
     rt.block_on(async {
-        let mut env = TestEnvironmentBuilder::new()
+        let env = TestEnvironmentBuilder::new()
             .with_org_file(
                 "test.org",
                 concat!(
@@ -155,7 +155,7 @@ fn watch_ui_emits_data_events_after_structure() {
 fn watch_ui_error_recovery_on_nonexistent_block() {
     let rt = runtime();
     rt.block_on(async {
-        let mut env = TestEnvironmentBuilder::new()
+        let env = TestEnvironmentBuilder::new()
             .with_org_file(
                 "test.org",
                 "* Placeholder\n:PROPERTIES:\n:ID: placeholder\n:END:\n",
@@ -230,7 +230,7 @@ fn watch_ui_error_recovery_on_nonexistent_block() {
 fn watch_ui_structural_change_triggers_new_structure_event() {
     let rt = runtime();
     rt.block_on(async {
-        let mut env = TestEnvironmentBuilder::new()
+        let env = TestEnvironmentBuilder::new()
             .with_org_file(
                 "test.org",
                 concat!(
@@ -374,7 +374,7 @@ fn test_keybinding_join_on_operations() {
 
         let reactive = env
             .reactive_engine
-            .as_ref()
+            .get()
             .expect("ReactiveEngine should be available");
 
         // Verify keybinding registry

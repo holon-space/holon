@@ -12,7 +12,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::{CursorPosition, ReferenceState};
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::SutHistoryWrite;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -23,6 +23,12 @@ use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for
 pub struct Redo;
 
 impl TransitionFactory<ReferenceState> for Redo {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutHistoryWrite,
+        >()]
+    }
+
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: redo routes through `ctx.engine().redo()` (the Turso
@@ -70,9 +76,9 @@ impl TransitionRef<ReferenceState> for Redo {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for Redo {
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
-        sut.apply_redo(ref_state).await;
+impl<S: SutHistoryWrite> TransitionImpl<ReferenceState, S> for Redo {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.redo().await;
     }
 }
 

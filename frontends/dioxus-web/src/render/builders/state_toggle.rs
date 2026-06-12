@@ -1,12 +1,10 @@
 use super::prelude::*;
+use holon_frontend::view_model::ViewKind;
 
-pub fn render(
-    _: &String,
-    current: &String,
-    label: &String,
-    _: &String,
-    _: &DioxusRenderContext,
-) -> Element {
+pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
+    let ViewKind::StateToggle { current, label, .. } = &node.kind else {
+        return rsx! {};
+    };
     let display = if label.is_empty() {
         current.clone()
     } else {

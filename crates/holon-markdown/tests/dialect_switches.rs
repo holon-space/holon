@@ -78,7 +78,10 @@ fn obsidian_baseline_has_every_sidecar() {
     assert_eq!(prop(&r.blocks[0], "wikilinks"), Some(r#"["CrossLink"]"#));
     assert_eq!(prop(&r.blocks[0], "embeds"), Some(r#"["Pic.png"]"#));
     assert_eq!(prop(&r.blocks[0], "self_links"), Some(r##"["#Section"]"##));
-    assert_eq!(prop(&r.blocks[0], "inline_tags"), Some(r#"["project","area/leaf"]"#));
+    assert_eq!(
+        prop(&r.blocks[0], "inline_tags"),
+        Some(r#"["project","area/leaf"]"#)
+    );
     assert_eq!(prop(&r.blocks[0], "highlights"), Some(r#"["hot"]"#));
     assert_eq!(prop(&r.blocks[0], "comments"), Some(r#"["note"]"#));
     assert!(prop(&r.blocks[0], "callouts").unwrap().contains("\"tip\""));
@@ -163,8 +166,14 @@ fn nested_tags_only_refines_inline_tags() {
     let without_nesting = parse_with(RICH, &dialect);
 
     // The inline_tags value changes...
-    assert_eq!(prop(&with_nesting.blocks[0], "inline_tags"), Some(r#"["project","area/leaf"]"#));
-    assert_eq!(prop(&without_nesting.blocks[0], "inline_tags"), Some(r#"["project","area"]"#));
+    assert_eq!(
+        prop(&with_nesting.blocks[0], "inline_tags"),
+        Some(r#"["project","area/leaf"]"#)
+    );
+    assert_eq!(
+        prop(&without_nesting.blocks[0], "inline_tags"),
+        Some(r#"["project","area"]"#)
+    );
 
     // ...but nothing else does.
     for key in SIDECAR_KEYS {
@@ -265,7 +274,9 @@ fn frontmatter_aliases_toggle_moves_storage_but_both_round_trip() {
     off_dialect.frontmatter_aliases = false;
     let off = parse_with(content, &off_dialect);
     assert!(!off.document.properties.contains_key("aliases"));
-    assert!(prop(&off.document, "frontmatter_extra").unwrap().contains("aliases"));
+    assert!(prop(&off.document, "frontmatter_extra")
+        .unwrap()
+        .contains("aliases"));
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +285,10 @@ fn frontmatter_aliases_toggle_moves_storage_but_both_round_trip() {
 
 #[test]
 fn canonical_block_ref_is_a_cross_file_link() {
-    let r = parse_with("# H ^h\n\nsee [[Note#^para-2]] here\n", &MarkdownDialect::obsidian());
+    let r = parse_with(
+        "# H ^h\n\nsee [[Note#^para-2]] here\n",
+        &MarkdownDialect::obsidian(),
+    );
     assert_eq!(prop(&r.blocks[0], "wikilinks"), Some(r#"["Note"]"#));
 }
 
@@ -302,7 +316,11 @@ fn daily_notes_inferred_only_when_configured_and_matching() {
     assert!(!non_date.document.properties.contains_key("daily_note"));
 
     // Feature off by default.
-    let off = parse_at("Daily/2026-06-18.md", "# x ^t\n", &MarkdownDialect::obsidian());
+    let off = parse_at(
+        "Daily/2026-06-18.md",
+        "# x ^t\n",
+        &MarkdownDialect::obsidian(),
+    );
     assert!(!off.document.properties.contains_key("daily_note"));
 }
 
@@ -318,7 +336,8 @@ fn round_trip(
     let root = Path::new("/vault");
     let parent = EntityUri::no_parent();
     let first = adapter.parse(path, content, &parent, root).unwrap();
-    let rendered = adapter.render_document(&first.document, &first.blocks, path, &first.document.id);
+    let rendered =
+        adapter.render_document(&first.document, &first.blocks, path, &first.document.id);
     let second = adapter.parse(path, &rendered, &parent, root).unwrap();
     (rendered, first, second)
 }
@@ -328,8 +347,14 @@ fn commonmark_round_trip_emits_no_obsidian_syntax() {
     let adapter = MarkdownFormatAdapter::commonmark();
     let (rendered, first, second) = round_trip(&adapter, "# Heading\n\nplain body\n");
     assert_eq!(first.blocks.len(), second.blocks.len());
-    assert!(!rendered.starts_with("---"), "frontmatter leaked: {rendered}");
-    assert!(!rendered.contains('^'), "block-id marker leaked: {rendered}");
+    assert!(
+        !rendered.starts_with("---"),
+        "frontmatter leaked: {rendered}"
+    );
+    assert!(
+        !rendered.contains('^'),
+        "block-id marker leaked: {rendered}"
+    );
 }
 
 #[test]
@@ -346,7 +371,13 @@ fn obsidian_round_trip_preserves_inline_features() {
         sidecar_props(&second.blocks[0])
     );
     // ...and the raw spans survive verbatim in content.
-    for marker in ["[[CrossLink]]", "![[Pic.png]]", "==hot==", "%%note%%", "[!tip]"] {
+    for marker in [
+        "[[CrossLink]]",
+        "![[Pic.png]]",
+        "==hot==",
+        "%%note%%",
+        "[!tip]",
+    ] {
         assert!(
             second.blocks[0].content.contains(marker),
             "{marker} did not survive the round-trip"

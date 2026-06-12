@@ -30,7 +30,7 @@ use holon_api::{EntityName, Tags, Value};
 use crate::core::datasource::{
     BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
     CrudOperations, DataSource, HasCache, OperationDescriptor, OperationProvider,
-    OperationRegistry, OperationResult, Result, UnknownOperationError,
+    OperationRegistry, OperationResult, OriginTaggedWrites, Result, UnknownOperationError,
 };
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_operation_provider::SqlOperationProvider;
@@ -421,7 +421,7 @@ impl BlockOrdering for SqlBlockOperations {
         content: holon_api::BlockContent,
         properties: &HashMap<String, Value>,
         tags: &Tags,
-        requires: &[String],
+        requires: &[EntityUri],
     ) -> Result<bool> {
         self.cell_registry
             .create_entity(
@@ -567,17 +567,17 @@ impl BlockOrdering for SqlBlockOperations {
             // Loro-backed: the outbound projector writes the SQL DELETE.
             return Ok(());
         }
-        // Authority-first delete guard (Task 3): the SQL delete fallback is
-        // only reachable for unseeded blocks and SqlOnly mode. In Loro mode,
-        // log a warning so we can observe how often the transitional path fires.
+        // ALLOW(fallback): authority-first delete guard (Task 3) — the SQL delete
+        // path here is only reachable for unseeded blocks and SqlOnly mode. In Loro
+        // mode, log a warning so we observe how often the transitional path fires.
         if self.cell_registry.has_loro_backing() {
             tracing::warn!(
-                block_id = %id,
+                block_id = %id, // ALLOW(fallback): disclosed degraded-mode warning, transitional path
                 "SQL delete fallback in Loro mode — block was unseeded. \
                  Transitional; re-seed adoption eliminates unseeded blocks."
             );
         }
-        // ALLOW(sole_block_writer): SQL delete fallback for unseeded blocks.
+        // ALLOW(sole_block_writer) ALLOW(fallback): SQL delete fallback for unseeded blocks.
         // Transitional — after sole-writer, all blocks originate in Loro, so
         // this fires only for pre-existing unseeded vaults the re-seed
         // adoption pass eliminates. NOT dead code: re-seed can fail mid-adoption.

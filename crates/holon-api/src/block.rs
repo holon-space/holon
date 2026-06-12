@@ -190,7 +190,7 @@ impl BlockResult {
             output: ResultOutput::Text {
                 content: content.into(),
             },
-            executed_at: chrono::Utc::now().timestamp_millis(),
+            executed_at: crate::clock::now_millis(),
         }
     }
 
@@ -198,7 +198,7 @@ impl BlockResult {
     pub fn table(headers: Vec<String>, rows: Vec<Vec<Value>>) -> Self {
         Self {
             output: ResultOutput::Table { headers, rows },
-            executed_at: chrono::Utc::now().timestamp_millis(),
+            executed_at: crate::clock::now_millis(),
         }
     }
 
@@ -208,7 +208,7 @@ impl BlockResult {
             output: ResultOutput::Error {
                 message: message.into(),
             },
-            executed_at: chrono::Utc::now().timestamp_millis(),
+            executed_at: crate::clock::now_millis(),
         }
     }
 }
@@ -288,7 +288,7 @@ pub struct Block {
     /// (edge field), not as a direct column. Reads from the `block` matview's
     /// hydrated `requires` JSON array.
     #[serde(skip, default)]
-    pub requires: Vec<String>,
+    pub requires: Vec<EntityUri>,
 
     // --- Content fields (flattened from BlockContent) ---
     /// Text content (raw text or source code)
@@ -331,7 +331,7 @@ pub struct Block {
 
 impl Default for Block {
     fn default() -> Self {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::clock::now_millis();
         Self {
             id: EntityUri::block_random(),
             parent_id: EntityUri::no_parent(),
@@ -533,7 +533,7 @@ impl Block {
                 self.marks = None;
             }
         }
-        self.updated_at = chrono::Utc::now().timestamp_millis();
+        self.updated_at = crate::clock::now_millis();
     }
 
     /// Get the plain text content of this block.
@@ -577,7 +577,7 @@ impl Block {
     /// flutter_rust_bridge:ignore
     pub fn set_properties_map(&mut self, props: HashMap<String, Value>) {
         self.properties = props;
-        self.updated_at = chrono::Utc::now().timestamp_millis();
+        self.updated_at = crate::clock::now_millis();
     }
 
     /// Get a property value by key
@@ -597,7 +597,7 @@ impl Block {
     /// Set a property value
     pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<Value>) {
         self.properties.insert(key.into(), value.into());
-        self.updated_at = chrono::Utc::now().timestamp_millis();
+        self.updated_at = crate::clock::now_millis();
     }
 
     /// Get source header arguments from properties (used by the Org Mode round-trip)
@@ -622,7 +622,7 @@ impl Block {
             if let Ok(json) = serde_json::to_string(&header_args) {
                 self.properties
                     .insert("_source_header_args".to_string(), Value::String(json));
-                self.updated_at = chrono::Utc::now().timestamp_millis();
+                self.updated_at = crate::clock::now_millis();
             }
         }
     }
@@ -641,7 +641,7 @@ impl Block {
         if let Some(r) = results {
             self.properties
                 .insert("_source_results".to_string(), Value::String(r));
-            self.updated_at = chrono::Utc::now().timestamp_millis();
+            self.updated_at = crate::clock::now_millis();
         }
     }
 
@@ -760,21 +760,28 @@ impl TryFrom<crate::StorageEntity> for Block {
         let requires = row
             .get("requires")
             .cloned()
-            .map(|v| match v {
-                Value::Array(arr) => arr
-                    .into_iter()
-                    .filter_map(|elem| elem.as_string().map(|s| s.to_string()))
-                    .collect(),
-                Value::Json(s) | Value::String(s) => {
-                    if s.is_empty() {
-                        Vec::new()
-                    } else {
-                        serde_json::from_str::<Vec<String>>(&s)
-                            .expect("stored requires JSON must be valid")
+            .map(|v| {
+                let raw: Vec<String> = match v {
+                    Value::Array(arr) => arr
+                        .into_iter()
+                        .filter_map(|elem| elem.as_string().map(|s| s.to_string()))
+                        .collect(),
+                    Value::Json(s) | Value::String(s) => {
+                        if s.is_empty() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_str::<Vec<String>>(&s)
+                                .expect("stored requires JSON must be valid")
+                        }
                     }
-                }
-                Value::Null => Vec::new(),
-                _ => Vec::new(),
+                    Value::Null => Vec::new(),
+                    _ => Vec::new(),
+                };
+                raw.into_iter()
+                    .map(|s| {
+                        EntityUri::parse_owned(s).expect("stored requires must be a valid URI")
+                    })
+                    .collect::<Vec<EntityUri>>()
             })
             .unwrap_or_default();
         let marks = row.get("marks").cloned().and_then(|v| match v {

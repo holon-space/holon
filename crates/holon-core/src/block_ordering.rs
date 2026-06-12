@@ -124,7 +124,7 @@ pub trait BlockOrdering: Send + Sync {
         _: BlockContent,
         _: &std::collections::HashMap<String, holon_api::Value>,
         _: &Tags,
-        _: &[String],
+        _: &[EntityUri],
     ) -> Result<bool> {
         Ok(false)
     }

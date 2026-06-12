@@ -31,6 +31,12 @@ pub struct PeerCharEdit {
 }
 
 impl TransitionFactory<ReferenceState> for PeerCharEdit {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_pbt_core::capabilities::SutLoro,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(_: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // The legacy generator never emits PeerCharEdit — it has no

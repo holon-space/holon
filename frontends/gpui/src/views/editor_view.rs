@@ -9,7 +9,7 @@ use gpui_component::input::{
 };
 use gpui_component::menu::PopupMenuItem;
 use holon_api::widget_spec::DataRow;
-use holon_frontend::cell::{compute_text_delta, CursorBias, DeltaOp, TextDelta};
+use holon_frontend::cell::{compute_text_delta, CursorBias};
 use holon_frontend::editor_view_model::{
     structural_block_action, EditorAction, EditorKey, EditorViewModel,
 };
@@ -197,20 +197,6 @@ impl EditorView {
                         if vm.has_cell() {
                             let prev = this.previous_text.clone();
                             if text != prev {
-                                // Only write to the cell when it is actually
-                                // behind `text`. A genuine keystroke leaves the
-                                // cell lagging `InputState` (the cell is written
-                                // only here), so the delta lands. But a
-                                // backend-originated change — e.g. a split
-                                // truncation projected back through the data
-                                // subscription's `set_value` — already wrote the
-                                // new content to the cell; re-deriving
-                                // `compute_text_delta(prev, text)` against the
-                                // stale `prev` and applying it would double-apply
-                                // (for a truncation, delete past the new end,
-                                // which Loro rejects out-of-bounds). Re-baseline
-                                // `previous_text` either way so the next genuine
-                                // keystroke diffs from the correct anchor.
                                 if vm.current_text().as_deref() != Some(text.as_str()) {
                                     for op in compute_text_delta(&prev, &text) {
                                         if let Err(e) = vm.apply_local(op) {
@@ -220,6 +206,31 @@ impl EditorView {
                                 }
                                 this.previous_text = text;
                             }
+                        } else if text != this.previous_text {
+                            // No Cell<String> attached (SqlOnly / no-Loro
+                            // mode). The per-keystroke Loro pipeline is
+                            // absent — fall back to `set_field("content")`
+                            // so the typed text lands in the backend before
+                            // the next transition. Without this, keystrokes
+                            // only mutate the local InputState and are
+                            // silently lost when the ReactiveRowSet rebuilds
+                            // (e.g. on a later SplitBlock on another row).
+                            let mut params = std::collections::HashMap::new();
+                            params
+                                .insert("id".into(), holon_api::Value::String(this.row_id.clone()));
+                            params.insert(
+                                "field".into(),
+                                holon_api::Value::String("content".to_string()),
+                            );
+                            params.insert("value".into(), holon_api::Value::String(text.clone()));
+                            services_clone.dispatch_intent(
+                                holon_frontend::operations::OperationIntent::new(
+                                    "block".into(),
+                                    "set_field".into(),
+                                    params,
+                                ),
+                            );
+                            this.previous_text = text;
                         }
                         drop(vm);
 
@@ -303,21 +314,26 @@ impl EditorView {
                         let Some(view) = this.upgrade() else {
                             return;
                         };
-                        let input = view.read(cx).input.clone();
                         // Focus is window-scoped; pick the first window
                         // that owns this input entity. There is exactly
                         // one in normal app usage.
                         for window_handle in cx.windows() {
                             let _ = window_handle.update(cx, |_, window, cx| {
-                                input.update(cx, |state, cx| {
-                                    let current = state.value().to_string();
+                                view.update(cx, |this, cx| {
+                                    let input = this.input.clone();
+                                    let (current, focused) = {
+                                        let state = input.read(cx);
+                                        (
+                                            state.value().to_string(),
+                                            state.focus_handle(cx).is_focused(window),
+                                        )
+                                    };
                                     if current == new_value {
                                         // Already in sync (CDC echo of our
                                         // own write or a redundant emit).
                                         applied = true;
                                         return;
                                     }
-                                    let focused = state.focus_handle(cx).is_focused(window);
                                     // "User is idle": InputState matches the
                                     // last-seen committed value, so any
                                     // typing they had pending was already
@@ -345,7 +361,12 @@ impl EditorView {
                                              new={new_value:?}"
                                         );
                                     }
-                                    state.set_value(&new_value, window, cx);
+                                    // Absolute convergence to the authority
+                                    // (the Loro cell when attached, else this
+                                    // SQL DataRow value for SqlOnly mode).
+                                    // Keeps `previous_text` in lockstep so the
+                                    // re-entrant Change writes nothing back.
+                                    this.converge_input(&new_value, window, cx);
                                     applied = true;
                                 });
                             });
@@ -381,13 +402,16 @@ impl EditorView {
             .current_text()
             .unwrap_or_default();
         let cell_for_remote = controller.lock().unwrap().cell().cloned();
-        let input_for_remote = input.clone();
         let _remote_delta_subscription: Option<Task<()>> = cell_for_remote.map(|cell| {
-            let _input = input_for_remote.clone();
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
                 let mut stream = cell.remote_deltas();
-                while let Some(delta) = stream.next().await {
+                // Each remote delta is a WAKEUP only: we converge absolutely
+                // to `cell.current()` (the authority) instead of replaying the
+                // delta. Out-of-order / coalesced deltas therefore all land on
+                // the same string, and the prior delta-replay sibling-flip
+                // (a stale splice landing on the wrong block) is impossible.
+                while stream.next().await.is_some() {
                     if this.upgrade().is_none() {
                         break;
                     }
@@ -395,34 +419,35 @@ impl EditorView {
                         let Some(view) = this.upgrade() else {
                             return;
                         };
-                        let editor_input = view.read(cx).input.clone();
                         for window_handle in cx.windows() {
                             let _ = window_handle.update(cx, |_, window, cx| {
-                                let state = editor_input.read(cx);
-                                // IME guard: skip while composition is active
-                                if state.ime_marked_range().is_some() {
-                                    return;
-                                }
-                                // Anchor cursor before applying remote delta.
-                                let cursor_codepoint =
-                                    state.text().offset_to_char_index(state.cursor());
-                                let anchor =
-                                    cell.anchor_cursor(cursor_codepoint, CursorBias::Left).ok(); // ALLOW(ok): backings without text-rich support degrade to None; cursor restoration falls back to 0
-                                                                                                 // Release the immutable borrow before updating
-                                let _state = state;
-                                editor_input.update(cx, |state, cx| {
-                                    apply_text_delta_to_state(state, &delta, window, cx);
-                                });
-                                // Resolve cursor after applying remote delta.
-                                let new_codepoint = anchor
-                                    .as_ref()
-                                    .and_then(|a| cell.resolve_cursor(a).ok()) // ALLOW(ok) ALLOW(fallback): backings without text-rich support degrade to position 0
-                                    .unwrap_or(0);
-                                editor_input.update(cx, |state, cx| {
-                                    let byte_offset =
-                                        state.text().char_index_to_offset(new_codepoint);
-                                    let pos = state.text().offset_to_position(byte_offset);
-                                    state.set_cursor_position(pos, window, cx);
+                                view.update(cx, |this, cx| {
+                                    let input = this.input.clone();
+                                    let (ime_active, current, focused) = {
+                                        let state = input.read(cx);
+                                        (
+                                            state.ime_marked_range().is_some(),
+                                            state.value().to_string(),
+                                            state.focus_handle(cx).is_focused(window),
+                                        )
+                                    };
+                                    // IME guard: never converge mid-composition.
+                                    if ime_active {
+                                        return;
+                                    }
+                                    // Focus/idle gate (mirrors the data path):
+                                    // a focused, actively-typing editor keeps
+                                    // its in-flight text; a focused-but-idle
+                                    // editor — e.g. the just-focused merge
+                                    // target after a join — DOES converge, and
+                                    // that is how it receives the merged
+                                    // content. `user_idle` := no unflushed
+                                    // keystroke (previous_text == InputState).
+                                    let user_idle = this.previous_text == current;
+                                    if focused && !user_idle {
+                                        return;
+                                    }
+                                    this.converge_input(&cell.current(), window, cx);
                                 });
                             });
                         }
@@ -477,6 +502,63 @@ impl EditorView {
         let just = is_focused && !self.prev_focused.get();
         self.prev_focused.set(is_focused);
         just
+    }
+
+    /// The single convergence entry point: set this editor's `InputState`
+    /// from an external authority, absolutely and idempotently.
+    ///
+    /// Targets the Loro cell authority (`current_text()`) when a cell is
+    /// attached, else `sql_default` (the SqlOnly DataRow content). Returns
+    /// early when already in sync. Preserves the caret by anchoring it on the
+    /// authority around the absolute `set_value` (which would otherwise force
+    /// the caret to end); SqlOnly has no anchor, so a SqlOnly reconcile resets
+    /// the caret to end — only ever reachable when the editor is unfocused or
+    /// focus just arrived, never mid-typing.
+    ///
+    /// Sets `previous_text` in lockstep so the re-entrant `InputEvent::Change`
+    /// (gpui_component's "silent" splice is NOT silent — it emits Change
+    /// unconditionally) computes an empty delta and writes nothing back to the
+    /// authority. This is the "write only genuine user edits" invariant.
+    pub(crate) fn converge_input(
+        &mut self,
+        sql_default: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = {
+            let vm = self.controller.lock().unwrap();
+            vm.current_text().unwrap_or_else(|| sql_default.to_string())
+        };
+        let input = self.input.clone();
+        let current = input.read(cx).value().to_string();
+        if current == target {
+            return; // idempotent — nothing to converge
+        }
+        // Anchor the caret on the authority before the absolute set (Loro
+        // cells only; SqlOnly returns None and the caret lands at end).
+        let anchor = {
+            let state = input.read(cx);
+            let cursor_codepoint = state.text().offset_to_char_index(state.cursor());
+            self.controller
+                .lock()
+                .unwrap()
+                .anchor_cursor(cursor_codepoint, CursorBias::Left)
+        };
+        input.update(cx, |state, cx| {
+            state.set_value(&target, window, cx);
+        });
+        if let Some(anchor) = anchor.as_ref() {
+            if let Some(new_codepoint) = self.controller.lock().unwrap().resolve_cursor(anchor) {
+                input.update(cx, |state, cx| {
+                    let byte_offset = state.text().char_index_to_offset(new_codepoint);
+                    let pos = state.text().offset_to_position(byte_offset);
+                    state.set_cursor_position(pos, window, cx);
+                });
+            }
+        }
+        // Lockstep: the deferred re-entrant Change now sees text ==
+        // previous_text → empty delta → no spurious write-back.
+        self.previous_text = target;
     }
 }
 
@@ -1272,42 +1354,5 @@ fn execute_action<T: 'static>(
         // UpdatePopup, Dismissed, InsertText, None, Propagate — no action needed
         // in the no-window context (subscribe callbacks). The caller handles cx.notify().
         _ => {}
-    }
-}
-
-/// Apply a `TextDelta` to an `InputState` via `replace_text_in_range_silent`.
-///
-/// Converts Loro codepoint positions to UTF-16 positions using `RopeExt`.
-fn apply_text_delta_to_state(
-    state: &mut InputState,
-    delta: &TextDelta,
-    window: &mut Window,
-    cx: &mut Context<InputState>,
-) {
-    let text_rope = state.text();
-    let full_text = text_rope.to_string();
-
-    let mut codepoint_pos = 0usize;
-    // Pre-compute char_idx → utf16 offset for the current text
-    let char_to_utf16 =
-        |cp: usize, s: &str| -> usize { s.chars().take(cp).map(|c| c.len_utf16()).sum() };
-
-    for op in &delta.ops {
-        match op {
-            DeltaOp::Retain { len_codepoint } => {
-                codepoint_pos += len_codepoint;
-            }
-            DeltaOp::Insert { text } => {
-                let utf16 = char_to_utf16(codepoint_pos, &full_text);
-                let range = utf16..utf16;
-                state.replace_text_in_range_silent(Some(range), text, window, cx);
-                codepoint_pos += text.chars().count();
-            }
-            DeltaOp::Delete { len_codepoint } => {
-                let utf16_start = char_to_utf16(codepoint_pos, &full_text);
-                let utf16_end = char_to_utf16(codepoint_pos + len_codepoint, &full_text);
-                state.replace_text_in_range_silent(Some(utf16_start..utf16_end), "", window, cx);
-            }
-        }
     }
 }

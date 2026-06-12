@@ -22,19 +22,20 @@ use holon_pbt_core::capabilities::{CapBlockId, SutBlockTreeWrite, SutEditorMirro
 /// not an `E2ESut` and does not implement `SutHandle`.
 #[derive(Default)]
 struct MiniEditorSut {
-    text: String,
+    text: std::cell::RefCell<String>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutEditorMirrorWrite for MiniEditorSut {
-    async fn apply_type_chars(&mut self, text: &str) {
-        self.text.push_str(text);
+    async fn apply_type_chars(&self, text: &str) {
+        self.text.borrow_mut().push_str(text);
     }
-    async fn apply_delete_backward(&mut self, count: usize) {
+    async fn apply_delete_backward(&self, count: usize) {
         for _ in 0..count {
-            self.text.pop();
+            self.text.borrow_mut().pop();
         }
     }
-    async fn apply_move_cursor(&mut self, byte_position: usize) {
+    async fn apply_move_cursor(&self, byte_position: usize) {
         // No cursor model in the mock; just observe the call.
         let _ = byte_position;
     }
@@ -47,27 +48,28 @@ impl SutEditorMirrorWrite for MiniEditorSut {
 /// compiling.
 #[derive(Default)]
 struct MiniBlockTreeSut {
-    last_op: Option<String>,
+    last_op: std::cell::RefCell<Option<String>>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl SutBlockTreeWrite for MiniBlockTreeSut {
-    async fn apply_split_block(&mut self, id: &CapBlockId, position: usize) {
-        self.last_op = Some(format!("split {id} @ {position}"));
+    async fn apply_split_block(&self, id: &CapBlockId, position: usize) {
+        *self.last_op.borrow_mut() = Some(format!("split {id} @ {position}"));
     }
-    async fn apply_join_block(&mut self, id: &CapBlockId) {
-        self.last_op = Some(format!("join {id}"));
+    async fn apply_join_block(&self, id: &CapBlockId) {
+        *self.last_op.borrow_mut() = Some(format!("join {id}"));
     }
-    async fn apply_indent(&mut self, id: &CapBlockId) {
-        self.last_op = Some(format!("indent {id}"));
+    async fn apply_indent(&self, id: &CapBlockId) {
+        *self.last_op.borrow_mut() = Some(format!("indent {id}"));
     }
-    async fn apply_outdent(&mut self, id: &CapBlockId) {
-        self.last_op = Some(format!("outdent {id}"));
+    async fn apply_outdent(&self, id: &CapBlockId) {
+        *self.last_op.borrow_mut() = Some(format!("outdent {id}"));
     }
-    async fn apply_move_up(&mut self, id: &CapBlockId) {
-        self.last_op = Some(format!("move_up {id}"));
+    async fn apply_move_up(&self, id: &CapBlockId) {
+        *self.last_op.borrow_mut() = Some(format!("move_up {id}"));
     }
-    async fn apply_move_down(&mut self, id: &CapBlockId) {
-        self.last_op = Some(format!("move_down {id}"));
+    async fn apply_move_down(&self, id: &CapBlockId) {
+        *self.last_op.borrow_mut() = Some(format!("move_down {id}"));
     }
 }
 

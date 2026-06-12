@@ -30,7 +30,7 @@ holon_macros::builder_registry!(
     node_dispatch: Element,
     context: DioxusRenderContext,
     node_type: holon_frontend::view_model::ViewModel,
-    kind_type: holon_frontend::view_model::ViewKind,
+    empty: rsx! {},
 );
 
 /// Top-level render entry point. A thin `#[component]` wrapper around the

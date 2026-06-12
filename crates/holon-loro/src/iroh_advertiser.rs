@@ -216,8 +216,8 @@ async fn accept_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loro_backend::TREE_NAME;
     use crate::iroh_sync_adapter::sync_doc_initiate;
+    use crate::loro_backend::TREE_NAME;
     use loro::{ExportMode, LoroText};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

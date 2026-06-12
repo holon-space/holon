@@ -42,7 +42,11 @@ pub use holon_loro::{
     LoroBackend, SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled,
 };
 
-// Backward compatibility: holon::api::loro_backend::TREE_NAME etc. keep resolving
+// ALLOW(compatibility): post-extraction re-export facade (ADR 0013). The
+// `holon::api::loro_backend` alias and the `holon::sync::*` glob (sync/mod.rs)
+// are consumed by ~7 + ~497 sites across integration-tests, holon-app, examples
+// and frontends — deleting them is a cross-crate migration outside this file's
+// ownership, deferred to a dedicated migration slice.
 pub use holon_loro as loro_backend;
 pub use memory_backend::MemoryBackend;
 pub use repository::{CoreOperations, DocumentRepository, Lifecycle, P2POperations};

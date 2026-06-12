@@ -1,3 +1,9 @@
+//! @c4 container
+//! @c4 layer Services
+//! Pattern: MCP Server
+//!
+//! MCP server frontend (stdio + HTTP).
+
 pub mod browser_relay;
 pub mod di;
 pub mod resources;

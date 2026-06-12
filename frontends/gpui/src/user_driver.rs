@@ -937,12 +937,12 @@ fn collect_collection_item_ids(
     }
 }
 
-fn is_modifier(k: &holon_api::Key) -> bool {
+pub fn is_modifier(k: &holon_api::Key) -> bool {
     use holon_api::Key;
     matches!(k, Key::Cmd | Key::Ctrl | Key::Alt | Key::Shift)
 }
 
-fn modifier_name(k: &holon_api::Key) -> Option<&'static str> {
+pub fn modifier_name(k: &holon_api::Key) -> Option<&'static str> {
     use holon_api::Key;
     Some(match k {
         Key::Cmd => "cmd",

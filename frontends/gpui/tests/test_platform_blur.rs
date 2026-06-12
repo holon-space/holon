@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use gpui::{AppContext as _, Keystroke, TestAppContext, VisualTestContext};
+use gpui::{Keystroke, TestAppContext, VisualTestContext};
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
@@ -17,7 +17,7 @@ use holon_integration_tests::test_environment::TestEnvironment;
 fn blur_commits_pending_text() {
     // Use TestAppContext (not TestApp) because we need `deactivate_window()`,
     // which requires a `VisualTestContext` bound to the window handle.
-    let mut cx = TestAppContext::single();
+    let cx = TestAppContext::single();
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
     let mut env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
@@ -29,7 +29,32 @@ fn blur_commits_pending_text() {
     runtime.block_on(async { env.start_app(true).await.expect("start_app") });
 
     let session = env.session_arc();
-    let engine = env.reactive_engine.clone().expect("reactive engine");
+    let engine = env.reactive_engine.get().cloned().expect("reactive engine");
+
+    // Warm the root layout watcher on tokio (real time) before the window
+    // subscribes — under TestPlatform the launch pre-warm time-skips its
+    // timer and would open the window in loading state.
+    {
+        use futures::StreamExt;
+        use futures_signals::signal::SignalExt;
+        let root_uri = holon_api::root_layout_block_uri();
+        let sig = engine.watch_data_signal(&root_uri);
+        let got = runtime.block_on(async move {
+            let mut stream = sig.to_stream();
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                while let Some(rvm) = stream.next().await {
+                    if rvm.widget_name().as_deref() != Some("loading") {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        });
+        assert!(got, "backend root layout watcher never produced real data");
+    }
+
     let bounds = BoundsRegistry::new();
     let nav = NavigationState::new();
 
@@ -51,8 +76,35 @@ fn blur_commits_pending_text() {
         .expect("window opened");
 
     let window = rebind_handle.window();
-    cx.run_until_parked();
-    bounds.flush();
+
+    // Settle to a fixed point: real tokio time between gpui pump cycles so
+    // the multi-level reactive cascade (panels → rows) fully renders.
+    {
+        let mut last_count = 0usize;
+        let mut stable = 0u32;
+        for _ in 0..500 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(500));
+            cx.run_until_parked();
+            bounds.flush();
+            let elements = bounds.all_elements();
+            let count = elements.len();
+            let still_loading = elements
+                .iter()
+                .any(|(_, info)| info.widget_type.as_ref() == "loading");
+            if count > 0 && count == last_count && !still_loading {
+                stable += 1;
+                if stable >= 3 {
+                    break;
+                }
+            } else {
+                stable = 0;
+            }
+            last_count = count;
+        }
+    }
 
     // Bind a VisualTestContext so we can call deactivate_window().
     let mut visual = VisualTestContext::from_window(window, &cx);
@@ -81,9 +133,17 @@ fn blur_commits_pending_text() {
         bounds.all_elements().len()
     );
 
-    // Clean up the window handle before dropping the context.
+    assert!(
+        bounds.all_elements().len() > 1,
+        "window must render real content before the blur exercise"
+    );
+
+    // Shutdown clears windows, but detached pump tasks still hold entity
+    // handles and gpui's leak detector runs before the dispatcher drops
+    // them — leak the contexts at test end (process exits right after).
     drop(rebind_handle);
-    cx.run_until_parked();
     cx.update(|app| app.shutdown());
     cx.run_until_parked();
+    std::mem::forget(visual);
+    std::mem::forget(cx);
 }

@@ -11,8 +11,8 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
+use crate::pbt::local_caps::SutSeamMutate;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use holon_pbt_core::capabilities::SutLoro;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
@@ -42,6 +42,12 @@ pub struct ApplyMutation {
 }
 
 impl TransitionFactory<ReferenceState> for ApplyMutation {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutSeamMutate,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let checks: Vec<Validated<(), Reason>> =
@@ -627,10 +633,9 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ApplyMutation {
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
-        sut.apply_apply_mutation(self.event.clone(), ref_state)
-            .await;
+impl<S: SutSeamMutate> TransitionImpl<ReferenceState, S> for ApplyMutation {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.apply_mutation(self.event.clone()).await;
     }
 }
 
@@ -723,7 +728,8 @@ pub async fn apply_apply_mutation_to_sut(
                 // guard so content edits run through the real editor in both modes.
                 let driver = sut
                     .driver
-                    .as_ref()
+                    .borrow()
+                    .clone()
                     .expect("driver not installed — was start_app called?");
                 // Only drive the real editor for blocks that are currently
                 // rendered: a real user can't click+type a block that isn't on
@@ -818,7 +824,8 @@ pub async fn apply_apply_mutation_to_sut(
             );
             let driver = sut
                 .driver
-                .as_ref()
+                .borrow()
+                .clone()
                 .expect("driver not installed — was start_app called?");
             match driver.synthetic_dispatch(&entity, &op, params).await {
                 Ok(()) => {

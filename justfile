@@ -29,9 +29,51 @@ setup:
     # incremental-rolling-hash fork (no crates.io / binstall release yet).
     cargo install --git https://github.com/nightscape/polydup-fork \
         --branch perf/incremental-rolling-hash polydup
+    # archidoc: architecture-IR compiler — scans the tree into JSON, renders
+    # C4 diagrams, and validates implementation against intended design.
+    # Pinned to nightscape's fork `dev` branch, which bundles three upstream PRs
+    # (GitSmart86/archidoc #4 crate-root lib.rs attachment, #5 paragraph
+    # descriptions, #6 .gitignore/hidden-dir aware walking). No crates.io release.
+    cargo install --git https://github.com/nightscape/archidoc \
+        --branch dev archidoc-cli
     rustup component add llvm-tools-preview
     echo ""
     echo "Setup complete. Try: just analyze"
+
+# --- Architecture (archidoc) ------------------------------------------------
+
+archidoc_baseline := "docs/Architecture/baseline"
+
+# Compile crate + frontend architecture IR into _context/ (gitignored).
+arch-compile:
+    archidoc ir compile "{{justfile_directory()}}/crates"    --output-dir _context/crates
+    archidoc ir compile "{{justfile_directory()}}/frontends" --output-dir _context/frontends
+
+# Regenerate the committed @c4 design baselines. Run after an *intentional*
+# structural change (crate added/removed/relevelled), then commit the result.
+arch-baseline:
+    archidoc ir compile "{{justfile_directory()}}/crates"    --design --output-dir {{archidoc_baseline}}/crates
+    archidoc ir compile "{{justfile_directory()}}/frontends" --design --output-dir {{archidoc_baseline}}/frontends
+
+# Fail if the crate/frontend @c4 structure drifts from the committed baseline.
+arch-validate: arch-compile
+    archidoc ir validate --strict {{archidoc_baseline}}/crates/architecture.json    _context/crates/current.json
+    archidoc ir validate --strict {{archidoc_baseline}}/frontends/architecture.json _context/frontends/current.json
+
+# Fail if a crate's `@c4 uses` arrows drift from its real Cargo dependencies —
+# a real dependency with no arrow (missing), or an arrow with no dependency
+# (stale). Reads the workspace dep graph from `cargo metadata`. Frontends are
+# intentionally arrow-free (and their dir names don't match their package
+# names), so only the crate graph is gated.
+arch-check-deps: arch-compile
+    archidoc ir check-deps _context/crates/current.json --manifest-dir "{{justfile_directory()}}" --strict
+
+# Regenerate the crate map + C4 diagrams from the @c4 annotations (the source of
+# truth lives in each crate's src/lib.rs). Commit the regenerated files.
+arch-docs: arch-compile
+    python3 scripts/gen-crate-map.py _context/crates/current.json _context/frontends/current.json docs/Architecture/CrateMap.md
+    archidoc ir render plantuml _context/crates/current.json    --output-dir docs/Architecture/c4/crates
+    archidoc ir render plantuml _context/frontends/current.json --output-dir docs/Architecture/c4/frontends
 
 # --- Property-Based Tests ---------------------------------------------------
 
@@ -97,7 +139,7 @@ pbt-list:
           done
     done
 
-# Run one predefined slice by exact name; e.g. `just pbt-slice loro_backend_pbt 64`.
+# Run one predefined slice by exact name; e.g. `just pbt-slice storage_consistency_pbt 64`.
 pbt-slice name cases='64' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail

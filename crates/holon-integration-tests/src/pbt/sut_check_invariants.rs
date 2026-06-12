@@ -1,23 +1,19 @@
 //! `apply_transition_async` + the per-transition settle scaffolding
 //! (the SplitBlock barrier in `block_tree_post_action`, the CDC drains, the
-//! `assert_cdc_quiescent` barrier) + the live-data mirror accessors
-//! (`live_blocks`, `live_focus_roots`, `wait_for_live_data_mirrors`).
+//! `assert_cdc_quiescent` barrier). The CDC-driven `LiveData` block/focus-root
+//! mirror accessors were removed in E3 with `SutBackend` (their only reader).
 //!
 //! Invariant checking itself lives entirely in `run_invariant_registry`
 //! (`pbt/invariant_runner.rs`): the registry runner owns the doc-URI
 //! resolution, the `block_raw` convergence wait, and every registered body.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
-use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 
 use super::reference_state::ReferenceState;
 use super::sut::E2ESut;
-use super::sut_cdc_mirrors::FocusRoot;
-use super::types::*;
 
 impl E2ESut {
     /// `ref_state`-dependent post-action for block-mutating transitions.
@@ -142,24 +138,203 @@ impl E2ESut {
                         .await;
                 }
             }
+            E2ETransition::UndoLastMutation(_) | E2ETransition::Redo(_) => {
+                // Block-convergence settle relocated here from the actions
+                // (`apply_undo_last_mutation` / `apply_redo`, SutHandle decomposition
+                // #1b): undo/redo restore the prior block set, so wait for the SUT to
+                // reconverge to the ref's expected ids before invariants read. This
+                // is `ref_state`-dependent, so it lives in the harness seam (which
+                // owns `ref_state`), letting the cap actions be pure `&self`.
+                let expected_ids = self.expected_block_ids(ref_state);
+                self.wait_for_blocks_synced(&expected_ids, Duration::from_secs(5))
+                    .await;
+            }
+            E2ETransition::PressKey(pk) => {
+                // Relocated verbatim from `apply_press_key`'s `if has_enter` tail
+                // (SutHandle decomposition): the Enter-split barrier + synthetic-id
+                // reconcile + focus-handoff verify + caret park are all
+                // `ref_state`-dependent, so they live in this harness seam (which
+                // owns `ref_state`), letting the action be a pure `&self` keystroke
+                // send. Enter dispatches `split_block`, which materializes a fresh
+                // UUID for the suffix block — hand that back to the synthetic
+                // `block::split-N` slot the ref-state allocated, mirroring
+                // `apply_split_block`'s mapping step.
+                use holon_api::Key;
+                use holon_pbt_core::capabilities::{EngineFocus, SutDriver};
+                let has_enter = pk.chord.0.iter().any(|k| matches!(k, Key::Enter));
+                if has_enter {
+                    // Turso barrier: let block_raw converge to the projected split
+                    // row before the mapper reads it. The placeholder split id is
+                    // treated as count-only by `wait_for_blocks_synced` (synthetic
+                    // ids never reach CDC), so this converges as soon as the real
+                    // split row lands — non-convergence surfaces in the mapper's
+                    // count assert below. No-Turso's Loro split is synchronous — the
+                    // mapper reads the snapshot directly, no barrier needed.
+                    if matches!(self.ctx.storage(), holon::di::StorageSelector::Turso) {
+                        let expected_ids = self.expected_block_ids(ref_state);
+                        let timeout = std::time::Duration::from_secs(5);
+                        self.wait_for_blocks_synced(&expected_ids, timeout).await;
+                    }
+                    self.map_unmapped_split_synthetic_ids(ref_state, "[PressKey-Enter]")
+                        .await;
+                    // Prod's split sets focus + caret on the new block (caret 0) via
+                    // the op response, applied in-process (ADR 0010). VERIFY the
+                    // SUT's own focus landed where the ref expects before parking the
+                    // mirror's caret — deriving the target from `ref_state` alone
+                    // would re-impose the expected focus and mask a regressed focus
+                    // handoff (the oracle-circularity the Jun-2026 review flagged).
+                    // The caret seed itself (`home`) stays: the headless mirror
+                    // tracks its caret independently and defaults to end-of-text.
+                    if let Some(active) = ref_state.ui.tab.active_editor.as_ref() {
+                        let expected_id = self.resolve_uri(&active.block_id);
+                        // The op-response focus handoff (`apply_structural_focus`,
+                        // ADR 0010) runs in the spawned dispatch task — block_raw
+                        // converging (the barrier above) does NOT imply focus has
+                        // moved yet. A single sample here raced that task and
+                        // produced flaky "handoff DIVERGED, engine focused <old
+                        // block>" failures (2026-06-11, window-active runs where the
+                        // busier main thread widened the race window). Poll until
+                        // convergence; the deadline keeps a genuinely regressed
+                        // handoff loud.
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                        loop {
+                            match SutDriver::engine_focused_block(self).await {
+                                EngineFocus::Focused(actual) => {
+                                    if actual == expected_id {
+                                        break;
+                                    }
+                                    if tokio::time::Instant::now() >= deadline {
+                                        panic!(
+                                            "[PressKey-Enter] split focus handoff DIVERGED: engine \
+                                             focused {actual}, ref expects the new split block \
+                                             {expected_id} (after 2s — async op-response focus \
+                                             application never converged)"
+                                        );
+                                    }
+                                }
+                                EngineFocus::Unfocused => {
+                                    if tokio::time::Instant::now() >= deadline {
+                                        panic!(
+                                            "[PressKey-Enter] split focus handoff LOST: engine has \
+                                             no focused block, ref expects the new split block \
+                                             {expected_id} (after 2s)"
+                                        );
+                                    }
+                                }
+                                // No frontend engine wired (SqlOnly headless): the
+                                // op-response focus is unobservable here — disclosed,
+                                // not silently skipped.
+                                EngineFocus::NoEngine => {
+                                    eprintln!(
+                                        "[PressKey-Enter] split focus handoff UNVERIFIED \
+                                         (no frontend engine); seeding caret on ref expectation \
+                                         {expected_id}"
+                                    );
+                                    break;
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        }
+                        self.sync_caret_to_new_split_block(&expected_id).await;
+                    }
+                }
+            }
+            E2ETransition::BulkExternalAdd(bea) => {
+                // Relocated from `apply_bulk_external_add` (SutHandle decomposition):
+                // the body serializes the FULL document from `ref_state`
+                // (`resolve_ref_blocks`) — an action-time `ref_state` read — plus a
+                // Turso DB-count verify, so it runs in this seam that owns
+                // `ref_state`, letting the action be a `&self` no-op. The free fn
+                // body is unchanged; only its call site moved here.
+                crate::pbt::transitions::bulk_external_add::apply_bulk_external_add_to_sut(
+                    self,
+                    &bea.doc_uri,
+                    &bea.blocks,
+                    ref_state,
+                )
+                .await;
+            }
+            E2ETransition::ApplyMutation(am) => {
+                // Relocated from `apply_apply_mutation` (SutHandle decomposition):
+                // the dispatch resolves URIs/blocks from `ref_state` and the
+                // LoroPeer path drives the `&mut self` `apply_peer_*` caps, so it
+                // runs in this seam (which owns `ref_state` and is `&mut self`),
+                // letting the action be a `&self` no-op. The free fn body is
+                // unchanged; only its call site moved here.
+                tracing::trace!("[apply] Applying mutation: {:?}", am.event.mutation);
+                crate::pbt::transitions::apply_mutation::apply_apply_mutation_to_sut(
+                    self,
+                    am.event.clone(),
+                    ref_state,
+                )
+                .await;
+            }
+            E2ETransition::StartApp(_) => {
+                // Relocated from `apply_start_app` (SutAppLifecycle peel): the
+                // pre-startup doc-uri reconcile (synthetic→resolved + `ctx.documents`
+                // re-key) and the Turso seed-count settle are `ref_state`-derived,
+                // so they run here after the action. The shared-Arc `doc_uri_map`
+                // means the `LoroSut` installed during the action sees these inserts.
+                for (synthetic_uri, filename) in &ref_state.files.documents {
+                    if self.doc_uri_map.lock().unwrap().contains_key(synthetic_uri) {
+                        continue;
+                    }
+                    if let Ok(resolved) = self.ctx.resolve_doc_uri_by_name(filename).await {
+                        self.doc_uri_map
+                            .lock()
+                            .unwrap()
+                            .insert(synthetic_uri.clone(), resolved.clone());
+                        let file_key = holon_api::EntityUri::file(filename);
+                        let removed = self.ctx.documents.borrow_mut().remove(&file_key);
+                        if let Some(path) = removed {
+                            self.ctx.documents.borrow_mut().insert(resolved, path);
+                        }
+                    }
+                }
+                // Turso-only seed-count settle (no-Turso returns early in the action).
+                if matches!(self.ctx.storage(), holon::di::StorageSelector::Turso) {
+                    let expected_ids = self.expected_block_ids(ref_state);
+                    self.prime_seed_count(&expected_ids, Duration::from_secs(10))
+                        .await;
+                }
+            }
+            E2ETransition::SimulateRestart(_) => {
+                // Block-convergence settle relocated here from
+                // `apply_simulate_restart` (SutAppLifecycle peel): the action
+                // re-parses the org files (no `ref_state`), then this seam waits
+                // for the SUT to reconverge to the ref's expected ids. The cap
+                // passes an empty expected-set so the inherent wait is a no-op.
+                let expected_ids = self.expected_block_ids(ref_state);
+                self.wait_for_blocks_synced(&expected_ids, Duration::from_secs(5))
+                    .await;
+            }
+            E2ETransition::CreateDocument(cd) => {
+                // Synthetic→uuid reconcile relocated here from
+                // `apply_create_document` (SutAppLifecycle peel): the action mints
+                // the real doc on disk (no `ref_state`); this seam re-derives the
+                // minted uri via `resolve_doc_uri_by_name` (the variant carries
+                // `file_name`) and binds it to the ref's synthetic uri so later
+                // transitions resolve the new doc.
+                let uuid_uri = self
+                    .ctx
+                    .resolve_doc_uri_by_name(&cd.file_name)
+                    .await
+                    .expect("CreateDocument post-action: minted doc URI not resolvable");
+                let synthetic_uri = ref_state
+                    .files
+                    .documents
+                    .iter()
+                    .find(|(_, name)| *name == &cd.file_name)
+                    .map(|(uri, _)| uri.clone())
+                    .expect("CreateDocument: synthetic URI not found in reference state");
+                self.doc_uri_map
+                    .lock()
+                    .unwrap()
+                    .insert(synthetic_uri, uuid_uri);
+            }
             _ => {}
         }
-    }
-
-    /// Lazy accessor for the CDC-driven `LiveData<Block>` mirroring the `block`
-    /// matview. Built on first use because we need an async `watch_view` call and
-    /// the SUT struct can't carry a started engine at construction time. The
-    /// matview hydrates `tags` (and `requires`) from the junction tables, so
-    /// rows are read directly into a fully-populated `Block`.
-    pub(super) async fn live_blocks(&self) -> Arc<holon::sync::LiveData<Block>> {
-        self.cdc.blocks(self.ctx.engine()).await
-    }
-
-    /// Lazy accessor for the CDC-driven `LiveData<FocusRoot>` mirroring the
-    /// `focus_roots` matview. Keyed by `"{region}\u{1F}{root_id}"` since one
-    /// region can have multiple root rows (one per child of the nav target).
-    pub(super) async fn live_focus_roots(&self) -> Arc<holon::sync::LiveData<FocusRoot>> {
-        self.cdc.focus_roots(self.ctx.engine()).await
     }
 
     /// Async body of `apply()` — extracted so Flutter (already async) can call directly
@@ -276,7 +451,7 @@ impl E2ESut {
                 // measures it — wait until the Turso CDC emission watermark is
                 // stable — so legitimate dir/file CDC lands inside `target_seq`
                 // rather than looking like post-settlement churn. Block/Loro
-                // settle is covered by `wait_for_live_data_mirrors` + Loro
+                // settle is covered by the Turso CDC quiescence wait below + Loro
                 // quiescence + the org idle/mtime gates.
                 self.ctx
                     .wait_for_cdc_quiescent(
@@ -290,8 +465,6 @@ impl E2ESut {
                 tokio::task::yield_now().await;
                 self.drain_cdc_events().await;
                 self.drain_region_cdc_events().await;
-                self.wait_for_live_data_mirrors(std::time::Duration::from_secs(2))
-                    .await;
             }
             .instrument(tracing::info_span!("pbt.pre_inv16_settle"))
             .await;
@@ -306,29 +479,5 @@ impl E2ESut {
             .instrument(tracing::info_span!("pbt.assert_cdc_quiescent"))
             .await;
         }
-    }
-
-    /// Drain every instantiated `LiveData` mirror up to the current CDC
-    /// emission watermark. Closes the race where the CDC emission has settled
-    /// (`wait_for_cdc_quiescent`) but a mirror's `spawn_actor`
-    /// task hasn't yet polled the matching CDC batches off its broadcast
-    /// receiver — invariants would then read a stale snapshot (most visibly,
-    /// invariant 8's region focus_roots check seeing the previous focus's
-    /// children alongside the current ones).
-    ///
-    /// Sampling `cdc_emitted_watermark()` AFTER `wait_for_cdc_quiescent` is
-    /// deliberate: by then every batch the transition could possibly produce
-    /// has been stamped with a `seq`, so once each mirror's `consumed_seq`
-    /// catches that watermark we know it has applied every CDC batch the
-    /// matview emitted before this call.
-    #[tracing::instrument(skip(self), name = "pbt.wait_for_live_data_mirrors")]
-    async fn wait_for_live_data_mirrors(&self, timeout: std::time::Duration) {
-        // Pre-startup transitions (e.g. `WriteOrgFile` before `StartApp`)
-        // run through this drain block too, but the engine doesn't exist
-        // yet — and there can't be any LiveData mirrors either.
-        if !self.ctx.is_running() {
-            return;
-        }
-        self.cdc.wait_quiescent(timeout).await;
     }
 }

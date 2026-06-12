@@ -11,8 +11,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::local_caps::SutSeamMutate;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -41,6 +41,12 @@ pub struct BulkExternalAdd {
 }
 
 impl TransitionFactory<ReferenceState> for BulkExternalAdd {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn crate::pbt::local_caps::SutSeamMutate,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let doc_uris: Vec<EntityUri> = state.files.documents.keys().cloned().collect();
@@ -180,10 +186,9 @@ impl TransitionRef<ReferenceState> for BulkExternalAdd {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for BulkExternalAdd {
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
-        sut.apply_bulk_external_add(&self.doc_uri, &self.blocks, ref_state)
-            .await;
+impl<S: SutSeamMutate> TransitionImpl<ReferenceState, S> for BulkExternalAdd {
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        sut.bulk_external_add(&self.doc_uri, &self.blocks).await;
     }
 }
 
@@ -231,12 +236,18 @@ pub async fn apply_bulk_external_add_to_sut(
 
     // Resolve file-based URI to UUID-based URI (documents map uses UUID keys after StartApp)
     let resolved_uri = sut.resolve_uri(doc_uri);
-    let file_path = sut.ctx.documents.get(&resolved_uri).unwrap_or_else(|| {
-        panic!(
-            "Document not found for BulkExternalAdd: {} (resolved: {})",
-            doc_uri, resolved_uri
-        )
-    });
+    let file_path = sut
+        .ctx
+        .documents
+        .borrow()
+        .get(&resolved_uri)
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "Document not found for BulkExternalAdd: {} (resolved: {})",
+                doc_uri, resolved_uri
+            )
+        });
 
     // Get all blocks for this document from reference state.
     // Note: ref_state already includes the new blocks (from apply_reference).
@@ -277,7 +288,7 @@ pub async fn apply_bulk_external_add_to_sut(
     tracing::trace!("[BulkExternalAdd] ORG CONTENT:\n{}", org_content);
     holon_filesystem::FileSystem::write(
         sut.org_fs.clone().as_ref(),
-        file_path,
+        &file_path,
         org_content.as_bytes(),
     )
     .await
@@ -420,7 +431,7 @@ pub async fn apply_bulk_external_add_to_sut(
 
     let elapsed = start.elapsed();
     let final_content =
-        holon_filesystem::FileSystem::read_to_string(sut.org_fs.as_ref(), file_path)
+        holon_filesystem::FileSystem::read_to_string(sut.org_fs.as_ref(), &file_path)
             .await
             .expect("Failed to read file after bulk add");
     let text_block_count = final_content.matches(":ID:").count();

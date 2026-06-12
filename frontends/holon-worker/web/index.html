@@ -70,6 +70,7 @@
     worker.addEventListener('message', e => {
       const { id, ok, value, error, kind, handle: snapshotHandle, snapshotJson } = e.data
       if (kind === 'ready') { readyResolve(); return }
+      if (kind === 'fatal') { line('WORKER FATAL: ' + error, 'err'); return }
       if (kind === 'snapshot') {
         const cb = snapshotListeners.get(snapshotHandle)
         if (cb) cb(snapshotJson)

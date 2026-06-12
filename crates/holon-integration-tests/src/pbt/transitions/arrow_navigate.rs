@@ -14,7 +14,7 @@ use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
 use crate::pbt::reference_state::{CursorPosition, ReferenceState};
-use crate::pbt::transition_dispatch::SutHandle;
+use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -31,6 +31,12 @@ pub struct ArrowNavigate {
 }
 
 impl TransitionFactory<ReferenceState> for ArrowNavigate {
+    fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        vec![::holon_pbt_core::composition::CapId::of::<
+            dyn ::holon_frontend::pbt_caps::SutArrowNavigate,
+        >()]
+    }
+
     type Reason = Reason;
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let regions = [Region::Main, Region::LeftSidebar, Region::RightSidebar];
@@ -235,9 +241,18 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for ArrowNavigate {
-    async fn apply_to_sut(&self, ref_state: &ReferenceState, sut: &mut S) {
-        sut.apply_arrow_navigate(self.region, self.direction, self.steps, ref_state)
+impl<S: holon_frontend::pbt_caps::SutArrowNavigate> TransitionImpl<ReferenceState, S>
+    for ArrowNavigate
+{
+    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+        // The cap's `region` is informational only (the driver emits global
+        // arrow keystrokes); the left/right sidebar distinction collapses to
+        // `Sidebar`.
+        let region = match self.region {
+            Region::Main => CapRegion::Main,
+            Region::LeftSidebar | Region::RightSidebar => CapRegion::Sidebar,
+        };
+        sut.apply_arrow_navigate(region, self.direction, self.steps)
             .await;
     }
 }

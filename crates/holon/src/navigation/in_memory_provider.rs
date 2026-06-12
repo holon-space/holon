@@ -21,11 +21,12 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Mutex;
 
 use super::provider::{ENTITY_NAME, navigation_operation_descriptors};
 use crate::core::datasource::{OperationProvider, OperationResult, Result};
-use holon_api::{EntityName, OperationDescriptor, Region, Value};
+use holon_api::{EntityName, NavigationOp, OperationDescriptor, Region, Value};
 use holon_core::storage::types::StorageEntity;
 
 /// Per-region back/forward history for one session. `entries[cursor]` is the
@@ -139,15 +140,15 @@ impl OperationProvider for InMemoryNavigationProvider {
             .map_err(|e: Box<dyn std::error::Error + Send + Sync>| e.to_string())?;
         let region_key = region.to_string();
 
-        match op_name {
-            "focus" => {
+        match NavigationOp::from_str(op_name) {
+            Ok(NavigationOp::Focus) => {
                 let block_id = params.get("block_id").and_then(|v| match v {
                     Value::String(s) => Some(s.clone()),
                     _ => None,
                 });
                 self.focus(&region_key, block_id)
             }
-            "focus_pin" => {
+            Ok(NavigationOp::FocusPin) => {
                 let block_id = params
                     .get("block_id")
                     .and_then(|v| match v {
@@ -157,10 +158,20 @@ impl OperationProvider for InMemoryNavigationProvider {
                     .ok_or_else(|| "Missing required parameter 'block_id'".to_string())?;
                 self.focus_pin(&region_key, block_id)
             }
-            "go_back" => self.go_back(&region_key),
-            "go_forward" => self.go_forward(&region_key),
-            "go_home" => self.focus(&region_key, None),
-            other => Err(format!("InMemoryNavigationProvider: unknown operation '{other}'").into()),
+            Ok(NavigationOp::GoBack) => self.go_back(&region_key),
+            Ok(NavigationOp::GoForward) => self.go_forward(&region_key),
+            Ok(NavigationOp::GoHome) => self.focus(&region_key, None),
+            // Pin soft-close is Turso-only (it edits `navigation_history` rows);
+            // a Loro-only session has no such table, matching the pre-enum
+            // behavior of rejecting `close` here.
+            Ok(NavigationOp::Close) => Err(format!(
+                "InMemoryNavigationProvider: '{}' is unsupported in Loro-only sessions",
+                NavigationOp::Close
+            )
+            .into()),
+            Err(_) => {
+                Err(format!("InMemoryNavigationProvider: unknown operation '{op_name}'").into())
+            }
         }
     }
 }

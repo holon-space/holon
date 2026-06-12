@@ -534,6 +534,18 @@ mod stateful_tests {
                                 .cloned()
                                 .unwrap_or(ref_parent_str);
 
+                            // Disambiguate duplicate-content siblings by the id_map's
+                            // expected SUT id (built from the create-op response in
+                            // `update_id_map_after_create`). Two blocks sharing
+                            // (content, parent) — e.g. `CreateBlocks [(p,"x"),(p,"x")]` —
+                            // would otherwise let the content-only match pair ref→SUT
+                            // events in a different order than the id_map did, spuriously
+                            // failing the id-consistency check below. When a mapping
+                            // exists, require the SUT event to carry exactly that id;
+                            // otherwise fall back to content+parent (order-agnostic, per
+                            // the watcher's no-delivery-order guarantee).
+                            let expected_sut_id = state.id_map.get(ref_block.id.as_str()).cloned();
+
                             let sut_match =
                                 sut_changes.iter().enumerate().find(|(idx, sut_change)| {
                                     !matched_sut_indices.contains(idx)
@@ -546,6 +558,11 @@ mod stateful_tests {
                                                     && sut_block.parent_id.as_raw_str()
                                                         == translated_parent_id
                                                     && sut_origin == ref_origin
+                                                    && expected_sut_id
+                                                        .as_deref()
+                                                        .map_or(true, |eid| {
+                                                            sut_block.id.as_str() == eid
+                                                        })
                                             }
                                             _ => false,
                                         }
