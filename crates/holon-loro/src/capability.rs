@@ -4,5 +4,5 @@
 //! every block-handling component — `holon-orgmode`, `holon-core`'s
 //! `BlockOrdering`, and `holon` — can speak the same capability vocabulary
 //! (D rework, `docs/Architecture/Replication.md` §2). Re-exported here for the
-//! existing `crate::sync::capability::…` call sites.
+//! existing `crate::capability::…` call sites.
 pub use holon_api::capability::{CapabilityProfile, Consolidator, SessionCapabilities};

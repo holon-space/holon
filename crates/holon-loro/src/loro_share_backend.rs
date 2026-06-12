@@ -7,26 +7,27 @@
 //!
 //! See the crate-level plan in docs/Reference/SUBTREE_SHARING.md for the threat model.
 
-use crate::core::SqlOperationProvider;
-use crate::core::datasource::{
-    OperationDescriptor, OperationProvider, OperationResult, Result, UndoAction,
+use holon_core::OperationProvider;
+use holon_api::OperationDescriptor;
+use holon_core::{
+    OperationResult, Result, UndoAction,
 };
-use crate::sync::debounced_commit_worker::{
+use crate::debounced_commit_worker::{
     self, DebouncedCommitWorkerHandle, any_commit, local_only,
 };
-use crate::sync::degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
-use crate::sync::iroh_advertiser::{ALPN_PREFIX, IrohAdvertiser, OnPeerConnected};
-use crate::sync::iroh_sync_adapter::{
+use crate::degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
+use crate::iroh_advertiser::{ALPN_PREFIX, IrohAdvertiser, OnPeerConnected};
+use crate::iroh_sync_adapter::{
     SharedTreeSyncManager, create_endpoint, make_alpn, sync_doc_initiate,
 };
-use crate::sync::loro_document_store::LoroDocumentStore;
-use crate::sync::loro_sync_controller::project_shared_doc_to_ops;
-use crate::sync::share_peer_id::stable_peer_id;
-use crate::sync::shared_snapshot_store::SharedSnapshotStore;
-use crate::sync::shared_tree::{
+use crate::loro_document_store::LoroDocumentStore;
+use crate::loro_sync_controller::project_shared_doc_to_ops;
+use crate::share_peer_id::stable_peer_id;
+use crate::shared_snapshot_store::SharedSnapshotStore;
+use crate::shared_tree::{
     self, HistoryRetention, SHARE_ROLE_MOUNT, SHARE_ROLE_PROPERTY, SHARED_TREE_ID_PROPERTY,
 };
-use crate::sync::ticket::Ticket;
+use crate::ticket::Ticket;
 use async_trait::async_trait;
 use holon_api::EntityName;
 use holon_api::EntityUri;
@@ -54,7 +55,7 @@ fn err(msg: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
 /// every `entity_name == TREE_ENTITY` comparison against an already-
 /// normalized `EntityName`.
 pub const TREE_ENTITY: &str = "tree";
-use crate::api::loro_backend::STABLE_ID;
+use crate::loro_backend::STABLE_ID;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Operations for creating and accepting shared Loro subtrees.
@@ -166,7 +167,7 @@ pub struct LoroShareBackend {
     /// `Option` so tests that construct the backend directly (without the
     /// full DI stack) can keep working; when `None`, mount-node projection
     /// is skipped.
-    sql_ops: Option<Arc<SqlOperationProvider>>,
+    sql_ops: Option<Arc<dyn OperationProvider>>,
     /// `shared_tree_id → known peer endpoint addrs`. Populated on
     /// accept (ticket author's addr), on every inbound advertiser
     /// handshake, and at startup from the sidecar JSON.
@@ -269,12 +270,12 @@ const PROJECTION_DEBOUNCE: Duration = Duration::from_millis(150);
 
 fn spawn_projection_worker(
     doc: Arc<LoroDoc>,
-    sql_ops: Arc<SqlOperationProvider>,
+    sql_ops: Arc<dyn OperationProvider>,
     mount_block_uri: String,
     shared_tree_id: String,
 ) -> ProjectionWorker {
-    use crate::api::snapshot_blocks_from_doc;
-    use crate::sync::loro_sync_controller::{diff_snapshots_to_ops, is_empty_frontiers};
+    use crate::loro_backend::snapshot_blocks_from_doc;
+    use crate::loro_sync_controller::{diff_snapshots_to_ops, is_empty_frontiers};
     use std::sync::Mutex as StdMutex;
 
     let watermark = Arc::new(StdMutex::new(doc.oplog_frontiers()));
@@ -298,7 +299,7 @@ fn spawn_projection_worker(
                     return Ok(());
                 }
 
-                let patch = |blocks: &mut HashMap<String, crate::api::SnapshotBlock>| {
+                let patch = |blocks: &mut HashMap<String, crate::loro_backend::SnapshotBlock>| {
                     for snap in blocks.values_mut() {
                         let block = &mut snap.block;
                         if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
@@ -334,7 +335,7 @@ fn spawn_projection_worker(
                         .execute_batch_with_origin(
                             &entity,
                             ops,
-                            crate::sync::event_bus::EventOrigin::Loro,
+                            crate::event_bus::EventOrigin::Loro,
                         )
                         .await
                         .map_err(|e| {
@@ -388,7 +389,7 @@ impl LoroShareBackend {
         advertiser: Arc<IrohAdvertiser>,
         degraded_bus: Arc<DegradedSignalBus>,
         device_key: SecretKey,
-        sql_ops: Option<Arc<SqlOperationProvider>>,
+        sql_ops: Option<Arc<dyn OperationProvider>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|self_weak| Self {
             store,
@@ -607,7 +608,7 @@ impl LoroShareBackend {
         Ok(())
     }
 
-    async fn global_doc(&self) -> Result<Arc<crate::sync::loro_document::LoroDocument>> {
+    async fn global_doc(&self) -> Result<Arc<crate::loro_document::LoroDocument>> {
         let store = self.store.read().await;
         store
             .get_global_doc()
@@ -788,7 +789,7 @@ impl LoroShareBackend {
     /// Test-only access to the global Loro document. Kept behind a
     /// separate name so production code doesn't accidentally reach past
     /// the operation surface.
-    pub async fn test_global_doc(&self) -> Arc<crate::sync::loro_document::LoroDocument> {
+    pub async fn test_global_doc(&self) -> Arc<crate::loro_document::LoroDocument> {
         self.global_doc().await.expect("test global_doc")
     }
 
@@ -827,7 +828,7 @@ fn parse_retention(s: &str) -> Result<HistoryRetention> {
 /// no ambiguity over "full URI vs bare id" at the call site.
 fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<TreeID> {
     let needle = stable_id.id();
-    let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
     for node in tree.get_nodes(false) {
         if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
             continue;
@@ -845,7 +846,7 @@ fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<Tre
 /// Find an existing mount node for a given `shared_tree_id`. Returns the
 /// mount's `TreeID` and its `STABLE_ID` if found.
 fn find_mount_by_shared_tree_id(doc: &LoroDoc, shared_tree_id: &str) -> Option<(TreeID, String)> {
-    let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
     for node in tree.get_nodes(false) {
         if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
             continue;
@@ -866,7 +867,7 @@ fn find_mount_by_shared_tree_id(doc: &LoroDoc, shared_tree_id: &str) -> Option<(
 }
 
 fn parent_as_option(doc: &LoroDoc, tid: TreeID) -> Option<TreeID> {
-    let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
     match tree.parent(tid) {
         Some(TreeParentId::Node(p)) => Some(p),
         _ => None,
@@ -879,7 +880,7 @@ fn set_stable_id(doc: &LoroDoc, tid: TreeID, stable_id: &str) -> anyhow::Result<
     // `set_external_id`) all assume this and strip prefixes on the read
     // side. Strip here too so a single-pass write matches every lookup.
     let bare = stable_id.strip_prefix("block:").unwrap_or(stable_id);
-    let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
     let meta = tree.get_meta(tid)?;
     meta.insert(STABLE_ID, bare)?;
     Ok(())
@@ -918,7 +919,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
             let tid = find_tree_id_by_stable_id(doc, &id_uri)
                 .ok_or_else(|| err(format!("block {id} not found in Loro tree")))?;
-            if shared_tree::is_mount_node(&doc.get_tree(crate::api::loro_backend::TREE_NAME), tid) {
+            if shared_tree::is_mount_node(&doc.get_tree(crate::loro_backend::TREE_NAME), tid) {
                 return Err(err(format!(
                     "block {id} is already a mount node; sharing a mount is not supported"
                 )));
@@ -1035,7 +1036,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // the mark in a way `to_delta()` doesn't surface, so reads return
         // empty mark sets even though the writer thinks the mark applied.
         let shared_doc = LoroDoc::new();
-        crate::api::loro_backend::configure_text_styles(&shared_doc);
+        crate::loro_backend::configure_text_styles(&shared_doc);
         let peer_id = stable_peer_id(&self.device_key, &t.shared_tree_id);
         shared_doc
             .set_peer_id(peer_id)
@@ -1093,7 +1094,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
         // Determine the shared root: the sole root in the freshly imported doc.
         let shared_root = {
-            let tree = shared_arc.get_tree(crate::api::loro_backend::TREE_NAME);
+            let tree = shared_arc.get_tree(crate::loro_backend::TREE_NAME);
             let roots = tree.roots();
             if roots.len() != 1 {
                 return Err(err(format!(
@@ -1120,7 +1121,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 let parent_tid = find_tree_id_by_stable_id(doc, &parent_uri)
                     .ok_or_else(|| err(format!("parent block {parent_id} not found")))?;
 
-                let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+                let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
                 let mount = shared_tree::create_mount_node(
                     &tree,
                     Some(parent_tid),
@@ -1199,7 +1200,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         let known: std::collections::HashSet<String> = {
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
-            let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
             tree.get_nodes(false)
                 .into_iter()
                 .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
@@ -1300,7 +1301,7 @@ pub async fn rehydrate_shared_trees(
     // doc lock — both are needed to project the mount row into SQL
     // below (block table keys blocks by `block:<uuid>` URI).
     let mount_records: Vec<MountRehydrationRecord> = {
-        let tree = global_doc.get_tree(crate::api::loro_backend::TREE_NAME);
+        let tree = global_doc.get_tree(crate::loro_backend::TREE_NAME);
         let mut out = Vec::new();
         for node in tree.get_nodes(false) {
             let parent_tid = match node.parent {
@@ -1579,7 +1580,7 @@ fn block_uri_from_bare(stored: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::loro_document_store::LoroDocumentStore;
+    use crate::loro_document_store::LoroDocumentStore;
     use tempfile::TempDir;
 
     fn make_backend() -> (Arc<LoroShareBackend>, TempDir) {
@@ -1595,7 +1596,7 @@ mod tests {
         let manager = Arc::new(SharedTreeSyncManager::new());
         // Use the persistent key-from-disk path so a `drop+re-make`
         // simulates a real process restart (same device identity).
-        let key = crate::sync::device_key_store::load_or_create_device_key(dir.path()).unwrap();
+        let key = crate::device_key_store::load_or_create_device_key(dir.path()).unwrap();
         let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
         (
             LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key),
@@ -1693,7 +1694,7 @@ mod tests {
         let collab = backend.global_doc().await.unwrap();
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
-        let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
         let parent_tid = parent_stable_id.map(|pid| {
             let parent_uri = EntityUri::block(pid);
             find_tree_id_by_stable_id(doc, &parent_uri)
@@ -1716,7 +1717,7 @@ mod tests {
         let doc = &*doc_arc;
         let uri = EntityUri::block(stable_id);
         let tid = find_tree_id_by_stable_id(doc, &uri)?;
-        let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
         let meta = tree.get_meta(tid).ok()?; // ALLOW(ok): Option chain — missing meta means no stable id
         match meta.get("content_raw") {
             Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
@@ -1775,7 +1776,7 @@ mod tests {
         // read directly from the shared_tree manager).
         let st_id = ticket_json["shared_tree_id"].as_str().unwrap();
         let b_shared_doc = backend_b.manager.get_doc(st_id).unwrap();
-        let b_tree = b_shared_doc.get_tree(crate::api::loro_backend::TREE_NAME);
+        let b_tree = b_shared_doc.get_tree(crate::loro_backend::TREE_NAME);
         let texts: Vec<String> = b_tree
             .get_nodes(false)
             .iter()
@@ -1844,7 +1845,7 @@ mod tests {
         // A appends text to the shared heading.
         {
             let a_doc = backend_a.manager.get_doc(&shared_tree_id).unwrap();
-            let tree = a_doc.get_tree(crate::api::loro_backend::TREE_NAME);
+            let tree = a_doc.get_tree(crate::loro_backend::TREE_NAME);
             let root = tree.roots()[0];
             let meta = tree.get_meta(root).unwrap();
             let text = match meta.get("content_raw") {
@@ -1862,7 +1863,7 @@ mod tests {
 
         // B's shared doc now reflects A's edit.
         let b_doc = backend_b.manager.get_doc(&shared_tree_id).unwrap();
-        let b_tree = b_doc.get_tree(crate::api::loro_backend::TREE_NAME);
+        let b_tree = b_doc.get_tree(crate::loro_backend::TREE_NAME);
         let b_root = b_tree.roots()[0];
         let meta = b_tree.get_meta(b_root).unwrap();
         let b_text = match meta.get("content_raw") {
@@ -1900,7 +1901,7 @@ mod tests {
         // Burst of 200 commits under paused tokio time — the debounce
         // sleep won't elapse until we explicitly advance the clock.
         for i in 0..200u32 {
-            let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
             let node = tree.create(None::<TreeID>).unwrap();
             tree.get_meta(node).unwrap().insert("n", i as i64).unwrap();
             doc.commit();
@@ -2043,7 +2044,7 @@ mod tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_a_path.clone())));
         let snapshot_store = Arc::new(SharedSnapshotStore::new(dir_a_path.clone(), bus.clone()));
         let manager = Arc::new(SharedTreeSyncManager::new());
-        let key = crate::sync::device_key_store::load_or_create_device_key(&dir_a_path).unwrap();
+        let key = crate::device_key_store::load_or_create_device_key(&dir_a_path).unwrap();
         let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
         let backend_a = LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key);
         let collab = backend_a.test_global_doc().await;
@@ -2063,7 +2064,7 @@ mod tests {
                 .manager_for_test()
                 .get_doc(&shared_tree_id)
                 .unwrap();
-            let tree = d.get_tree(crate::api::loro_backend::TREE_NAME);
+            let tree = d.get_tree(crate::loro_backend::TREE_NAME);
             let root = tree.roots()[0];
             let meta = tree.get_meta(root).unwrap();
             let text = match meta.get("content_raw") {
@@ -2082,7 +2083,7 @@ mod tests {
                 .manager_for_test()
                 .get_doc(&shared_tree_id)
                 .expect("A has shared doc");
-            let a_tree = a_doc.get_tree(crate::api::loro_backend::TREE_NAME);
+            let a_tree = a_doc.get_tree(crate::loro_backend::TREE_NAME);
             let root = a_tree.roots()[0];
             let meta = a_tree.get_meta(root).unwrap();
             let text = match meta.get("content_raw") {
@@ -2137,7 +2138,7 @@ mod tests {
 
         // Commit an edit that the worker will try to persist.
         {
-            let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
             let node = tree.create(None::<TreeID>).unwrap();
             tree.get_meta(node).unwrap().insert("k", "v").unwrap();
             doc.commit();
@@ -2159,7 +2160,7 @@ mod tests {
 
         // In-memory doc still has the edit — failure must not
         // roll back the state the user produced.
-        let tree = doc.get_tree(crate::api::loro_backend::TREE_NAME);
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
         let nodes: Vec<_> = tree
             .get_nodes(false)
             .into_iter()

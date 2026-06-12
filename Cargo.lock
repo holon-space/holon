@@ -4702,8 +4702,11 @@ dependencies = [
  "holon-block-roundtrip-testing",
  "holon-core",
  "holon-engine",
+ "holon-loro",
  "holon-macros",
  "holon-orgmode",
+ "holon-petri",
+ "holon-profiles",
  "holon-turso",
  "iroh",
  "loro",
@@ -4820,6 +4823,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "web-time",
  "workspace-hack 0.1.0",
 ]
 
@@ -5026,6 +5030,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-loro"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "futures-signals",
+ "getrandom 0.3.4",
+ "holon-api",
+ "holon-core",
+ "holon-macros",
+ "iroh",
+ "loro",
+ "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "proptest-state-machine",
+ "rand 0.9.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-macros"
 version = "0.1.0"
 dependencies = [
@@ -5048,6 +5081,7 @@ dependencies = [
  "async-trait",
  "holon",
  "holon-api",
+ "holon-core",
  "holon-macros",
  "tokio",
  "workspace-hack 0.1.0",
@@ -5202,6 +5236,37 @@ dependencies = [
  "serde",
  "serde_json",
  "validated",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-petri"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "holon-api",
+ "holon-core",
+ "holon-engine",
+ "rhai",
+]
+
+[[package]]
+name = "holon-profiles"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "futures-signals",
+ "holon-api",
+ "holon-core",
+ "holon-engine",
+ "holon-macros",
+ "rhai",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
  "workspace-hack 0.1.0",
 ]
 

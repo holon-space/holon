@@ -137,7 +137,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 .skip(1) // Skip &self
                 .filter_map(|arg| match arg {
                     FnArg::Typed(pat_type) => {
-                        let param_name = extract_param_name(&pat_type.pat);
+                        let param_name = param_wire_name(&extract_param_name(&pat_type.pat));
                         let (type_str, required) = infer_type(&pat_type.ty);
 
                         // Skip optional parameters (Option<T> types)
@@ -290,7 +290,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
 
             for arg in method.sig.inputs.iter().skip(1) {  // Skip &self
                 if let FnArg::Typed(pat_type) = arg {
-                    let param_name = extract_param_name(&pat_type.pat);
+                    let param_name = param_wire_name(&extract_param_name(&pat_type.pat));
                     let param_name_ident = match &*pat_type.pat {
                         Pat::Ident(pat_ident) => pat_ident.ident.clone(),
                         _ => syn::Ident::new(&param_name, proc_macro2::Span::call_site()),
@@ -450,7 +450,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                             syn::Ident::new(&name_str, proc_macro2::Span::call_site())
                         }
                     };
-                    let param_name_str = param_name_ident.to_string();
+                    let param_name_str = param_wire_name(&param_name_ident.to_string());
                     let (type_str, is_required) = infer_type(&pat_type.ty);
                     let is_optional = !is_required;  // Convert required flag to optional flag
                     let type_str_cleaned = type_str.replace(" ", "");
@@ -1081,7 +1081,7 @@ fn generate_precondition_closure(
                     syn::Ident::new(&name_str, proc_macro2::Span::call_site())
                 }
             };
-            let param_name_str = param_name_ident.to_string();
+            let param_name_str = param_wire_name(&param_name_ident.to_string());
             let (type_str, is_required) = infer_type(&pat_type.ty);
             let is_optional = !is_required;
             let type_str_cleaned = type_str.replace(" ", "");
@@ -1220,6 +1220,23 @@ pub fn extract_param_name(pat: &Pat) -> String {
         Pat::Wild(_) => "_".to_string(),
         _ => quote! { #pat }.to_string(),
     }
+}
+
+/// The wire/operation name for a parameter: its Rust identifier with a single
+/// leading underscore stripped. A leading underscore is the Rust "intentionally
+/// unused" idiom (e.g. a param required by the trait shape but unused by a
+/// `#[require(...)]` precondition). It must not leak into the generated
+/// OperationDescriptor param name or the StorageEntity keys used for dispatch
+/// and precondition lookup — otherwise a caller passing the logical name (`id`)
+/// could never match a binding generated from `_id`. The binding identifier
+/// keeps the underscore (so the unused-variable lint stays suppressed); only the
+/// key/name string is normalized here. The wildcard `_` is left untouched.
+fn param_wire_name(ident_name: &str) -> String {
+    ident_name
+        .strip_prefix('_')
+        .filter(|stripped| !stripped.is_empty())
+        .unwrap_or(ident_name)
+        .to_string()
 }
 
 /// Infer type string and required flag from Rust type

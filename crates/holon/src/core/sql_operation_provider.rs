@@ -444,7 +444,7 @@ impl SqlOperationProvider {
         // Ensure timestamps are present so the event payload is a complete Block.
         // Without this, CacheEventSubscriber fails to deserialize: "missing field created_at".
         let mut params = params.clone();
-        let now_ms = crate::util::now_unix_millis();
+        let now_ms = holon_core::util::now_unix_millis();
         params
             .entry("created_at".into())
             .or_insert_with(|| Value::Integer(now_ms));

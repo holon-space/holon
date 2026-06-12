@@ -7,7 +7,7 @@
 //! Shutdown: `drop_share` calls `endpoint.close()` which causes the pending
 //! `endpoint.accept()` to return `None` and the task to exit.
 
-use crate::sync::iroh_sync_adapter::{
+use crate::iroh_sync_adapter::{
     connection_remote_addr, create_endpoint, create_endpoint_with_key, make_alpn,
     sync_doc_handle_connection,
 };
@@ -216,8 +216,8 @@ async fn accept_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::loro_backend::TREE_NAME;
-    use crate::sync::iroh_sync_adapter::sync_doc_initiate;
+    use crate::loro_backend::TREE_NAME;
+    use crate::iroh_sync_adapter::sync_doc_initiate;
     use loro::{ExportMode, LoroText};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

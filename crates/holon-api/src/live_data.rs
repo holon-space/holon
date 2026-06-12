@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use futures_signals::signal_map::{MutableBTreeMap, MutableBTreeMapLockRef, MutableSignalMap};
-use holon_api::{Change, Value};
+use crate::{Change, Value};
 use tokio::sync::Notify;
 
-use crate::storage::types::StorageEntity;
+use crate::StorageEntity;
 
 /// Pull `_rowid` (set by `process_cdc_event`) out of a row's data, if present.
 fn extract_rowid(data: &StorageEntity) -> Option<String> {
@@ -308,10 +308,10 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     pub fn subscribe<C, S>(self: &Arc<Self>, source_name: &'static str, mut stream: S)
     where
         C: Into<Change<StorageEntity>> + Send + 'static,
-        S: tokio_stream::Stream<Item = holon_api::BatchWithMetadata<C>> + Send + Unpin + 'static,
+        S: tokio_stream::Stream<Item = crate::streaming::BatchWithMetadata<C>> + Send + Unpin + 'static,
     {
         let live = Arc::clone(self);
-        crate::util::spawn_actor(async move {
+        tokio::spawn(async move {
             use tokio_stream::StreamExt;
             use tracing::Instrument;
             let span = tracing::info_span!("live_data.subscribe_actor", source = source_name);
@@ -360,10 +360,10 @@ mod tests {
     use std::task::{Context, Poll};
 
     use futures_signals::signal_map::{MapDiff, SignalMapExt};
-    use holon_api::Value;
+    use crate::Value;
 
     fn make_row(id: &str, content: &str) -> StorageEntity {
-        let mut row: StorageEntity = holon_api::StorageEntity::new();
+        let mut row: StorageEntity = crate::StorageEntity::new();
         row.insert("id".into(), Value::String(id.to_string()));
         row.insert("content".into(), Value::String(content.to_string()));
         row
@@ -394,7 +394,7 @@ mod tests {
 
         let created = Change::Created {
             data: make_row("c", "new"),
-            origin: holon_api::ChangeOrigin::Local {
+            origin: crate::ChangeOrigin::Local {
                 operation_id: None,
                 trace_id: None,
             },
@@ -417,7 +417,7 @@ mod tests {
 
         let deleted = Change::Deleted {
             id: "x".to_string(),
-            origin: holon_api::ChangeOrigin::Local {
+            origin: crate::ChangeOrigin::Local {
                 operation_id: None,
                 trace_id: None,
             },
@@ -448,14 +448,14 @@ mod tests {
         // Simulate a CDC Created event the matview emits for a new focus_roots
         // row. process_cdc_event injects `_rowid` into the data — this is what
         // our fix uses to remember the rowid → user-key mapping.
-        let mut row: StorageEntity = holon_api::StorageEntity::new();
+        let mut row: StorageEntity = crate::StorageEntity::new();
         row.insert("region".into(), Value::String("right_sidebar".to_string()));
         row.insert("root_id".into(), Value::String("block:abc".to_string()));
         row.insert("_rowid".into(), Value::String("42".to_string()));
 
         live.apply_changes(vec![Change::Created {
             data: row,
-            origin: holon_api::ChangeOrigin::Local {
+            origin: crate::ChangeOrigin::Local {
                 operation_id: None,
                 trace_id: None,
             },
@@ -467,7 +467,7 @@ mod tests {
         // to `change.id.to_string()` (rowid) because data has no `id` column.
         live.apply_changes(vec![Change::Deleted {
             id: "42".to_string(),
-            origin: holon_api::ChangeOrigin::Local {
+            origin: crate::ChangeOrigin::Local {
                 operation_id: None,
                 trace_id: None,
             },
@@ -505,7 +505,7 @@ mod tests {
         // Apply a CDC change
         live.apply_changes(vec![Change::Created {
             data: make_row("a", "new-item"),
-            origin: holon_api::ChangeOrigin::Local {
+            origin: crate::ChangeOrigin::Local {
                 operation_id: None,
                 trace_id: None,
             },

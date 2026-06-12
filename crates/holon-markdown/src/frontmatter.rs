@@ -27,6 +27,10 @@ use std::collections::BTreeMap;
 pub struct Frontmatter {
     pub title: Option<String>,
     pub tags: Vec<String>,
+    /// Note aliases (link-resolution names). Only populated when the dialect
+    /// enables `frontmatter_aliases`; otherwise an `aliases:` key stays in
+    /// `extra` and round-trips opaquely.
+    pub aliases: Vec<String>,
     /// Every key that wasn't projected onto a typed field. Stored as raw
     /// YAML scalars/sequences/maps so round-trip rendering is lossless.
     pub extra: BTreeMap<String, serde_yaml::Value>,
@@ -46,6 +50,17 @@ impl Frontmatter {
             map.insert(
                 serde_yaml::Value::String("title".into()),
                 serde_yaml::Value::String(title.clone()),
+            );
+        }
+        if !self.aliases.is_empty() {
+            let seq: Vec<serde_yaml::Value> = self
+                .aliases
+                .iter()
+                .map(|a| serde_yaml::Value::String(a.clone()))
+                .collect();
+            map.insert(
+                serde_yaml::Value::String("aliases".into()),
+                serde_yaml::Value::Sequence(seq),
             );
         }
         if !self.tags.is_empty() {
@@ -68,7 +83,10 @@ impl Frontmatter {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.tags.is_empty() && self.extra.is_empty()
+        self.title.is_none()
+            && self.tags.is_empty()
+            && self.aliases.is_empty()
+            && self.extra.is_empty()
     }
 }
 
@@ -103,7 +121,10 @@ pub fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
     (Some(yaml), body)
 }
 
-pub fn parse(content: &str) -> Result<(Frontmatter, &str)> {
+/// Parse frontmatter. When `project_aliases` is true an `aliases:` key is
+/// lifted onto [`Frontmatter::aliases`]; otherwise it stays in `extra` and
+/// round-trips opaquely like any other key.
+pub fn parse(content: &str, project_aliases: bool) -> Result<(Frontmatter, &str)> {
     let (yaml_opt, body) = split_frontmatter(content);
     let Some(yaml) = yaml_opt else {
         return Ok((Frontmatter::default(), body));
@@ -141,6 +162,9 @@ pub fn parse(content: &str) -> Result<(Frontmatter, &str)> {
             "tags" => {
                 fm.tags = parse_tags(v)?;
             }
+            "aliases" if project_aliases => {
+                fm.aliases = parse_string_list(v, "alias")?;
+            }
             _ => {
                 fm.extra.insert(key, v);
             }
@@ -165,6 +189,24 @@ fn parse_tags(v: serde_yaml::Value) -> Result<Vec<String>> {
             })
             .collect(),
         other => anyhow::bail!("`tags` must be a string or list, got {other:?}"),
+    }
+}
+
+/// A YAML scalar string or sequence of strings → `Vec<String>`. Unlike
+/// [`parse_tags`] a scalar is kept whole (a single alias), not CSV-split.
+/// `what` names the element in error messages.
+fn parse_string_list(v: serde_yaml::Value, what: &str) -> Result<Vec<String>> {
+    match v {
+        serde_yaml::Value::Null => Ok(Vec::new()),
+        serde_yaml::Value::String(s) => Ok(vec![s]),
+        serde_yaml::Value::Sequence(seq) => seq
+            .into_iter()
+            .map(|item| match item {
+                serde_yaml::Value::String(s) => Ok(s),
+                other => anyhow::bail!("{what} must be a string, got {other:?}"),
+            })
+            .collect(),
+        other => anyhow::bail!("`{what}es` must be a string or list, got {other:?}"),
     }
 }
 
@@ -205,7 +247,7 @@ mod tests {
     #[test]
     fn parses_title_and_tags_list() {
         let src = "---\ntitle: My Note\ntags: [a, b]\n---\nbody\n";
-        let (fm, body) = parse(src).unwrap();
+        let (fm, body) = parse(src, true).unwrap();
         assert_eq!(fm.title.as_deref(), Some("My Note"));
         assert_eq!(fm.tags, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(body, "body\n");
@@ -214,14 +256,14 @@ mod tests {
     #[test]
     fn parses_tags_as_csv_string() {
         let src = "---\ntags: alpha, beta, gamma\n---\nbody\n";
-        let (fm, _) = parse(src).unwrap();
+        let (fm, _) = parse(src, true).unwrap();
         assert_eq!(fm.tags, vec!["alpha", "beta", "gamma"]);
     }
 
     #[test]
     fn extras_round_trip() {
         let src = "---\ncreated: 2026-04-26\nfoo:\n  bar: 1\n---\n";
-        let (fm, _) = parse(src).unwrap();
+        let (fm, _) = parse(src, true).unwrap();
         assert!(fm.extra.contains_key("created"));
         assert!(fm.extra.contains_key("foo"));
         let rendered = fm.render();
@@ -233,7 +275,7 @@ mod tests {
     #[test]
     fn rejects_non_mapping_frontmatter() {
         let src = "---\n- a\n- b\n---\nbody\n";
-        let err = parse(src).unwrap_err();
+        let err = parse(src, true).unwrap_err();
         assert!(format!("{err:?}").contains("mapping"));
     }
 
@@ -241,5 +283,30 @@ mod tests {
     fn empty_frontmatter_renders_nothing() {
         let fm = Frontmatter::default();
         assert_eq!(fm.render(), "");
+    }
+
+    #[test]
+    fn aliases_projected_to_typed_field_when_enabled() {
+        let src = "---\naliases: [Foo, F]\n---\n";
+        let (fm, _) = parse(src, true).unwrap();
+        assert_eq!(fm.aliases, vec!["Foo".to_string(), "F".to_string()]);
+        assert!(!fm.extra.contains_key("aliases"));
+        assert!(fm.render().contains("aliases:"));
+    }
+
+    #[test]
+    fn scalar_alias_is_one_entry() {
+        let (fm, _) = parse("---\naliases: Solo\n---\n", true).unwrap();
+        assert_eq!(fm.aliases, vec!["Solo".to_string()]);
+    }
+
+    #[test]
+    fn aliases_stay_in_extra_when_disabled() {
+        let src = "---\naliases: [Foo, F]\n---\n";
+        let (fm, _) = parse(src, false).unwrap();
+        assert!(fm.aliases.is_empty());
+        assert!(fm.extra.contains_key("aliases"));
+        // Still round-trips, just opaquely through `extra`.
+        assert!(fm.render().contains("aliases:"));
     }
 }

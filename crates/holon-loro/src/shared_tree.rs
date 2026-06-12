@@ -11,7 +11,7 @@
 //! In the original (personal) tree, the extracted subtree is replaced with a mount node
 //! that references the shared tree's ID.
 
-use crate::api::loro_backend::TREE_NAME;
+use crate::loro_backend::TREE_NAME;
 use anyhow::{Context, Result, bail};
 use loro::{ExportMode, Frontiers, LoroDoc, LoroTree, LoroValue, TreeID, ValueOrContainer};
 use std::collections::HashSet;
@@ -173,7 +173,7 @@ pub fn extract_subtree(
     // any import so subsequent mark applications honor `ExpandType` —
     // see `configure_text_styles` doc and Phase 0.1 spike S3.
     let shared_doc = LoroDoc::new();
-    crate::api::loro_backend::configure_text_styles(&shared_doc);
+    crate::loro_backend::configure_text_styles(&shared_doc);
     shared_doc.set_peer_id(rand::random::<u64>())?;
     shared_doc
         .import(&snapshot)
@@ -199,7 +199,7 @@ pub fn gc_after_extraction(source_doc: &LoroDoc) -> Result<LoroDoc> {
         .context("Failed to export shallow snapshot for GC")?;
 
     let compacted = LoroDoc::new();
-    crate::api::loro_backend::configure_text_styles(&compacted);
+    crate::loro_backend::configure_text_styles(&compacted);
     compacted.set_peer_id(rand::random::<u64>())?;
     compacted
         .import(&shallow)

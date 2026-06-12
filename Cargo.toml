@@ -19,6 +19,9 @@ members = [
     "crates/holon-mcp-client",
     "crates/holon-macros",
     "crates/holon-macros-test",
+    "crates/holon-petri",
+    "crates/holon-profiles",
+    "crates/holon-loro",
     "frontends/tui",
     "frontends/mcp",
     "frontends/gpui",
@@ -169,7 +172,11 @@ r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = 
 holon = { path = "crates/holon" }
 holon-api = { path = "crates/holon-api" }
 holon-core = { path = "crates/holon-core" }
+holon-engine = { path = "crates/holon-engine" }
 holon-expr = { path = "crates/holon-expr" }
+holon-petri = { path = "crates/holon-petri" }
+holon-profiles = { path = "crates/holon-profiles" }
+holon-loro = { path = "crates/holon-loro" }
 holon-turso = { path = "crates/holon-turso" }
 holon-frontend = { path = "crates/holon-frontend" }
 holon-app = { path = "crates/holon-app" }

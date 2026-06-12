@@ -1,10 +1,13 @@
 //! `MarkdownFormatAdapter` — implements `holon_core::FileFormatAdapter`
 //! for `.md` / `.markdown`.
 //!
-//! Stateless wrapper around `parse_markdown_file` and `MarkdownRenderer`,
-//! analogous to `holon_orgmode::OrgFormatAdapter`. Plug into
-//! `FileSyncController::with_format(...)` to drive an Obsidian-style vault
-//! through the same controller used for org files.
+//! Wraps `parse_markdown_file` and `MarkdownRenderer`, analogous to
+//! `holon_orgmode::OrgFormatAdapter`. Unlike the org adapter it carries a
+//! [`MarkdownDialect`] describing the vault's flavor — the trait methods keep
+//! their format-neutral signatures, and the dialect rides on the adapter so a
+//! `FileSyncController::with_format(...)` can host a full Obsidian vault, a
+//! plain CommonMark tree, or any orthogonal mix in between by choosing a
+//! preset.
 
 use anyhow::Result;
 use holon_api::block::Block;
@@ -12,14 +15,38 @@ use holon_api::EntityUri;
 use holon_core::file_format::{FileFormatAdapter, FileFormatParseResult};
 use std::path::Path;
 
+use crate::dialect::MarkdownDialect;
 use crate::parser::parse_markdown_file;
 use crate::renderer::MarkdownRenderer;
 
-pub struct MarkdownFormatAdapter;
+pub struct MarkdownFormatAdapter {
+    dialect: MarkdownDialect,
+}
 
 impl MarkdownFormatAdapter {
+    /// Full Obsidian flavor — the default and the crate's historical behavior.
     pub fn new() -> Self {
-        Self
+        Self::obsidian()
+    }
+
+    /// Adapter for an explicit dialect.
+    pub fn with_dialect(dialect: MarkdownDialect) -> Self {
+        Self { dialect }
+    }
+
+    /// Full Obsidian flavor — every extension on.
+    pub fn obsidian() -> Self {
+        Self::with_dialect(MarkdownDialect::obsidian())
+    }
+
+    /// Plain CommonMark — every Obsidian extension off.
+    pub fn commonmark() -> Self {
+        Self::with_dialect(MarkdownDialect::commonmark())
+    }
+
+    /// The dialect this adapter parses and renders with.
+    pub fn dialect(&self) -> &MarkdownDialect {
+        &self.dialect
     }
 }
 
@@ -41,7 +68,7 @@ impl FileFormatAdapter for MarkdownFormatAdapter {
         parent_dir_id: &EntityUri,
         root: &Path,
     ) -> Result<FileFormatParseResult> {
-        let r = parse_markdown_file(path, content, parent_dir_id, root)?;
+        let r = parse_markdown_file(path, content, parent_dir_id, root, &self.dialect)?;
         Ok(FileFormatParseResult {
             document: r.document,
             blocks: r.blocks,
@@ -56,11 +83,12 @@ impl FileFormatAdapter for MarkdownFormatAdapter {
         file_path: &Path,
         file_id: &EntityUri,
     ) -> String {
-        MarkdownRenderer::render_document(document, blocks, file_path, file_id)
+        MarkdownRenderer::new(self.dialect.clone())
+            .render_document(document, blocks, file_path, file_id)
     }
 
     fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String {
-        MarkdownRenderer::render_blocks(blocks, file_path, file_id)
+        MarkdownRenderer::new(self.dialect.clone()).render_blocks(blocks, file_path, file_id)
     }
 }
 
@@ -76,6 +104,14 @@ mod tests {
     }
 
     #[test]
+    fn default_adapter_is_obsidian() {
+        assert_eq!(
+            MarkdownFormatAdapter::default().dialect(),
+            &MarkdownDialect::obsidian()
+        );
+    }
+
+    #[test]
     fn parse_via_adapter_matches_direct_call() {
         let adapter = MarkdownFormatAdapter::new();
         let path = PathBuf::from("/tmp/note.md");
@@ -84,7 +120,8 @@ mod tests {
         let content = "---\ntitle: Hi\n---\n# A ^aa\n\nbody\n\n## B ^bb\n";
 
         let via_adapter = adapter.parse(&path, content, &parent, &root).unwrap();
-        let via_direct = parse_markdown_file(&path, content, &parent, &root).unwrap();
+        let via_direct =
+            parse_markdown_file(&path, content, &parent, &root, adapter.dialect()).unwrap();
 
         assert_eq!(via_adapter.blocks.len(), via_direct.blocks.len());
         assert_eq!(via_adapter.document.id, via_direct.document.id);
@@ -103,8 +140,8 @@ mod tests {
         let content = "# A ^aa\n\nbody\n";
         let parsed = adapter.parse(&path, content, &parent, &root).unwrap();
         let via_adapter = adapter.render_blocks(&parsed.blocks, &path, &parsed.document.id);
-        let via_direct =
-            MarkdownRenderer::render_blocks(&parsed.blocks, &path, &parsed.document.id);
+        let via_direct = MarkdownRenderer::new(MarkdownDialect::obsidian())
+            .render_blocks(&parsed.blocks, &path, &parsed.document.id);
         assert_eq!(via_adapter, via_direct);
     }
 

@@ -16,20 +16,33 @@ use holon_api::EntityUri;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use crate::dialect::MarkdownDialect;
 use crate::frontmatter::Frontmatter;
 
-pub struct MarkdownRenderer;
+/// Renders a `Block` tree to markdown in a configured [`MarkdownDialect`].
+/// Each dialect switch gates exactly the emission its parser counterpart
+/// recognizes, so a parse→render round-trip under the same dialect is stable.
+pub struct MarkdownRenderer {
+    dialect: MarkdownDialect,
+}
 
 impl MarkdownRenderer {
+    pub fn new(dialect: MarkdownDialect) -> Self {
+        Self { dialect }
+    }
+
     pub fn render_document(
+        &self,
         doc: &Block,
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
     ) -> String {
         let mut out = String::new();
-        let fm = frontmatter_from_document(doc);
-        out.push_str(&fm.render());
+        if self.dialect.yaml_frontmatter {
+            let fm = frontmatter_from_document(doc);
+            out.push_str(&fm.render());
+        }
 
         if !doc.content.is_empty() {
             out.push_str(doc.content.trim_end_matches('\n'));
@@ -41,11 +54,11 @@ impl MarkdownRenderer {
             }
         }
 
-        out.push_str(&Self::render_blocks(blocks, file_path, file_id));
+        out.push_str(&self.render_blocks(blocks, file_path, file_id));
         out
     }
 
-    pub fn render_blocks(blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
+    pub fn render_blocks(&self, blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
         let mut out = String::new();
         // Sibling order is caller-provided (the ordered read; ADR 0005); the
         // renderer trusts the input order and only imposes a content-type
@@ -63,7 +76,7 @@ impl MarkdownRenderer {
 
         if let Some(roots) = children_by_parent.get(file_id.as_str()) {
             for r in roots {
-                render_tree(r, &children_by_parent, &mut out, 1);
+                render_tree(r, &children_by_parent, &mut out, 1, &self.dialect);
             }
         }
         out
@@ -75,11 +88,12 @@ fn render_tree<'a>(
     children_by_parent: &HashMap<&'a str, Vec<&'a Block>>,
     out: &mut String,
     depth: u8,
+    dialect: &MarkdownDialect,
 ) {
     match block.content_type {
-        ContentType::Text => render_heading(block, depth, out),
+        ContentType::Text => render_heading(block, depth, out, dialect),
         ContentType::Source => render_source(block, out),
-        ContentType::Image => render_image(block, out),
+        ContentType::Image => render_image(block, out, dialect),
     }
 
     let empty = Vec::new();
@@ -91,27 +105,31 @@ fn render_tree<'a>(
         } else {
             depth
         };
-        render_tree(c, children_by_parent, out, next_depth);
+        render_tree(c, children_by_parent, out, next_depth, dialect);
     }
 }
 
-fn render_heading(block: &Block, depth: u8, out: &mut String) {
+fn render_heading(block: &Block, depth: u8, out: &mut String, dialect: &MarkdownDialect) {
     let (head, body) = match block.content.split_once('\n') {
         Some((h, b)) => (h, Some(b)),
         None => (block.content.as_str(), None),
     };
-    let task_marker = block
-        .properties
-        .get("task_state")
-        .and_then(|v| v.as_string())
-        .map(|kw| match kw {
-            "DONE" => "[x] ".to_string(),
-            "DOING" => "[/] ".to_string(),
-            _ => "[ ] ".to_string(),
-        })
-        .unwrap_or_default();
+    let task_marker = if dialect.gfm_tasks {
+        block
+            .properties
+            .get("task_state")
+            .and_then(|v| v.as_string())
+            .map(|kw| format!("[{}] ", dialect.task_keywords.marker_for_keyword(kw)))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
-    let id_marker = block_id_marker(block);
+    let id_marker = if dialect.block_ids {
+        block_id_marker(block)
+    } else {
+        String::new()
+    };
 
     let hashes = "#".repeat(depth.max(1) as usize);
     out.push_str(&hashes);
@@ -146,11 +164,19 @@ fn render_source(block: &Block, out: &mut String) {
     out.push_str("```\n\n");
 }
 
-fn render_image(block: &Block, out: &mut String) {
-    // Obsidian embed syntax. `block.content` carries the relative file path.
-    out.push_str("![[");
-    out.push_str(block.content.trim());
-    out.push_str("]]\n\n");
+fn render_image(block: &Block, out: &mut String, dialect: &MarkdownDialect) {
+    // `block.content` carries the relative file path. Obsidian uses embed
+    // syntax; with embeds off, fall back to the CommonMark image form.
+    let path = block.content.trim();
+    if dialect.embeds {
+        out.push_str("![[");
+        out.push_str(path);
+        out.push_str("]]\n\n");
+    } else {
+        out.push_str("![](");
+        out.push_str(path);
+        out.push_str(")\n\n");
+    }
 }
 
 fn block_id_marker(block: &Block) -> String {
@@ -201,7 +227,21 @@ fn frontmatter_from_document(doc: &Block) -> Frontmatter {
         })
         .unwrap_or_default();
 
-    Frontmatter { title, tags, extra }
+    // The `aliases` property exists only when the dialect projected it as a
+    // typed field at parse time; otherwise aliases ride inside `extra`.
+    let aliases: Vec<String> = doc
+        .properties
+        .get("aliases")
+        .and_then(|v| v.as_string())
+        .map(|json| serde_json::from_str::<Vec<String>>(json).unwrap_or_default())
+        .unwrap_or_default();
+
+    Frontmatter {
+        title,
+        tags,
+        aliases,
+        extra,
+    }
 }
 
 #[cfg(test)]
@@ -214,12 +254,16 @@ mod tests {
         EntityUri::file("note.md")
     }
 
+    fn renderer() -> MarkdownRenderer {
+        MarkdownRenderer::new(MarkdownDialect::obsidian())
+    }
+
     #[test]
     fn renders_simple_heading() {
         let mut block = Block::new_text(EntityUri::block("h1"), doc_uri(), "Top\nbody text");
         block.set_property("ID", holon_api::Value::String("h1".into()));
         let out =
-            MarkdownRenderer::render_blocks(&[block], &PathBuf::from("/test/note.md"), &doc_uri());
+            renderer().render_blocks(&[block], &PathBuf::from("/test/note.md"), &doc_uri());
         assert!(out.starts_with("# Top ^h1\n"));
         assert!(out.contains("body text"));
     }
@@ -232,7 +276,7 @@ mod tests {
         child.set_property("ID", holon_api::Value::String("b".into()));
 
         let out =
-            MarkdownRenderer::render_blocks(&[top, child], &PathBuf::from("/note.md"), &doc_uri());
+            renderer().render_blocks(&[top, child], &PathBuf::from("/note.md"), &doc_uri());
         assert!(out.contains("# A ^a"));
         assert!(out.contains("## B ^b"));
     }
@@ -253,7 +297,7 @@ mod tests {
         );
         src.set_property("ID", holon_api::Value::String("s".into()));
 
-        let out = MarkdownRenderer::render_blocks(
+        let out = renderer().render_blocks(
             &[parent, text, src],
             &PathBuf::from("/note.md"),
             &doc_uri(),
@@ -271,7 +315,7 @@ mod tests {
         let mut block = Block::new_text(EntityUri::block("t1"), doc_uri(), "Do thing");
         block.set_property("ID", holon_api::Value::String("t1".into()));
         block.set_property("task_state", holon_api::Value::String("TODO".into()));
-        let out = MarkdownRenderer::render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer().render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri());
         assert!(out.contains("# [ ] Do thing ^t1"));
     }
 
@@ -280,7 +324,7 @@ mod tests {
         let mut block = Block::new_text(EntityUri::block("t1"), doc_uri(), "Done thing");
         block.set_property("ID", holon_api::Value::String("t1".into()));
         block.set_property("task_state", holon_api::Value::String("DONE".into()));
-        let out = MarkdownRenderer::render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer().render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri());
         assert!(out.contains("# [x] Done thing ^t1"));
     }
 
@@ -293,7 +337,7 @@ mod tests {
         let mut head = Block::new_text(EntityUri::block("h"), doc_uri(), "Heading");
         head.set_property("ID", holon_api::Value::String("h".into()));
 
-        let out = MarkdownRenderer::render_document(
+        let out = renderer().render_document(
             &doc,
             &[head],
             &PathBuf::from("/note.md"),
@@ -320,7 +364,7 @@ mod tests {
         src.set_property("ID", holon_api::Value::String("s".into()));
 
         let out =
-            MarkdownRenderer::render_blocks(&[parent, src], &PathBuf::from("/note.md"), &doc_uri());
+            renderer().render_blocks(&[parent, src], &PathBuf::from("/note.md"), &doc_uri());
         assert!(out.contains("```holon_prql\nfrom x import y\n```"));
     }
 }

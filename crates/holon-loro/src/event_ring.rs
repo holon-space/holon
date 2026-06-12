@@ -13,10 +13,10 @@
 
 use std::collections::VecDeque;
 
-pub(crate) const DEFAULT_EVENT_RING_CAPACITY: usize = 4096;
+pub const DEFAULT_EVENT_RING_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReplayWindowExpired {
+pub struct ReplayWindowExpired {
     pub requested: u64,
     pub oldest_available: u64,
 }
@@ -33,7 +33,7 @@ impl std::fmt::Display for ReplayWindowExpired {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EventRing<T> {
+pub struct EventRing<T> {
     entries: VecDeque<(u64, T)>,
     next_seq: u64,
     capacity: usize,
@@ -93,7 +93,7 @@ impl<T: Clone> EventRing<T> {
 /// losing all future changes). Now a full channel blocks this delivery task
 /// (never the mutator — callers run this in a spawned task) up to a timeout;
 /// only on timeout is the subscriber dropped, with an error log.
-pub(crate) async fn deliver_to_subscribers<T: Send + 'static>(
+pub async fn deliver_to_subscribers<T: Send + 'static>(
     subscribers: &mut Vec<tokio::sync::mpsc::Sender<Result<Vec<T>, holon_api::ApiError>>>,
     batch: Vec<T>,
 ) where

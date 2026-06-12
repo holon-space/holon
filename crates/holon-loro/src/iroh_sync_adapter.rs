@@ -32,8 +32,8 @@
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod adapter {
-    use crate::sync::loro_document::LoroDocument;
-    use crate::sync::shared_tree::SharedTreeStore;
+    use crate::loro_document::LoroDocument;
+    use crate::shared_tree::SharedTreeStore;
     use anyhow::{Context, Result};
     use iroh::{Endpoint, EndpointAddr};
     use loro::{ExportMode, LoroDoc};
@@ -575,8 +575,8 @@ mod adapter {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::api::loro_backend::TREE_NAME;
-        use crate::sync::shared_tree::{HistoryRetention, extract_subtree};
+        use crate::loro_backend::TREE_NAME;
+        use crate::shared_tree::{HistoryRetention, extract_subtree};
         use loro::LoroText;
 
         fn set_text(tree: &loro::LoroTree, node: loro::TreeID, content: &str) {

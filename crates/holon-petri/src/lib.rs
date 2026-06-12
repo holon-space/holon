@@ -370,14 +370,14 @@ fn topo_sort_computed(computed: &BTreeMap<String, &CompiledExpr>) -> Vec<String>
     for (name, compiled) in computed {
         let mut name_deps = Vec::new();
         for other in &computed_names {
-            if *other != name.as_str() && crate::util::expr_references(&compiled.source, other) {
+            if *other != name.as_str() && holon_core::util::expr_references(&compiled.source, other) {
                 name_deps.push(*other);
             }
         }
         deps.insert(name.as_str(), name_deps);
     }
 
-    crate::util::topo_sort_kahn(&computed_names, &deps)
+    holon_core::util::topo_sort_kahn(&computed_names, &deps)
 }
 
 /// Build prototype properties from a block's properties.

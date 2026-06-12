@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use holon_api::{CompiledExpr, FieldLifetime, TypeDefinition};
 use rhai::Engine as RhaiEngine;
 
-use crate::util::{expr_references, topo_sort_kahn};
+use holon_core::util::{expr_references, topo_sort_kahn};
 
 /// A compiled computed field: name + pre-compiled Rhai AST.
 /// Stored in topological order (dependencies before dependents).
@@ -384,6 +384,27 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
     }
 
     Ok(Arc::new(registry))
+}
+
+/// Build the set of type-defined profiles from a [`TypeRegistry`].
+///
+/// Bridge function — `profile_from_type_def` lives in `holon-profiles` and
+/// can't see `VirtualChildConfig` (which lives in `holon`'s `TypeRegistry`),
+/// so it's attached here. Single source of truth shared by the Turso DI path
+/// and the no-Turso bundled-only resolver.
+pub fn type_profiles_from_registry(
+    type_registry: &TypeRegistry,
+) -> Vec<holon_profiles::EntityProfile> {
+    type_registry
+        .all()
+        .iter()
+        .filter_map(|td| {
+            holon_profiles::profile_from_type_def(td).map(|mut p| {
+                p.virtual_child = type_registry.virtual_child_config(&td.name);
+                p
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

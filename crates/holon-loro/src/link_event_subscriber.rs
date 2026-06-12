@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use futures_signals::signal_map::{MapDiff, SignalMapExt};
 
-use crate::storage::types::Result;
-use crate::sync::live_data::LiveData;
+use holon_core::storage::types::Result;
+use holon_api::live_data::LiveData;
 use holon_api::block::Block;
 use holon_api::link_parser::{Link, extract_links};
 

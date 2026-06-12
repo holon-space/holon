@@ -1,6 +1,6 @@
 //! On-disk persistence for per-share `LoroDoc` snapshots.
 //!
-//! Parallel to [`crate::sync::loro_document_store::LoroDocumentStore`],
+//! Parallel to [`crate::loro_document_store::LoroDocumentStore`],
 //! but keyed by `shared_tree_id` and holding many files under a
 //! `shares/` subdirectory of the storage root.
 //!
@@ -19,7 +19,7 @@
 //! `sweep_stale_tmps` runs once at startup to clean leftover `.tmp`
 //! files from crashed previous writes.
 
-use crate::sync::degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
+use crate::degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
 use anyhow::{Context, Result, anyhow};
 use iroh::EndpointAddr;
 use loro::{ExportMode, LoroDoc};
@@ -209,7 +209,7 @@ impl SharedSnapshotStore {
         // this, `LoroText::mark` silently no-ops and reads return empty
         // mark sets — see Phase 0.1 spike S3.
         let doc = LoroDoc::new();
-        crate::api::loro_backend::configure_text_styles(&doc);
+        crate::loro_backend::configure_text_styles(&doc);
         match doc.import(&bytes) {
             Ok(_) => Ok(doc),
             Err(e) => {

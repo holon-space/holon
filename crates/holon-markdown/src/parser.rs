@@ -42,8 +42,11 @@ use markdown::{Constructs, ParseOptions};
 use std::path::Path;
 use uuid::Uuid;
 
+use crate::callout::extract_callouts;
+use crate::dialect::{DailyNoteConfig, MarkdownDialect, TaskKeywords};
 use crate::frontmatter::{self, Frontmatter};
-use crate::wikilink::extract_wikilink_targets;
+use crate::inline::{extract_comments, extract_highlights, extract_inline_tags};
+use crate::wikilink::classify_wikilinks;
 
 pub struct ParseResult {
     pub document: Block,
@@ -67,6 +70,7 @@ pub fn parse_markdown_file(
     content: &str,
     parent_dir_id: &EntityUri,
     root: &Path,
+    dialect: &MarkdownDialect,
 ) -> Result<ParseResult> {
     let file_id = generate_file_id(path, root);
     // Use the file stem (no extension) as the page title default so the // ALLOW(fallback): default-value comment
@@ -77,7 +81,11 @@ pub fn parse_markdown_file(
         .unwrap_or("unknown")
         .to_string();
 
-    let (frontmatter, body) = frontmatter::parse(content)?;
+    let (frontmatter, body) = if dialect.yaml_frontmatter {
+        frontmatter::parse(content, dialect.frontmatter_aliases)?
+    } else {
+        (Frontmatter::default(), content)
+    };
 
     // The page title is the first line of `content`. We hold onto `file_name`
     // here and prepend it once the body preamble has been parsed below.
@@ -124,6 +132,13 @@ pub fn parse_markdown_file(
     } else {
         format!("{}\n{}", title_line, preamble_text)
     };
+    apply_inline_metadata(&mut document, dialect);
+    if let Some(cfg) = &dialect.daily_notes {
+        if let Some(date) = daily_note_date(path, root, cfg) {
+            document.set_property("daily_note", holon_api::Value::Boolean(true));
+            document.set_property("date", holon_api::Value::String(date));
+        }
+    }
 
     // `parent_stack` holds (depth, EntityUri) frames. The current parent for
     // a heading of depth `d` is the nearest entry whose depth is `< d`; if
@@ -161,22 +176,32 @@ pub fn parse_markdown_file(
         let (heading_text, body_text) = split_first_line(between);
         let heading_text = strip_atx_marker(heading_text);
 
-        let (heading_text, block_id_marker) = pop_trailing_block_id(heading_text);
-        let (body_text, body_block_id) = pop_trailing_block_id_in_body(&body_text);
+        let (heading_text, body_text, block_id) = if dialect.block_ids {
+            let (heading_text, marker) = pop_trailing_block_id(heading_text);
+            let (body_text, body_marker) = pop_trailing_block_id_in_body(&body_text);
+            (heading_text, body_text, marker.or(body_marker))
+        } else {
+            (heading_text, body_text, None)
+        };
 
-        let block_id = block_id_marker.or(body_block_id);
         let (id, needs_write) = match block_id {
             Some(id) => (id, false),
             None => (Uuid::new_v4().to_string(), true),
         };
-        if needs_write {
+        // Only record a writeback when block-id markers are in play; with
+        // `block_ids` off there is no `^id` syntax to persist.
+        if needs_write && dialect.block_ids {
             blocks_needing_ids.push(id.clone());
         }
 
         // Strip code fences out of the body — they become source-block children.
         let (body_without_code, source_blocks) = extract_code_fences(&body_text);
 
-        let (task_state, heading_text) = strip_task_state_prefix(heading_text);
+        let (task_state, heading_text) = if dialect.gfm_tasks {
+            strip_task_state_prefix(heading_text, &dialect.task_keywords)
+        } else {
+            (None, heading_text.to_string())
+        };
 
         let mut combined = heading_text.to_string();
         let body_clean = body_without_code.trim_end_matches('\n');
@@ -214,16 +239,7 @@ pub fn parse_markdown_file(
             );
         }
 
-        let wikilink_targets = extract_wikilink_targets(&block.content);
-        if !wikilink_targets.is_empty() {
-            block.set_property(
-                "wikilinks",
-                holon_api::Value::String(
-                    serde_json::to_string(&wikilink_targets)
-                        .expect("wikilink targets serialize to JSON"),
-                ),
-            );
-        }
+        apply_inline_metadata(&mut block, dialect);
 
         blocks.push(block);
 
@@ -437,29 +453,26 @@ fn parse_fence_info(rest: &str) -> Option<String> {
     Some(lang)
 }
 
-/// Recognize GFM `[ ]` / `[x]` task state at the head of a heading line.
-/// Returns (parsed_state_or_none, remaining_text_after_marker).
-fn strip_task_state_prefix(line: &str) -> (Option<TaskState>, String) {
+/// Recognize a `[marker]` task state at the head of a heading line using the
+/// dialect's marker table. Returns (parsed_state_or_none,
+/// remaining_text_after_marker). A leading `[…]` whose content is not a known
+/// marker (e.g. `[link]`) is left untouched.
+fn strip_task_state_prefix(line: &str, keywords: &TaskKeywords) -> (Option<TaskState>, String) {
     let trimmed = line.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("[ ]") {
-        return (
-            Some(TaskState::active("TODO")),
-            rest.trim_start().to_string(),
-        );
-    }
-    if let Some(rest) = trimmed
-        .strip_prefix("[x]")
-        .or_else(|| trimmed.strip_prefix("[X]"))
-    {
-        return (Some(TaskState::done("DONE")), rest.trim_start().to_string());
-    }
-    if let Some(rest) = trimmed.strip_prefix("[/]") {
-        return (
-            Some(TaskState::active("DOING")),
-            rest.trim_start().to_string(),
-        );
-    }
-    (None, line.to_string())
+    let Some(after_open) = trimmed.strip_prefix('[') else {
+        return (None, line.to_string());
+    };
+    let Some(close) = after_open.find(']') else {
+        return (None, line.to_string());
+    };
+    let Some(marker) = keywords.by_marker(&after_open[..close]) else {
+        return (None, line.to_string());
+    };
+    let rest = after_open[close + 1..].trim_start();
+    (
+        Some(TaskState::new(marker.keyword.clone(), marker.category)),
+        rest.to_string(),
+    )
 }
 
 fn apply_frontmatter_to_document(doc: &mut Block, fm: &Frontmatter) {
@@ -470,10 +483,87 @@ fn apply_frontmatter_to_document(doc: &mut Block, fm: &Frontmatter) {
         let tags = Tags::from_tag_iter(fm.tags.clone());
         doc.set_property("tags", holon_api::Value::String(tags.to_csv()));
     }
+    // `fm.aliases` is only populated when the dialect enables
+    // `frontmatter_aliases`; otherwise aliases ride along inside `extra`.
+    if !fm.aliases.is_empty() {
+        doc.set_property("aliases", holon_api::Value::String(to_json_string(&fm.aliases)));
+    }
     if !fm.extra.is_empty() {
         let json = serde_json::to_string(&fm.extra).expect("YAML extras serialize to JSON");
         doc.set_property("frontmatter_extra", holon_api::Value::String(json));
     }
+}
+
+/// Extract each enabled inline feature into its own sidecar property. The
+/// source spans stay verbatim in `block.content`; only the metadata is lifted,
+/// and each switch touches exactly one property so the features stay
+/// orthogonal.
+fn apply_inline_metadata(block: &mut Block, dialect: &MarkdownDialect) {
+    let mut props: Vec<(&'static str, String)> = Vec::new();
+    {
+        let content = block.content.as_str();
+        if dialect.wikilinks || dialect.embeds || dialect.self_links {
+            let classified = classify_wikilinks(content);
+            if dialect.wikilinks && !classified.links.is_empty() {
+                props.push(("wikilinks", to_json_string(&classified.links)));
+            }
+            if dialect.embeds && !classified.embeds.is_empty() {
+                props.push(("embeds", to_json_string(&classified.embeds)));
+            }
+            if dialect.self_links && !classified.self_links.is_empty() {
+                props.push(("self_links", to_json_string(&classified.self_links)));
+            }
+        }
+        if dialect.inline_tags {
+            let tags = extract_inline_tags(content, dialect.nested_tags);
+            if !tags.is_empty() {
+                props.push(("inline_tags", to_json_string(&tags)));
+            }
+        }
+        if dialect.highlights {
+            let highlights = extract_highlights(content);
+            if !highlights.is_empty() {
+                props.push(("highlights", to_json_string(&highlights)));
+            }
+        }
+        if dialect.comments {
+            let comments = extract_comments(content);
+            if !comments.is_empty() {
+                props.push(("comments", to_json_string(&comments)));
+            }
+        }
+        if dialect.callouts {
+            let callouts = extract_callouts(content);
+            if !callouts.is_empty() {
+                props.push((
+                    "callouts",
+                    serde_json::to_string(&callouts).expect("callouts serialize to JSON"),
+                ));
+            }
+        }
+    }
+    for (name, json) in props {
+        block.set_property(name, holon_api::Value::String(json));
+    }
+}
+
+fn to_json_string(values: &[String]) -> String {
+    serde_json::to_string(values).expect("string list serializes to JSON")
+}
+
+/// ISO date for a daily note, or `None` when the path doesn't match the
+/// configured folder/format. A non-matching name is not an error — it just
+/// isn't a daily note.
+fn daily_note_date(path: &Path, root: &Path, cfg: &DailyNoteConfig) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?; // ALLOW(ok): path outside root → not a daily note
+    if let Some(folder) = &cfg.folder {
+        if !relative.starts_with(folder) {
+            return None;
+        }
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let date = chrono::NaiveDate::parse_from_str(stem, &cfg.format).ok()?; // ALLOW(ok): non-date stem → not a daily note
+    Some(date.format("%Y-%m-%d").to_string())
 }
 
 #[cfg(test)]
@@ -484,7 +574,14 @@ mod tests {
     fn parse(content: &str) -> ParseResult {
         let path = PathBuf::from("/test/note.md");
         let root = PathBuf::from("/test");
-        parse_markdown_file(&path, content, &EntityUri::no_parent(), &root).unwrap()
+        parse_markdown_file(
+            &path,
+            content,
+            &EntityUri::no_parent(),
+            &root,
+            &MarkdownDialect::obsidian(),
+        )
+        .unwrap()
     }
 
     #[test]

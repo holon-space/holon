@@ -25,8 +25,8 @@ use rhai::Engine as RhaiEngine;
 
 use futures_signals::signal_map::SignalMapExt;
 
-use crate::storage::types::StorageEntity;
-use crate::sync::LiveData;
+use holon_api::StorageEntity;
+use holon_api::live_data::LiveData;
 
 /// Variables that are frontend-local (UI state), not data-dependent.
 /// Conditions referencing only these variables are extracted as `Predicate`
@@ -160,7 +160,7 @@ fn split_condition(source: &str) -> (Option<String>, Predicate) {
         let refs_only_ui = !conjunct.is_empty()
             && UI_STATE_VARIABLES
                 .iter()
-                .any(|var| crate::util::expr_references(conjunct, var))
+                .any(|var| holon_core::util::expr_references(conjunct, var))
             && !has_non_ui_references(conjunct);
 
         if refs_only_ui {
@@ -368,27 +368,6 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
     })
 }
 
-/// Build the set of type-defined profiles from a [`TypeRegistry`].
-///
-/// `profile_from_type_def` can't see `virtual_child` (it's stored in a side map
-/// on the registry — `TypeDefinition` lives in `holon-api`, `VirtualChildConfig`
-/// in `holon`), so it's attached here. Single source of truth shared by the
-/// Turso DI path and the no-Turso bundled-only resolver.
-pub fn type_profiles_from_registry(
-    type_registry: &crate::type_registry::TypeRegistry,
-) -> Vec<EntityProfile> {
-    type_registry
-        .all()
-        .iter()
-        .filter_map(|td| {
-            profile_from_type_def(td).map(|mut p| {
-                p.virtual_child = type_registry.virtual_child_config(&td.name);
-                p
-            })
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Computed field parsing + topo-sort
 // ---------------------------------------------------------------------------
@@ -431,14 +410,14 @@ fn topo_sort_computed_fields(
     for (field, _) in &fields {
         let mut field_deps = Vec::new();
         for other in &names {
-            if *other != field.name.as_str() && crate::util::expr_references(&field.source, other) {
+            if *other != field.name.as_str() && holon_core::util::expr_references(&field.source, other) {
                 field_deps.push(*other);
             }
         }
         deps.insert(field.name.as_str(), field_deps);
     }
 
-    let order = crate::util::topo_sort_kahn(&names, &deps);
+    let order = holon_core::util::topo_sort_kahn(&names, &deps);
 
     let mut field_map: HashMap<String, (RawComputedField, CompiledExpr)> = fields
         .into_iter()
@@ -515,7 +494,7 @@ fn storage_entity_to_rhai_map(entity: &StorageEntity) -> rhai::Dynamic {
 /// just an Arc clone, no RwLock contention on the hot path.
 pub struct ProfileResolver {
     #[allow(dead_code)] // keeps the LiveData stream alive while the resolver exists
-    source: Arc<crate::sync::LiveData<EntityProfile>>,
+    source: Arc<holon_api::live_data::LiveData<EntityProfile>>,
     cache_signal: futures_signals::signal::Mutable<Arc<ProfileCache>>,
     /// Entity operations from the OperationDispatcher, keyed by entity name.
     /// Injected at DI time — this is the single source of truth for operations.
@@ -528,7 +507,7 @@ pub struct ProfileResolver {
 
 impl ProfileResolver {
     pub fn new(
-        source: Arc<crate::sync::LiveData<EntityProfile>>,
+        source: Arc<holon_api::live_data::LiveData<EntityProfile>>,
         ui_info: holon_api::UiInfo,
         live_entities: LiveEntities,
         entity_operations: HashMap<EntityName, Vec<OperationDescriptor>>,
@@ -546,7 +525,7 @@ impl ProfileResolver {
     ///
     /// Type-defined profiles are seeded first; org-based profiles override them.
     pub fn with_type_profiles(
-        source: Arc<crate::sync::LiveData<EntityProfile>>,
+        source: Arc<holon_api::live_data::LiveData<EntityProfile>>,
         ui_info: holon_api::UiInfo,
         live_entities: LiveEntities,
         entity_operations: HashMap<EntityName, Vec<OperationDescriptor>>,
@@ -565,7 +544,7 @@ impl ProfileResolver {
         let bg_type_profiles = Arc::clone(&type_profiles);
         let signal = source.signal_map();
         let bg_signal = cache_signal.clone();
-        crate::util::spawn_actor(async move {
+        tokio::spawn(async move {
             signal
                 .for_each(move |_diff| {
                     let new_cache = Arc::new(Self::build_cache_from_source(
@@ -643,7 +622,7 @@ impl ProfileResolver {
     }
 
     fn build_cache_from_source(
-        source: &crate::sync::LiveData<EntityProfile>,
+        source: &holon_api::live_data::LiveData<EntityProfile>,
         ui_info: &holon_api::UiInfo,
         type_profiles: &[EntityProfile],
     ) -> ProfileCache {
@@ -1021,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_expr_references() {
-        use crate::util::expr_references;
+        use holon_core::util::expr_references;
         assert!(expr_references("is_task && priority > 0", "is_task"));
         assert!(expr_references("is_task", "is_task"));
         assert!(!expr_references("is_task_done", "is_task"));

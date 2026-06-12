@@ -7,10 +7,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 
-use crate::api::types::Traversal;
-use crate::api::{CoreOperations, LoroBackend};
-use crate::core::datasource::{CrudOperations, DataSource, OperationResult, Result};
-use crate::sync::LoroDocumentStore;
+use holon_api::repository::Traversal;
+use holon_api::repository::CoreOperations;
+use crate::loro_backend::LoroBackend;
+use holon_core::{CrudOperations, DataSource, OperationResult, Result};
+use crate::LoroDocumentStore;
 use holon_api::ApiError;
 use holon_api::Value;
 use holon_api::block::Block;

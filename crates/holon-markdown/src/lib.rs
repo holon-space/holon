@@ -16,15 +16,24 @@
 //! ## Scope
 //!
 //! Targets Obsidian-style vaults: CommonMark + GFM task lists + YAML
-//! frontmatter + `[[wikilink]]` + `^block-id` markers. See
-//! `docs/Architecture/Sync.md` for the full conventions.
+//! frontmatter + `[[wikilink]]` + `^block-id` markers, plus callouts,
+//! highlights, comments, inline tags, aliases, and self-links. Every feature
+//! is an atomic, orthogonal switch on [`MarkdownDialect`] so a single crate
+//! can match a given vault's settings or degrade all the way to CommonMark.
+//! See `docs/Architecture/Sync.md` for the full conventions.
 
+pub mod callout;
+pub mod dialect;
 pub mod file_format;
 pub mod frontmatter;
+pub mod inline;
 pub mod parser;
 pub mod renderer;
 pub mod wikilink;
 
+pub use callout::Callout;
+pub use dialect::{DailyNoteConfig, MarkdownDialect, TaskKeywords, TaskMarker};
 pub use file_format::MarkdownFormatAdapter;
 pub use parser::{parse_markdown_file, ParseResult};
 pub use renderer::MarkdownRenderer;
+pub use wikilink::{classify_wikilinks, ClassifiedWikilinks, Wikilink};

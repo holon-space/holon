@@ -12,6 +12,10 @@ path = "src/lib.rs"
 holon-macros.workspace = true
 holon.workspace = true
 holon-api.workspace = true
+# operations_trait expands to `holon_core::{Result, OperationResult, UndoAction,
+# UnknownOperationError}` for external consumers (see holon-macros operations_trait.rs);
+# every other consumer (holon-loro, holon-filesystem) declares this dep.
+holon-core.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }

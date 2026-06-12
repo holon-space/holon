@@ -9,7 +9,7 @@ use proptest::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-pub use crate::api::loro_backend::{CONTENT_RAW, CONTENT_TYPE, SOURCE_CODE, STABLE_ID, TREE_NAME};
+pub use crate::loro_backend::{CONTENT_RAW, CONTENT_TYPE, SOURCE_CODE, STABLE_ID, TREE_NAME};
 
 /// Return the metadata field that stores a node's primary text content,
 /// based on its `content_type` (`source` blocks live in `source_code`,

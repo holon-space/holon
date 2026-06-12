@@ -1,10 +1,10 @@
 pub mod api;
 pub mod core;
 pub mod di;
-pub mod entity_profile;
+pub use holon_profiles as entity_profile;
 pub mod identity;
 pub mod navigation;
-pub mod petri;
+pub use holon_petri as petri;
 pub mod storage;
 pub mod sync;
 // `testing` depends on proptest which is native-only (not on any wasm target).

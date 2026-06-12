@@ -1,116 +1,25 @@
-//! Synchronization infrastructure
+//! Synchronization infrastructure — re-exported from `holon-loro`.
 //!
-//! - `canonical_path`: Type-safe canonical path that resolves symlinks
-//! - `loro_document`: Loro CRDT document (storage only, no transport)
-//! - `iroh_sync_adapter`: Iroh P2P transport adapter for syncing Loro documents
-//! - `external_system`: External system integration with contract-based validation
-//! - `loro_document_store`: Store for managing multiple Loro documents
-//! - `loro_block_operations`: Generic operations on Loro blocks
-//! - `loro_blocks_datasource`: DataSource for populating QueryableCache
-//! - `event_bus`: Event bus trait and types for event sourcing
+//! The Loro CRDT backend, P2P sync, snapshot helpers, and block operation
+//! providers now live in `holon-loro`. This module re-exports them for
+//! backward compatibility (`holon::sync::*` paths keep resolving).
 //!
-//! Note: Block hierarchy schema is now managed by `BlockHierarchySchemaModule`
-//! in `storage/schema_modules.rs` via the `SchemaRegistry`.
+//! Three wiring modules stay in `holon` because they bridge the `holon::core`
+//! SQL types into the Loro pipeline (see Phase D partition).
 
-pub mod block_cell_registry;
-pub mod canonical_path;
-pub mod capability;
-pub mod consolidator;
-
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod debounced_commit_worker;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod degraded_signal_bus;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod device_key_store;
-pub mod event_bus;
 pub mod event_infra_module;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod iroh_advertiser;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod iroh_sync_adapter;
-pub mod link_event_subscriber;
-pub mod live_data;
-pub mod live_value;
-pub mod loro_block_operations;
 pub mod loro_block_query_source;
-pub mod loro_blocks_datasource;
-pub mod loro_document;
-pub mod loro_document_store;
 pub mod loro_module;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod loro_share_backend;
-pub mod loro_sync_controller;
-pub mod loro_text_cell_backing;
-// The materialized-view manager moved to the `holon-turso` crate; re-export it
-// so `crate::sync::matview_manager::*` paths keep resolving (ADR 0004 Phase 9).
-pub use holon_turso::matview_manager;
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod multi_peer;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod share_peer_id;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod shared_snapshot_store;
-pub mod shared_tree;
-pub mod sync_base_store;
-pub mod text_merge_provider;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub mod ticket;
 pub mod turso_block_query_source;
 
-pub use canonical_path::CanonicalPath;
-pub use capability::{CapabilityProfile, Consolidator, SessionCapabilities};
-pub use consolidator::BlockConsolidator;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub use degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
-pub use event_bus::*;
-pub use event_infra_module::{EventInfraModule, LinkEventSubscriberHandle};
-pub use holon_api::EntityUri;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub use iroh_sync_adapter::IrohSyncAdapter;
-pub use live_data::LiveData;
-pub use live_value::LiveValue;
-pub use loro_block_operations::LoroBlockOperations;
-pub use loro_blocks_datasource::LoroBlocksDataSource;
-pub use loro_document::*;
-pub use loro_document_store::*;
+pub use holon_loro::*;
+pub use holon_turso::matview_manager;
+pub use holon_turso::matview_manager::{MatviewHook, MatviewManager, WatchResult, reconcile_named_view};
+
+// Re-export live_data module and the LiveData type (moved to holon-api earlier)
+pub use holon_api::live_data;
+pub use holon_api::live_data::LiveData;
+
+// Re-export wiring modules that stayed in holon
 pub use loro_module::{LoroConfig, LoroModule};
-pub use loro_sync_controller::{
-    LoroProjection, LoroSyncController, LoroSyncControllerHandle, SinkReader, block_to_params,
-};
-pub use matview_manager::{MatviewHook, MatviewManager, WatchResult, reconcile_named_view};
-pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
-pub use text_merge_provider::{TextHandle, TextMergeProvider};
+pub use event_infra_module::{EventInfraModule, LinkEventSubscriberHandle};

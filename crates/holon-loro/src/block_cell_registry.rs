@@ -20,14 +20,14 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use loro::{LoroDoc, LoroText};
 
-use crate::api::repository::CoreOperations;
+use holon_api::repository::CoreOperations;
 use holon_api::{EntityUri, Tags, Value};
 use holon_core::cell::CellBacking;
 use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
 
-use crate::api::loro_backend::{CONTENT_RAW, LoroBackend, STABLE_ID, TREE_NAME};
-use crate::sync::loro_document::LoroDocument;
-use crate::sync::loro_text_cell_backing::LoroTextCellBacking;
+use crate::loro_backend::{CONTENT_RAW, LoroBackend, STABLE_ID, TREE_NAME};
+use crate::loro_document::LoroDocument;
+use crate::loro_text_cell_backing::LoroTextCellBacking;
 
 /// Registry of [`Cell<T>`](holon_core::cell::Cell)s for `block` entity
 /// fields.
@@ -125,11 +125,11 @@ impl BlockCellRegistry {
                 // re-ingest of an index.org swap) wrote a container that
                 // `read_content_from_meta` never reads — the update was lost
                 // and Loro kept serving the stale source text.
-                let content_key = match meta.get(crate::api::loro_backend::CONTENT_TYPE) {
+                let content_key = match meta.get(crate::loro_backend::CONTENT_TYPE) {
                     Some(loro::ValueOrContainer::Value(v))
                         if v.as_string().is_some_and(|s| s.as_str() == "source") =>
                     {
-                        crate::api::loro_backend::SOURCE_CODE
+                        crate::loro_backend::SOURCE_CODE
                     }
                     _ => CONTENT_RAW,
                 };

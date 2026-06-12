@@ -18,11 +18,12 @@
 //! - Async-first: All operations return Futures for flexibility
 
 pub mod action_watcher;
-pub(crate) mod event_ring;
-pub mod loro_backend;
+// event_ring moved to holon-loro; re-exported below
+// loro_backend moved to holon-loro; re-exported below
 pub mod memory_backend;
 // pbt_infrastructure pulls in proptest which is native-only.
-#[cfg(not(target_arch = "wasm32"))]
+// Also gated behind test-helpers: zero production consumers outside #[cfg(test)].
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-helpers")))]
 pub mod pbt_infrastructure;
 pub mod repository;
 pub mod types;
@@ -37,9 +38,12 @@ pub mod query_engine;
 pub mod ui_watcher;
 
 // Re-export commonly used types
-pub use loro_backend::{
+pub use holon_loro::{
     LoroBackend, SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled,
 };
+
+// Backward compatibility: holon::api::loro_backend::TREE_NAME etc. keep resolving
+pub use holon_loro as loro_backend;
 pub use memory_backend::MemoryBackend;
 pub use repository::{CoreOperations, DocumentRepository, Lifecycle, P2POperations};
 // Re-export streaming types from holon-api (moved from streaming module)

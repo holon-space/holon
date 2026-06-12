@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::api::SnapshotBlock;
+use crate::loro_backend::SnapshotBlock;
 #[cfg(test)]
 use holon_api::block::Block;
 use tracing::{info, warn};

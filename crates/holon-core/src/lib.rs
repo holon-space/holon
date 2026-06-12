@@ -17,6 +17,7 @@ pub mod publish_errors;
 pub mod storage;
 pub mod traits;
 pub mod undo;
+pub mod util;
 
 pub use downstream_projection::DownstreamProjection;
 pub use file_format::{FileFormatAdapter, FileFormatParseResult};

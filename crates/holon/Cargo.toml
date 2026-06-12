@@ -11,9 +11,9 @@ path = "src/lib.rs"
 [features]
 default = ["iroh-sync"]
 # Enable test helpers for integration tests that need access to test utilities
-test-helpers = ["dep:tempfile"]
+test-helpers = ["dep:tempfile", "holon-loro/test-helpers"]
 # Enable Iroh P2P transport for syncing Loro documents across devices
-iroh-sync = ["iroh", "base64"]
+iroh-sync = ["iroh", "base64", "holon-loro/iroh-sync"]
 
 [dependencies]
 loro.workspace = true
@@ -49,6 +49,9 @@ sqlparser.workspace = true
 once_cell.workspace = true
 serde_yaml.workspace = true
 holon-engine = { path = "../holon-engine" }
+holon-petri.workspace = true
+holon-profiles.workspace = true
+holon-loro.workspace = true
 fluxdi.workspace = true
 futures.workspace = true
 futures-signals.workspace = true
@@ -118,4 +121,8 @@ required-features = ["test-helpers"]
 
 [[test]]
 name = "turso_storage_repros"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "api_pbt"
 required-features = ["test-helpers"]

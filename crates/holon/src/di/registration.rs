@@ -100,7 +100,7 @@ async fn create_initialized_engine(
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
 
-    let type_profiles = crate::entity_profile::type_profiles_from_registry(type_registry);
+    let type_profiles = crate::type_registry::type_profiles_from_registry(type_registry);
 
     let ddl_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let matview_mgr = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex.clone());

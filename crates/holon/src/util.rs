@@ -5,22 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// On native this calls `std::time::SystemTime::now()`. On wasm32, where
 /// `std::time` panics, it routes through `web_time` which forwards to the
 /// browser's `Date.now()`.
-pub fn now_unix_millis() -> i64 {
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time before unix epoch")
-            .as_millis() as i64
-    }
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .expect("system time before unix epoch")
-            .as_millis() as i64
-    }
-}
+pub use holon_core::util::now_unix_millis;
 
 /// Monotonic instant, wasm32-safe.
 ///

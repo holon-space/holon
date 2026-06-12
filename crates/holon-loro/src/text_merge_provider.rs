@@ -3,7 +3,7 @@
 //! A block's `content` is mergeable text. When Loro is present that text lives
 //! in a shared `LoroText` CRDT container (concurrent edits merge); without Loro
 //! it is a plain, transient string (last-writer-wins, no merge). Today the
-//! choice is made implicitly inside [`crate::sync::block_cell_registry`].
+//! choice is made implicitly inside [`crate::block_cell_registry`].
 //!
 //! [`TextMergeProvider`] makes that choice an explicit, capability-driven seam:
 //! [`CapabilityProfile::Projected`] → a [`LoroTextMergeProvider`] handing out
@@ -19,15 +19,15 @@
 //! diverge from the registry's container logic — both resolve the same
 //! `LoroText`, they just reach it through one boundary.
 //!
-//! [`CapabilityProfile::Projected`]: crate::sync::capability::CapabilityProfile::Projected
-//! [`CapabilityProfile::Direct`]: crate::sync::capability::CapabilityProfile::Direct
+//! [`CapabilityProfile::Projected`]: crate::capability::CapabilityProfile::Projected
+//! [`CapabilityProfile::Direct`]: crate::capability::CapabilityProfile::Direct
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use loro::LoroText;
 
-use crate::sync::capability::CapabilityProfile;
+use crate::capability::CapabilityProfile;
 
 /// A handle to a block's mergeable content text.
 pub enum TextHandle {

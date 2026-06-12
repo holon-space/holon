@@ -28,7 +28,7 @@ impl LoroDocument {
         // Install the rich-text mark policy (Bold/Italic/.../Link/Verbatim
         // expand types). Must run before any LoroText is created or marked,
         // and is a no-op if re-called — see `configure_text_styles` doc.
-        crate::api::loro_backend::configure_text_styles(&doc);
+        crate::loro_backend::configure_text_styles(&doc);
         doc.set_peer_id(peer_id)?;
 
         info!(

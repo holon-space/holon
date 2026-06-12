@@ -2,7 +2,7 @@
 //!
 //! In the Loro-present session, **Loro is the consolidator**: it owns sibling
 //! order and merge (pinned at session start via [`SessionCapabilities`]). The
-//! projection ([`crate::sync::loro_sync_controller::LoroProjection`]) computes
+//! projection ([`crate::loro_sync_controller::LoroProjection`]) computes
 //! the diff of the Loro authority against the persisted base and hands the
 //! result here as a typed-intent [`ChangeSet`] carrying [`Provenance`]. The
 //! consolidator records the intent (op-multiset agreement — the Phase-2
@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use holon_api::{ChangeSet, EntityName, Provenance, agrees_with_ops};
 
-use crate::core::datasource::OperationProvider;
-use crate::storage::types::StorageEntity;
-use crate::sync::capability::{Consolidator, SessionCapabilities};
-use crate::sync::event_bus::EventOrigin;
+use holon_core::OperationProvider;
+use holon_api::StorageEntity;
+use crate::capability::{Consolidator, SessionCapabilities};
+use crate::event_bus::EventOrigin;
 
 /// The block consolidator. Wraps the sink command bus and the pinned session
 /// capabilities; owns the op-multiset shadow counters.

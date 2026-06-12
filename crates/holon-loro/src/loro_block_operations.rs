@@ -23,16 +23,18 @@ use tokio::sync::RwLock;
 use holon_api::block::{Block, BlockContent};
 use holon_api::{ContentType, EntityName, EntityUri, Operation, Value};
 
-use crate::api::types::Traversal;
-use crate::api::{CoreOperations, LoroBackend};
-use crate::core::datasource::{
+use holon_api::repository::Traversal;
+use holon_api::repository::CoreOperations;
+use crate::loro_backend::LoroBackend;
+use holon_core::{
     BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
-    CompletionStateInfo, CrudOperations, DataSource, MarkOperations, OperationDescriptor,
+    CompletionStateInfo, CrudOperations, DataSource, MarkOperations,
     OperationProvider, OperationRegistry, OperationResult, Result, TaskOperations, TextOperations,
     UnknownOperationError,
 };
-use crate::storage::types::StorageEntity;
-use crate::sync::LoroDocumentStore;
+use holon_api::OperationDescriptor;
+use holon_api::StorageEntity;
+use crate::LoroDocumentStore;
 use holon_api::ApiError;
 
 /// Generic operations on Loro blocks.
@@ -603,7 +605,7 @@ impl TextOperations<Block> for LoroBlockOperations {
 #[async_trait]
 impl OperationProvider for LoroBlockOperations {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        use crate::core::datasource::{
+        use holon_core::{
             __operations_block_operations, __operations_crud_operations,
             __operations_mark_operations, __operations_task_operations,
             __operations_text_operations,
@@ -657,7 +659,7 @@ impl OperationProvider for LoroBlockOperations {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<OperationResult> {
-        use crate::core::datasource::{
+        use holon_core::{
             __operations_block_operations, __operations_crud_operations,
             __operations_mark_operations, __operations_task_operations,
             __operations_text_operations,

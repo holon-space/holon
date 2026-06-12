@@ -6,9 +6,8 @@
 
 use holon_api::streaming::ChangeSubscribers;
 
-use super::event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
-use super::repository::{CoreOperations, Lifecycle};
-use super::types::NewBlock;
+use holon_loro::{EventRing, deliver_to_subscribers, DEFAULT_EVENT_RING_CAPACITY};
+use holon_api::repository::{CoreOperations, Lifecycle, NewBlock};
 use async_trait::async_trait;
 use holon_api::block_mutation::{BlockMutation, BlockTreeView};
 use holon_api::streaming::ChangeNotifications;
@@ -143,7 +142,7 @@ impl MemoryBackend {
 
     /// Get current Unix timestamp in milliseconds.
     fn now_millis() -> i64 {
-        crate::util::now_unix_millis()
+        holon_core::util::now_unix_millis()
     }
 
     /// Notify all active subscribers of a change event and add to event log.

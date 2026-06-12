@@ -25,11 +25,11 @@ use holon_core::storage::block_query::Result;
 use holon_core::storage::{BlockQuerySource, BlockSnapshot};
 use tokio::sync::RwLock;
 
-use crate::api::loro_backend::LoroBackend;
+use holon_loro::LoroBackend;
 use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::api::repository::CoreOperations;
+use holon_api::repository::CoreOperations;
 use crate::api::{DispatchingOperationEngine, OperationEngine};
-use crate::core::datasource::OperationProvider;
+use holon_core::OperationProvider;
 use crate::sync::loro_block_operations::LoroBlockOperations;
 use crate::sync::loro_document_store::LoroDocumentStore;
 
@@ -162,7 +162,7 @@ pub fn register_loro_operation_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::repository::Lifecycle;
+    use holon_api::repository::Lifecycle;
     use crate::di::lifecycle::build_no_turso_container;
     use holon_api::BlockContent;
     use holon_core::storage::BlockQuery;
@@ -337,7 +337,7 @@ mod tests {
     /// guarantee the prod wiring relies on.
     #[tokio::test]
     async fn loro_block_op_persists_across_store_reopen() {
-        use crate::core::datasource::CrudOperations;
+        use holon_core::CrudOperations;
         use holon_api::Value;
 
         let tmp = tempfile::tempdir().unwrap();

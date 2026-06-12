@@ -36,10 +36,10 @@ use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
 
-use crate::api::{SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled};
-use crate::core::datasource::OperationProvider;
-use crate::sync::LoroDocumentStore;
-use crate::sync::sync_base_store::{BaseKey, BaseStore};
+use crate::loro_backend::{SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled};
+use holon_core::OperationProvider;
+use crate::LoroDocumentStore;
+use crate::sync_base_store::{BaseKey, BaseStore};
 
 /// Filename of the sidecar file that persists the sync watermark next to the
 /// `.loro` snapshot. One file per `LoroDocumentStore`.
@@ -81,7 +81,7 @@ pub struct LoroSyncControllerHandle {
     /// subscribe actor alive for other consumers (the reactive cache) — the
     /// runtime SQL→Loro mirror that used to consume it is retired (Loro is the
     /// authority; see the module doc).
-    _block_live: Arc<crate::sync::live_data::LiveData<Block>>,
+    _block_live: Arc<holon_api::live_data::LiveData<Block>>,
     last_synced: Arc<StdMutex<Frontiers>>,
     error_count: Arc<AtomicUsize>,
     /// Allows tests to trigger a reconciliation cycle without mutating Loro.
@@ -132,7 +132,7 @@ impl LoroSyncController {
     /// 4. Spawn the `tokio::select!` loop on `self`.
     pub async fn start(
         self,
-        block_live: Arc<crate::sync::live_data::LiveData<Block>>,
+        block_live: Arc<holon_api::live_data::LiveData<Block>>,
     ) -> Result<LoroSyncControllerHandle> {
         // (1) Loro subscription — synchronous, before spawn.
         let wake_for_callback = self.wake.clone();
@@ -231,7 +231,7 @@ pub struct LoroProjection {
     /// `ChangeSet`; it records the intent (op-multiset agreement) and writes the
     /// SQL sink. (Phase 5: replaces the projection's direct
     /// `execute_batch_with_origin` block call.)
-    consolidator: Arc<crate::sync::consolidator::BlockConsolidator>,
+    consolidator: Arc<crate::consolidator::BlockConsolidator>,
     /// Read side of the sink — reads the *current* persisted block state as the
     /// diff "before". The projection compares Loro (authority) against this and
     /// emits only genuinely-changed rows (compare-and-skip), so re-projecting an
@@ -258,8 +258,8 @@ pub struct LoroProjection {
     /// Phase 3 (shadow): the last-projected Loro snapshot. The shadow base-diff
     /// (Loro authority vs this base) runs alongside the live sink-diff and
     /// asserts op-multiset agreement before the diff source is flipped. See
-    /// [`crate::sync::sync_base_store`].
-    base_store: crate::sync::sync_base_store::SyncBaseStore,
+    /// [`crate::sync_base_store`].
+    base_store: crate::sync_base_store::SyncBaseStore,
 }
 
 impl LoroProjection {
@@ -271,11 +271,11 @@ impl LoroProjection {
         sidecar_path: PathBuf,
     ) -> Self {
         let base_store =
-            crate::sync::sync_base_store::SyncBaseStore::from_frontiers_sidecar(&sidecar_path);
+            crate::sync_base_store::SyncBaseStore::from_frontiers_sidecar(&sidecar_path);
         // A `LoroProjection` exists only in the Loro-present config (it IS the
         // Loro→SQL projection), so the consolidator is pinned to Loro.
-        let caps = crate::sync::capability::SessionCapabilities::detect_and_pin(true);
-        let consolidator = Arc::new(crate::sync::consolidator::BlockConsolidator::new(
+        let caps = crate::capability::SessionCapabilities::detect_and_pin(true);
+        let consolidator = Arc::new(crate::consolidator::BlockConsolidator::new(
             command_bus,
             caps,
         ));
