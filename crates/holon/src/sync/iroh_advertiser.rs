@@ -70,18 +70,23 @@ impl IrohAdvertiser {
         shared_tree_id: String,
         doc: Arc<LoroDoc>,
     ) -> Result<EndpointAddr> {
-        self.start_share_with_callback(shared_tree_id, doc, None)
+        self.start_share_with_callback(shared_tree_id, doc, None, None)
             .await
     }
 
     /// Variant of `start_share` that installs a callback fired after each
     /// successful inbound sync handshake. Used by `LoroShareBackend` to
     /// remember dialing peers' addresses for later bidirectional sync.
+    ///
+    /// `preferred_port` rebinds the same UDP port across restarts (keyed
+    /// endpoints only) so peers' persisted addrs for this share stay
+    /// dialable — see `create_endpoint_with_key`.
     pub async fn start_share_with_callback(
         &self,
         shared_tree_id: String,
         doc: Arc<LoroDoc>,
         on_peer_connected: Option<OnPeerConnected>,
+        preferred_port: Option<u16>,
     ) -> Result<EndpointAddr> {
         let mut guard = self.shares.write().await;
         if guard.contains_key(&shared_tree_id) {
@@ -92,7 +97,7 @@ impl IrohAdvertiser {
 
         let alpn = make_alpn(ALPN_PREFIX, &shared_tree_id);
         let endpoint = match &self.secret_key {
-            Some(key) => create_endpoint_with_key(vec![alpn.clone()], key.clone())
+            Some(key) => create_endpoint_with_key(vec![alpn.clone()], key.clone(), preferred_port)
                 .await
                 .context("create iroh endpoint for advertiser (keyed)")?,
             None => create_endpoint(vec![alpn.clone()])
@@ -113,6 +118,7 @@ impl IrohAdvertiser {
         ));
 
         guard.insert(shared_tree_id, ShareHandle { endpoint, task });
+        tracing::debug!(addr = ?addr, "[advertiser] share endpoint bound");
         Ok(addr)
     }
 

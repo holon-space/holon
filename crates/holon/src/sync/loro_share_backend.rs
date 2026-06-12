@@ -619,16 +619,25 @@ impl LoroShareBackend {
         let persisted = {
             let mut guard = self.known_peers.write().await;
             let entry = guard.entry(shared_tree_id.to_string()).or_default();
-            // Replace any existing entry for the same `EndpointId`.
+            // Merge into any existing entry for the same `EndpointId`.
             // The id is stable across restarts (derived from the
-            // device key), but the socket addrs behind it are NOT —
-            // iroh re-binds to a fresh ephemeral port each run. If
-            // we kept the stale entry we'd dial dead sockets forever.
+            // device key) and so is the advertiser port (persisted
+            // sidecar, see `start_advertising_stable`), so older
+            // socket addrs usually stay valid — and the freshly
+            // observed addr can be a single non-routable interface
+            // (e.g. a vmnet host-only addr), so REPLACING the set
+            // with it would throw away the dialable routes. iroh
+            // races all candidate paths, so unioning is safe.
             if let Some(pos) = entry.iter().position(|a| a.id == addr.id) {
-                entry[pos] = addr;
+                entry[pos].addrs.extend(addr.addrs);
             } else {
                 entry.push(addr);
             }
+            tracing::debug!(
+                shared_tree_id = %shared_tree_id,
+                peers = ?entry,
+                "[share] remember_peer updated known_peers"
+            );
             entry.clone()
         };
         if let Err(e) = self.snapshot_store.save_peers(shared_tree_id, &persisted) {
@@ -664,6 +673,62 @@ impl LoroShareBackend {
         })
     }
 
+    /// Start advertising with a restart-stable UDP port.
+    ///
+    /// Loads the port sidecar (if any), binds the advertiser to it, and
+    /// persists the actually-bound port for the next restart. Keeping
+    /// the port stable is what keeps the addrs peers persisted for us
+    /// dialable across our restarts — relay and discovery are disabled,
+    /// so a changed port partitions us until WE dial THEM first.
+    async fn start_advertising_stable(
+        &self,
+        shared_tree_id: &str,
+        doc: Arc<LoroDoc>,
+    ) -> anyhow::Result<EndpointAddr> {
+        let preferred_port = match self.snapshot_store.load_port(shared_tree_id) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    shared_tree_id = %shared_tree_id,
+                    error = %e,
+                    "[share] port sidecar unreadable; binding ephemeral port"
+                );
+                None
+            }
+        };
+        let addr = self
+            .advertiser
+            .start_share_with_callback(
+                shared_tree_id.to_string(),
+                doc,
+                Some(self.peer_connected_callback()),
+                preferred_port,
+            )
+            .await?;
+        let bound_port = addr.addrs.iter().find_map(|t| match t {
+            iroh::TransportAddr::Ip(sa) if sa.is_ipv4() => Some(sa.port()),
+            _ => None,
+        });
+        match bound_port {
+            Some(port) => {
+                if let Err(e) = self.snapshot_store.save_port(shared_tree_id, port) {
+                    warn!(
+                        shared_tree_id = %shared_tree_id,
+                        port = port,
+                        error = %e,
+                        "[share] save_port failed — next restart rebinds ephemeral"
+                    );
+                }
+            }
+            None => warn!(
+                shared_tree_id = %shared_tree_id,
+                addr = ?addr,
+                "[share] no IPv4 addr on advertiser endpoint — port not persisted"
+            ),
+        }
+        Ok(addr)
+    }
+
     /// Sync bidirectionally with every known peer for `shared_tree_id`.
     /// The initiator side of the VV-based protocol pushes our updates
     /// and pulls theirs in one round — so a single call on either side
@@ -695,6 +760,12 @@ impl LoroShareBackend {
                     .await
                     .map_err(|e| err(format!("create endpoint: {e:#}")))?,
             };
+            tracing::debug!(
+                shared_tree_id = %shared_tree_id,
+                local_endpoint = %ep.id().fmt_short(),
+                dial_addr = ?addr,
+                "[share] dialing peer"
+            );
             let fut = sync_doc_initiate(&ep, &doc, &alpn_bytes, addr);
             match timeout(CONNECT_TIMEOUT, fut).await {
                 Ok(Ok(conn)) => {
@@ -913,12 +984,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .register_arc(shared_tree_id.clone(), shared_arc.clone());
 
         let addr = self
-            .advertiser
-            .start_share_with_callback(
-                shared_tree_id.clone(),
-                shared_arc.clone(),
-                Some(self.peer_connected_callback()),
-            )
+            .start_advertising_stable(&shared_tree_id, shared_arc.clone())
             .await
             .map_err(|e| err(format!("start advertiser: {e:#}")))?;
 
@@ -986,12 +1052,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         let shared_arc = Arc::new(shared_doc);
         let shared_tree_id = t.shared_tree_id.clone();
         match self
-            .advertiser
-            .start_share_with_callback(
-                shared_tree_id.clone(),
-                shared_arc.clone(),
-                Some(self.peer_connected_callback()),
-            )
+            .start_advertising_stable(&shared_tree_id, shared_arc.clone())
             .await
         {
             Ok(_) => {}
@@ -1348,12 +1409,7 @@ pub async fn rehydrate_shared_trees(
         // degraded-mode but non-fatal — the share is still in the
         // registry and can be pulled from.
         match backend
-            .advertiser
-            .start_share_with_callback(
-                shared_tree_id.clone(),
-                arc.clone(),
-                Some(backend.peer_connected_callback()),
-            )
+            .start_advertising_stable(&shared_tree_id, arc.clone())
             .await
         {
             Ok(_) => {}
@@ -1384,27 +1440,54 @@ pub async fn rehydrate_shared_trees(
         // endpoint addr gets registered on the other side's
         // advertiser and (b) we pull any edits that landed while we
         // were offline. Spawned non-blocking so rehydrate can process
-        // multiple shares concurrently. Errors are warnings — the
-        // share is still usable without this initial sync.
+        // multiple shares concurrently. Retries with backoff: the
+        // peer may itself be mid-restart (its endpoint torn down but
+        // not yet rebound), and a failed kick would otherwise leave
+        // both sides holding stale addrs with nothing to repair them.
         let backend_for_kick = backend.weak_self();
         let kick_id = shared_tree_id.clone();
-        tokio::spawn(async move {
-            let Some(strong) = backend_for_kick.upgrade() else {
-                return;
-            };
-            match strong.sync_with_peers(&kick_id).await {
-                Ok(n) => tracing::debug!(
+        let had_peers = {
+            let guard = backend.known_peers.read().await;
+            guard.get(&shared_tree_id).is_some_and(|p| !p.is_empty())
+        };
+        if had_peers {
+            tokio::spawn(async move {
+                let mut delay = Duration::from_secs(1);
+                for attempt in 1u32..=3 {
+                    let Some(strong) = backend_for_kick.upgrade() else {
+                        return;
+                    };
+                    match strong.sync_with_peers(&kick_id).await {
+                        Ok(n) if n > 0 => {
+                            tracing::debug!(
+                                shared_tree_id = %kick_id,
+                                peers_synced = %n,
+                                attempt = attempt,
+                                "[share] rehydrate kick-sync complete"
+                            );
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(e) => warn!(
+                            shared_tree_id = %kick_id,
+                            error = %e,
+                            attempt = attempt,
+                            "[share] rehydrate kick-sync failed"
+                        ),
+                    }
+                    drop(strong);
+                    if attempt < 3 {
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                    }
+                }
+                warn!(
                     shared_tree_id = %kick_id,
-                    peers_synced = %n,
-                    "[share] rehydrate kick-sync complete"
-                ),
-                Err(e) => warn!(
-                    shared_tree_id = %kick_id,
-                    error = %e,
-                    "[share] rehydrate kick-sync failed"
-                ),
-            }
-        });
+                    "[share] rehydrate kick-sync reached no peer after 3 attempts — \
+                     cross-peer sync resumes when a peer dials us or a local edit retries"
+                );
+            });
+        }
 
         // Re-project the mount row into SQL. `INSERT OR IGNORE` on the
         // block table makes this safe across restarts — if the row is

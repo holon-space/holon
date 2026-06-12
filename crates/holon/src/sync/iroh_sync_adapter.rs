@@ -132,19 +132,51 @@ mod adapter {
     /// Reusing the same key across restarts keeps the iroh endpoint
     /// identity stable — peers can dedupe by id and update the cached
     /// socket addrs without treating the restarted peer as a stranger.
+    ///
+    /// `preferred_port` requests the same UDP port across restarts.
+    /// With relay and discovery disabled, peers can only reconnect via
+    /// the socket addrs they persisted — a stable port keeps those
+    /// addrs valid after a restart (a stable key alone is not enough).
+    /// If the port is taken, falls back to an ephemeral port with a
+    /// warning: peers then can't reach us until we dial them first.
     pub async fn create_endpoint_with_key(
         alpns: Vec<Vec<u8>>,
         secret_key: iroh::SecretKey,
+        preferred_port: Option<u16>,
     ) -> Result<Endpoint> {
-        let builder = Endpoint::builder()
-            .relay_mode(iroh::RelayMode::Disabled)
-            .secret_key(secret_key);
-        let ep = if alpns.is_empty() {
-            builder.bind().await?
-        } else {
-            builder.alpns(alpns).bind().await?
+        let build = |port: Option<u16>| -> Result<iroh::endpoint::Builder> {
+            let mut builder = Endpoint::builder()
+                .relay_mode(iroh::RelayMode::Disabled)
+                .secret_key(secret_key.clone());
+            if !alpns.is_empty() {
+                builder = builder.alpns(alpns.clone());
+            }
+            if let Some(p) = port {
+                builder = builder
+                    .bind_addr(std::net::SocketAddr::from((
+                        std::net::Ipv4Addr::UNSPECIFIED,
+                        p,
+                    )))
+                    .context("bind_addr for preferred port")?;
+            }
+            Ok(builder)
         };
-        Ok(ep)
+        match preferred_port {
+            Some(p) => match build(Some(p))?.bind().await {
+                Ok(ep) => Ok(ep),
+                Err(e) => {
+                    tracing::warn!(
+                        port = p,
+                        error = %e,
+                        "preferred port bind failed; using ephemeral port — \
+                         peers' persisted addrs for this endpoint are stale \
+                         until we dial them"
+                    );
+                    Ok(build(None)?.bind().await?)
+                }
+            },
+            None => Ok(build(None)?.bind().await?),
+        }
     }
 
     // -- Incremental sync protocol --

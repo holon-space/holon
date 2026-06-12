@@ -152,6 +152,51 @@ impl SharedSnapshotStore {
         Ok(peers)
     }
 
+    /// Sidecar path for the advertiser's bound UDP port. Re-binding the
+    /// same port across restarts keeps the addrs that peers persisted
+    /// for us dialable (relay and discovery are disabled, so socket
+    /// addrs are the only routing information peers have).
+    pub fn port_path(&self, shared_tree_id: &str) -> PathBuf {
+        self.shares_dir.join(format!("{shared_tree_id}.port"))
+    }
+
+    /// Atomically persist the advertiser's bound port for this share.
+    pub fn save_port(&self, shared_tree_id: &str, port: u16) -> Result<()> {
+        std::fs::create_dir_all(&self.shares_dir)
+            .with_context(|| format!("create {}", self.shares_dir.display()))?;
+        let final_path = self.port_path(shared_tree_id);
+        let tmp_path = self.shares_dir.join(format!("{shared_tree_id}.port.tmp"));
+        {
+            let mut f = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("create tmp {}", tmp_path.display()))?;
+            f.write_all(port.to_string().as_bytes())
+                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
+            f.sync_all()
+                .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
+        }
+        std::fs::rename(&tmp_path, &final_path)
+            .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
+        Ok(())
+    }
+
+    /// Load the persisted advertiser port. Missing file → `None`
+    /// (fresh share or pre-port-sidecar vault — benign). Malformed
+    /// content is an error: the caller decides whether to surface it
+    /// or rebind ephemeral.
+    pub fn load_port(&self, shared_tree_id: &str) -> Result<Option<u16>> {
+        let path = self.port_path(shared_tree_id);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("read {}", path.display()))?;
+        let port: u16 = text
+            .trim()
+            .parse()
+            .with_context(|| format!("parse port sidecar {}", path.display()))?;
+        Ok(Some(port))
+    }
+
     /// Load `<id>.loro`. On decode error, quarantine the file (rename
     /// to `<id>.loro.corrupt-<rfc3339-ts>`) and emit
     /// [`ShareDegraded::SnapshotLoadFailed`] on the bus. Returns `Err`

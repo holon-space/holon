@@ -1047,6 +1047,33 @@ mod tests {
             prop::collection::vec(step, 0..8)
         }
 
+        // Regression test for the auto-resync-after-dual-restart race
+        // (pinned proptest seed cc 8888f981): with relay and discovery
+        // disabled, consecutive restarts of both peers used to leave
+        // both sides holding stale socket addrs with no repair path —
+        // B's debounced auto-resync dialed a dead port and never
+        // retried. Fixed by the restart-stable advertiser port
+        // (`start_advertising_stable`), addr-set merging in
+        // `remember_peer`, and the retrying rehydrate kick-sync.
+        // Run directly (no proptest, no fork) so RUST_LOG tracing
+        // reaches stderr when debugging.
+        #[test]
+        fn cross_peer_sync_after_restart_repro() {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .try_init();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_case(vec![
+                Action::RestartA,
+                Action::RestartB,
+                Action::CrossPeerSyncAfterRestart(" [X:a]".to_string()),
+            ]));
+        }
+
         proptest! {
             #![proptest_config(ProptestConfig {
                 cases: 24,
