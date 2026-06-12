@@ -68,7 +68,7 @@ cargo nextest run --profile dev
 
 ### Configuration
 
-Test runner configuration is in `Nextest.toml` in the workspace root. Key settings:
+Test runner configuration is in `.config/nextest.toml` in the workspace root. Key settings:
 
 - **`test-threads`**: Number of parallel test threads (`auto` = all available CPUs)
 - **`timeout`**: Individual test timeout in seconds (default: 300s)
