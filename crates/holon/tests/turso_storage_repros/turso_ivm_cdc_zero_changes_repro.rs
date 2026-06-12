@@ -14,7 +14,7 @@
 //! Run with:
 //!   cargo test -p holon turso_ivm_cdc_zero_changes_repro -- --nocapture
 
-use super::turso::TursoBackend;
+use holon::storage::turso::TursoBackend;
 use tempfile::TempDir;
 
 /// Simple case: INSERT → CREATE MATVIEW → UPDATE → expect CDC

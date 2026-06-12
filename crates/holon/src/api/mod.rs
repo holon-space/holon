@@ -36,14 +36,6 @@ pub mod operation_engine;
 pub mod query_engine;
 pub mod ui_watcher;
 
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod loro_backend_pbt;
-#[cfg(test)]
-mod sync_pbt;
-
 // Re-export commonly used types
 pub use loro_backend::{
     LoroBackend, SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled,

@@ -56,10 +56,10 @@
 //! - Complex CDC-specific scenarios like batch operations and conflict detection
 //! - Complex view scenarios like filtered views with triggers
 
-use super::turso::{ChangeData, RowChange, TursoBackend};
-use crate::api::ChangeOrigin;
-use crate::storage::backend::StorageBackend;
-use crate::storage::types::{Filter, StorageEntity};
+use holon::api::ChangeOrigin;
+use holon::storage::backend::StorageBackend;
+use holon::storage::turso::{ChangeData, RowChange, TursoBackend};
+use holon::storage::types::{Filter, StorageEntity};
 use holon_api::Value;
 use holon_api::{FieldSchema, TypeDefinition};
 use proptest::prelude::*;

@@ -9,8 +9,8 @@
 //! This is the holon-stack regression gate. Pure-Turso variant lives at
 //! `bigdata/turso/bindings/rust/tests/matview_first_open.rs`.
 
-use crate::storage::DbHandle;
-use crate::storage::test_helpers::create_test_backend_at_path;
+use holon::storage::DbHandle;
+use holon::storage::test_helpers::create_test_backend_at_path;
 use holon_api::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;

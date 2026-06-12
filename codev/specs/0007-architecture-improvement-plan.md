@@ -200,9 +200,23 @@ Goal: the dependency graph matches the documented layering on all targets.
    "test seams are prod API" as a deliberate ADR — decide, don't drift.)
 5. **Async DI**: make factories `Provider::root_async` throughout and delete
    `run_async_in_sync` / `block_in_place` arms (the recurring
-   tokio-runtime-mismatch deadlock class).
+   tokio-runtime-mismatch deadlock class). — **DONE (2026-06-12)**: the only
+   production `block_in_place` lived in `register_core_services`, which was
+   dead code (zero callers) — deleted along with `run_async_in_sync` and sync
+   `create_queryable_cache`. The live DI path already follows the converged
+   pattern (async boundary acquisition, sync capture factories,
+   `Provider::root_async`); documented in `docs/Architecture/Principles.md`.
+   Remaining pure-sync `Provider::root` factories deliberately left as-is (no
+   deadlock value in converting). `mcp_vtable`'s `block_in_place` is a
+   deliberate Turso-FFI boundary, kept.
 6. Relocate the ~12k lines of in-src `#[cfg(test)]`/repro modules from
-   `crates/holon/src` to `tests/` or a repro crate.
+   `crates/holon/src` to `tests/` or a repro crate. — **DONE (2026-06-12)**:
+   19 dedicated test/repro files moved to 4 integration-test binaries under
+   `crates/holon/tests/` (`api_suite`, `sync_suite`, `turso_storage_repros`,
+   `turso_storage_pbt`); `storage::test_helpers` regated behind
+   `test-helpers` feature; 2 orphan repro files (never compiled since
+   `b8176cc51a`, API-rotted) deleted. Inline `#[cfg(test)]` modules stay in
+   src by design.
 
 ## Phase 4 — Robustness & freshness
 

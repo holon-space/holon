@@ -23,7 +23,7 @@
 //! Run with:
 //!   cargo test -p holon --lib cdc_base_vs_matview -- --nocapture
 
-use super::turso::{ChangeData, RowChange, TursoBackend};
+use holon::storage::turso::{ChangeData, RowChange, TursoBackend};
 use holon_api::streaming::{Batch, BatchMetadata, WithMetadata};
 
 type RawCdcRx = tokio::sync::broadcast::Receiver<WithMetadata<Batch<RowChange>, BatchMetadata>>;
@@ -131,7 +131,7 @@ async fn setup() -> (TempBackend, RawCdcRx) {
 
 struct TempBackend {
     _temp_dir: tempfile::TempDir,
-    handle: super::turso::DbHandle,
+    handle: holon::storage::turso::DbHandle,
 }
 
 /// Direct INSERT/UPDATE/DELETE against the base table emits zero CDC events

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dfb8af0bbd419156eea4fb38be59dc05cfa2a13594e35ac07f21849b56037f18 # shrinks to (initial_state, transitions, seen_counter) = (GroupState { peers: 2, peer_counter: 3, last_transition_was_sync_all: false }, [], None)

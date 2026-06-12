@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::turso::TursoBackend;
+use holon::storage::turso::TursoBackend;
 use tempfile::TempDir;
 
 fn ids_from_rows(rows: &[holon_api::StorageEntity], col: &str) -> BTreeSet<String> {
@@ -25,7 +25,7 @@ fn ids_from_rows(rows: &[holon_api::StorageEntity], col: &str) -> BTreeSet<Strin
 fn collect_cdc(
     cdc_rx: &mut tokio::sync::broadcast::Receiver<
         holon_api::streaming::WithMetadata<
-            holon_api::streaming::Batch<super::turso::RowChange>,
+            holon_api::streaming::Batch<holon::storage::turso::RowChange>,
             holon_api::streaming::BatchMetadata,
         >,
     >,

@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [features]
 default = ["iroh-sync"]
 # Enable test helpers for integration tests that need access to test utilities
-test-helpers = []
+test-helpers = ["dep:tempfile"]
 # Enable Iroh P2P transport for syncing Loro documents across devices
 iroh-sync = ["iroh", "base64"]
 
@@ -62,6 +62,7 @@ uuid.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 base64 = { version = "0.22", optional = true }
+tempfile = { workspace = true, optional = true }
 
 # wasm32-wasip1-threads (holon-worker) — wasi has std::time and std::thread
 # but tokio refuses `rt-multi-thread` on any wasm target, and wasi doesn't
@@ -109,4 +110,12 @@ required-features = ["test-helpers"]
 
 [[test]]
 name = "turso_block_query_source_round_trip_pbt"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "sync_suite"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "turso_storage_repros"
 required-features = ["test-helpers"]

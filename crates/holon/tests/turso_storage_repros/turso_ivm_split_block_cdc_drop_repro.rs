@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 
-use super::turso::{ChangeData, RowChange, TursoBackend};
+use holon::storage::turso::{ChangeData, RowChange, TursoBackend};
 use holon_api::streaming::{Batch, BatchMetadata, WithMetadata};
 use tempfile::TempDir;
 

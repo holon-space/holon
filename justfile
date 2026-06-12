@@ -57,7 +57,7 @@ pbt name='general' cases='64' *FLAGS:
             ;;
         loro)
             PROPTEST_CASES={{cases}} cargo test \
-                -p holon --lib api::loro_backend_pbt \
+                -p holon --test api_suite loro_backend_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-loro.log
             ;;
         *)

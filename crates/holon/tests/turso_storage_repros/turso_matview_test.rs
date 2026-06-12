@@ -10,7 +10,7 @@
 //! Run with timeout to prevent hang:
 //!   timeout 30 cargo test -p holon turso_matview_test::test_create_matview_block_in_place -- --nocapture
 
-use crate::storage::test_helpers::create_test_backend_at_path;
+use holon::storage::test_helpers::create_test_backend_at_path;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;

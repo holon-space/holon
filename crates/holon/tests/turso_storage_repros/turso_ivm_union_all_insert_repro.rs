@@ -11,7 +11,7 @@
 //! Run with:
 //!   cargo test -p holon turso_ivm_union_all_insert_repro -- --nocapture
 
-use super::turso::TursoBackend;
+use holon::storage::turso::TursoBackend;
 use tempfile::TempDir;
 
 /// Simple case: focus_roots with direct table (no chain) — CDC works

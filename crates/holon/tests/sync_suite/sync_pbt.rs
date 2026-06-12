@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::sync::multi_peer::*;
+    use holon::sync::multi_peer::*;
     use proptest::prelude::*;
     use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
     use std::sync::Arc;
@@ -68,12 +68,12 @@ mod tests {
     // -- Iroh sync PBT (real QUIC transport) --
 
     #[cfg(feature = "iroh-sync")]
-    struct IrohSyncBackend(crate::sync::iroh_sync_adapter::IrohSync);
+    struct IrohSyncBackend(holon::sync::iroh_sync_adapter::IrohSync);
 
     #[cfg(feature = "iroh-sync")]
     impl SyncBackend for IrohSyncBackend {
         fn sync_pair(&self, doc_a: &loro::LoroDoc, doc_b: &loro::LoroDoc) -> anyhow::Result<()> {
-            crate::sync::iroh_sync_adapter::SyncBackend::sync_pair(&self.0, doc_a, doc_b)
+            holon::sync::iroh_sync_adapter::SyncBackend::sync_pair(&self.0, doc_a, doc_b)
         }
     }
 
@@ -86,7 +86,7 @@ mod tests {
         type Transition = GroupTransition;
 
         fn init_state() -> BoxedStrategy<Self::State> {
-            let backend = crate::sync::iroh_sync_adapter::IrohSync::new()
+            let backend = holon::sync::iroh_sync_adapter::IrohSync::new()
                 .expect("Failed to create IrohSync runtime");
             Just(GroupState::new(Arc::new(IrohSyncBackend(backend)))).boxed()
         }
@@ -184,18 +184,18 @@ mod tests {
 
     #[cfg(feature = "iroh-sync")]
     mod share_subtree_pbt {
-        use crate::sync::degraded_signal_bus::{
+        use holon::sync::degraded_signal_bus::{
             DegradedSignalBus, ShareDegraded, ShareDegradedReason,
         };
-        use crate::sync::device_key_store::load_or_create_device_key;
-        use crate::sync::iroh_advertiser::IrohAdvertiser;
-        use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
-        use crate::sync::loro_document_store::LoroDocumentStore;
-        use crate::sync::loro_share_backend::{
+        use holon::sync::device_key_store::load_or_create_device_key;
+        use holon::sync::iroh_advertiser::IrohAdvertiser;
+        use holon::sync::iroh_sync_adapter::SharedTreeSyncManager;
+        use holon::sync::loro_document_store::LoroDocumentStore;
+        use holon::sync::loro_share_backend::{
             LoroShareBackend, SubtreeShareOperations, rehydrate_shared_trees,
         };
-        use crate::sync::multi_peer::{TREE_NAME, get_alive_nodes};
-        use crate::sync::shared_snapshot_store::SharedSnapshotStore;
+        use holon::sync::multi_peer::{TREE_NAME, get_alive_nodes};
+        use holon::sync::shared_snapshot_store::SharedSnapshotStore;
         use holon_api::{InlineMark, Value};
         use loro::{LoroDoc, LoroText, TreeID, TreeParentId};
         use proptest::prelude::*;
@@ -393,7 +393,7 @@ mod tests {
         /// Locate `suffix` in the shared root text and apply `kind` over
         /// the matching scalar range. Returns `true` on success.
         ///
-        /// Uses `crate::api::loro_backend::mark_to_loro_value` so the
+        /// Uses `holon::api::loro_backend::mark_to_loro_value` so the
         /// applied mark value matches what the production
         /// `update_block_marked` / `apply_inline_mark` paths use — which
         /// is the same path the editor will eventually drive.
@@ -416,7 +416,7 @@ mod tests {
                 return false;
             }
             let mark = kind.to_inline();
-            let value = crate::api::loro_backend::mark_to_loro_value(&mark);
+            let value = holon::api::loro_backend::mark_to_loro_value(&mark);
             t.mark(start..end, mark.loro_key(), value)
                 .expect("LoroText mark");
             doc.commit();
@@ -448,7 +448,7 @@ mod tests {
                 Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => t,
                 _ => return expected.iter().map(|m| (m.suffix.clone(), m.key)).collect(),
             };
-            let observed = crate::api::loro_backend::read_marks_from_text(&t);
+            let observed = holon::api::loro_backend::read_marks_from_text(&t);
             let s = t.to_string();
             let mut missing = Vec::new();
             for em in expected {
@@ -676,7 +676,7 @@ mod tests {
                 Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => t,
                 _ => return Vec::new(),
             };
-            crate::api::loro_backend::read_marks_from_text(&t)
+            holon::api::loro_backend::read_marks_from_text(&t)
                 .into_iter()
                 .map(|m| (m.start, m.end, m.mark.loro_key()))
                 .collect()
@@ -794,8 +794,8 @@ mod tests {
                         if ref_a.share_usable && ref_b.share_usable {
                             let a_shared = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
                             let b_shared = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
-                            crate::sync::multi_peer::SyncBackend::sync_pair(
-                                &crate::sync::multi_peer::DirectSync,
+                            holon::sync::multi_peer::SyncBackend::sync_pair(
+                                &holon::sync::multi_peer::DirectSync,
                                 &a_shared,
                                 &b_shared,
                             )

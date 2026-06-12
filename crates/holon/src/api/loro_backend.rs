@@ -827,7 +827,6 @@ impl LoroBackend {
         self.collab_doc.doc_id()
     }
 
-    #[cfg(test)]
     pub fn collab_for_test(&self) -> Arc<LoroDocument> {
         self.collab_doc.clone()
     }

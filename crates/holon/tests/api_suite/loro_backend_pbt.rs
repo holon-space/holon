@@ -5,15 +5,15 @@
 
 #[cfg(test)]
 mod stateful_tests {
-    use super::super::loro_backend::LoroBackend;
-    use super::super::memory_backend::MemoryBackend;
-    use super::super::pbt_infrastructure::{
+    use holon::api::loro_backend::LoroBackend;
+    use holon::api::memory_backend::MemoryBackend;
+    use holon::api::pbt_infrastructure::{
         BlockTransition, apply_transition, check_transition_preconditions,
         generate_crud_transitions, populate_initial_id_map, translate_transition,
         update_id_map_after_create, verify_backends_match,
     };
-    use super::super::repository::{CoreOperations, Lifecycle};
-    use super::super::types::Traversal;
+    use holon::api::repository::{CoreOperations, Lifecycle};
+    use holon::api::types::Traversal;
     use holon_api::streaming::ChangeNotifications;
     use holon_api::{ApiError, Block, Change, StreamPosition};
     use proptest::prelude::*;
@@ -774,8 +774,8 @@ mod stateful_tests {
 /// to prove or disprove that hypothesis at the LoroBackend layer.
 #[cfg(test)]
 mod custom_properties_round_trip {
-    use super::super::loro_backend::{LoroBackend, snapshot_blocks_from_doc};
-    use super::super::repository::{CoreOperations, Lifecycle};
+    use holon::api::loro_backend::{LoroBackend, snapshot_blocks_from_doc};
+    use holon::api::repository::{CoreOperations, Lifecycle};
     use holon_api::{BlockContent, EntityUri, Value};
     use std::collections::HashMap;
 

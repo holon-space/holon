@@ -7,9 +7,6 @@ pub mod sql_operation_provider;
 pub mod stream_cache;
 pub mod traits;
 
-#[cfg(test)]
-mod test_macro;
-
 pub use datasource::{DataSource, StreamProvider};
 // Re-export DynamicEntity from holon_api (single source of truth)
 pub use holon_api::DynamicEntity;

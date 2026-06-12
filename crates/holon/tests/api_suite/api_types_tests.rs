@@ -3,7 +3,7 @@
 //! These tests verify that API types can be properly serialized/deserialized
 //! and implement the required traits.
 
-use super::types::*;
+use holon::api::types::*;
 use holon_api::{ApiError, Block, BlockContent, BlockMetadata, Change, ChangeOrigin, EntityUri};
 
 #[test]

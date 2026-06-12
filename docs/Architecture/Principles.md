@@ -594,6 +594,29 @@ This enables:
 - Configuration (different providers for different environments — Loro on/off, Turso on/off)
 - Automatic dependency resolution (services declare what they need, DI wires it)
 
+### Async DI Pattern (Spec 0007 Phase 3.5)
+
+The converged pattern (June 2026):
+
+1. **Async boundary at the top**: `open_and_register_core` acquires the `DbHandle`
+   via async Turso initialization. Callers obtain handles before entering DI
+   registration.
+2. **Sync factories capture clones**: `Provider::root` factories receive owned
+   clones of `DbHandle`, `Arc<...>`, etc. — they never call `block_in_place`.
+3. **Async work uses `Provider::root_async`**: 44 factories use the async path
+   directly. fluxdi rejects sync resolution of an async provider loudly
+   (fail-loud, no silent deadlock).
+4. **The mcp_vtable `block_in_place`** (`holon-mcp-client/src/mcp_vtable.rs`)
+   is a deliberate Turso-FFI boundary on a dedicated runtime — it is NOT the
+   DI-deadlock class.
+5. **Test-side `block_in_place`** (~50 sites) bridges `multi_thread` tokio
+   (proptest) into async — untouched; this is test infrastructure, not DI.
+
+Deleted (June 2026): `register_core_services` (only production `block_in_place`),
+`run_async_in_sync`, and sync `create_queryable_cache` — all were dead code with
+zero callers. The 27 remaining pure-sync `Provider::root` factories capture
+clones only (no blocking) and are harmless to leave.
+
 ---
 
 ## Extension Points

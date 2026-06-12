@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::storage::test_helpers::create_test_backend;
+    use holon::storage::test_helpers::create_test_backend;
     use std::time::Duration;
     use tokio::time::timeout;
 

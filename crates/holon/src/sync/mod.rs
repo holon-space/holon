@@ -34,8 +34,6 @@ pub mod degraded_signal_bus;
 pub mod device_key_store;
 pub mod event_bus;
 pub mod event_infra_module;
-#[cfg(test)]
-mod fork_at_test;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
