@@ -8,25 +8,112 @@
 //! re-exports them for backcompat with existing test code.
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
 use holon::api::backend_engine::BackendEngine;
-use holon_api::{EntityName, EntityUri, KeyChord, Value};
+use holon_api::{EntityName, EntityUri, KeyChord, StorageEntity, Value};
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+
+use crate::pbt::op_write_cap::IdResolver;
 
 pub use holon_frontend::user_driver::{ReactiveEngineDriver, UserDriver};
 
 /// Dispatches mutations directly via `BackendEngine::execute_operation`.
 /// Legacy driver — bypasses FrontendSession and ReactiveEngine.
+///
+/// This is also the **dispatch floor** of the layer-localization driver ladder
+/// (§8.11): the bottom rung that applies a structural op directly to the engine,
+/// below the interaction (geometry / view-model) layers. Its `SutBlockTreeWrite`
+/// impl is what a storage-only composed config (no ViewModel/UI → no higher driver)
+/// installs, so "the floor is just another `UserDriver`" rather than a bespoke cap.
 pub struct DirectUserDriver {
     engine: Arc<BackendEngine>,
+    /// Synthetic-oracle→SUT-real id map (the `SutBlockTreeWrite` floor resolves every
+    /// id through it, exactly like `OpDispatchWriter`). Empty = identity (the legacy
+    /// `new` callers that dispatch fixed ids).
+    resolver: IdResolver,
 }
 
 impl DirectUserDriver {
+    /// Identity resolution (legacy backend PBTs that pass fixed ids).
     pub fn new(engine: Arc<BackendEngine>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            resolver: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Share the composed runner's id map so the floor `SutBlockTreeWrite` resolves an
+    /// oracle synthetic id (`block::split-N`) to the engine-minted id before dispatch.
+    pub fn with_resolver(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
+        Self { engine, resolver }
+    }
+
+    fn resolve(&self, id: &EntityUri) -> EntityUri {
+        self.resolver
+            .lock()
+            .expect("resolver lock")
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone())
+    }
+
+    /// Dispatch a `block` op directly to the engine — the floor below interaction
+    /// resolution (`synthetic_dispatch` == `BackendEngine::execute_operation`).
+    async fn dispatch_block(&self, op: &str, params: StorageEntity) {
+        let params: HashMap<String, Value> = params
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        self.synthetic_dispatch("block", op, params)
+            .await
+            .unwrap_or_else(|e| panic!("[DirectUserDriver floor] block/{op} failed: {e:#}"));
+    }
+
+    fn id_only(&self, id: &EntityUri) -> StorageEntity {
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(self.resolve(id).to_string()));
+        params
+    }
+}
+
+/// The dispatch-floor `SutBlockTreeWrite` (§8.11 LL-2). Each structural op is applied
+/// directly to the engine via `synthetic_dispatch` (== `OpDispatchWriter`'s no-focus-sink
+/// path), below the geometry/view-model interaction layers. UI-only gestures
+/// (click→focus, expand/collapse, slash) have NO floor — they are view-model concepts
+/// and correctly bottom out at the VM rung (§8.11 care-point 3), so this floor provides
+/// only the structural-write cap, not the gesture caps.
+#[async_trait::async_trait(?Send)]
+impl SutBlockTreeWrite for DirectUserDriver {
+    async fn apply_split_block(&self, id: &EntityUri, position: usize) {
+        let mut params = self.id_only(id);
+        params.insert("position".into(), Value::Integer(position as i64));
+        self.dispatch_block("split_block", params).await;
+    }
+
+    async fn apply_join_block(&self, id: &EntityUri) {
+        let mut params = self.id_only(id);
+        params.insert("position".into(), Value::Integer(0));
+        self.dispatch_block("join_block", params).await;
+    }
+
+    async fn apply_indent(&self, id: &EntityUri) {
+        self.dispatch_block("indent", self.id_only(id)).await;
+    }
+
+    async fn apply_outdent(&self, id: &EntityUri) {
+        self.dispatch_block("outdent", self.id_only(id)).await;
+    }
+
+    async fn apply_move_up(&self, id: &EntityUri) {
+        self.dispatch_block("move_up", self.id_only(id)).await;
+    }
+
+    async fn apply_move_down(&self, id: &EntityUri) {
+        self.dispatch_block("move_down", self.id_only(id)).await;
     }
 }
 

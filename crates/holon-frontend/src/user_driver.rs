@@ -366,6 +366,42 @@ pub trait UserDriver: Send + Sync {
         self.send_raw_keystroke(keystroke, modifiers).await
     }
 
+    /// Set block `target`'s expand/collapse state to `expanded`.
+    ///
+    /// Block expansion has NO engine representation — it is a per-widget,
+    /// view-local `Mutable<bool>` (the GPUI chevron's `on_mouse_down` flips it
+    /// directly; `Block` documents "UI state like collapsed is NOT stored
+    /// here - kept locally"). So unlike every other gesture, this verb cannot
+    /// dispatch an `OperationIntent`; each driver drives the REAL per-frontend
+    /// mechanism:
+    /// - headless (`ReactiveEngineDriver`): find the `expand_toggle` node in a
+    ///   reactive snapshot and `gate.set(expanded)` — the same poke the GPUI
+    ///   handler performs.
+    /// - windowed (`GpuiUserDriver` / `SimUserDriver`): synthesize a real click
+    ///   on the chevron registered under `expand_toggle_id_for(target)`, so the
+    ///   production handler flips the gate exactly as a user's tap would.
+    ///
+    /// Absoluteness is owned jointly with the ref model: the windowed chevron
+    /// is a toggle, and the PBT generates expand/collapse only in the
+    /// state-changing direction (the ref's `expanded_toggles` is the expansion
+    /// source of truth, exactly as `holon-layout-testing`'s `scene_state`
+    /// tracks it). The driver drives the gesture; it does not re-derive state
+    /// — a windowed driver cannot read the live persistent gate anyway
+    /// (`snapshot_reactive` rebuilds a fresh tree each call).
+    ///
+    /// Default impl fails loud (a driver with no view tree / window cannot do
+    /// this honestly), mirroring `send_raw_keystroke`.
+    async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
+        let _ = (target, expanded);
+        anyhow::bail!(
+            "set_block_expanded is unimplemented for this UserDriver. Block expansion is \
+             view-local widget state; only a driver with a reactive view tree \
+             (ReactiveEngineDriver) or a real window (GpuiUserDriver/SimUserDriver) can drive \
+             the chevron. Was an ExpandToggle/CollapseToggle transition generated for a driver \
+             that cannot reach the view?"
+        )
+    }
+
     /// Whether `send_raw_keystroke` routes through a real input pipeline
     /// that performs key-chord resolution before any keystroke reaches an
     /// editor (TUI / GPUI native drivers). Headless drivers
@@ -512,6 +548,31 @@ impl UserDriver for ReactiveEngineDriver {
         // directly instead of dispatching `navigation.editor_focus`.
         let _ = region;
         self.engine.set_focus(Some(entity_id.clone()));
+        Ok(())
+    }
+
+    /// Headless expand/collapse: find the `expand_toggle` node in a reactive
+    /// snapshot and `gate.set(expanded)` — the same view-local poke the GPUI
+    /// chevron's `on_mouse_down` handler performs. Shares the tree walk with
+    /// the headless test gate (`set_expand_toggle_gate`). Fails loud if no
+    /// matching node exists (a shadow_builder / interpret regression). The
+    /// flipped `Mutable` is reborn on the next `snapshot_reactive` (the tree is
+    /// rebuilt per call) — the expansion source of truth is the ref model, as
+    /// documented on the trait method.
+    async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let root = self.engine.snapshot_reactive(&root_uri);
+        let target_str = target.as_str();
+        let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
+        let gate = root.find_expand_toggle_gate(bare).ok_or_else(|| {
+            anyhow::anyhow!(
+                "set_block_expanded: no expand_toggle node with target_id={bare} in the \
+                 reactive tree under {root_uri}. The fixture grew an expand_toggle render but \
+                 the engine didn't produce a matching node — likely a shadow_builder or \
+                 interpret regression."
+            )
+        })?;
+        gate.set(expanded);
         Ok(())
     }
 

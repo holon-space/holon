@@ -69,6 +69,62 @@ The single configurable PBT is then just the convergence test driving a per-conf
 > go DOWN.** Full rule + worked example: `PbtCompositionDesign.md` §8.10. (This corrects the
 > 2026-06-24 `xk` increment, which minted `TaskStateSlice`; the 2026-06-25 cleanup deleted it.)
 
+## ★ Layer-localization — the driver ladder is a subsystem axis (2026-06-26)
+
+Extends the North Star's "minimize which subsystems must be active" with **which interaction layer**
+a bug lives in. The driver layers form a faithful-refinement ladder and **are subsystems** (no new
+dimension): a transition is driven against the **highest available** `UserDriver` —
+`GpuiUserDriver` (UI on) ⊐ `ReactiveEngineDriver` (ViewModel on) ⊐ `DirectUserDriver` (dispatch
+floor). Ordinary subsystem bisection peels UI then ViewModel (the `Actor::UI ⟹ ViewModel` validity
+orders it), the driver auto-descends, and the layer where the **pinned** failure stops reproducing
+localizes the bug to that delta (GPUI geometry / VM intent+editor / engine). Full model +
+care-points: `PbtCompositionDesign.md` §8.11. User directive behind it: **drive interactions through
+the UI-adjacent logic layer, never `OpDispatchWriter` dispatch, even headless** — the dispatch floor
+exists only as the diagnostic bottom rung.
+
+Concrete work (most is the in-flight driver-component refactor; the rest is small framework wiring):
+
+- **LL-1 🧠 VM rung — `UserDriver`-backed input component in `compose_sut`** *(in progress)*. Generalize
+  the windowed driver-backed cap provider (`GpuiDriverComponent` + `GpuiWindowComponent`'s `SutLayout`)
+  to wrap **any** `dyn UserDriver` + **optional** geometry: headless = `ReactiveEngineDriver`, no
+  geometry (no-op `SutLayout` waits, skip the bounds precheck); windowed = `GpuiUserDriver` + geometry.
+  Wire a `ReactiveEngineDriver` over `HeadlessFrontendComponent`'s engine into the headless `CapMap`.
+  This admits the UI-gesture transitions headless, driven UI-adjacently. Rename `Gpui*` → driver-agnostic
+  once proven.
+- **LL-2 ✅ Dispatch floor — `DirectUserDriver` provides the structural-write cap (2026-06-26).** The
+  bottom rung is *just another `UserDriver`*: `DirectUserDriver` (`mutation_driver.rs`) now impls
+  `SutBlockTreeWrite`, applying each structural op directly to the engine via `synthetic_dispatch`
+  (`== OpDispatchWriter`'s no-focus-sink path, behavior-identical) — the floor *below* the
+  geometry/view-model interaction layers. Installed in the storage-only `compose_sut_seeded` turso
+  branch (no ViewModel/UI → no higher driver). **SCOPE REFINEMENT (verified):** the floor provides only
+  the *structural-write* cap, **NOT** the UI-gesture caps. `DirectUserDriver` wraps only a
+  `BackendEngine` (no ViewModel/focus/geometry; it *bails* on `click_entity`/`drop_entity`), and per
+  §8.11 care-point 3 pure-UI gestures (click→focus, expand/collapse, slash) are view-model concepts that
+  **correctly bottom out at the VM rung** — there is no sub-VM layer for them, so they need no floor.
+  `OpDispatchWriter` survives only as `KeystrokeBlockTreeWriter`'s VM-rung focus-sink fallback
+  (`dispatch_intent_sync` handoff for join/indent/outdent until those keystroke-rebind too).
+- **LL-3 🧠 Construction-time single-driver install (parse, don't validate).** The builder
+  (`compose_sut`/`compose_windowed_sut`) knows the subsystem set → picks **exactly one** `UserDriver`
+  (UI→Gpui, ViewModel→ReactiveEngine, neither→Direct) and installs it as THE driver backing the gesture
+  caps. **Gesture transitions bind the driver caps** (`SutDriver`/`SutBlockInteract`/`SutLayout`/
+  `SutEditorMirrorWrite`), so the layer is decided once at construction and a transition *cannot reach a
+  lower driver* — it isn't in the `CapMap`. This **replaces** "transitions prefer the higher cap at
+  dispatch time" (runtime preference) with construction-time choice (single source of truth, wrong layer
+  unreachable by encapsulation). Today structural transitions bind `SutBlockTreeWrite` (the rejected
+  too-low dispatch path) → rebind them to the driver caps. Caveat: value-level (one `dyn UserDriver` per
+  run), not compile-time monomorphization — the bisector runs many configs in one process. The bisector
+  descends layers by re-construction (smaller set → builder re-derives the driver); it never needs to
+  know drivers exist. **Touches the "one cap per variant" rule** in the `author-transition` recipe — a
+  gesture's driver-form vs floor-form is selected by *which driver is installed*, not by two cap bounds.
+- **LL-4 🧠 Pin the failure signature in the bisector.** Layer-shrinking must only accept
+  re-reproductions of the *same* signature (invariant id + divergence), and must refuse to shrink past
+  the layer that still *selects* the failing invariant (else "bug gone" conflates "logic correct below"
+  with "detector deselected"). Verify the existing memorize-the-error mechanism covers this; extend if not.
+- **LL-5 🧠 Editor faithfulness audit (the soft spot).** Scope exactly how much editor logic is shared
+  (`editor_caret.rs`) vs reimplemented (`HeadlessEditorMirror` vs gpui-component `InputState`). Editor-layer
+  localization is only sound for shared code; the fix is extracting `InputState` logic into a shared
+  frontend layer both drivers run (thin-UI applied to the editor). Likely a larger follow-on, not a blocker.
+
 ## How to read this
 
 Each task is tagged:
@@ -87,9 +143,10 @@ A 🤖 task carries everything an agent needs:
 - **Gate** — the exact command that must go green.
 
 The full step-by-step recipes (add an invariant / component / cap, with code
-snippets, the test-triad patterns, and anti-patterns) are in
-[`PbtCompositionContributing.md`](PbtCompositionContributing.md). The terse version
-lives in `crates/holon-integration-tests/src/pbt/composed/invariants.rs` (module doc).
+snippets, the test-triad patterns, and anti-patterns) — and the migration **process**
+itself — now live in the **`pbt-composition` skill** (`.claude/skills/pbt-composition/`),
+which auto-fires when you work on this code. The terse version lives in
+`crates/holon-integration-tests/src/pbt/composed/invariants.rs` (module doc).
 
 ## Status (2026-06-23) — current top-of-file summary
 
@@ -423,9 +480,21 @@ lib selection 47/47 (the 3 `memory_slice::structural_pbt` reds are the **pre-exi
 scaffolding decay**, not batch 3 — my new invariants all deselect there); `frontend_wide_pbt`
 green (281s); `general_e2e_composed_pbt` green (185s).
 
-**Unported now 4:** the windowed pair (`inv-focus-matches-ref`=`SutDriver`,
-`inv-frontend-no-error-widgets`=`SutLayout+SutViewModel`) + the cap-host pair
-(`inv-no-errors`=`SutErrorLog`, `inv-sql-budget`=`SutSpanMetrics`, need a component host).
+**🟢 Batch 4 LANDED (2026-06-25) — the windowed pair, catalog now complete for C3.**
+`inv-frontend-no-error-widgets` (`SutViewModel + SutLayout`) and `inv-focus-matches-ref`
+(`SutDriver + RefGlobalFocus + RefEditorMirror`) wired into the composed catalog
+(`composed/invariants/{frontend_no_error_widgets,focus_matches_ref}.rs`, `wire()`-only per the
+no-tests-of-tests philosophy — teeth from `run_windowed_composed_check` every windowed tick +
+deferred `cargo-mutants`). Both deselect in storage/headless slices (no `SutDriver`/`SutLayout`),
+select over `window_slice::window_focus_wide`; added to the `_assert_capmap_hosts_windowed_bodies`
+compile-proof; `memory_slice_selects_exactly` deselect-list +2. `inv-no-errors` (`SutErrorLog`)
+and `inv-sql-budget` (`SutSpanMetrics`) were **already wired** (catalog) via their cap hosts.
+**C3 unported now 0.** (Done via the `pbt-composition` skill, Recipe 1.)
+
+**Note (2026-06-25): this section drifted behind code** — B4 `matview_consistent_with_ref` is
+wired (catalog), the `SutRenderer`/`SutLoroLog` E3 deletion below is **done** (see
+`sut_capabilities.rs:118,882`), and `window_slice` (E4 `GpuiWindowComponent` +
+`GpuiFrontendEngineComponent` + `GpuiDriverComponent`) is built. Treat dated ✅ rows as historical.
 
 **★ E3 DELETION NOW UNLOCKED for `SutRenderer` + `SutLoroLog`.** All their native invariant
 consumers are composed-covered: `SutRenderer` (viewmodel-* family + matview-consistent +

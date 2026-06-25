@@ -5,10 +5,13 @@ use std::sync::Arc;
 
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::composition::{CapMap, Config};
+use holon_pbt_core::{Actor, ComponentSet};
 
-use super::components::{GpuiDriverComponent, GpuiFrontendEngineComponent, GpuiWindowComponent};
+use super::components::{GpuiFrontendEngineComponent, GpuiWindowComponent};
 use crate::pbt::composed::seed_primitives::{Plant, apply_plant, seed_ref_tree};
+use crate::pbt::driver_input::DriverInputComponent;
 use crate::pbt::reference_capabilities::reference_state_ref_caps;
 use crate::pbt::reference_state::Resolved;
 use crate::pbt::state_machine::fresh_reference_state;
@@ -58,8 +61,69 @@ pub fn window_focus_wide(
     Config::new()
         .with(GpuiWindowComponent::new(geometry))
         .with(GpuiFrontendEngineComponent::new(engine.clone()))
-        .with(GpuiDriverComponent::new(engine))
+        .with(DriverInputComponent::new(engine))
         .build()
+}
+
+/// E4 — the full windowed **input** SUT: [`window_focus_wide`]'s read caps
+/// (`SutLayout` + `SutViewModel` + `SutRenderer` + `SutDriver`) **plus** the
+/// windowed input caps `SutBlockInteract` + `SutArrowNavigate`, driven through the
+/// live window's production `UserDriver` (`driver`). Because its `cap_set()` now
+/// carries the input caps, the value-level cap gate in
+/// `transition_dispatch::aggregate_transitions` stops narrowing `PressKey` /
+/// `ArrowNavigate` / `DragDropBlock` / `ClickBlock` out of the alphabet on the
+/// composed windowed path — the input transitions become cap-admitted.
+///
+/// `DriverInputComponent::with_input` wraps `driver` (it never re-implements input)
+/// and reads `geometry` (a `clone_box` of the same `BoundsRegistry` the
+/// `GpuiWindowComponent` reads) for the single-shot bounds precheck.
+pub fn window_input_wide(
+    geometry: Box<dyn GeometryProvider>,
+    engine: Arc<ReactiveEngine>,
+    driver: Arc<dyn UserDriver>,
+) -> CapMap {
+    let driver_geometry = geometry.clone_box();
+    Config::new()
+        .with(GpuiWindowComponent::new(geometry))
+        .with(GpuiFrontendEngineComponent::new(engine.clone()))
+        .with(DriverInputComponent::with_input(
+            engine,
+            driver,
+            driver_geometry,
+        ))
+        .build()
+}
+
+/// The `Actor::UI` sibling of [`compose_sut`](crate::pbt::composed::compose_sut):
+/// build the windowed composed `CapMap` from a **live window's** handles,
+/// validated against a UI-bearing [`ComponentSet`] (the canonical one is
+/// [`ComponentSet::full_gpui`]).
+///
+/// `compose_sut` deliberately **cannot** build this: it boots its components on
+/// the tokio runtime, but a GPUI window has thread affinity — it must be
+/// launched on the gpui thread by the windowed harness, which then hands its
+/// `geometry` / `engine` / production `UserDriver` here. So the two construction
+/// paths are siblings, not one entry (`compose_sut` asserts `!has_actor(UI)` and
+/// points here). Both yield a `ComponentSet`-described `CapMap` that runs the one
+/// shared catalog via `run_selected` — one SUT *shape*, two harnesses.
+///
+/// Fail-loud: panics if `set` isn't a real windowed set (no `Actor::UI`, or
+/// invalid — `Actor::UI` requires the `ViewModel` projection).
+pub fn compose_windowed_sut(
+    set: &ComponentSet,
+    geometry: Box<dyn GeometryProvider>,
+    engine: Arc<ReactiveEngine>,
+    driver: Arc<dyn UserDriver>,
+) -> CapMap {
+    assert!(
+        set.has_actor(Actor::UI),
+        "compose_windowed_sut needs a windowed set (Actor::UI present); got {set:?}. \
+         Headless sets go through `compose_sut`."
+    );
+    set.validate().unwrap_or_else(|e| {
+        panic!("compose_windowed_sut: invalid windowed set {set:?}: {e}");
+    });
+    window_input_wide(geometry, engine, driver)
 }
 
 /// Like [`window_focus_wide`] but with the windowed `SutDriver`'s
@@ -78,7 +142,7 @@ pub fn window_focus_wide_planted(
     Config::new()
         .with(GpuiWindowComponent::new(geometry))
         .with(GpuiFrontendEngineComponent::new(engine.clone()))
-        .with(GpuiDriverComponent::with_forced_engine_focus(
+        .with(DriverInputComponent::with_forced_engine_focus(
             engine,
             forced_focus,
         ))

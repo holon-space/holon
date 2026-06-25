@@ -23,19 +23,14 @@ use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 use crate::pbt::invariants::bodies::displayed_text::{
     InvDisplayedTextViewModel, InvDisplayedTextWidget,
 };
-use crate::pbt::invariants::bodies::editor_caret_matches_ref::InvEditorCaretMatchesRef;
-use crate::pbt::invariants::bodies::editor_text_matches_ref::InvEditorTextMatchesRef;
 use crate::pbt::invariants::bodies::focus_matches_ref::InvFocusMatchesRef;
+// E3 (2026-06-25): `InvFrontendBoundsRendered` + `InvFrontendNoErrorWidgets` are dual
+// `SutViewModel + SutLayout` bodies — removed from native proxy dispatch when
+// `impl SutViewModel for E2ESut` was deleted, but retained here for the windowed
+// `_assert_capmap_hosts_windowed_bodies` compile-proof (`run_windowed_composed_check`
+// still runs them over a `CapMap`).
 use crate::pbt::invariants::bodies::frontend_bounds_rendered::InvFrontendBoundsRendered;
-use crate::pbt::invariants::bodies::frontend_engine::InvFrontendEngine;
 use crate::pbt::invariants::bodies::frontend_no_error_widgets::InvFrontendNoErrorWidgets;
-use crate::pbt::invariants::bodies::frontend_root_not_error::InvFrontendRootNotError;
-use crate::pbt::invariants::bodies::live_tree_matches_fresh::InvLiveTreeMatchesFresh;
-use crate::pbt::invariants::bodies::navigation_focus::InvNavigationFocus;
-use crate::pbt::invariants::bodies::value_fn_provider_arg_variance_13::InvValueFnProviderArgVariance13;
-use crate::pbt::invariants::bodies::value_fn_provider_identity::InvValueFnProviderIdentity;
-use crate::pbt::invariants::bodies::view_selection::InvViewSelection;
-use crate::pbt::invariants::bodies::viewmodel_no_error_widgets::InvViewmodelNoErrorWidgets;
 use crate::pbt::invariants::bodies::window_focus_matches_engine_focus::InvWindowFocusMatchesEngineFocus;
 use crate::pbt::invariants::registry::{
     InvariantSpec, ModeOverride, PbtSuiteSpec, RunMode, Subsystem, register_default, subsystems,
@@ -361,16 +356,19 @@ impl E2ESut {
     }
 
     /// The E4 windowed composition-path check (see the call site in
-    /// [`Self::run_invariant_registry_gated`]). Builds a `CapMap` hosting the
-    /// windowed caps (`SutLayout`/`SutViewModel`/`SutRenderer`/`SutDriver`) over the
-    /// SUT's installed live geometry + engine, and runs the composed catalog against
-    /// the per-tick reference oracle. Selection picks exactly the windowed invariants
-    /// (the block/storage invariants deselect — the windowed `CapMap` has no
-    /// `SutBackend`). Panics on a composed failure: a windowed divergence the
-    /// composition path catches is a real bug, even when the native run passed.
+    /// [`Self::run_invariant_registry_gated`]). A thin shim over the single-sourced
+    /// [`crate::pbt::composed::windowed::run_windowed_composed_check`] (the gpui sim
+    /// per-tick hook calls the same free fn): it hands the SUT's installed live
+    /// geometry + engine + `UserDriver` to `window_input_wide` and runs the composed
+    /// catalog against the per-tick reference oracle. Selection picks exactly the
+    /// windowed invariants (the block/storage invariants deselect — the windowed
+    /// `CapMap` has no `SutBackend`; the input caps it now also hosts bind no
+    /// invariant body, so the selected set is unchanged). Panics on a composed
+    /// failure: a windowed divergence the composition path catches is a real bug,
+    /// even when the native run passed.
     ///
     /// The cloned `ReferenceState`'s `Arc<Runtime>` is a shared clone of the live
-    /// one (like the native `resolved`), so dropping `ref_caps` here is a refcount
+    /// one (like the native `resolved`), so dropping `ref_caps` there is a refcount
     /// decrement — safe inside this async context (no off-thread drop needed).
     async fn run_windowed_composed_check(
         &self,
@@ -388,37 +386,22 @@ impl E2ESut {
             .as_ref()
             .expect("run_windowed_composed_check: frontend_engine installed (has_window)")
             .clone();
-        let sut_caps = crate::pbt::window_slice::builders::window_focus_wide(geometry, engine);
-        let ref_caps = crate::pbt::reference_capabilities::reference_state_ref_caps(
-            crate::pbt::reference_state::Resolved::identity(resolved.get().clone())
-                .map(std::sync::Arc::new),
-        );
-        let report = holon_pbt_core::composition::run_selected(
-            &crate::pbt::composed::composed_invariant_catalog(),
-            &sut_caps,
-            &ref_caps,
+        let driver = self
+            .driver
+            .borrow()
+            .clone()
+            .expect("run_windowed_composed_check: UserDriver installed (has_window)");
+        // Single-sourced check (E4): builds the windowed input `CapMap`
+        // (`window_input_wide`) and runs the composed catalog. The sim's per-tick
+        // hook calls this same free fn — one copy, not two.
+        crate::pbt::composed::windowed::run_windowed_composed_check(
+            geometry,
+            engine,
+            driver,
+            resolved.get(),
+            self.last_transition.variant_name(),
         )
         .await;
-        let failures = report.failures();
-        assert!(
-            failures.is_empty(),
-            "[E4 windowed composed check] run_selected over the GpuiWindowComponent CapMap \
-             diverged after `{}` — the windowed invariants fail on the COMPOSITION path even \
-             though the native E2ESut registry passed:\n{:#?}",
-            self.last_transition.variant_name(),
-            failures,
-        );
-        // Non-vacuity floor: the core windowed geometry invariant must SELECT + run
-        // every tick (it binds `SutLayout + SutViewModel` on the SUT and `RefLayout`
-        // on the ref, all present here), so a future regression that silently
-        // deselects the windowed family — turning "green" into "ran nothing" — fails
-        // HERE rather than passing vacuously.
-        assert!(
-            report.ran_ids().contains(&"inv-frontend-bounds-rendered"),
-            "[E4 windowed composed check] non-vacuity: inv-frontend-bounds-rendered must run \
-             on the composition path each tick (ran: {:?})",
-            report.ran_ids(),
-        );
     }
 }
 
@@ -486,18 +469,13 @@ impl<R, S, T: Invariant<R, S>> DynInvariant<R, S> for T {
 /// `CachingProxy` forwards. Any SUT satisfying it (E2ESut today; `CapMap` for a
 /// composed slice tomorrow) can host the whole proxy registry. This is the
 /// single place the union lives (Step 1: unhardcode the body list from E2ESut).
-pub trait WideProxyCaps:
-    holon_pbt_core::capabilities::SutSqlProjection
-    + holon_pbt_core::capabilities::SutViewModel
-    + holon_pbt_core::capabilities::SutLayout
-{
-}
-impl<T> WideProxyCaps for T where
-    T: holon_pbt_core::capabilities::SutSqlProjection
-        + holon_pbt_core::capabilities::SutViewModel
-        + holon_pbt_core::capabilities::SutLayout
-{
-}
+/// E3 (2026-06-25): `SutViewModel` dropped from the supertrait bound — its
+/// invariant bodies were relocated onto the composed catalog when
+/// `impl SutViewModel for E2ESut` was deleted. `SutLayout` REMAINS: `E2ESut`
+/// still hosts it (the windowed shell), and `InvDisplayedTextWidget` still
+/// dispatches natively against it.
+pub trait WideProxyCaps: holon_pbt_core::capabilities::SutLayout {}
+impl<T> WideProxyCaps for T where T: holon_pbt_core::capabilities::SutLayout {}
 
 /// A boxed native invariant dispatched against the per-tick `CachingProxy` over
 /// any `S: WideProxyCaps` (E2ESut today; `CapMap` for composed slices).
@@ -556,6 +534,8 @@ fn _assert_capmap_hosts_windowed_bodies()
         Box::new(InvDisplayedTextWidget),
         Box::new(InvDisplayedTextViewModel),
         Box::new(InvWindowFocusMatchesEngineFocus),
+        Box::new(InvFrontendNoErrorWidgets),
+        Box::new(InvFocusMatchesRef),
     ]
 }
 
@@ -613,17 +593,22 @@ fn native_proxy_invariants<'a, S: WideProxyCaps>() -> Vec<ProxyInvariant<'a, S>>
         // no-parent-cycles, source-language, focus-roots) were removed when
         // `impl SutBackend for E2ESut` was deleted — they are composed-catalog
         // hosted (see `NATIVE_ONLY_EXCLUDED` + `E1_RELOCATED_CAP_COVERAGE`).
-        Box::new(InvViewSelection),
-        Box::new(InvNavigationFocus),
+        // E3: `inv-navigation-focus` removed when `impl SutSqlProjection for E2ESut` was
+        // deleted (it read `current_focus_rows` via the SQL projection). It now runs only
+        // via the composed catalog — `full_headless` hosts `SutSqlProjection` and lists
+        // `inv-navigation-focus` in `WIDE_REQUIRED_INVARIANTS` (see `NATIVE_ONLY_EXCLUDED`
+        // + `E1_RELOCATED_CAP_COVERAGE`).
+        // E3 (2026-06-25): the `SutViewModel`-bound bodies (`inv-view-selection`,
+        // `inv-value-fn-provider-{arg-variance-13,identity}`, `inv-viewmodel-no-error-widgets`,
+        // `inv-frontend-root-not-error`, `inv-live-tree-matches-fresh`, `inv-frontend-engine`)
+        // and the two dual `SutViewModel + SutLayout` bodies (`inv-frontend-no-error-widgets`,
+        // `inv-frontend-bounds-rendered`) were removed when `impl SutViewModel for E2ESut`
+        // was deleted. They are composed-catalog hosted (`full_headless` hosts `SutViewModel`,
+        // exercised by `general_e2e_composed_pbt`; the windowed dual bodies are also covered by
+        // `run_windowed_composed_check`) — see `NATIVE_ONLY_EXCLUDED` + `E1_RELOCATED_CAP_COVERAGE`.
+        // `InvDisplayedTextWidget` STAYS: it binds only on `SutLayout`, which `E2ESut`
+        // keeps as the window shell.
         Box::new(InvDisplayedTextWidget),
-        Box::new(InvValueFnProviderArgVariance13),
-        Box::new(InvValueFnProviderIdentity),
-        Box::new(InvViewmodelNoErrorWidgets),
-        Box::new(InvFrontendRootNotError),
-        Box::new(InvFrontendNoErrorWidgets),
-        Box::new(InvLiveTreeMatchesFresh),
-        Box::new(InvFrontendEngine),
-        Box::new(InvFrontendBoundsRendered),
     ]
 }
 
@@ -635,11 +620,13 @@ fn native_self_invariants() -> Vec<SelfInvariant> {
     // the composed slice (`composed::span_metrics`); it is now in
     // `NATIVE_ONLY_EXCLUDED`. The remaining self-invariants take `&mut self` (driver
     // ops the `&self` proxy can't forward) and stay native until E5.
+    // E3: `SutEditorMirrorRead` deleted off `E2ESut` (the headless editor caret/live-text
+    // read surface). Its two ref-comparison invariants (`inv-editor-caret-matches-ref`,
+    // `inv-editor-text-matches-ref`) now run only via the composed catalog — `full_headless`
+    // hosts the editor read cap (see `NATIVE_ONLY_EXCLUDED` + `E1_RELOCATED_CAP_COVERAGE`).
     vec![
         Box::new(InvFocusMatchesRef),
         Box::new(InvWindowFocusMatchesEngineFocus),
-        Box::new(InvEditorCaretMatchesRef),
-        Box::new(InvEditorTextMatchesRef),
     ]
 }
 
@@ -658,10 +645,20 @@ pub(crate) const NATIVE_ONLY_EXCLUDED: &[&str] = &[
     "inv-task-state-storage-coherence",
     // covered by cdc_delivery_pbt + subsystem_convergence_pbt (`storage` preset).
     "inv-block-tags-references-exist",
-    // per-block content equality on stable ids; covered natively by
-    // inv-blocks-match-ref/* field comparison — covered standalone by
-    // split_block_content_pbt.
+    // E3: `SutSqlProjection` deleted off `E2ESut` (the headless Turso SQL-projection
+    // read surface). Its `inv-navigation-focus` (SQL `current_focus` read) and per-block
+    // `inv-block-content-matches-ref` (SQL `block_raw.content` read) now run only via the
+    // composed catalog (`navigation_focus::wire` + `block_content_sql::wire`); the standalone
+    // `split_block_content_pbt` / `peer_conflict_pbt` slices were deleted. See the
+    // `SutSqlProjection` row in `E1_RELOCATED_CAP_COVERAGE`.
+    "inv-navigation-focus",
     "inv-block-content-matches-ref",
+    // E3: `SutEditorMirrorRead` deleted off `E2ESut` (the headless editor caret/live-text
+    // read surface). Both ref-comparison invariants now run only via the composed catalog
+    // (`editor_caret::wire` + `editor_text::wire`) — `full_headless` hosts the editor read
+    // cap. See the `SutEditorMirrorRead` row in `E1_RELOCATED_CAP_COVERAGE`.
+    "inv-editor-caret-matches-ref",
+    "inv-editor-text-matches-ref",
     // E3: `SutBackend` deleted off `E2ESut` (the headless `block_raw`/`block`-matview
     // read surface). Its 6 structural bodies now run only via the composed catalog
     // (`HeadlessFrontendComponent` / `SqlProjectionComponent` host `SutBackend`) —
@@ -724,6 +721,21 @@ pub(crate) const NATIVE_ONLY_EXCLUDED: &[&str] = &[
     // with the harness driving its reset/freeze lifecycle) — see
     // `E1_RELOCATED_CAP_COVERAGE`.
     "inv-sql-budget",
+    // E3 (2026-06-25): `SutViewModel` deleted off `E2ESut` (the headless ViewModel
+    // read surface). Its ViewModel-bound bodies now run only via the composed catalog —
+    // `full_headless` (HeadlessFrontendComponent) hosts `SutViewModel`, exercised every
+    // tick by `general_e2e_composed_pbt`. The last two are the dual `SutViewModel +
+    // SutLayout` windowed bodies (also covered by `run_windowed_composed_check`). See the
+    // `SutViewModel` row in `E1_RELOCATED_CAP_COVERAGE`.
+    "inv-view-selection",
+    "inv-frontend-engine",
+    "inv-frontend-root-not-error",
+    "inv-live-tree-matches-fresh",
+    "inv-viewmodel-no-error-widgets",
+    "inv-value-fn-provider-identity",
+    "inv-value-fn-provider-arg-variance-13",
+    "inv-frontend-no-error-widgets",
+    "inv-frontend-bounds-rendered",
 ];
 
 /// One invariant's disposition for a single tick, retained so the runner can

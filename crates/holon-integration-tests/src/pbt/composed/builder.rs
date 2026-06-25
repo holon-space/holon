@@ -30,18 +30,20 @@ use holon::sync::LoroDocumentStore;
 use holon_api::EntityUri;
 use holon_api::repository::CoreOperations;
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutSqlProjection,
+    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use holon_pbt_core::{Actor, ComponentSet, Projection, StorageAdapter};
 
+use crate::mutation_driver::DirectUserDriver;
+use crate::pbt::driver_input::DriverInputComponent;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
 use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::memory_slice::components::{
     CoreOpsCommit, EditorCommitTarget, InMemEditorComponent,
 };
-use crate::pbt::op_write_cap::{IdResolver, OpDispatchWriter};
+use crate::pbt::op_write_cap::{IdResolver, KeystrokeBlockTreeWriter, OpDispatchWriter};
 use crate::pbt::sql_slice::SqlProjectionComponent;
 use crate::pbt::sql_slice::builders::new_sql_engine_with_structural_ops;
 use crate::pbt::sut_loro::LoroSut;
@@ -122,11 +124,17 @@ pub async fn compose_sut_seeded(
         "compose_sut: the frontend (ViewModel) arm boots over a Turso backend; a \
          ViewModel projection without Turso storage is unsupported. got {set:?}"
     );
-    // Deferred arm — fail loud rather than silently composing an under-provisioned
-    // SUT that would deselect invariants and look "fine".
+    // `compose_sut` builds the HEADLESS CapMap on the tokio runtime. A GPUI window
+    // has thread affinity — it must be launched on the gpui thread by the windowed
+    // harness, which then hands its live handles to the sibling entry. So a UI set
+    // here is unbuildable by construction; fail loud rather than silently composing
+    // an under-provisioned SUT that would deselect invariants and look "fine".
     assert!(
         !set.has_actor(Actor::UI),
-        "compose_sut: the windowed GPUI (FrontendBounds/Driver) arm is E4, not headless"
+        "compose_sut builds the headless CapMap on tokio; a GPUI window has thread affinity and \
+         cannot be booted here. Build the windowed CapMap with \
+         `window_slice::builders::compose_windowed_sut(set, geometry, engine, driver)` from the \
+         gpui-thread harness's live window handles instead. got {set:?}"
     );
 
     let mut caps = CapMap::new();
@@ -180,22 +188,56 @@ pub async fn compose_sut_seeded(
         // component's `register` (the nav slice adds it explicitly); add it here since
         // Turso storage is active and its invariants belong to this config.
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        // `SutQueryResults` (the full-mode query-engine row-count surface) — same
+        // per-config rationale as `SutSqlProjection`: NOT in `register`, added here
+        // because a real query engine (Turso `BackendEngine` + reactive watch) backs
+        // this frontend. Its presence keeps `inv-viewmodel-decompiled-rows-match-query`
+        // selected for the wide composed PBT and (via `sut_absent`) keeps the degraded
+        // `inv-viewmodel-shows-source-when-no-query` twin deselected here.
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
         // The editor READ cap (the WRITE cap is in `register`). Selects the
         // `inv-editor-{text,caret}-matches-ref` invariants — added only when the config
         // drives the editor, so non-editor frontend configs keep their selection.
         if has_editor {
             caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
         }
-        // Shared-resolver writer override (same rationale as the sql arm), with the
-        // booted `ReactiveEngine` as a focus sink so `split_block`/`join_block` dispatch
-        // through the production `dispatch_intent_sync` (→ `apply_structural_focus`) and
-        // the new/merged block becomes the focused block — the frontend split focus-handoff
-        // (#3), faithful on the real swap target, not just the wide slice.
-        caps.insert(Arc::new(OpDispatchWriter::with_resolver_and_focus(
+        // Structural-write cap, VM-rung driver-backed (§8.11 LL-3). `SplitBlock` is
+        // driven through the production keystroke pipeline (focus the editor + home +
+        // N×right + Enter → `HeadlessEditorMirror` split) — the UI-adjacent interaction
+        // layer, not raw op dispatch — so a keystroke/intent/reducer bug localizes to
+        // this layer. The remaining structural ops (`join`/`indent`/`outdent`/`move_*`)
+        // still dispatch via the inner `OpDispatchWriter` fallback (shared-resolver +
+        // `ReactiveEngine` focus sink, so `split_block`/`join_block` hand off focus
+        // through `dispatch_intent_sync` → `apply_structural_focus`) — the rebind is
+        // incremental (Split first). Reuses the component's OWN `ReactiveEngineDriver`
+        // so the single live `HeadlessEditorMirror` is shared with the editor-write caps.
+        let structural_fallback = OpDispatchWriter::with_resolver_and_focus(
             eng.clone(),
             resolver.clone(),
             comp.reactive(),
+        );
+        caps.insert(Arc::new(KeystrokeBlockTreeWriter::new(
+            comp.driver(),
+            comp.reactive(),
+            resolver.clone(),
+            structural_fallback,
         )) as Arc<dyn SutBlockTreeWrite>);
+        // The VM-rung driver (§8.11 layer-localization): install the frontend's OWN
+        // headless `ReactiveEngineDriver` as THE driver backing the gesture caps, so
+        // the composed `CapMap` drives user gestures UI-adjacently (click-intent
+        // resolution + `MutableText`/`InputState` editing — the same production logic
+        // the GPUI window runs, minus geometry/platform), not via `OpDispatchWriter`
+        // dispatch. This admits the `SutBlockInteract`/`SutArrowNavigate` gesture
+        // alphabet headless (ClickBlock/ExpandToggle/PressKey/…). Reuses the component's
+        // driver (not a fresh one) so the single live `HeadlessEditorMirror` stays shared
+        // with the editor-write caps. No geometry → its `require_bounds` precheck is a
+        // no-op (the driver resolves targets itself).
+        Arc::new(DriverInputComponent::with_input_headless(
+            comp.reactive(),
+            comp.driver(),
+            resolver.clone(),
+        ))
+        .register(&mut caps);
         // Capture the frontend's Loro authority store (present iff Loro is on for this
         // build = an editor config) so the Loro arm below reads its caps over the SAME
         // doc the frontend op pipeline writes (task #4 read-doc unification).
@@ -228,11 +270,14 @@ pub async fn compose_sut_seeded(
     } else if has_turso {
         let eng = new_sql_engine_with_structural_ops().await;
         Arc::new(SqlProjectionComponent::new(eng.clone())).register(&mut caps);
-        // Override the block-tree writer with the SHARED-resolver one so the runner's
-        // per-tick synthetic→real reconcile reaches the writer (the C2.0 kernel).
-        // `SqlProjectionComponent::register` installs a fresh-resolver writer; this
-        // insert replaces it under the same cap `TypeId`.
-        caps.insert(Arc::new(OpDispatchWriter::with_resolver(
+        // Override the block-tree writer with the shared-resolver DISPATCH FLOOR
+        // (§8.11 LL-2): a storage-only config has no ViewModel/UI, so no higher driver
+        // is available — the floor `DirectUserDriver` applies each structural op
+        // directly to the engine (`synthetic_dispatch` == the old `OpDispatchWriter`
+        // no-focus-sink path, behavior-identical), the bottom rung the subsystem
+        // bisector descends to. `SqlProjectionComponent::register` installs a
+        // fresh-resolver writer; this replaces it under the same cap `TypeId`.
+        caps.insert(Arc::new(DirectUserDriver::with_resolver(
             eng.clone(),
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);

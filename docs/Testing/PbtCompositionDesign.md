@@ -44,7 +44,7 @@ The **negative** half (`need_sut⁻`) is the one new primitive vs today's runtim
 Two asymmetries that matter:
 
 - **The SUT composes as a union of independent components** (backend ⊕ frontend ⊕ projection).
-- **The Ref does not.** `ReferenceState` is one *coupled* model (a `SplitBlock` mutates block-state *and* editor cursor atomically). On the Ref side, "sub-Ref" means a *capability-view/projection of one coherent model*, not a union of parts. (The transitions are already written generic over `Ref` capability traits — `split_block_apply_to_ref<R: RefBlockTreeMut + RefFocusMut + …>` — so Ref-side composition for *generators* already works.)
+- **The Ref *core* does not.** `ReferenceState` is one *coupled* model (a `SplitBlock` mutates block-state *and* editor cursor atomically). On the Ref side, "sub-Ref" means a *capability-view/projection of one coherent model*, not a union of parts. (The transitions are already written generic over `Ref` capability traits — `split_block_apply_to_ref<R: RefBlockTreeMut + RefFocusMut + …>` — so Ref-side composition for *generators* already works.) When two subsystems write the *same* datum and the outcome is a merge ("neither X nor Y"), the coupled core still owns it — it may compute the merged value via a **not-under-test merge engine (Loro) driven from intent**, never by storing two copies. See §5.4. **Caveat — "coupled core" ≠ "closed struct":** the core not composing constrains only *shared* data; the Ref as a whole may still be an **open registry of per-module *private* extensions** over that core, which is what makes new-subsystem contribution (even via git submodule) possible. See §5.5.
 
 ---
 
@@ -134,6 +134,53 @@ Audited all 40 invariant bodies (see git history / the analysis that produced th
 
 - **Hard req** — component is nonsense without the cap (Turso projection ⊸ a CDC source). Missing → config invalid, fail loud at `Config::build`.
 - **Soft / degrading req** — component functions in a *disclosed* degraded mode (GPUI ⊸ query result → shows source; outliner tree still works). Missing → both SUT and Ref take the degraded projection; the harness should assert the degraded banner shows so degradation can't masquerade as full mode.
+
+### 5.4 Interacting subsystems: when the expected value is a *merge* (2026-06-26)
+
+§5.1 says the Ref is one coupled core whose sub-Refs are projections, "never a union of parts." That rule answers *code structure*; it does **not** by itself say how the core computes the result when two subsystems write the **same datum** and the outcome is neither subsystem's value — the canonical case being the same block edited in an org file and in the UI, where the result is **Loro's CRDT merge**. This section is the standing answer, and it refines §5.1/§9 without reversing them.
+
+**First, most "interactions" aren't merges — classify the pair of writes:**
+
+| Pair | Reference treatment | Oracle archetype |
+|---|---|---|
+| **Orthogonal / commuting** (different data, or disjoint *footprints*) | apply both in any order → exact, *no merge engine*, algorithm-independent | construction (10/15) |
+| **Sequential same-target** (settle between transitions) | last-writer / fold in defined order — still a *function* the core predicts exactly | construction (10) |
+| **Concurrent same-target, overlapping footprint** (true conflict) | reuse the merge engine *or* drop to convergence | 20 or 25 |
+
+The crucial framing: the "neither X nor Y" outcome arises **only under genuine concurrency** (divergent histories merged — i.e. the multi-peer regime). Under our settle-between-transitions harness (quiescence is the harness's job, §8 of `PbtSlicing.md`), a UI edit lands in Loro *before* the next org edit reads it, so there is no conflict to model. **The merge problem is the multi-peer regime's problem**, and that regime is already a distinct tier with a property oracle — `subsystem_convergence_pbt` / `loro_sync_controller_pbt` (S1–S3/C1–C3 convergence laws), deliberately kept separate because rewriting Loro's CRDT semantics into the block model "is not even semantically possible" (`PbtSlicing.md` §12).
+
+**The overlapping-conflict residue: reuse Loro, don't re-implement it — and don't read it back.** Per the oracle-design failure-correlation model (`~/.claude/skills/property-based-testing/reference/oracle-design.md`), the worst oracle isn't "reuses production code" — it's **correlated duplication of the thing under test** (and, equally bad, **reading SUT state back into the ref**, which is vacuous-by-construction). In the *composed E2E* PBT, Loro's CRDT correctness is **not under test** (it has its own tier); what's under test is integration — op construction, routing org/UI edits into the CRDT, projection drift. So the coupled core may legitimately **hold its own `LoroBackend` instance and drive it from *intent*** (the ops the transition sequence intended) to compute the full expected merged content, while the SUT feeds *its* Loro through the whole stack. Same engine, **independent derivation paths in** → uncorrelated on the integration axis; blind only to Loro-internal bugs, which are out of scope here. Conditions to keep it a "good 20" and not the archetype-40 trap: (1) not-under-test in this test; (2) fed from intent, never the SUT's produced ops; (3) the two paths into Loro genuinely differ. The alternative to reuse is *worse*: refusing it forces either lost precision (drop to a relational check) or the read-back cheat (Independence → 0).
+
+**The shortcut that avoids the engine entirely (footprint partition).** Two concurrent edits with **disjoint footprints** commute — any sane sequence CRDT preserves non-overlapping concurrent edits — so the core predicts the exact merged value by applying both in any order, *without invoking Loro and independent of its algorithm*. Only **overlapping** footprints need the reused engine or a convergence relation. Footprint-disjointness is cheaply decidable from the ops, so bias the generator toward the commuting interior (high-precision construction oracle) and sample the conflicting residue separately under the weaker oracle — the difficulty moves out of the oracle and into generation.
+
+**Classify each shared field by merge rule, not by subsystem.** Most block properties are **LWW-registers** (`task_state`, scalar props): the core predicts them exactly by tracking `(value, Lamport-ts)` and merging as max — no engine, no convergence. Only **sequence/text** content under concurrent overlapping edits needs the footprint partition. Audit which shared fields are which: it tells you precisely where the merge is real and where the coupled core already handles it for free.
+
+**Structure consequence (refines, doesn't reverse, §5.1's "never a union of parts").** A composite Ref `{ core, org_ext, ui_ext, … }` is fine **iff** the extensions hold only disjoint subsystem-*private* data (org: paths/on-disk bytes/dirty-state; ui: caret/focus/scroll) and all shared block data lives in `core`. The interaction "override" the naive design reaches for (`apply_block_modification` reconciling two copies) collapses into "the core applies ops in order"; the only genuinely joint computation is the overlapping-conflict merge, and that is computed (engine-from-intent) or constrained (convergence), never stored in two places.
+
+**Why this does not violate §5.2.** §5.2's "zero in-body variant projections" is about the Ref **degrading on capability/subsystem *absence*** (a config twin). Branching the Ref on an edit pair's *footprint* (disjoint vs overlapping) is branching on the **input**, not on the active-subsystem set — it is the oracle computing its answer, the same as any data-dependent reference logic. The §5.2 invariant (no config-variant projections) is untouched.
+
+### 5.5 Open module contribution: a coupled core is not a closed struct (2026-06-26)
+
+§5.1 ("monolithic by necessity") is about *correctness* — shared data must be single-homed. It is **not** an argument for a *closed* `ReferenceState`, and it should not be read as one. There is a separate, legitimate design axis the coupling rule says nothing against: **open contribution** — letting a new subsystem module (imagine `Loro+Iroh` P2P sync as a *not-yet-existing* module) drop in its **generators + transitions + reference-state + SUT impl** and integrate with *zero edits to a central type* — ideally shipped as a separate crate / git submodule. The monolithic `ReferenceState` struct is what blocks that today, and that is an *implementation* fact (hardcoded fields), not a consequence of §5.1.
+
+**The corrected claim.** "One coupled core" forbids exactly one thing: splitting *shared* state across multiple owners (two copies of block content → reconcile-on-read, §5.4). It does **not** forbid an *open registry of private extensions* over that core. So the production form of the Ref is:
+
+> **one coupled core** (all cross-cutting shared data — block tree, content, editor, focus — single-homed) **+ an open registry of per-module private-state extensions** (P2P: peer set, per-peer divergence, sync clocks).
+
+The core doesn't compose; the *extensions* do. This is §5.4's `{ core, org_ext, ui_ext }` made into an *open registry* rather than hardcoded fields — symmetric to how the SUT is already an open `CapMap` of components.
+
+**Most of the contribution is already open; the ref half is half-built.**
+- **Transitions/generators/invariants are already capability-bound.** A module's transition is `impl TransitionRef<R> for PeerEdit where R: RefBlockTreeMut + RefPeersMut` — it programs against the core's *stable cap interface* + its own new caps, never naming the concrete Ref. The dispatch chokepoint (the closed `E2ETransition` enum) is exactly what §8.9 `cap_transition!` + the `inventory`/`typetag` open-registry PoC is built to flip.
+- **The SUT is already an open `CapMap`** — a module's SUT impl is one more component.
+- **The ref is already a `CapProvider`** (§8.8: `impl CapProvider for ReferenceState`, registered under each `Ref*` cap). So the ref side is already a typemap that *can* host multiple providers.
+
+**What a module ships (the submodule shape):** its private reference-state type, registered into the ref's open extension registry (*not* a new field on `ReferenceState`); impls of its **own** `RefPeers`/`RefPeersMut` traits **for** `ReferenceState` (the orphan rule *permits* a local-trait-for-foreign-type impl, so a separate crate can do this); its capability-bound transitions/generators/invariants; and its SUT `CapProvider`. The coupling is preserved because the **core stays one provider owning all the cross-cutting caps** (block+editor+focus from one object — the same way a SUT component backs several caps from one `Arc`); the module's providers are orthogonal additions.
+
+**The module hands *intent*; the core computes the merge.** When `SyncWithPeer` lands remote ops on the shared block tree, the module hands *intended* ops to the core's stable write interface — it does **not** compute the merge. The core's commute / LWW / cite-Loro-from-intent machinery (§5.4) produces the merged value. So a module needs *zero* knowledge of merge semantics, and the open-extension story composes cleanly with the merge-oracle story.
+
+**The principled boundary (where the submodule dream legitimately stops).** This works for subsystems whose new ref-state is **private/additive** — P2P qualifies (peers/clocks private; the block tree it syncs is *already* core). Same condition as §5.1's hidden-capability rule (don't generate the transition → the cap stays hidden). It does **not** work, and *should not*, for a module that changes the **shared semantics of existing core data** (e.g. block-level ACLs every subsystem must now honor): that genuinely edits the domain model and must touch the core. No registry can or should hide a *real* coupling. The line is "additive subsystem vs. shared-vocabulary change," which is principled, not a wart.
+
+**Backlog (not built).** The remaining gap to the submodule story is (a) flipping the transition dispatch to the open registry (§8.9, in flight) and (b) replacing `ReferenceState`'s hardcoded private fields with the open extension registry (the core keeps its cross-cutting fields; only subsystem-*private* state moves into the registry). Until (b), a new subsystem still edits `ReferenceState` — the one remaining central chokepoint on the ref side.
 
 ---
 
@@ -262,6 +309,21 @@ transition sequence)` that still reproduces — "fails with `{Loro}` only" vs "f
 with `{EditorState}` only" vs "fails regardless, empty set". Spike module:
 `crates/holon-integration-tests/src/pbt/subsystem_shrink.rs` (run `cargo test -p
 holon-integration-tests --features pbt --lib subsystem_shrink`).
+
+**Why this matters — it replaces the unit-test base (proof-partition framing).** The
+North Star inverts the test pyramid: the ONE configurable `WideE2E` PBT is the
+primary asset, not a thin slow cap. Inverting it would forfeit the pyramid base's
+fast feedback / localization / cheap repro — *except* that minimization recovers
+them top-down. A wide failure shrinks to the minimal `(subsystem set, transition
+sequence)`; that minimized config runs **only the required subsystems and
+transitions**, so it executes at near unit-test speed and localizes to the culprit,
+while being a *projection of the one PBT* (not a fork that can drift or trivialize).
+Persisted as a capture (the shrunk *sequence*, not an RNG seed — ADR 0009 / §"Captures,
+not seeds" in `PbtSlicing.md` §13), its replay is the deterministic sub-second gate
+that *is* the recovered unit test — provably non-vacuous because it reproduced a real
+failure. So we don't build a unit-test base; the harness *discovers* one per failure
+(minimize) and *freezes* it (capture). Full framing: the property-based-testing skill,
+`reference/strategy-and-pyramid.md` ("The proof-partition model").
 
 **The `(Config, sequence)` model.** The config is part of the
 `ReferenceStateMachine::State`, not a fixed slice choice. It is a
@@ -521,6 +583,28 @@ on the deletion list, so a future session must migrate/delete it too. That is th
   `ComposedSlice` is justified, because there is no ONE-PBT coverage to inherit. Mark it
   explicitly as transient (it dies when E4 lands its component + axis).
 
+**The "NO" branch: one SUT shape, two harnesses (`!has_actor(UI)` is permanent) (2026-06-26).**
+The `SutLayout`/`SutDriver` "windowed shell" caps look fundamentally different from every other
+cap because they need live geometry + real platform input (keymap, hit-test, drag bounds) that a
+headless reactive tree has no equivalent for. `compose_sut` asserts `!has_actor(UI)` (`builder.rs`)
+and the windowed checks build a composed `CapMap` from the live window's handles via
+`compose_windowed_sut` (wrapping `window_input_wide`) inside `run_windowed_composed_check`. This is
+**not** a permanent two-SUT-*shape* design — both paths yield a `ComponentSet`-described `CapMap`
+that runs the one shared catalog via `run_selected`. `UserDriver` remains the single input interface
+(`ReactiveEngineDriver` headless, `GpuiUserDriver`/`SimUserDriver` windowed — never forked);
+`GpuiDriverComponent` only *wraps* whichever production `dyn UserDriver` the window installs and
+adds a geometry precheck + cap gating. But the **construction entry does not unify**: `compose_sut`
+boots on the tokio runtime, while a GPUI window has **thread affinity** — it must be launched on the
+gpui thread by the windowed harness, which hands its handles to `compose_windowed_sut`. So
+`!has_actor(UI)` is **correct and permanent** (it fail-louds the unbuildable headless path, pointing
+at the sibling entry), and the windowed StateMachineTest **harness** is thread-bound and cannot fold
+into WideE2E's tokio loop. End state (Backlog ★ "GPUI axis"): **one SUT shape + one catalog, two
+harnesses** (headless tokio + windowed gpui-thread). The chevron verb gap is closed
+(`UserDriver::set_block_expanded`, 2026-06-26). What remains is to repoint the windowed
+transition-apply (`apply_split_block_input_pipeline_to_sut`, `engine_focused_block`, Gherkin
+fixtures) off `<E2ESut as SutLayout+SutDriver>` onto the windowed `CapMap`, then delete E2ESut's
+windowed **cap impls** — the windowed harness survives. See `PbtComposition_EndgameRoadmap.md`.
+
 **Worked example (the rule's origin).** `task_state_coherence_pbt` consumed `SutLoroTaskState`
 + `SutSqlProjection` over `E2ESut`. The 2026-06-24 increment (jj `xk`) discharged it by minting
 `TaskStateSlice` — but `full_headless` already hosts both caps and `WideE2E` already runs
@@ -536,11 +620,145 @@ above. Judge by deletions, not by green slices.
 
 ---
 
+## 8.11 Layer-localization — the driver ladder IS a subsystem axis (no new dimension) (2026-06-26)
+
+This connects the "drive interactions UI-adjacent" directive (the PBT drives user interactions
+through the logic layer *just below* the UI surface, not an operation dispatch — even headless;
+the UI is a thin shell) to the ADR 0009 subsystem minimizer, and answers: *can we localize a bug
+to a **layer** — geometry vs view-model vs engine?*
+
+**The ladder.** User interactions can be driven by three `UserDriver` implementations forming a
+**total order of faithful refinements** — each = the one below + the production logic the lower
+one shortcuts:
+
+```
+DirectUserDriver          raw OperationIntent → engine reducer                  (dispatch floor)
+  ⊏ ReactiveEngineDriver    + find_click_intent resolution + InputState/MutableText editing
+      ⊏ GpuiUserDriver        + geometry/hit-test + keymap + real platform-input pump
+```
+
+**Highest-available rule ⇒ it collapses to 1-D (the driver layers ARE subsystems).** The driver is
+a *pure function of the active subsystem set*: `Actor::UI` present → `GpuiUserDriver`; ViewModel
+present, no UI → `ReactiveEngineDriver`; neither → `DirectUserDriver`. So this is **not a new
+dimension** — the layers are subsystems already in the `ComponentSet`, and a transition is always
+driven against the **highest available** `UserDriver`. Three things fall out:
+- The ladder is **well-ordered for free** by the existing validity constraint `Actor::UI ⟹ ViewModel`
+  (`component_set.rs`): no window without a view-model, so subsystem bisection can only peel UI
+  before/with ViewModel — the descent GPUI→VM→dispatch is automatic.
+- Invariant + generator deactivation is the **existing** cap-selection (`Needs::selected_against` +
+  the `aggregate_transitions` wiring gate): UI off deselects `SutLayout`/window-focus invariants and
+  narrows UI-only gestures; ViewModel off deselects VM invariants. The same set now also picks the
+  *driver*.
+- **No new shrink machinery, no new cost.** The bisector already re-runs the trace at smaller
+  subsystem sets; the driver simply descends with each peel.
+
+**1-D is not just cheaper — it is more *correct*.** A 2-D axis (vary the driver independently of
+subsystem presence) would permit *unfaithful* configs — "drive via dispatch while a window is
+present." Production never does that (if a window exists, input flows through it), so such a config
+can only fabricate bugs, never find real ones. "Highest available" enforces faithfulness: always
+exercise the full stack that is present; *removing* a subsystem legitimately removes its layer. So
+every config the bisector runs is one that can occur in production, and localization is a byproduct
+of ordinary subsystem minimization.
+
+**Localization = the boundary, across the bisection, where the *pinned* failure stops reproducing.**
+Pin the original failure *signature* (invariant id + the specific divergence); count any *other*
+failure during shrink as a non-reproduction (so a different bug the upper layer masked causes no
+slippage — this is also the multi-bug safeguard). Layers ≥ L diverge from ref, layers < L match ⇒
+the bug lives in the **L-delta**:
+- gone when **UI** peels off → the **GPUI delta** (geometry / hit-test / keymap / platform input).
+- gone when **ViewModel** peels off → the **ViewModel delta** (intent resolution / editor input).
+- still failing at the **dispatch floor** → the **engine / backend** itself.
+
+**Read-side and write-side localization compose.** The *read* side already localizes *within* one
+run: one application, N projections compared to ref (the data-layer "trouble begins at" report).
+The *write* side localizes *across* runs: the driver **is** the application, so you cannot observe a
+single write at multiple layers — you re-run the trace with a lower driver. That across-run cost is
+**already paid** by subsystem bisection. Net: data-layer localization per run (reads),
+interaction-layer localization across the bisection (writes).
+
+**Faithfulness is the load-bearing assumption — and it is path-dependent.** The ladder is sound only
+where the lower layer runs the *same code* the upper one does, minus the delta:
+- **Gesture / intent path — a faithful shortcut, not a copy.** `ReactiveEngineDriver::click_entity`
+  reads the *same* `node.click_intent()` GPUI's `on_mouse_down` reads, and calls the *same*
+  `dispatch_intent_sync` (the engine *is* `BuilderServices`). The only substituted step is *locating*
+  the node — id-walk vs geometry hit-test — which is exactly the GPUI delta.
+- **Editor keystroke path — a partial reimplementation (the soft spot).** Prod editor input flows
+  through gpui-component's `InputState`; headless flows through `HeadlessEditorMirror`. They share
+  the byte-offset math (`editor_caret.rs`) but not the `InputState` integration, so editor-layer
+  localization is only as sound as the shared code. **This axis therefore *exposes* where the
+  thin-UI architecture is unfinished** — the editor still has logic trapped in the GPUI widget.
+  Making it fully sound = extracting that logic into a shared frontend layer both drivers run (the
+  thin-UI directive, applied to the editor). The axis and the architecture co-evolve.
+
+**Construction-time driver selection (parse, don't validate — the layer is chosen ONCE).** The
+builder knows the full subsystem set, so it picks **exactly one** `UserDriver` and installs it as the
+*single* driver backing the gesture caps in the `CapMap` (`Actor::UI`→`GpuiUserDriver`, ViewModel→
+`ReactiveEngineDriver`, neither→`DirectUserDriver`). Gesture transitions bind the **driver** caps
+(`SutDriver`/`SutBlockInteract`/`SutLayout`/`SutEditorMirrorWrite`), so *which layer runs* is decided
+solely by which driver the builder installed — the lower drivers were never constructed for this run,
+so a transition **cannot reach one** (it isn't in the map, and there is no ambient driver registry).
+This replaces a runtime "prefer the higher cap" rule with construction-time choice: a single source of
+truth for the layer, and the wrong layer made unreachable by encapsulation rather than discouraged.
+Consequences: the dispatch floor stops being a distinct always-present `SutBlockTreeWrite` cap and
+becomes *just another `UserDriver`* (a `DirectUserDriver`, installed only when no higher driver is);
+and the bisector **descends layers by re-construction** — it hands the builder a smaller subsystem set,
+the builder re-derives the single driver, transitions transparently use it (the bisector never needs to
+know drivers exist). *Caveat — value-level, not compile-time:* the layer is runtime-selected from the
+env-chosen set and the bisector runs many configs in one process, so the driver is inherently `dyn`;
+the guarantee is "exactly one instance constructed & encapsulated per run," not a monomorphized type.
+That is the same strength as the rest of the cap model (absence = the cap isn't there → the transition
+narrows out), applied to *which driver* rather than *which subsystem*.
+
+**Care-points (the discipline that keeps localization honest).**
+1. The dispatch floor (`DirectUserDriver`) applies a structural op **directly to the engine**
+   (`synthetic_dispatch` == `execute_operation`), below the geometry/view-model interaction layers —
+   not by re-running production interaction resolution, else it isn't *below* the VM. **LL-2 verified
+   (2026-06-26): the floor provides only the *structural-write* cap (`SutBlockTreeWrite`), NOT the
+   UI-gesture caps.** `DirectUserDriver` wraps only a `BackendEngine` (no ViewModel/focus/geometry); a
+   storage-only config has neither. UI-only gestures (click→focus, expand/collapse, slash) are
+   view-model concepts that bottom out at the VM rung (care-point 3) — there is no faithful sub-VM
+   "ref-intended effect" for them, so the floor legitimately does not host them.
+2. **Install exactly one driver per run** (construction-time, above) — gesture transitions bind the
+   *driver* caps, never a separate `SutBlockTreeWrite`/`OpDispatchWriter` dispatch cap. Installing
+   *both* a driver and `OpDispatchWriter` for the same gesture, or binding a gesture to the dispatch
+   cap while a driver layer is present, is the **rejected anti-pattern** (it tests the wrong layer —
+   see the skill anti-patterns).
+3. **View-local transitions (expand/collapse) correctly bottom out at the VM rung** — they narrow
+   out when ViewModel is off, because there is no sub-VM layer for a view-local concept; that *is*
+   the right localization.
+4. **Non-gesture mutations** (`BulkExternalAdd` / `Peer*` / `ApplyMutation`) are layer-invariant
+   (always direct) — "highest available" does not apply; they ride a separate cap.
+5. **Localization is bounded by the failing invariant's caps.** A failure only a `SutLayout`
+   invariant can catch cannot be localized below UI — the detector deselects there. "Bug gone at the
+   lower layer" must be read as *gone **or** undetectable here*; the signature pin plus a check that
+   the invariant is still *selected* is the discriminator.
+
+**Operation → layer mapping (not uniform — it partitions, cleanly).**
+
+| Transition class | dispatch floor | ViewModel | GPUI |
+|---|---|---|---|
+| Structural (Split/Join/Indent/Outdent/Move) | ✓ (the op) | ✓ | ✓ |
+| Navigation (Focus/Home/Pin/Unpin; Back/Fwd headless-gappy) | ✓ (nav op) | ✓ | ✓ |
+| Click / Drag / Slash / Arrow | ✓ (ref-intended intent) | ✓ | ✓ |
+| Editor (Type/Move/Delete/PressKey/Blur) | ✓ (ref-effect set-content) | ✓ | ✓ |
+| Expand / Collapse | ✗ (view-local — no engine op) | ✓ | ✓ |
+| External/Lifecycle (BulkAdd/Peer*/Mutation/WriteOrg/StartApp…) | ✓ | — | — (layer-invariant) |
+
+A transition that has no form at a layer simply narrows out there — the same per-transition
+self-narrowing the wiring gate already does for absent subsystems.
+
+**Relation to the in-flight work.** The `UserDriver`-backed input component (Backlog E-track) is the
+**missing VM rung** — a headless `ReactiveEngineDriver`-backed driver inside `compose_sut`; a
+`DirectUserDriver`-backed component is the **dispatch floor**. Once both exist behind the
+highest-available rule, the existing bisector yields layer-localization with no new dimension.
+
+---
+
 ## 9. Risks, gotchas, open questions
 
 - **Step 1 parity is the real risk.** Everything else is mechanical. Land it behind the existing `E2ESut` entry point and diff selection against the blessed slices before deleting the old path.
 - **`?Send` per trait.** Watch for an `E2ESut` cap future that captures non-`?Send`-compatible state; none appeared in the spike but verify per trait.
-- **Ref coupling.** The omnipotent core is monolithic *by necessity* — do not try to "union" Ref state from parts. Sub-Refs are projections, not parts.
+- **Ref coupling.** The omnipotent core is monolithic *by necessity* — do not try to "union" *shared* Ref state from parts. Sub-Refs are projections, not parts. The subtlety (§5.4): "don't union parts" forbids two owners of one shared datum, *not* composing the Ref from disjoint subsystem-private extensions over a shared core. And when a shared datum's value is a genuine merge, the core computes it via a not-under-test merge engine fed from intent (or a convergence relation for the overlapping residue) — never by reading the SUT back, and never by re-implementing Loro. **"Monolithic by necessity" is about *shared data*, not the struct: the Ref may be an *open registry* of per-module private extensions over the coupled core (§5.5) — that is the seam for new-subsystem / git-submodule contribution, and the only thing it forbids is a module silently owning a second copy of a shared datum.**
 - **Degraded twins must be routed through the `CapSet`** on both SUT and Ref, or false divergence (§5.2 soundness rule).
 - **Caching adapter union impl** lives once on `CapMap`; do not let it regress into per-SUT panicking impls (that's the rejected Move B).
 - **Open → resolving:** exact split of `Subsystem` (coarse, ~9) vs `Sut*` caps (fine, ~23). Recommendation stands: unify on the capability as the single unit for both `prov` and `need`. **The §8.5 audit gives the first concrete instance:** `min_sut` today encodes *realization* (the structural block invariants carry `TursoProjection` because `E2ESut::SutBackend` reads Turso) rather than the *capability* their bodies actually call (`SutBackend`). **But §8.6 shows this is not a free re-label:** there is only one `SutBackend` realization and it *needs* Turso, so the `TursoProjection` in `min_sut` is currently load-bearing — it gates these invariants out of the non-Turso `loro_backend_pbt` slice, where the SQL would fail. The reclassification (realization→capability) must wait until a non-Turso `SutBackend` realization exists; only then does the parity gate hold. The broader `Subsystem`-vs-cap unification follows from there.
@@ -556,9 +774,20 @@ with the current two components the catalog is *complete*, so coverage now grows
 adding **components** (each a 🧠 scope task that unlocks a batch of 🤖 invariant-adds),
 not ref caps.
 
+**Open-contribution item (🧠, not built — §5.5):** make a new subsystem contributable
+as a self-contained module (separate crate / git submodule) with zero central edits —
+(a) flip transition dispatch to the open `inventory`/`typetag` registry (§8.9, in
+flight), and (b) replace `ReferenceState`'s hardcoded subsystem-*private* fields with
+an open per-module extension registry (the coupled cross-cutting core stays as-is).
+Boundary: additive/private-state subsystems only; a shared-semantics change still
+touches the core.
+
 The step-by-step **how** — copy-paste recipes for adding an invariant, a component,
 or hosting a cap, with the Needs-from-bounds rule, the test-triad patterns, and the
-anti-patterns that fail review — is [`PbtCompositionContributing.md`](PbtCompositionContributing.md).
+anti-patterns that fail review — now lives in the **`pbt-composition` skill**
+(`.claude/skills/pbt-composition/`), the single source of truth for the migration
+*process*. It auto-fires when you edit this code; this document remains the referenced
+*architecture* (the §-numbered decisions the skill cites).
 
 ## 10. File map
 

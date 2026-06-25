@@ -116,8 +116,6 @@ impl RenderSut {
         block_id: &holon_api::EntityUri,
         value: bool,
     ) {
-        use holon_frontend::reactive_view_model::ReactiveViewModel;
-
         let engine = self
             .reactive_engine
             .borrow()
@@ -130,45 +128,16 @@ impl RenderSut {
             .unwrap_or_else(holon_api::root_layout_block_uri);
         let root = engine.snapshot_reactive(&root_id);
 
-        fn find_and_flip(node: &ReactiveViewModel, target_id: &str, value: bool) -> bool {
-            let is_toggle = matches!(node.widget_name().as_deref(), Some("expand_toggle"));
-            if is_toggle {
-                let props = node.props.lock_ref();
-                let matches = props
-                    .get("target_id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s == target_id)
-                    .unwrap_or(false);
-                drop(props);
-                if matches && let Some(gate) = node.expanded.as_ref() {
-                    gate.set(value);
-                    return true;
-                }
-            }
-            for child in &node.children {
-                if find_and_flip(child, target_id, value) {
-                    return true;
-                }
-            }
-            if let Some(slot) = node.slot.as_ref() {
-                let content = slot.content.lock_ref();
-                if find_and_flip(&content, target_id, value) {
-                    return true;
-                }
-            }
-            if let Some(lazy) = node.lazy_slot.as_ref()
-                && let Some(materialised) = lazy.cache.get_cloned()
-                && find_and_flip(&materialised, target_id, value)
-            {
-                return true;
-            }
-            false
-        }
-
         let block_uri = block_id.to_string();
         let target_id = block_uri.strip_prefix("block:").unwrap_or(&block_uri);
+        // Shared walk with `ReactiveEngineDriver::set_block_expanded` — both
+        // poke the exact gate the GPUI chevron's `on_mouse_down` flips.
+        let gate = root.find_expand_toggle_gate(target_id);
+        if let Some(gate) = &gate {
+            gate.set(value);
+        }
         assert!(
-            find_and_flip(&root, target_id, value),
+            gate.is_some(),
             "set_expand_toggle_gate: no expand_toggle node with \
              target_id={target_id} in reactive tree under {root_id}. \
              The fixture grew an expand_toggle render but the engine \
@@ -183,10 +152,5 @@ impl RenderSut {
         let engine = self.reactive_engine.borrow();
         let engine = engine.as_ref()?;
         engine.key_bindings().lock_ref().get(op_name).cloned()
-    }
-
-    /// Drain all pending ViewModel emissions since the last drain.
-    pub(super) fn vm_emissions_drain(&self) -> Vec<holon_frontend::ViewModel> {
-        std::mem::take(&mut *self.vm_emissions.lock().unwrap())
     }
 }

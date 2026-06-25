@@ -146,6 +146,10 @@ pub const WIDE_REQUIRED_INVARIANTS: &[&str] = &[
     "inv-block-parent-matches-ref/block_raw",
     "inv-blocks-match-ref/org",
     "inv-navigation-focus",
+    // SQL-projection per-block content equality. `full_headless` hosts `SutSqlProjection`
+    // (the SQL `block_raw.content` read), so requiring it every tick makes the ONE PBT the
+    // owner of this check — replacing the deleted standalone `split_block_content_pbt`.
+    "inv-block-content-matches-ref",
     "inv-focus-roots",
     "inv-viewmodel-no-error-widgets",
     // ViewModel liveness (C-remainder port, 2026-06-23): same root-VM readiness as

@@ -1352,10 +1352,4 @@ impl E2ESut {
     // ── Phase 7 accessors for capability-trait impls ───────────────────────
     // These expose private state through the narrowest safe surface.
     // DO NOT use from transitions — the proxy semantics are invariant-only.
-
-    /// Drain all pending ViewModel emissions since the last drain.
-    /// Production path: sut.rs:5846 `std::mem::take(&mut *self.render.vm_emissions.lock().unwrap())`.
-    pub(super) fn vm_emissions_drain(&mut self) -> Vec<holon_frontend::ViewModel> {
-        self.render.vm_emissions_drain()
-    }
 }

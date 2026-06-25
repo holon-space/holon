@@ -1,6 +1,5 @@
-//! `split_block_content_pbt` — narrow slice targeting two SplitBlock
-//! content-routing bugs that share the same minimal recipe (lifecycle +
-//! parser-seeded doc + split).
+//! `split_block_content_pbt` — SplitBlock content-routing regression, now
+//! driven through the composed `ComposedSut<WideE2E>` (E3 migration).
 //!
 //! # Bug class A (SqlOnly variant)
 //!
@@ -24,133 +23,25 @@
 //! (`event_acks.consumer='loro'` empty), so SQL→Loro replay never
 //! happens and chord-op `resolve_parent_tree_id` can't find the parent.
 //! See `devlog/2026-05-19-splitblock-loro-mirror-empty.md` for the
-//! full diagnosis. Same minimal shape as Bug A — WriteOrgFile +
-//! SplitBlock — but the failure mode is a chord-op error rather than
-//! a content divergence, which surfaces through the existing
-//! `inv-block-content-matches-ref` plus error invariants on the SUT.
+//! full diagnosis.
 //!
-//! # Why this slice exists
+//! # E3 migration (2026-06-26)
 //!
-//! `general_e2e_pbt` takes ~10 min and exercises 50+ transitions. This
-//! slice narrows to **lifecycle + parser write + split** and runs
-//! `inv-block-content-matches-ref` (per-block content equality) which
-//! caught the wide-PBT divergence directly. Per-case wall expected
-//! ~5-7 s; 16 cases × 1..6 steps should reproduce in under 2 minutes
-//! per variant.
+//! The old `E2ESut` `component_pbt!` halves + their gherkin replays
+//! (`split_block_content_pbt[_full]`, `_gherkin*`) have been **deleted** —
+//! they dispatched `InvBlockContentMatchesRef` over `E2ESut::SutSqlProjection`,
+//! which this stack removes from `E2ESut` (E3). The split-routing regression
+//! now rides on `ComposedSut<WideE2E>` via `split_block_content_composed_gherkin`
+//! (the per-tick `inv-block-content-matches-ref`, in `WIDE_REQUIRED_INVARIANTS`,
+//! catches mis-routing). The pure-parse outline check is SUT-agnostic and stays.
 //!
-//! # Transitions
-//!
-//! - `StartApp` — required.
-//! - `WriteOrgFile` (non-index.org) — seeds the doc via the parser path
-//!   so split targets are parser-created blocks, matching the failing
-//!   wide-PBT shape (vs `BulkExternalAdd`'s loro-tree blocks).
-//! - `NavigateFocus` — needed to put cursor in a region before split.
-//! - `SplitBlock` — the suspect.
-//!
-//! Deliberately omitted: peer/Loro transitions (no Loro here — `SqlOnly`),
-//! BulkExternalAdd (different write path), TypeChars/DeleteBackward
-//! (would introduce in-flight cell writes confounding the diagnosis).
-//!
-//! # Capture-on-panic
-//!
-//! `declare_pbt_slice!` installs a thread-local capture buffer; the first
-//! panic dumps the failing transition sequence to
-//! `tests/fixtures/split_block_content_pbt/captured-*.json` for replay.
+//! Coverage not yet ported off the deleted `E2ESut` halves (handoff
+//! `PbtComposition_SutSqlProjection_Handoff.md`, Step 1): the assert-vocabulary
+//! (`widget contains` / `focus is on`) and the corrupt-id / before-startup
+//! negative controls. Re-author these as born-booted composed features when
+//! resumed.
 
 #![cfg(feature = "pbt")]
-
-use holon_integration_tests::component_pbt;
-use holon_integration_tests::pbt::invariants::bodies::block_content_matches_ref::InvBlockContentMatchesRef;
-use holon_integration_tests::pbt::transitions::{NavigateFocus, SplitBlock};
-
-component_pbt! {
-    test_fn: split_block_content_pbt,
-    set: holon_pbt_core::ComponentSet::sql_only(),
-    transitions: [
-        preset lifecycle,
-        preset org_writes,
-        NavigateFocus,
-        SplitBlock,
-    ],
-    invariants: [InvBlockContentMatchesRef],
-    cases: 16,
-    max_shrink_iters: 40,
-    steps: 1..6,
-    fixtures_dir: "tests/fixtures/split_block_content_pbt",
-}
-
-component_pbt! {
-    test_fn: split_block_content_pbt_full,
-    set: holon_pbt_core::ComponentSet::full_headless(),
-    transitions: [
-        preset lifecycle,
-        preset org_writes,
-        NavigateFocus,
-        SplitBlock,
-    ],
-    invariants: [InvBlockContentMatchesRef],
-    cases: 16,
-    max_shrink_iters: 40,
-    steps: 1..6,
-    fixtures_dir: "tests/fixtures/split_block_content_pbt_full",
-}
-
-/// Phase 1 proof-point: replay a hand-authored Gherkin `.feature` through the
-/// same SUT machine + `InvBlockContentMatchesRef` as the JSON fixtures, but
-/// with strict semantics (a failed precondition is a hard panic, never a
-/// silent skip). Drives the `SqlOnly` slice.
-#[test]
-fn split_block_content_pbt_gherkin() {
-    holon_integration_tests::pbt::fixtures::run_feature_strict::<
-        SplitBlockContentPbtMachine,
-        SplitBlockContentPbtSut,
-    >(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/split_block_content_pbt/split_routes_prefix_suffix.feature"
-    ));
-}
-
-/// Phase 3 assert vocabulary: replay a feature with `Then` widget-contains +
-/// focus-on assertions. Surfaces real harness state — fails loud if the SUT
-/// can't render / track focus.
-#[test]
-fn split_block_content_pbt_gherkin_asserts() {
-    holon_integration_tests::pbt::fixtures::run_feature_strict::<
-        SplitBlockContentPbtMachine,
-        SplitBlockContentPbtSut,
-    >(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/_gherkin_assert/widget_and_focus.feature"
-    ));
-}
-
-/// VT1: a block created by `SplitBlock` is addressable as `block::split-N`.
-/// Asserts focus + rendered content on the new split block (and the trimmed
-/// original), exercising synthetic-id resolution and `within N seconds`.
-#[test]
-fn split_block_content_pbt_gherkin_split_addressing() {
-    holon_integration_tests::pbt::fixtures::run_feature_strict::<
-        SplitBlockContentPbtMachine,
-        SplitBlockContentPbtSut,
-    >(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/_gherkin_assert/split_then_address_new_block.feature"
-    ));
-}
-
-/// Negative control: a `Then` assertion before the app is started is vacuous
-/// (no rendered state) and must HARD PANIC, never silently pass.
-#[test]
-#[should_panic(expected = "vacuous")]
-fn split_block_content_pbt_gherkin_assert_before_startup_panics() {
-    holon_integration_tests::pbt::fixtures::run_feature_strict::<
-        SplitBlockContentPbtMachine,
-        SplitBlockContentPbtSut,
-    >(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/_gherkin_negative/then_before_startup.feature"
-    ));
-}
 
 /// Phase 4 expansion check: a `Scenario Outline` with N `Examples` rows must
 /// expand to N independent fixtures, with `<placeholder>` substituted in the
@@ -173,29 +64,13 @@ fn split_block_content_pbt_gherkin_outline_expands() {
     }
 }
 
-/// Negative control: a `.feature` whose split target references a block whose
-/// `:ID:` was corrupted must HARD PANIC under strict replay (precondition
-/// failure), never silently skip the step and report green.
-#[test]
-#[should_panic(expected = "preconditions FAILED")]
-fn split_block_content_pbt_gherkin_corrupt_id_panics() {
-    holon_integration_tests::pbt::fixtures::run_feature_strict::<
-        SplitBlockContentPbtMachine,
-        SplitBlockContentPbtSut,
-    >(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/_gherkin_negative/split_corrupt_id.feature"
-    ));
-}
-
-/// E3 MIGRATION PROOF (2026-06-25): the SAME gherkin replay over `ComposedSut<WideE2E>`
-/// (born-booted `full_headless` CapMap) instead of `E2ESut`. The feature is re-authored
-/// onto the wide seed (no `Given org file` / `app is started` ceremony — born-booted),
-/// focuses + splits `c1`; the split-routing regression is caught by the per-tick composed
-/// catalog (`inv-block-content-matches-ref`, in `WIDE_REQUIRED_INVARIANTS` → non-vacuous),
-/// and the assert vocabulary runs via `impl FixtureAssertable for ComposedSut`. Once the
-/// remaining features are ported (handoff), the `E2ESut` `component_pbt!` halves + the old
-/// `.feature` corpus above are deleted and `SutSqlProjection` comes off `E2ESut`.
+/// E3 MIGRATION PROOF (2026-06-25): the gherkin replay over `ComposedSut<WideE2E>`
+/// (born-booted `full_headless` CapMap) instead of `E2ESut`. The feature is
+/// re-authored onto the wide seed (no `Given org file` / `app is started`
+/// ceremony — born-booted), focuses + splits `c1`; the split-routing regression
+/// is caught by the per-tick composed catalog (`inv-block-content-matches-ref`,
+/// in `WIDE_REQUIRED_INVARIANTS` → non-vacuous), and the assert vocabulary runs
+/// via `impl FixtureAssertable for ComposedSut`.
 #[test]
 fn split_block_content_composed_gherkin() {
     holon_integration_tests::pbt::fixtures::run_feature_strict::<

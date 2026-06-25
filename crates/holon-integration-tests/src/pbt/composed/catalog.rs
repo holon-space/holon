@@ -45,6 +45,14 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // Windowed focus coherence (E4 inc4): needs `SutDriver` (now CapMap-hosted)
         // + `SutLayout`; no ref cap. Only the full windowed slice supplies both.
         invariants::window_focus::wire(),
+        // Windowed no-error-widgets (laid-out tree + BoundsRegistry): needs
+        // `SutViewModel + SutLayout`, no ref. Windowed sibling of the headless
+        // `viewmodel_no_error_widgets`; only the windowed slice supplies `SutLayout`.
+        invariants::frontend_no_error_widgets::wire(),
+        // Windowed differential focus: engine global focus matches the ref model.
+        // Needs `SutDriver` + `RefGlobalFocus + RefEditorMirror`. Only the windowed
+        // slice supplies `SutDriver`; body self-skips with no focus / open editor.
+        invariants::focus_matches_ref::wire(),
         // Watch invariants (E1 — SutWatchRows over the production reactive surface):
         // needs `SutWatchRows` + `RefWatches`. Only the frontend slice supplies the
         // SUT cap; trivially Ok until a slice registers watches + seeds the ref.
@@ -80,6 +88,11 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         invariants::editable_text_has_draggable::wire(),
         invariants::viewmodel_root_matches_render_expr::wire(),
         invariants::viewmodel_decompiled_rows_match_query::wire(),
+        // Degraded "shows source" twin (Bundle D): the first negative-selection
+        // (`sut_absent: [SutQueryResults]`) consumer. Mutually exclusive with the
+        // full-mode `viewmodel_decompiled_rows_match_query` above — selected only by
+        // the no-query-engine `block_query_degraded` builder.
+        invariants::viewmodel_shows_source_when_no_query::wire(),
         invariants::viewmodel_entity_ids_subset_of_data::wire(),
         invariants::viewmodel_state_toggle_correct::wire(),
         invariants::viewmodel_editable_text_triggers::wire(),

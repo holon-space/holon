@@ -7,6 +7,7 @@
 //! CDC→watch→`interpret_pure` render path) + `SutBackend` (over `block_raw`), so
 //! the renderer invariants *and* the block-tree catalog both run over it.
 
+pub mod block_query_component;
 pub mod builders;
 pub mod components;
 

@@ -408,6 +408,30 @@ impl UserDriver for GpuiUserDriver {
         Ok(())
     }
 
+    /// Real expand/collapse: synthesize a click on the chevron registered under
+    /// `expand_toggle_id_for(target)`, so the production `on_mouse_down` handler
+    /// flips the row's view-local `expanded` `Mutable<bool>` — the same path a
+    /// user's chevron tap takes. The chevron is a toggle with no driver-readable
+    /// state (`snapshot_reactive` rebuilds a fresh tree), so direction is owned
+    /// by the ref model (see the trait doc); `expanded` is the intended result.
+    async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
+        let target_str = target.as_str();
+        let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
+        let element_id = holon_frontend::expand_toggle_id_for(bare);
+        let (cx, cy) = self.require_element_center(&element_id, "set_block_expanded")?;
+        tracing::info!(
+            "[ui-event] set_block_expanded({target_str:?}, expanded={expanded}) → click chevron \
+             {element_id:?} at ({cx:.1},{cy:.1})"
+        );
+        self.dispatch_event(InteractionEvent::MouseClick {
+            position: (cx, cy),
+            button: "left".into(),
+            modifiers: Vec::new(),
+        })
+        .await?;
+        Ok(())
+    }
+
     /// Focus the entity via click, then press the chord keys through
     /// the interaction channel. Modifier keys are pressed, the regular
     /// keys are clicked, and modifiers are released in reverse.

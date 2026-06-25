@@ -147,6 +147,46 @@ mod tests {
         // standalone `task_state_coherence_pbt` slice — see the convergence rule in
         // `PbtCompositionDesign` §8.10.
         ("SutLoroTaskState", &["inv-task-state-storage-coherence"]),
+        // SutEditorMirrorRead → the headless editor caret/live-text read surface. Its E2ESut
+        // impl is deleted; both ref-comparison invariants now run only via the composed catalog
+        // (`editor_caret::wire` + `editor_text::wire`), hosted by `full_headless`.
+        (
+            "SutEditorMirrorRead",
+            &[
+                "inv-editor-caret-matches-ref",
+                "inv-editor-text-matches-ref",
+            ],
+        ),
+        // SutSqlProjection → the headless Turso SQL-projection read surface. Its E2ESut impl
+        // is deleted; `inv-navigation-focus` (now in `WIDE_REQUIRED_INVARIANTS`) and
+        // `inv-block-content-matches-ref` run only via the composed catalog
+        // (`navigation_focus::wire` + `block_content_sql::wire`). The standalone
+        // `split_block_content_pbt` / `peer_conflict_pbt` slices were deleted (the latter's
+        // peer transitions are covered by `full_headless_cap_set_admits_peer_transitions`).
+        (
+            "SutSqlProjection",
+            &["inv-navigation-focus", "inv-block-content-matches-ref"],
+        ),
+        // SutViewModel → the headless ViewModel read surface. Its E2ESut impl is deleted;
+        // all ViewModel-bound bodies now run only via the composed catalog — `full_headless`
+        // (HeadlessFrontendComponent) hosts `SutViewModel`, exercised every tick by
+        // `general_e2e_composed_pbt`. The last two are the dual `SutViewModel + SutLayout`
+        // windowed bodies, also covered by `run_windowed_composed_check`. (`SutLayout` /
+        // `SutDriver` are NOT relocated here — they remain on `E2ESut`'s windowed shell.)
+        (
+            "SutViewModel",
+            &[
+                "inv-view-selection",
+                "inv-frontend-engine",
+                "inv-frontend-root-not-error",
+                "inv-live-tree-matches-fresh",
+                "inv-viewmodel-no-error-widgets",
+                "inv-value-fn-provider-identity",
+                "inv-value-fn-provider-arg-variance-13",
+                "inv-frontend-no-error-widgets",
+                "inv-frontend-bounds-rendered",
+            ],
+        ),
     ];
 
     /// Print the full selection baseline (run with `--nocapture`). This is the

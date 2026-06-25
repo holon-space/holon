@@ -17,6 +17,9 @@
 //!
 //! The new invariant then lights up automatically in *every* slice whose
 //! components provide its `Needs` — no per-slice wiring.
+//!
+//! Full process (router, recipes, anti-patterns, the §8.10 convergence litmus):
+//! the `pbt-composition` skill (`.claude/skills/pbt-composition/`).
 
 pub mod block_content;
 pub mod block_content_sql;
@@ -26,9 +29,11 @@ pub mod displayed_text;
 pub mod editable_text_has_draggable;
 pub mod editor_caret;
 pub mod editor_text;
+pub mod focus_matches_ref;
 pub mod focus_roots;
 pub mod frontend_bounds_rendered;
 pub mod frontend_engine;
+pub mod frontend_no_error_widgets;
 pub mod frontend_root_not_error;
 pub mod live_children_match_ref;
 pub mod live_tree_matches_fresh;
@@ -54,6 +59,7 @@ pub mod viewmodel_editable_text_triggers;
 pub mod viewmodel_entity_ids_subset_of_data;
 pub mod viewmodel_no_error_widgets;
 pub mod viewmodel_root_matches_render_expr;
+pub mod viewmodel_shows_source_when_no_query;
 pub mod viewmodel_snapshot;
 pub mod viewmodel_state_toggle_correct;
 pub mod viewmodel_tree_virtual_slots;

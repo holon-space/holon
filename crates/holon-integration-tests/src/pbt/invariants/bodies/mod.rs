@@ -43,6 +43,7 @@ pub mod viewmodel_editable_text_triggers;
 pub mod viewmodel_entity_ids_subset_of_data;
 pub mod viewmodel_no_error_widgets;
 pub mod viewmodel_root_matches_render_expr;
+pub mod viewmodel_shows_source_when_no_query;
 pub mod viewmodel_snapshot;
 pub mod viewmodel_state_toggle_correct;
 pub mod viewmodel_tree_virtual_slots;

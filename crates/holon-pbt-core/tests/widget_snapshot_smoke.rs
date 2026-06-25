@@ -129,6 +129,9 @@ impl SutRenderer for ToySut {
     async fn root_render_ready(&self) -> bool {
         false
     }
+    async fn root_render_kind(&self) -> Option<String> {
+        None
+    }
 }
 
 #[async_trait::async_trait(?Send)]

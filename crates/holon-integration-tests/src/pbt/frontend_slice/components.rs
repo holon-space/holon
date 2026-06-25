@@ -29,9 +29,9 @@ use holon_frontend::{FrontendSession, ReactiveEngineDriver, UserDriver};
 use holon_pbt_core::capabilities::{
     CapRegion, FrontendRootVm, ProviderStabilityReport, SutBackend, SutBlockTreeWrite,
     SutEditorMirrorRead, SutEditorMirrorWrite, SutErrorLog, SutFocusWrite, SutHistoryWrite,
-    SutMcpEmit, SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutRenderer,
-    SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister, SutWatchRows, ViewportHint,
-    WatchRow, WidgetSnapshot,
+    SutMcpEmit, SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults,
+    SutRenderer, SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister, SutWatchRows,
+    ViewportHint, WatchRow, WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use tempfile::TempDir;
@@ -278,6 +278,18 @@ impl HeadlessFrontendComponent {
     /// merged block becomes the focused block (the frontend split focus-handoff).
     pub(crate) fn reactive(&self) -> Arc<ReactiveEngine> {
         self.reactive.clone()
+    }
+
+    /// The production headless [`UserDriver`] (`ReactiveEngineDriver`) — the SAME
+    /// instance the editor/focus caps drive through, so it hosts the one live
+    /// `HeadlessEditorMirror`. Handed to the headless driver-backed input component
+    /// (`DriverInputComponent::with_input_headless`) so the composed `CapMap`'s gesture
+    /// caps (`SutBlockInteract`/`SutArrowNavigate`/`SutDriver`) drive the UI-adjacent
+    /// logic layer over ONE driver (the VM rung, §8.11). MUST be this instance, not a
+    /// fresh `ReactiveEngineDriver::new` — a second one would carry a separate editor
+    /// mirror and desync caret/text from the editor-write caps.
+    pub(crate) fn driver(&self) -> Arc<dyn UserDriver> {
+        self.driver.clone()
     }
 
     /// The frontend's `LoroDocumentStore` — the authority store the production op
@@ -709,6 +721,28 @@ impl SutRenderer for HeadlessFrontendComponent {
             holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot();
         }))
         .is_ok()
+    }
+
+    async fn root_render_kind(&self) -> Option<String> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let rqr = self.resolve_watch(&root_uri).await?;
+        match rqr.snapshot().0 {
+            holon_api::RenderExpr::FunctionCall { name, .. }
+                if name != "loading" && name != "spacer" =>
+            {
+                Some(name)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutQueryResults for HeadlessFrontendComponent {
+    async fn root_query_row_count(&self) -> Option<usize> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let rqr = self.resolve_watch(&root_uri).await?;
+        Some(rqr.snapshot().1.len())
     }
 }
 

@@ -20,16 +20,12 @@ use holon_frontend::user_driver::UserDriver;
 use holon_frontend::{OperationIntent, ReactiveViewModel};
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::RebindHandle;
-use holon_integration_tests::pbt::composed::composed_invariant_catalog;
+use holon_integration_tests::pbt::composed::windowed::run_windowed_composed_check;
 use holon_integration_tests::pbt::fixtures::FixtureStep;
 use holon_integration_tests::pbt::phased::{
     replay_fixture_with_driver_sync_callback, PbtReadyContext, PbtReadyResult,
 };
-use holon_integration_tests::pbt::reference_capabilities::reference_state_ref_caps;
-use holon_integration_tests::pbt::reference_state::Resolved;
-use holon_integration_tests::pbt::window_slice::builders::window_focus_wide;
 use holon_integration_tests::pbt::ReferenceState;
-use holon_pbt_core::composition::run_selected;
 
 /// Wait on tokio (real time) until the engine's root layout signal produces
 /// a non-loading view model. Under TestPlatform gpui timers time-skip, so the
@@ -439,6 +435,28 @@ impl UserDriver for SimUserDriver {
         Ok(())
     }
 
+    /// Mirror `GpuiUserDriver::set_block_expanded`: click the chevron
+    /// registered under `expand_toggle_id_for(target)` so the production
+    /// handler flips the row's view-local `expanded` `Mutable<bool>`. Direction
+    /// is ref-owned (see the trait doc), so the desired-state arg is unused —
+    /// the chevron is a toggle and the ref only generates the state-changing
+    /// direction.
+    async fn set_block_expanded(&self, target: &EntityUri, _: bool) -> Result<(), anyhow::Error> {
+        let target_str = target.as_str();
+        let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
+        let element_id = holon_frontend::expand_toggle_id_for(bare);
+        self.pump();
+        let info = self.bounds.element_info(&element_id).ok_or_else(|| {
+            anyhow::anyhow!("set_block_expanded: chevron {element_id} not in bounds")
+        })?;
+        let (cx, cy) = info.center();
+        self.raw_click(Point {
+            x: Pixels::from(cx),
+            y: Pixels::from(cy),
+        });
+        Ok(())
+    }
+
     async fn click_entity_with_tree(
         &self,
         _: &EntityUri,
@@ -745,6 +763,15 @@ impl SimReplayer {
             Arc::new(std::sync::Mutex::new(None));
         let engine_slot_ready = engine_slot.clone();
 
+        // Driver slot — twin of `engine_slot`: `on_ready` stashes the live
+        // `SimUserDriver` so the per-tick hook can build the windowed INPUT
+        // `CapMap` (`window_input_wide`) over the same production driver the
+        // window installs (E4). `SimUserDriver` carries `unsafe impl Send/Sync`,
+        // so the `Arc<Mutex<…>>` is closure-safe.
+        let driver_slot: Arc<std::sync::Mutex<Option<Arc<dyn UserDriver>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let driver_slot_ready = driver_slot.clone();
+
         let on_ready = move |ctx: &PbtReadyContext| -> Option<PbtReadyResult> {
             let app = unsafe { &mut *app_ptr };
             let rebind = unsafe { &*rebind_ptr };
@@ -775,6 +802,8 @@ impl SimReplayer {
                 rt_handle: rt_handle.clone(),
                 interaction_tx: interaction_tx.clone(),
             });
+            // Hand the live driver to the per-tick hook (E4 windowed input).
+            *driver_slot_ready.lock().unwrap() = Some(driver.clone());
             Some(PbtReadyResult {
                 driver: Some(driver),
                 frontend_engine: Some(ctx.reactive_engine.clone()),
@@ -787,10 +816,12 @@ impl SimReplayer {
         // (the full catalog + a forced window settle every tick is a real cost — H-B4 —
         // so default-off keeps existing windowed runs fast; the `E2ESut` per-step
         // `check_invariants` still runs in parallel, so this is purely additive). When
-        // on, each post-StartApp tick: settle the window, build the windowed `CapMap`
-        // (`window_focus_wide` over this window's geometry + engine) and a ref `CapMap`
-        // from the LIVE `ReferenceState`, then run the composed catalog over them and
-        // panic on failures.
+        // on, each post-StartApp tick: settle the window, then call the shared
+        // `run_windowed_composed_check` (the single-sourced E4 check) which builds the
+        // windowed INPUT `CapMap` (`window_input_wide` over this window's geometry +
+        // engine + driver) and a ref `CapMap` from the LIVE `ReferenceState`, runs the
+        // composed catalog, and panics on failures / non-vacuity. Same free fn the
+        // `E2ESut` per-step hook calls — one copy.
         let catalog_enabled = std::env::var("HOLON_PBT_WINDOWED_CATALOG")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -830,18 +861,23 @@ impl SimReplayer {
                 .unwrap()
                 .clone()
                 .expect("per-tick hook fired before StartApp populated the engine slot");
-            let sut = window_focus_wide(Box::new(bounds_tick.clone()), engine);
-            // Build the ref CapMap from the LIVE reference state (not a fresh/seeded one)
-            // so the displayed-text/bounds checks compare against what the run actually
-            // expects — load-bearing, not vacuous.
-            let ref_caps =
-                reference_state_ref_caps(Resolved::identity(ref_state.clone()).map(Arc::new));
+            let driver = driver_slot
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("per-tick hook fired before StartApp populated the driver slot");
 
+            // The shared, single-sourced windowed check builds `window_input_wide`
+            // over the LIVE geometry + engine + driver and a ref `CapMap` from the
+            // LIVE reference state, runs the composed catalog, and asserts no
+            // divergence + the non-vacuity floor (inv-frontend-bounds-rendered ran).
             let t_check = std::time::Instant::now();
-            let report = futures::executor::block_on(run_selected(
-                &composed_invariant_catalog(),
-                &sut,
-                &ref_caps,
+            let report = futures::executor::block_on(run_windowed_composed_check(
+                Box::new(bounds_tick.clone()),
+                engine,
+                driver,
+                ref_state,
+                &format!("tick {tick_idx}"),
             ));
             let check_ms = t_check.elapsed().as_millis();
             if std::env::var("HOLON_PBT_WINDOWED_CATALOG_TIMING").is_ok() {
@@ -852,24 +888,6 @@ impl SimReplayer {
                     report.failures().len()
                 );
             }
-            // Non-vacuity floor: the windowed geometry invariant MUST have been selected
-            // and run over the live window — else a mis-built ref silently deselected
-            // everything and `failures.is_empty()` is vacuously true. Mirrors the harness
-            // `REQUIRED_INVARIANTS` discipline. (`window_focus_wide` + live ref ⇒ this
-            // runs; the deterministic `gpui_window_slice` test proves it bites under a
-            // planted fault — the per-tick loop reuses that exact `run_selected` path.)
-            assert!(
-                report.ran_ids().contains(&"inv-frontend-bounds-rendered"),
-                "windowed per-tick non-vacuity: inv-frontend-bounds-rendered must run \
-                 each tick (ran={:?}, deselected={:?})",
-                report.ran_ids(),
-                report.deselected.iter().map(|d| d.0).collect::<Vec<_>>()
-            );
-            assert!(
-                report.failures().is_empty(),
-                "windowed per-tick catalog diverged at tick {tick_idx}: {:?}",
-                report.failures()
-            );
         };
 
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -418,4 +418,8 @@ impl<'a, S: SutRenderer> SutRenderer for CachingProxy<'a, S> {
     async fn root_render_ready(&self) -> bool {
         self.inner.root_render_ready().await
     }
+
+    async fn root_render_kind(&self) -> Option<String> {
+        self.inner.root_render_kind().await
+    }
 }

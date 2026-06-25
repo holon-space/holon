@@ -24,11 +24,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use holon::api::BackendEngine;
 use holon_api::{EntityUri, StorageEntity, Value};
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
+use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 
 /// Shared oracle-synthetic → SUT-real id map (the `doc_uri_map` analog). The
@@ -179,5 +181,160 @@ impl SutBlockTreeWrite for OpDispatchWriter {
 
     async fn apply_move_down(&self, id: &EntityUri) {
         self.execute("move_down", self.id_only(id)).await;
+    }
+}
+
+/// VM-rung **keystroke-driven** `SutBlockTreeWrite` (LL-3, §8.11). Structural
+/// mutations are driven through the production [`UserDriver`]'s editor-keystroke
+/// pipeline — the UI-adjacent interaction layer — NOT raw op dispatch. This is the
+/// "drive interactions UI-adjacent, even headless" directive applied to structural
+/// edits: the construction-time-installed driver (here a `ReactiveEngineDriver`
+/// over the booted frontend) IS what performs the split, so a bug in the
+/// keystroke→intent→reducer path reproduces here and localizes to the VM layer.
+///
+/// `apply_split_block` = focus the block's editor (`click_entity`, exactly the
+/// production focus-on-click — `HeadlessFrontendComponent::apply_focus_editable_text`
+/// IS `click_entity`) + `home` + N×`right` + `Enter`. The `HeadlessEditorMirror`
+/// maps `Enter` (no slash match) to `split_block` at the live cursor, so the split
+/// lands at the same byte the user's caret sits on — the same physical sequence
+/// `E2ESut`'s windowed `apply_split_block_input_pipeline` performs, minus the
+/// geometry/window-focus prechecks (no platform window headless).
+///
+/// Ops not yet on the keystroke path (`join`/`indent`/`outdent`/`move_*`) delegate
+/// to the inner [`OpDispatchWriter`] — the rebind is incremental (Split first).
+pub struct KeystrokeBlockTreeWriter {
+    driver: Arc<dyn UserDriver>,
+    /// The frontend `ReactiveEngine` (as `BuilderServices`) — read the block's live
+    /// `MutableText` content cell for the byte→keystroke conversion (the same source
+    /// `editor_live_text` reads; populated by rendering, not the router cache that
+    /// `displayed_text` consults).
+    reactive: Arc<ReactiveEngine>,
+    resolver: IdResolver,
+    fallback: OpDispatchWriter,
+}
+
+impl KeystrokeBlockTreeWriter {
+    /// `driver` drives the keystrokes; `reactive` reads live editor content; `resolver`
+    /// translates oracle synthetic ids to the SUT-minted ids (shared with `fallback`'s
+    /// resolver); `fallback` dispatches the not-yet-converted ops over the same engine.
+    pub fn new(
+        driver: Arc<dyn UserDriver>,
+        reactive: Arc<ReactiveEngine>,
+        resolver: IdResolver,
+        fallback: OpDispatchWriter,
+    ) -> Self {
+        Self {
+            driver,
+            reactive,
+            resolver,
+            fallback,
+        }
+    }
+
+    fn resolve(&self, id: &EntityUri) -> EntityUri {
+        self.resolver
+            .lock()
+            .expect("resolver lock")
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone())
+    }
+
+    /// Focus/open the block's editor — the production focus-on-click path
+    /// (`HeadlessFrontendComponent::apply_focus_editable_text` IS `click_entity`),
+    /// so a subsequent keystroke routes to THIS block's editor.
+    async fn focus_editor(&self, resolved: &EntityUri, ctx: &str) {
+        self.driver
+            .click_entity(resolved, "main")
+            .await
+            .unwrap_or_else(|e| panic!("[{ctx}/keystroke] focus {resolved} failed: {e:#}"));
+    }
+
+    /// Send one raw keystroke through the driver, fail-loud with the gesture context.
+    async fn key(&self, keystroke: &str, modifiers: &[&str], ctx: &str) {
+        self.driver
+            .send_raw_keystroke(keystroke, modifiers)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[{ctx}/keystroke] {keystroke} {modifiers:?} failed: {e:#}")
+            });
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
+    async fn apply_split_block(&self, id: &EntityUri, position: usize) {
+        let resolved = self.resolve(id);
+        self.focus_editor(&resolved, "SplitBlock").await;
+        // `position` is a byte offset; each `right` advances one CHAR. Convert against
+        // the block's live `MutableText` content cell (the pre-split text the caret
+        // walks — the same source `editor_live_text` reads). Populated by rendering, so
+        // it is present for any rendered text block (unlike `displayed_text`'s router
+        // cache, which is only warm for router-touched blocks).
+        let services: &dyn BuilderServices = self.reactive.as_ref();
+        // Poll for the content cell: a freshly-created target (e.g. split-of-a-split)
+        // may still be landing its Loro `content_raw`. Fail loud at the deadline rather
+        // than convert against an absent cell.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let text = loop {
+            match services.editable_text(&resolved, "content") {
+                Ok(cell) => break cell.current(),
+                Err(e) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        panic!(
+                            "[SplitBlock/keystroke] no editable content cell for {resolved} \
+                             within 2s — cannot convert byte position {position} to \
+                             keystrokes: {e:#}"
+                        );
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            text.is_char_boundary(position),
+            "[SplitBlock/keystroke] position {position} is not a char boundary of {text:?}"
+        );
+        let right_presses = text[..position].chars().count();
+        // Caret to `position`, then Enter → `HeadlessEditorMirror` splits at the caret.
+        self.key("home", &[], "SplitBlock").await;
+        for _ in 0..right_presses {
+            self.key("right", &[], "SplitBlock").await;
+        }
+        self.key("enter", &[], "SplitBlock").await;
+    }
+
+    async fn apply_join_block(&self, id: &EntityUri) {
+        let resolved = self.resolve(id);
+        // Backspace at caret 0 → `join_block` (merge into previous sibling) in the
+        // `HeadlessEditorMirror`. Focus the block, home to pin the caret at 0, Backspace.
+        self.focus_editor(&resolved, "JoinBlock").await;
+        self.key("home", &[], "JoinBlock").await;
+        self.key("backspace", &[], "JoinBlock").await;
+    }
+
+    async fn apply_indent(&self, id: &EntityUri) {
+        // Tab → `indent` in the `HeadlessEditorMirror` (block-level; caret-independent).
+        let resolved = self.resolve(id);
+        self.focus_editor(&resolved, "Indent").await;
+        self.key("tab", &[], "Indent").await;
+    }
+
+    async fn apply_outdent(&self, id: &EntityUri) {
+        // Shift+Tab → `outdent` (BackTab) in the `HeadlessEditorMirror`.
+        let resolved = self.resolve(id);
+        self.focus_editor(&resolved, "Outdent").await;
+        self.key("tab", &["shift"], "Outdent").await;
+    }
+
+    // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke (they
+    // ride the chord path, not text editing). Kept on the dispatch fallback until the
+    // chord-resolution rebind (`send_key_chord`) lands.
+    async fn apply_move_up(&self, id: &EntityUri) {
+        self.fallback.apply_move_up(id).await;
+    }
+
+    async fn apply_move_down(&self, id: &EntityUri) {
+        self.fallback.apply_move_down(id).await;
     }
 }

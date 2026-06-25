@@ -409,6 +409,53 @@ impl ReactiveViewModel {
         self.data.get_cloned()
     }
 
+    /// Find the view-local `expanded` `Mutable<bool>` of the `expand_toggle`
+    /// node whose `target_id` prop equals `target_id` (a bare block id, no
+    /// `block:` scheme), walking children + slot + materialised lazy slot.
+    ///
+    /// Block expansion has no engine representation — it is per-widget view
+    /// state (the GPUI chevron's `on_mouse_down` flips this very gate, and
+    /// `Block` documents "collapsed is NOT stored ... kept locally"). This is
+    /// the single walk shared by the headless test gate (`set_expand_toggle_gate`)
+    /// and `ReactiveEngineDriver::set_block_expanded`, so both poke the exact
+    /// node the production handler does. Returns a clone of the gate handle
+    /// (cheap — `Mutable` is `Arc`-backed).
+    pub fn find_expand_toggle_gate(&self, target_id: &str) -> Option<Mutable<bool>> {
+        if matches!(self.widget_name().as_deref(), Some("expand_toggle")) {
+            let props = self.props.lock_ref();
+            let is_match = props
+                .get("target_id")
+                .and_then(|v| v.as_string())
+                .map(|s| s == target_id)
+                .unwrap_or(false);
+            drop(props);
+            if is_match {
+                if let Some(gate) = self.expanded.as_ref() {
+                    return Some(gate.clone());
+                }
+            }
+        }
+        for child in &self.children {
+            if let Some(gate) = child.find_expand_toggle_gate(target_id) {
+                return Some(gate);
+            }
+        }
+        if let Some(slot) = self.slot.as_ref() {
+            let content = slot.content.lock_ref();
+            if let Some(gate) = content.find_expand_toggle_gate(target_id) {
+                return Some(gate);
+            }
+        }
+        if let Some(lazy) = self.lazy_slot.as_ref() {
+            if let Some(materialised) = lazy.cache.get_cloned() {
+                if let Some(gate) = materialised.find_expand_toggle_gate(target_id) {
+                    return Some(gate);
+                }
+            }
+        }
+        None
+    }
+
     /// Update this node's *structural* mutables (expr, props) in place from
     /// a freshly-interpreted node.
     ///

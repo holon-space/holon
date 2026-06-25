@@ -271,6 +271,9 @@ async fn memory_slice_selects_exactly_the_full_catalog() {
             // Renderer cluster (C-remainder batch 2b) — needs `SutRenderer`
             // (+ ref layout) (the frontend slice). The memory slice has no renderer.
             "inv-editable-text-has-draggable",
+            // Windowed differential focus (E4) — needs `SutDriver` (the windowed
+            // slice) + `RefGlobalFocus`/`RefEditorMirror`. No `SutDriver` here.
+            "inv-focus-matches-ref",
             // Focus roots (SutHandle decomposition) — needs `SutSqlProjection` +
             // `SutBackend` + `RefFocus`. The memory slice has no `SutSqlProjection`.
             "inv-focus-roots",
@@ -279,6 +282,8 @@ async fn memory_slice_selects_exactly_the_full_catalog() {
             // ViewModel liveness (C-remainder port) — need `SutViewModel`
             // (the frontend slice). The memory slice has no ViewModel.
             "inv-frontend-engine",
+            // Windowed (E4) — needs `SutViewModel` + `SutLayout` (the windowed slice).
+            "inv-frontend-no-error-widgets",
             "inv-frontend-root-not-error",
             // Live children projection (C-remainder batch 3) — needs `SutSqlProjection`
             // + `SutLoroLog` (the combined/frontend slice).
@@ -320,6 +325,10 @@ async fn memory_slice_selects_exactly_the_full_catalog() {
             // Frontend — needs `SutViewModel` (the frontend slice).
             "inv-viewmodel-no-error-widgets",
             "inv-viewmodel-root-matches-render-expr",
+            // Degraded "shows source" twin (Bundle D) — needs `SutRenderer` (the
+            // frontend slice's `block_query_degraded` builder). The memory slice has
+            // no renderer, so it is deselected here like the full-mode twin.
+            "inv-viewmodel-shows-source-when-no-query",
             "inv-viewmodel-snapshot",
             "inv-viewmodel-state-toggle-correct",
             "inv-viewmodel-tree-virtual-slots",

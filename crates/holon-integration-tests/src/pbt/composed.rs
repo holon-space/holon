@@ -72,4 +72,11 @@ pub mod seed_primitives;
 #[cfg(any(test, feature = "pbt"))]
 pub mod wide_e2e;
 
+/// The single-sourced E4 windowed composition-path check
+/// ([`windowed::run_windowed_composed_check`]). `pbt`-gated like the windowed
+/// slice it builds; consumed by both the `E2ESut` invariant runner and the gpui
+/// TestPlatform sim's per-tick hook (deduplicating what used to be two copies).
+#[cfg(any(test, feature = "pbt"))]
+pub mod windowed;
+
 pub use catalog::composed_invariant_catalog;

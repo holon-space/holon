@@ -108,11 +108,13 @@ pub async fn new_sql_engine_with_structural_ops() -> Arc<BackendEngine> {
 }
 
 /// Build a structural-write composed SUT over a real Turso engine: `SutBackend`
-/// (block-tree invariants) + the reusable [`OpDispatchWriter`] as
-/// `SutBlockTreeWrite`, sharing `resolver` (the synthetic→real id map the composed
-/// runner accumulates). `SutSqlProjection` is intentionally NOT registered so the
-/// navigation/focus invariants deselect (this slice has no navigation engine; a
-/// focused oracle would false-RED against empty focus rows).
+/// (block-tree invariants) + the dispatch-floor [`DirectUserDriver`] as
+/// `SutBlockTreeWrite` (§8.11 LL-2 — a storage-only config has no higher driver, so
+/// the floor applies structural ops directly to the engine), sharing `resolver` (the
+/// synthetic→real id map the composed runner accumulates). `SutSqlProjection` is
+/// intentionally NOT registered so the navigation/focus invariants deselect (this
+/// slice has no navigation engine; a focused oracle would false-RED against empty
+/// focus rows).
 pub fn sql_structural_wide(
     engine: Arc<BackendEngine>,
     resolver: crate::pbt::op_write_cap::IdResolver,

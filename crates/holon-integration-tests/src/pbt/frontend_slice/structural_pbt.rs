@@ -73,7 +73,7 @@ use crate::pbt::transitions::{
     SimulateRestart, SplitBlock, ToggleState, TypeChars, UnpinBlock,
 };
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutSqlProjection,
+    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::CapProvider;
 use proptest::prop_oneof;
@@ -689,6 +689,10 @@ async fn boot_and_seed_editor(
     let mut caps = CapMap::new();
     comp.clone().register(&mut caps);
     caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+    // `SutQueryResults` (full-mode query engine) — mirrors `SutSqlProjection`: keeps
+    // `inv-viewmodel-decompiled-rows-match-query` selected and the degraded
+    // `inv-viewmodel-shows-source-when-no-query` twin deselected over this real renderer.
+    caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
     // The editor READ cap — pairs with the (always-registered) `RefEditorMirror` to
     // select `inv-editor-{text,caret}-matches-ref`. The WRITE cap is already in the
     // component's `register`.
@@ -766,7 +770,7 @@ mod teeth {
     /// driven, the FULL catalog (incl. the org invariant) must go green.
     #[tokio::test(flavor = "multi_thread")]
     async fn frontend_fresh_drive_org_seed_full_catalog_green() {
-        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::capabilities::{SutQueryResults, SutSqlProjection};
         use holon_pbt_core::composition::CapProvider;
 
         // The page-rooted working tree AS org: `structural-page` is the doc/page,
@@ -790,6 +794,9 @@ mod teeth {
         let mut caps = CapMap::new();
         comp.clone().register(&mut caps);
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        // `SutQueryResults` (full-mode query engine) — same rationale as the combined
+        // boot above: keeps the full decompiled twin selected and the degraded twin off.
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
         caps.insert(Arc::new(OpDispatchWriter::with_resolver(
             engine.clone(),
             resolver.clone(),

@@ -662,3 +662,59 @@ async fn frontend_slice_runs_structural_block_invariants() {
         report.failures(),
     );
 }
+
+/// Bundle D minimal positive: the degraded ("shows source") twin. A real no-Turso
+/// block-query frontend (no query engine) boots over a Loro tree whose root has a
+/// query-source child, so the production `derive_render_expr` degrades to a
+/// `source_editor` render. With NO `SutQueryResults` cap wired, the catalog selects
+/// the degraded `inv-viewmodel-shows-source-when-no-query` (and DESELECTS the
+/// full-mode `inv-viewmodel-decompiled-rows-match-query`). The twin must pass — the
+/// root really renders `source_editor`.
+#[tokio::test(flavor = "multi_thread")]
+async fn frontend_slice_degraded_shows_source_twin_selects_and_passes() {
+    use crate::pbt::frontend_slice::block_query_component::BlockQueryFrontendComponent;
+    use crate::pbt::frontend_slice::builders::block_query_degraded;
+    use holon_pbt_core::capabilities::SutRenderer;
+    use holon_pbt_core::invariant::InvariantResult;
+
+    let comp = Arc::new(BlockQueryFrontendComponent::new().await);
+
+    // The no-Turso seed actually renders `source_editor` (else the twin would Skip
+    // forever with no teeth).
+    assert_eq!(
+        comp.root_render_kind().await.as_deref(),
+        Some("source_editor"),
+        "the degraded no-Turso block-query frontend must render `source_editor`",
+    );
+
+    let sut = block_query_degraded(comp);
+    let ref_ = CapMap::new();
+    let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
+
+    let degraded = "inv-viewmodel-shows-source-when-no-query";
+    let full = "inv-viewmodel-decompiled-rows-match-query";
+
+    let degraded_result = report
+        .ran
+        .iter()
+        .find(|(id, _)| id.0 == degraded)
+        .map(|(_, r)| r.clone());
+    assert!(
+        matches!(degraded_result, Some(InvariantResult::Ok)),
+        "the degraded twin must SELECT and pass (root renders source_editor); got {degraded_result:?}; ran={:?}",
+        report.ran_ids(),
+    );
+
+    // The full-mode twin is mutually exclusive: deselected (disclosed) here because
+    // no `SutQueryResults` is wired.
+    assert!(
+        !report.ran_ids().contains(&full),
+        "the full-mode twin must be DESELECTED when no query engine is wired; ran={:?}",
+        report.ran_ids(),
+    );
+    assert!(
+        report.deselected.iter().any(|d| d.0 == full),
+        "the full-mode twin must be disclosed in deselected; deselected={:?}",
+        report.deselected,
+    );
+}

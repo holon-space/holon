@@ -14,8 +14,8 @@ use holon_api::EntityUri;
 use holon_frontend::geometry::{GeometryProvider, ProviderEvalCtx};
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_pbt_core::capabilities::{
-    FrontendRootVm, ProviderStabilityReport, RenderedElement, SutDriver, SutLayout, SutRenderer,
-    SutViewModel, ViewportHint, WidgetSnapshot,
+    FrontendRootVm, ProviderStabilityReport, RenderedElement, SutLayout, SutQueryResults,
+    SutRenderer, SutViewModel, ViewportHint, WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 
@@ -398,121 +398,37 @@ impl SutRenderer for GpuiFrontendEngineComponent {
         }))
         .is_ok()
     }
-}
 
-impl CapProvider for GpuiFrontendEngineComponent {
-    fn register(self: Arc<Self>, caps: &mut CapMap) {
-        caps.insert(self.clone() as Arc<dyn SutViewModel>);
-        caps.insert(self as Arc<dyn SutRenderer>);
-    }
-}
-
-/// The windowed slice's [`SutDriver`] provider (E4 increment 4). `inv-window-focus-
-/// matches-engine-focus` is the **only** catalog invariant binding `SutDriver`, and
-/// it calls exactly one of its methods — [`SutDriver::engine_focused_block`] — which
-/// reads the **window's own** frontend [`ReactiveEngine`] focus (the same engine
-/// `GpuiFrontendEngineComponent` renders from), comparing it against the per-frame
-/// window focus that `SutLayout` reports. So this component holds just that engine.
-///
-/// The driving methods (`driver_click` / `send_raw_keystroke` / …) are honest
-/// `unimplemented!`: a windowed `StateMachineTest` applies transitions through the
-/// concrete `UserDriver` (`SimUserDriver`) directly, never through the `SutDriver`
-/// cap — the cap exists to *read* focus, not to drive (Bundle E plan, H7). They are
-/// never reached because `run_selected` only runs the focus invariant, which reads.
-///
-/// `forced_engine_focus` is the **planted negative control**: when `Some`,
-/// `engine_focused_block` returns it verbatim instead of the live engine focus,
-/// letting a test inject an engine/window focus divergence (the steal-back /
-/// zombie-editor fault, ADR 0010) to prove the invariant *bites* — the focus-axis
-/// analogue of increment 3a's `Plant::Content` reference plant.
-pub struct GpuiDriverComponent {
-    engine: Arc<ReactiveEngine>,
-    forced_engine_focus: Option<holon_pbt_core::capabilities::EngineFocus>,
-}
-
-impl GpuiDriverComponent {
-    /// Read the live window engine focus.
-    pub fn new(engine: Arc<ReactiveEngine>) -> Self {
-        Self {
-            engine,
-            forced_engine_focus: None,
-        }
-    }
-
-    /// Force `engine_focused_block` to report `focus` regardless of the live
-    /// engine — the planted divergence used to prove `inv-window-focus-matches-
-    /// engine-focus` fails on a real engine/window mismatch.
-    pub fn with_forced_engine_focus(
-        engine: Arc<ReactiveEngine>,
-        focus: holon_pbt_core::capabilities::EngineFocus,
-    ) -> Self {
-        Self {
-            engine,
-            forced_engine_focus: Some(focus),
+    async fn root_render_kind(&self) -> Option<String> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let rqr = self.resolve_watch(&root_uri).await?;
+        match rqr.snapshot().0 {
+            holon_api::RenderExpr::FunctionCall { name, .. }
+                if name != "loading" && name != "spacer" =>
+            {
+                Some(name)
+            }
+            _ => None,
         }
     }
 }
 
 #[async_trait::async_trait(?Send)]
-impl SutDriver for GpuiDriverComponent {
-    async fn driver_send_key_chord(&self, _chord: &str) {
-        unimplemented!(
-            "GpuiDriverComponent::driver_send_key_chord: the windowed slice drives \
-             transitions through the concrete UserDriver, not the SutDriver cap (H7)"
-        )
-    }
-
-    async fn driver_click(&self, _id: &EntityUri) {
-        unimplemented!("GpuiDriverComponent::driver_click: drive via the concrete UserDriver (H7)")
-    }
-
-    async fn click_entity(&self, _id: &EntityUri, _region: &str) -> Result<(), String> {
-        unimplemented!("GpuiDriverComponent::click_entity: drive via the concrete UserDriver (H7)")
-    }
-
-    async fn wait_for_engine_focus(
-        &self,
-        _id: &EntityUri,
-        _timeout: Duration,
-    ) -> Result<(), String> {
-        unimplemented!(
-            "GpuiDriverComponent::wait_for_engine_focus: drive via the concrete UserDriver (H7)"
-        )
-    }
-
-    async fn send_raw_keystroke(&self, _key: &str, _modifiers: &[&str]) -> Result<(), String> {
-        unimplemented!(
-            "GpuiDriverComponent::send_raw_keystroke: drive via the concrete UserDriver (H7)"
-        )
-    }
-
-    async fn driver_current_focus(&self) -> Option<EntityUri> {
-        self.engine.focused_block()
-    }
-
-    /// The load-bearing method: the window engine's globally focused block, mapped
-    /// into [`EngineFocus`]. `forced_engine_focus` overrides it for the planted
-    /// negative control.
-    async fn engine_focused_block(&self) -> holon_pbt_core::capabilities::EngineFocus {
-        use holon_pbt_core::capabilities::EngineFocus;
-        if let Some(forced) = &self.forced_engine_focus {
-            return forced.clone();
-        }
-        match self.engine.focused_block() {
-            None => EngineFocus::Unfocused,
-            Some(id) => EngineFocus::Focused(id),
-        }
-    }
-
-    /// The windowed slice uses fixed shared ids (no synthetic ref-doc URIs to
-    /// remap), so the id passes through unchanged.
-    fn resolve_ref_block_id(&self, id: &EntityUri) -> EntityUri {
-        id.clone()
+impl SutQueryResults for GpuiFrontendEngineComponent {
+    async fn root_query_row_count(&self) -> Option<usize> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let rqr = self.resolve_watch(&root_uri).await?;
+        Some(rqr.snapshot().1.len())
     }
 }
 
-impl CapProvider for GpuiDriverComponent {
+impl CapProvider for GpuiFrontendEngineComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
-        caps.insert(self as Arc<dyn SutDriver>);
+        caps.insert(self.clone() as Arc<dyn SutViewModel>);
+        caps.insert(self.clone() as Arc<dyn SutRenderer>);
+        // Full-mode query engine (a real Turso-backed `ReactiveEngine` window) — keeps
+        // the degraded `inv-viewmodel-shows-source-when-no-query` twin deselected here
+        // and `inv-viewmodel-decompiled-rows-match-query` selectable.
+        caps.insert(self as Arc<dyn SutQueryResults>);
     }
 }

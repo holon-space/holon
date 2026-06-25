@@ -23,7 +23,7 @@ use proptest_state_machine::prop_state_machine;
 
 prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
-        cases: 16,
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(16),
         max_shrink_iters: 200,
         .. proptest::test_runner::Config::default()
     })]

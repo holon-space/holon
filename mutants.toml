@@ -1,0 +1,16 @@
+# NOTE: `jobs` and `timeout` are NOT valid config keys in cargo-mutants 27.x —
+# they are CLI-only flags. Pass `--jobs 4 --timeout 600` on the command line.
+test_package = ["holon-integration-tests"]
+test_tool = "nextest"
+minimum_test_timeout = 120
+exclude_globs = [
+  "**/tests/**", "**/test_*.rs", "**/*_test.rs", "**/examples/**",
+  "crates/holon-pbt-core/**", "crates/holon-integration-tests/**",
+  "crates/holon-macros/**", "crates/holon-macros-test/**",
+  "crates/*-testing/**", "crates/holon-architecture-tests/**",
+  "**/frb_generated.rs", "**/*.pb.rs",
+]
+examine_globs = [
+  "crates/holon-frontend/src/editor_caret.rs",
+  "crates/holon-frontend/src/headless_editor_mirror.rs",
+]

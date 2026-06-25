@@ -1111,6 +1111,28 @@ pub trait SutRenderer {
     /// render must consult this first and skip when it returns `false`,
     /// rather than asserting against a transient placeholder root.
     async fn root_render_ready(&self) -> bool;
+
+    /// The root `RenderExpr` `FunctionCall` name from the resolved watch
+    /// snapshot's render-expr side — e.g. `"table"`, `"columns"`, or
+    /// `"source_editor"` (the degraded no-query-engine render). `None` when the
+    /// root is not ready: no watch resolved, a `loading`/`spacer` placeholder,
+    /// or the render expr is not a `FunctionCall`. The degraded twin
+    /// `inv-viewmodel-shows-source-when-no-query` reads this; `None` → it Skips.
+    async fn root_render_kind(&self) -> Option<String>;
+}
+
+/// SUT-side query-results read surface. Present only when a real query engine
+/// backs the render path (the Turso `BackendEngine` + `ReactiveEngine`
+/// `watch_query_live` surface the full-mode frontend component owns). A degraded
+/// no-Turso ("shows source") frontend has NO query engine and so does NOT
+/// provide this cap — making it the negative-selection (`sut_absent`)
+/// discriminator between the full-mode `inv-viewmodel-decompiled-rows-match-query`
+/// twin and the degraded `inv-viewmodel-shows-source-when-no-query` twin.
+#[holon_macros::capmap_adapter]
+pub trait SutQueryResults {
+    /// Number of rows the root layout's watch query produced. `None` when the
+    /// root watch is not ready (no query engine, or still loading).
+    async fn root_query_row_count(&self) -> Option<usize>;
 }
 
 // ─── Phase 6d — Layout/Bounds cluster ────────────────────────────────
