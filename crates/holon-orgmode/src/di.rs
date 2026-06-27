@@ -1234,6 +1234,68 @@ fn resolve_doc_for_block(feed: &holon::sync::LiveData<Block>, block: &Block) -> 
     None
 }
 
+/// Generic boot-time file-sync spawn: build a [`FileSyncController`] over the given domain
+/// seams (`BlockReader` / `DocumentManager` / `BlockOrdering`) and `FileFormatAdapter`, then
+/// `tokio::spawn` [`run_file_sync_controller`]. Backend- AND format-agnostic per ADR 0004:
+/// the caller injects the seam adapters for whichever store is canonical and the format
+/// adapter for whichever on-disk serialization (org / markdown / …) — there is no
+/// adapter-pair-named bootstrap. The returned strong `Arc<OrgSyncIdleSignal>` keeps the loop
+/// alive (the loop holds a `Weak` and exits when the caller drops it). Call from an async
+/// tokio context (so `tokio::spawn` has a runtime).
+///
+/// Block→file re-render is the caller's concern and stays dormant here (a closed rerender
+/// channel) — matching the no-Turso bootstrap.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_file_sync(
+    root_directory: PathBuf,
+    block_reader: Arc<dyn BlockReader>,
+    doc_manager: Arc<dyn DocumentManager>,
+    ordering: Arc<dyn BlockOrdering>,
+    format: Arc<dyn holon_core::FileFormatAdapter>,
+    alias_registrar: Option<Arc<dyn crate::file_sync_controller::AliasRegistrar>>,
+    fs: Arc<dyn holon_filesystem::FileSystem>,
+    change_source: Arc<dyn holon_filesystem::FileChangeSource>,
+) -> (
+    tokio::sync::watch::Receiver<Option<Result<(), String>>>,
+    Arc<OrgSyncIdleSignal>,
+) {
+    // Canonicalize the root the way `OrgModeConfig::new` does so `scan_org_files` and
+    // `on_file_changed` strip_prefix against the canonical form (macOS /tmp → /private/tmp).
+    let root_directory = fs.canonicalize(&root_directory).unwrap_or(root_directory);
+    let mut controller = FileSyncController::with_format(
+        block_reader,
+        doc_manager,
+        root_directory.clone(),
+        format,
+        ordering,
+        fs.clone(),
+    );
+    if let Some(registrar) = alias_registrar {
+        controller = controller.with_alias_registrar(registrar);
+    }
+
+    let (ready_sender, ready_signal) = FileWatcherReadySignal::new();
+    let ready_sender_arc = Arc::new(std::sync::Mutex::new(Some(ready_sender)));
+
+    let idle = OrgSyncIdleSignal::new();
+    let idle_weak = Arc::downgrade(&idle);
+
+    // Dormant rerender channel — dropping `_tx` keeps the `rerender_rx` select arm idle.
+    let (_tx, rerender_rx) = tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
+
+    tokio::spawn(run_file_sync_controller(
+        controller,
+        root_directory,
+        idle_weak,
+        rerender_rx,
+        ready_sender_arc,
+        fs,
+        change_source,
+    ));
+
+    (ready_signal.into_receiver(), idle)
+}
+
 /// Backend-blind FileSyncController driver: initialize, build the file watcher,
 /// run the initial scan, signal readiness, arm the watcher, and run the main
 /// `select!` loop. Shared by the Turso factory and the no-Turso bootstrap —

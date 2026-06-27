@@ -77,7 +77,7 @@ Holon uses a **hybrid data model** where different storage technologies are used
 
 **Key Distinctions**:
 
-- **Loro = authority for blocks** (post-2026-05 authority-flip). The vast majority of block writes — from chord ops, MCP, OrgMode runtime updates — flows through `LoroBlockOperations`, lands in the LoroDoc, fires `on_loro_changed`, gets projected to Turso by `LoroProjection` / `BlockConsolidator`. **Exceptions handled in `BlockCellRegistry::write_field`** (`crates/holon/src/sync/block_cell_registry.rs`): the fields `id`, `depth`, `content_type`, and `source_name` are routed to the SQL path (no clean Loro encoding today); `_expected_*` watermark control fields pass through to SQL; and any block whose tree node is absent in the LoroDoc (unseeded vault) falls back to SQL with a disclosed `tracing::warn!`. These carve-outs are documented and visible — Turso may hold these fields' values without a Loro write.
+- **Loro = the authoritative block adapter under the default wiring** (post-2026-05 authority-flip; the block *domain* remains canonical per [ADR 0004](../adr/0004-domain-adapter-actor-split.md) — authority is a DI choice, not a permanent property of Loro). The vast majority of block writes — from chord ops, MCP, OrgMode runtime updates — flows through `LoroBlockOperations`, lands in the LoroDoc, fires `on_loro_changed`, gets projected to Turso by `LoroProjection` / `BlockConsolidator`. **Exceptions handled in `BlockCellRegistry::write_field`** (`crates/holon/src/sync/block_cell_registry.rs`): the fields `id`, `depth`, `content_type`, and `source_name` are routed to the SQL path (no clean Loro encoding today); `_expected_*` watermark control fields pass through to SQL; and any block whose tree node is absent in the LoroDoc (unseeded vault) falls back to SQL with a disclosed `tracing::warn!`. These carve-outs are documented and visible — Turso may hold these fields' values without a Loro write.
 - **Turso = projection only** for blocks (with above carve-outs). The `block` table is downstream of Loro; matviews built on top of `block` (focus_roots, blocks_with_paths, etc.) project from there. Direct SQL writes to the `block` table outside `BlockConsolidator` and the startup-seed path are forbidden (archlint-enforced via the `sole_block_writer` smell — see [Archlint.md](Archlint.md)).
 - **Sync Adapters (Iroh, local file persist)**: Transport-only. Iroh syncs Loro CRDT documents between devices via P2P. Local persistence serializes Loro state to disk. These are independently optional.
 - **OrgMode runtime updates** go through the cell layer, not direct SQL writes — same path as UI. The org-startup-seeding code path (parse files at boot, populate Loro) is the only OrgMode-to-storage write that bypasses cells.
@@ -100,7 +100,7 @@ All 4 combinations of OrgMode × Loro are valid:
 | OFF | OFF | Core app, Turso-direct writes via SqlOperationProvider, LWW (degraded mode for tests/SqlOnly) |
 | ON | OFF | Org file sync, Turso-direct writes, LWW |
 | OFF | ON | Loro authority, no org file watching, full cell layer |
-| ON | ON | Full pipeline: org files seed Loro at startup → cell-routed writes → Loro → projector → Turso → CDC → UI |
+| ON | ON | Full pipeline: the file adapter (org here) seeds Loro at startup → cell-routed writes → Loro → projector → Turso → CDC → UI |
 
 **Lost Update Prevention**
 
@@ -176,7 +176,7 @@ Each block contains:
                    SqlOperationProvider → Turso (LWW) → CDC → UI
 ```
 
-**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the org parser populates the LoroDoc from `.org` files. After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
+**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the configured **file adapter** seeds the LoroDoc from its files. The file-sync controller is **format-agnostic** (it speaks only to a `FileFormatAdapter`); org is the default format, markdown is an equal peer — neither is privileged. After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
 
 **P2P Sync Flow (Iroh)**
 

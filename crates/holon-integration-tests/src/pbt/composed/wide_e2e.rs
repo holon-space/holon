@@ -19,17 +19,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use holon_api::repository::NewBlock;
 use holon_api::{Block, EntityUri, Region};
 use holon_orgmode::OrgBlockExt;
 use holon_pbt_core::composition::{CapMap, CapSet};
-use holon_pbt_core::{ComponentSet, TransitionImpl, TransitionRef};
+use holon_pbt_core::{
+    Actor, ComponentSet, Projection, StorageAdapter, TransitionImpl, TransitionRef, Wiring,
+};
 use proptest::prelude::Just;
 use proptest::strategy::{BoxedStrategy, Strategy};
 use proptest_state_machine::ReferenceStateMachine;
 
 use crate::pbt::composed::builder::{compose_sut, compose_sut_seeded};
 use crate::pbt::composed::harness::{ComposedSlice, sut_ids};
-use crate::pbt::composed::seed_primitives::fixed_ids;
+use crate::pbt::composed::seed_primitives::{C1, C2, PARENT, fixed_ids};
 use crate::pbt::composed::subsystem_seed::build_started_ref;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
@@ -174,17 +177,51 @@ pub const WIDE_REQUIRED_INVARIANTS: &[&str] = &[
     "inv-task-state-storage-coherence",
 ];
 
-/// Boot the windowless production session with the working tree as the boot org, via
-/// the PRODUCTION builder (`compose_sut_seeded`) over `full_headless` — the EXACT CapMap
-/// the `general_e2e_pbt` swap targets — then drive the initial focus onto the page root
-/// (matching the oracle) and return the cap map + the booted scaffold ids.
+/// The wide working tree (`page_root` → `parent`/`c1`/`c2` siblings) as a structured
+/// boot seed — the non-frontend face of the same tree `WIDE_TREE_ORG` encodes for the
+/// frontend org boot, derived from the SAME fixed ids + contents `structural_ref_wired`
+/// re-roots the oracle into, so SUT and oracle agree by construction. Order matters:
+/// `page_root` first, then its children (so the builder's `create_block` replay nests
+/// them and the sibling sequence is `0,1,2`).
+fn wide_seed_tree() -> Vec<NewBlock> {
+    let ids = fixed_ids();
+    let page = page_root();
+    vec![
+        NewBlock::text(EntityUri::no_parent(), "structural-page").with_id(page.clone()),
+        NewBlock::text(page.clone(), PARENT).with_id(ids.parent),
+        NewBlock::text(page.clone(), C1).with_id(ids.c1),
+        NewBlock::text(page, C2).with_id(ids.c2),
+    ]
+}
+
+/// Boot the windowless production SUT for the oracle's wiring via the PRODUCTION builder
+/// (`compose_sut_seeded`) and seed the working tree, then (for a focus-capable config)
+/// drive the initial focus onto the page root (matching the oracle) and return the cap
+/// map + the scaffold ids to seed-inject into the oracle.
+///
+/// The builder owns boot+seed for every wiring: a **frontend** (Turso+ViewModel) config
+/// ingests `WIDE_TREE_ORG` through its session's file-sync adapter; a **non-frontend**
+/// (Loro-only) config has no session, so the builder creates [`wide_seed_tree`] directly
+/// into the canonical Loro backend. Both faces encode the same tree, so the SUT matches the
+/// oracle either way. Org carries no special status here (ADR 0004 — the domain is
+/// canonical, org/Loro/Turso are peer adapters): it's just the serialization the frontend
+/// session's file-sync happens to read; the non-frontend face is structured domain CRUD.
 pub async fn boot_and_seed_wide(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, BTreeSet<EntityUri>) {
-    let set = ComponentSet::full_headless();
-    let bundle =
-        compose_sut_seeded(&set, resolver, &[("structural-page.org", WIDE_TREE_ORG)]).await;
+    // SUT-side parameterization seam: the booted set follows the oracle's drawn wiring
+    // (today fixed to `full_headless` by `wide_e2e_ref`; `init_state` draws
+    // `any_valid_wiring()` once the ref-side wiring + required-invariants sub-steps land).
+    let set = set_for_wiring(&ref_state.wiring);
+    let has_frontend = set.has_projection(Projection::ViewModel);
+    let bundle = compose_sut_seeded(
+        &set,
+        resolver,
+        &[("structural-page.org", WIDE_TREE_ORG)],
+        &wide_seed_tree(),
+    )
+    .await;
     let mut caps = bundle.caps;
 
     // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME `MetricsSut`
@@ -201,72 +238,146 @@ pub async fn boot_and_seed_wide(
         caps.insert(m as std::sync::Arc<dyn SutMetricsLifecycle>);
     }
 
-    // Scaffold = everything booted EXCEPT the non-seed working tree (parent/c1/c2);
-    // `structural-page` stays in the scaffold (injected). The builder's own
-    // `scaffold_ids` assumes a post-boot engine seed, so recompute against the tree.
+    // Scaffold = everything the SUT booted OR the oracle models, EXCEPT the non-seed
+    // working tree (parent/c1/c2). The union is what makes the seed wiring-agnostic: a
+    // frontend SUT boots `block:journals` + the index.org layout (so they're in `booted`
+    // and filtered); a non-frontend SUT does NOT, but the oracle still models that layout
+    // (`build_started_ref`'s `seed_booted_layout_into_ref`), so its ids must come from the
+    // ref side to be seed-injected and filtered — otherwise they'd false-diverge
+    // (`block:journals present in ref but missing from the SUT`). `structural-page` (the
+    // page root) is in both and filtered either way.
     let ids = fixed_ids();
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .collect();
     let booted = sut_ids(&caps).await;
-    let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
+    let ref_ids: BTreeSet<EntityUri> = ref_state
+        .domain
+        .block_state
+        .blocks
+        .keys()
+        .cloned()
+        .collect();
+    let scaffold: BTreeSet<EntityUri> = booted
+        .union(&ref_ids)
+        .filter(|id| !tree.contains(id))
+        .cloned()
+        .collect();
 
-    // Fresh-drive the initial focus on the SUT to match the oracle (page root).
-    TransitionImpl::apply_to_sut(
-        &NavigateFocus {
-            region: Region::Main,
-            block_id: page_root(),
-        },
-        ref_state,
-        &mut caps,
-    )
-    .await;
-    tokio::time::sleep(SETTLE).await;
+    // Fresh-drive the initial focus on the SUT to match the oracle (page root) — only for
+    // a focus-capable config. A non-frontend (Loro-only) SUT has no `SutFocusWrite` cap
+    // (no ViewModel/nav), and its focus/nav invariants deselect, so there is nothing to
+    // align; driving `NavigateFocus` there would hit an absent cap.
+    if has_frontend {
+        TransitionImpl::apply_to_sut(
+            &NavigateFocus {
+                region: Region::Main,
+                block_id: page_root(),
+            },
+            ref_state,
+            &mut caps,
+        )
+        .await;
+        tokio::time::sleep(SETTLE).await;
+    }
 
     (caps, scaffold)
 }
 
-/// The `full_headless` cap set, computed ONCE by booting `compose_sut(full_headless)`
-/// on a throwaway current-thread runtime and extracting the (runtime-free) `CapSet`.
-/// The swap ref carries this so `aggregate_transitions` auto-narrows the production
-/// alphabet to exactly what the composed SUT can drive.
-pub fn full_headless_cap_set() -> CapSet {
-    use std::sync::OnceLock;
-    static CELL: OnceLock<CapSet> = OnceLock::new();
-    CELL.get_or_init(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build current-thread runtime for cap_set extraction");
-        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let cs = rt.block_on(async {
-            compose_sut(&ComponentSet::full_headless(), &resolver)
-                .await
-                .caps
-                .cap_set()
-        });
-        drop(rt);
-        cs
-    })
-    .clone()
+/// Normalize a (possibly drawn) `Wiring` into the composed **headless** `ComponentSet`
+/// the `general_e2e_composed_pbt` swap boots — the SUT-side seam env-parameterization
+/// flips (drawing `any_valid_wiring()` instead of fixing `full_headless`). Mirrors the
+/// native `storage_selector_for_wiring` backend choice so a Loro-only draw maps to the
+/// cheap `LoroMemory` SUT and a Turso draw to the full `BackendEngine`:
+///
+/// - **strip `Actor::UI`** — the composed `CapMap` is headless by construction
+///   (`compose_sut` fail-louds on a UI actor; a window is the sibling gpui-thread
+///   harness's job, Design §8.10);
+/// - **force `StorageAdapter::Loro` when Turso is absent** — the native selector maps
+///   every non-Turso wiring onto the LoroMemory backend, and `compose_sut` requires ≥1
+///   of Loro/Turso;
+/// - **select `ViewModel` only with Turso** (`compose_sut` asserts `!has_frontend ||
+///   has_turso`); always select `EditorState`.
+///
+/// Idempotent: an already-normalized wiring maps to itself, so
+/// `set_for_wiring(&full_headless().wiring) == full_headless()`.
+pub fn set_for_wiring(wiring: &Wiring) -> ComponentSet {
+    let mut wiring = wiring.clone();
+    wiring.actors.remove(&Actor::UI);
+    if !wiring.has_storage(StorageAdapter::Turso) {
+        wiring.storage_adapters.insert(StorageAdapter::Loro);
+    }
+    let mut projections: BTreeSet<Projection> = [Projection::EditorState].into_iter().collect();
+    if wiring.has_storage(StorageAdapter::Turso) {
+        projections.insert(Projection::ViewModel);
+    }
+    ComponentSet::new(wiring, projections)
 }
 
-/// The swap oracle: the seeded wide tree re-wired to `full_headless` (the production
-/// `general_e2e_pbt` wiring — full storage + projections, NO UI actor) carrying the
-/// `full_headless` cap_set, so `aggregate_transitions` gates the alphabet to the
-/// composed SUT's real caps.
-pub fn wide_e2e_ref() -> ReferenceState {
+/// The composed cap set for a (normalized) `wiring`, computed ONCE per distinct
+/// `ComponentSet` by booting `compose_sut(set_for_wiring(wiring))` on a throwaway
+/// current-thread runtime and extracting the (runtime-free) `CapSet`. The swap ref
+/// carries this so `aggregate_transitions` auto-narrows the production alphabet to
+/// exactly what THIS composed SUT can drive. Cached by `Wiring` (linear scan — `Wiring`
+/// is `Eq` but not `Hash`/`Ord`, and the draw set is tiny).
+pub fn cap_set_for_wiring(wiring: &Wiring) -> CapSet {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Mutex<Vec<(Wiring, CapSet)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let set = set_for_wiring(wiring);
+    if let Some((_, cs)) = cache
+        .lock()
+        .expect("cap_set cache mutex")
+        .iter()
+        .find(|(w, _)| *w == set.wiring)
+    {
+        return cs.clone();
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build current-thread runtime for cap_set extraction");
+    let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+    let cs = rt.block_on(async { compose_sut(&set, &resolver).await.caps.cap_set() });
+    drop(rt);
+    cache
+        .lock()
+        .expect("cap_set cache mutex")
+        .push((set.wiring.clone(), cs.clone()));
+    cs
+}
+
+/// The `full_headless` cap set — the swap's current fixed wiring. Thin alias over
+/// [`cap_set_for_wiring`] (the parameterized seam).
+pub fn full_headless_cap_set() -> CapSet {
+    cap_set_for_wiring(&ComponentSet::full_headless().wiring)
+}
+
+/// The swap oracle for a (normalized) `wiring`: the seeded wide tree, re-wired to that
+/// wiring and carrying its composed cap_set, so `aggregate_transitions` gates the alphabet
+/// to exactly the caps THIS composed SUT provides. The ref-side **subsystem** wiring stays
+/// `wide_ref()`'s `{Loro, EditorState}` for every draw (the editor/focus transitions gate
+/// on it; the SUT-side cap_set, not the ref subsystems, is what narrows per wiring) — so a
+/// Loro-only draw reuses the same oracle tree with a narrower cap_set.
+///
+/// NO deliberate narrowing remains: the swap drives the FULL production
+/// `aggregate_transitions` alphabet auto-narrowed by the real cap set.
+/// - `SutMutate` → `ToggleState`: un-narrowed task #4 (Loro read-doc unify + real
+///   `cycle_task_state` toggle).
+/// - `SutWatchRegister` → `SetupWatch`/`RemoveWatch`: un-narrowed task #5 — the watch
+///   invariant seed-excludes both sides, so `inv-watch-rows-match-ref` compares only the
+///   non-seed working tree.
+pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
+    let set = set_for_wiring(wiring);
     let mut state = wide_ref();
-    state.wiring = ComponentSet::full_headless().wiring;
-    // NO deliberate narrowing remains: the swap drives the FULL production
-    // `aggregate_transitions` alphabet auto-narrowed by the real `full_headless` cap set.
-    // - `SutMutate` → `ToggleState`: un-narrowed task #4 (Loro read-doc unify + real
-    //   `cycle_task_state` toggle).
-    // - `SutWatchRegister` → `SetupWatch`/`RemoveWatch`: un-narrowed task #5 — the watch
-    //   invariant now seed-excludes both sides (scaffold blocks on the SUT, the phantom
-    //   `started-ref-layout-query` on the oracle), so `inv-watch-rows-match-ref` compares
-    //   only the non-seed working tree.
-    state.with_cap_set(full_headless_cap_set())
+    state.wiring = set.wiring.clone();
+    state.with_cap_set(cap_set_for_wiring(wiring))
+}
+
+/// The swap oracle for the current fixed wiring (`full_headless`). Thin alias over
+/// [`wide_e2e_ref_for`] (the parameterized seam).
+pub fn wide_e2e_ref() -> ReferenceState {
+    wide_e2e_ref_for(&ComponentSet::full_headless().wiring)
 }
 
 /// Reference machine over the production `E2ETransition`, generated by the FULL
@@ -336,7 +447,74 @@ impl ComposedSlice for WideE2E {
 mod tests {
     use super::*;
     use crate::pbt::transitions::{AddPeer, MergeFromPeer, PeerEdit, PeerEditOp, SyncWithPeer};
-    use holon_pbt_core::TransitionImpl;
+
+    /// Seed-generalization validation (the §8.10 next-step gate): a **Loro-only** wide
+    /// draw (no Turso ⇒ no frontend) boots EMPTY through the builder's non-frontend arm,
+    /// so `boot_and_seed_wide` must seed the working tree directly into the canonical Loro
+    /// backend. This proves the block-comparison invariants RUN and are GREEN over the
+    /// seeded Loro SUT — parent/c1/c2 match the oracle AND the oracle-modeled boot layout
+    /// (`block:journals` + index.org) is filtered via the ref∪booted scaffold union, not
+    /// falsely diverging. Without the seed this would deselect/false-RED; this is the gate
+    /// for letting `init_state` draw non-frontend wirings.
+    #[test]
+    fn loro_only_wide_seed_runs_block_invariants_green() {
+        // Build the ref OUTSIDE any ambient runtime (it does a `block_on` for cap-set
+        // extraction — mirrors proptest's sync `init_state`), then drive the async boot +
+        // catalog run on a manually-built multi-thread runtime (mirrors `init_test`).
+        let wiring = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
+        let ref_state = wide_e2e_ref_for(&wiring);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build multi-thread runtime");
+        rt.block_on(async {
+            let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+            let (caps, scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
+            let report =
+                <WideE2E as ComposedSlice>::run_report(&caps, &resolver, &scaffold, &ref_state)
+                    .await;
+            assert!(
+                report.failures().is_empty(),
+                "Loro-only wide seed must run the catalog green; failures: {:?}",
+                report.failures()
+            );
+            let ran = report.ran_ids();
+            assert!(
+                ran.contains(&"inv-blocks-match-ref/block_raw"),
+                "the block-id comparison must RUN over the seeded Loro SUT (non-vacuity \
+                 proof the seed landed); ran: {ran:?}"
+            );
+        });
+    }
+
+    /// The SUT-side parameterization seam's behaviour-preservation anchor: the swap's
+    /// current fixed wiring round-trips through [`set_for_wiring`] to exactly
+    /// `full_headless` (so flipping `init_state` to draw `any_valid_wiring()` cannot
+    /// silently change today's full_headless run), and the normalizer maps a Loro-only
+    /// draw onto the cheap headless backend (Loro forced, no ViewModel, no UI).
+    #[test]
+    fn set_for_wiring_preserves_full_headless_and_maps_loro_only() {
+        let full = ComponentSet::full_headless();
+        assert_eq!(
+            set_for_wiring(&full.wiring),
+            full,
+            "set_for_wiring must be identity on the already-normalized full_headless wiring"
+        );
+
+        // A bare Loro-only manifest (the fast-path target) → Loro backend, EditorState
+        // only (ViewModel needs Turso), no UI.
+        let loro_only = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
+        let set = set_for_wiring(&loro_only);
+        assert!(set.has_storage(StorageAdapter::Loro));
+        assert!(!set.has_storage(StorageAdapter::Turso));
+        assert!(!set.has_projection(Projection::ViewModel));
+        assert!(set.has_projection(Projection::EditorState));
+        assert!(!set.has_actor(Actor::UI));
+
+        // A Turso draw selects the frontend (ViewModel) arm.
+        let turso = Wiring::custom(vec![StorageAdapter::Turso], vec![], vec![]);
+        assert!(set_for_wiring(&turso).has_projection(Projection::ViewModel));
+    }
 
     /// A4 NON-VACUITY: the `full_headless` cap set now ADMITS the peer transitions, so
     /// `aggregate_transitions` auto-selects them into the swap alphabet. Before A2 this

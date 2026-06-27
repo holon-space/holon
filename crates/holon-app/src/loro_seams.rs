@@ -1,13 +1,18 @@
-//! Loro-backed adapters for the backend-blind file-sync controller, plus the
-//! no-Turso org-sync bootstrap (`spawn_loro_org_sync`).
+//! **Loro** seam adapters for the backend-blind file-sync controller, plus a
+//! Loro-store convenience bootstrap (`spawn_loro_file_sync`).
 //!
-//! ADR 0004 Phase 9, task #4: the org sync controller speaks only to the
+//! ADR 0004 Phase 9, task #4: the file-sync controller speaks only to the
 //! [`BlockReader`], [`DocumentManager`], and [`BlockOrdering`] seams. These three
 //! adapters implement those seams directly against a [`LoroBackend`] tree — no
 //! Turso, no `QueryableCache`, no cell registry, no command bus. They are the
 //! Loro counterparts of `CacheBlockReader` / `LiveDocumentManager` (Turso) in
 //! holon-orgmode's `di.rs` and of the `Upstream` branch of `impl BlockOrdering
 //! for SqlBlockOperations`.
+//!
+//! This module names exactly ONE adapter (Loro) — ADR-0004-compliant. The
+//! **file format** is NOT baked in: `spawn_loro_file_sync` takes a
+//! `FileFormatAdapter` and delegates to the generic, format-agnostic
+//! [`holon_orgmode::di::spawn_file_sync`]. There is no `loro × org` pair module.
 //!
 //! They live in holon-app (Phase 2.5, C1/C2 of the architecture plan): only the
 //! wiring crate may name a concrete backend type, so holon-orgmode stays
@@ -543,67 +548,39 @@ impl BlockOrdering for LoroBlockOrdering {
     }
 }
 
-/// Build the three Loro adapters, construct an [`FileSyncController`] over them,
-/// and spawn [`run_file_sync_controller`] — the no-Turso bootstrap. The returned
-/// strong `Arc<OrgSyncIdleSignal>` keeps the loop alive (the loop holds a `Weak`
-/// and exits when the caller drops it). Called from within an async tokio
-/// context (the no-Turso test setup) so `tokio::spawn` has a runtime.
-///
-/// [`FileSyncController`]: holon_orgmode::file_sync_controller::FileSyncController
-/// [`run_file_sync_controller`]: holon_orgmode::di::run_file_sync_controller
-pub fn spawn_loro_org_sync(
+/// Construct the three **Loro** seam adapters and hand them to the generic,
+/// format-agnostic [`holon_orgmode::di::spawn_file_sync`]. This names only the *store*
+/// (Loro) — ADR-0004-compliant — and takes the on-disk `format` as a parameter (org,
+/// markdown, …), so it bakes in neither an adapter pair nor a privileged format. The
+/// returned strong `Arc<OrgSyncIdleSignal>` keeps the loop alive. Call from an async
+/// tokio context (so `tokio::spawn` has a runtime).
+pub fn spawn_loro_file_sync(
     root_directory: PathBuf,
     backend: Arc<LoroBackend>,
     doc_store: Arc<tokio::sync::RwLock<holon::sync::LoroDocumentStore>>,
+    format: Arc<dyn holon_core::FileFormatAdapter>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
 ) -> (
     tokio::sync::watch::Receiver<Option<Result<(), String>>>,
     Arc<holon_orgmode::OrgSyncIdleSignal>,
 ) {
-    use holon_orgmode::di::{run_file_sync_controller, LoroAliasRegistrar, OrgRerender};
-    use holon_orgmode::file_sync_controller::FileSyncController;
+    use holon_orgmode::di::{spawn_file_sync, LoroAliasRegistrar};
 
-    // Canonicalize the root the same way `OrgModeConfig::new` does:
-    // `FileSyncController` canonicalizes its internal root, and `on_file_changed`
-    // strip_prefixes scanned paths against it. macOS `/tmp` → `/private/tmp`, so
-    // a raw root makes `scan_org_files` yield paths that fail the prefix check.
-    let root_directory = fs.canonicalize(&root_directory).unwrap_or(root_directory);
     let block_reader: Arc<dyn BlockReader> = Arc::new(LoroBlockReader::new(backend.clone()));
     let doc_manager: Arc<dyn DocumentManager> = Arc::new(LoroDocumentManager::new(backend.clone()));
     let ordering: Arc<dyn BlockOrdering> = Arc::new(LoroBlockOrdering::new(backend.clone()));
+    let registrar: Arc<dyn holon_orgmode::file_sync_controller::AliasRegistrar> =
+        Arc::new(LoroAliasRegistrar { doc_store });
 
-    let controller = FileSyncController::new(
+    spawn_file_sync(
+        root_directory,
         block_reader,
         doc_manager,
-        root_directory.clone(),
         ordering,
-        fs.clone(),
-    )
-    .with_alias_registrar(Arc::new(LoroAliasRegistrar {
-        doc_store: doc_store.clone(),
-    }));
-
-    let (ready_sender, ready_signal) = holon_orgmode::FileWatcherReadySignal::new();
-    let ready_sender_arc = Arc::new(std::sync::Mutex::new(Some(ready_sender)));
-
-    let idle = holon_orgmode::OrgSyncIdleSignal::new();
-    let idle_weak = Arc::downgrade(&idle);
-
-    // No block→org re-render in the no-Turso path (out of scope for this task).
-    // Dropping `_tx` closes the channel so the `rerender_rx.recv()` select arm
-    // stays dormant.
-    let (_tx, rerender_rx) = tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
-
-    tokio::spawn(run_file_sync_controller(
-        controller,
-        root_directory,
-        idle_weak,
-        rerender_rx,
-        ready_sender_arc,
+        format,
+        Some(registrar),
         fs,
         change_source,
-    ));
-
-    (ready_signal.into_receiver(), idle)
+    )
 }

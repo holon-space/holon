@@ -23,7 +23,7 @@
 //! the wasm frontends (which bring their own wiring).
 
 pub mod headless_builder_services;
-pub mod loro_org_sync;
+pub mod loro_seams;
 pub mod mcp_integrations;
 pub mod no_turso;
 #[cfg(test)]
@@ -33,7 +33,7 @@ pub mod session;
 pub mod wiring;
 
 pub use headless_builder_services::HeadlessBuilderServices;
-pub use loro_org_sync::spawn_loro_org_sync;
+pub use loro_seams::spawn_loro_file_sync;
 pub use mcp_integrations::{McpIntegrationRegistry, McpIntegrationsModule};
 pub use no_turso::{from_block_query_source, register_block_query_frontend};
 pub use seed::seed_default_layout;

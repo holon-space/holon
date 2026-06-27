@@ -1308,8 +1308,13 @@ mod teeth {
     async fn full_headless_static_catalog_probe() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let set = ComponentSet::full_headless();
-        let bundle =
-            compose_sut_seeded(&set, &resolver, &[("structural-page.org", WIDE_TREE_ORG)]).await;
+        let bundle = compose_sut_seeded(
+            &set,
+            &resolver,
+            &[("structural-page.org", WIDE_TREE_ORG)],
+            &[],
+        )
+        .await;
         let mut caps = bundle.caps;
 
         let ids = fixed_ids();

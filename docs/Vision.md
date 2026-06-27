@@ -251,13 +251,13 @@ Each component does one thing well. Makes maintenance and extension easier.
       ┌───────▼───────┐         ┌───────▼───────────┐
       │  LORO CRDT    │         │  THIRD-PARTY      │
       │               │         │  APIs             │
-      │  Source of    │         │                   │
-      │  truth for    │         │  Source of truth  │
-      │  owned data   │         │  for external     │
+      │  Authority    │         │                   │
+      │  for owned    │         │  Source of truth  │
+      │  data         │         │  for external     │
       └───────────────┘         └───────────────────┘
 ```
 
-**Key insight**: Both owned data (from Loro CRDT) and third-party data (from external APIs) flow into the **same Turso cache**. The UI queries this single unified cache. The difference is only in where the source of truth lives and how sync works.
+**Key insight**: Both owned data (from Loro CRDT) and third-party data (from external APIs) flow into the **same Turso cache**. The UI queries this single unified cache. The difference is only in which adapter is authoritative (Loro for owned data, the external API for external data) and how sync works.
 
 **Key Principles**:
 

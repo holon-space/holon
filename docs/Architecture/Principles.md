@@ -360,9 +360,15 @@ Holon's data flow is layered. Each layer has one job:
 - Consistent CDC stream for all changes
 - Uniform reactive read primitive (`Cell<T>`) regardless of authority
 
-### Source of Truth by Data Type
+### Authority by Data Type (default wiring)
 
-| Data Type | Authority | Turso Role |
+Per [ADR 0004](../adr/0004-domain-adapter-actor-split.md) the block **domain** (the
+knowledge graph itself) is the only *canonical* projection; Loro / Org / Markdown / Turso
+are peer serialization adapters. The table below names which adapter is **authoritative**
+for each data type under the **default DI wiring** — authority is a wiring choice, not a
+permanent property of any adapter.
+
+| Data Type | Authority (default wiring) | Turso Role |
 |-----------|-----------|------------|
 | Owned blocks (content, structure, metadata) | Loro CRDT | Projection only — never written directly |
 | External system data (Todoist, JIRA, etc.) | External API | Projection — populated by polling / webhooks |
@@ -404,7 +410,7 @@ Local files (Markdown or Org Mode) provide an additional interface to owned data
                  │
 ┌────────────────▼────────────────────────┐
 │            Loro CRDT                    │
-│      (Source of truth for owned)        │
+│     (default authority for owned)       │
 └─────────────────────────────────────────┘
 ```
 

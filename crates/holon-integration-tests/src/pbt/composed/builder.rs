@@ -28,7 +28,7 @@ use std::time::Duration;
 use holon::api::{BackendEngine, LoroBackend};
 use holon::sync::LoroDocumentStore;
 use holon_api::EntityUri;
-use holon_api::repository::CoreOperations;
+use holon_api::repository::{CoreOperations, NewBlock};
 use holon_pbt_core::capabilities::{
     SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutQueryResults, SutSqlProjection,
 };
@@ -91,7 +91,7 @@ pub struct ComposedSut {
 /// (`SutLoroLog`/`SutLoroTaskState`) via `merge_missing`, its own `SutBackend`
 /// reported in [`ComposedSut::shadowed`].
 pub async fn compose_sut(set: &ComponentSet, resolver: &IdResolver) -> ComposedSut {
-    compose_sut_seeded(set, resolver, DEFAULT_FRONTEND_SEED_ORG).await
+    compose_sut_seeded(set, resolver, DEFAULT_FRONTEND_SEED_ORG, &[]).await
 }
 
 /// The frontend arm's default boot org — a minimal one-heading doc. Callers that
@@ -101,14 +101,24 @@ pub async fn compose_sut(set: &ComponentSet, resolver: &IdResolver) -> ComposedS
 pub const DEFAULT_FRONTEND_SEED_ORG: &[(&str, &str)] =
     &[("doc0.org", "#+ID: ref-doc-0\n* Doc zero\n")];
 
-/// [`compose_sut`] with the frontend arm's boot org files chosen by the caller. The
-/// non-frontend arms ignore `frontend_seed_org` (no org boot). This is how the wide
-/// swap slice boots its working tree AS org over the SAME production builder the
-/// `general_e2e_pbt` swap targets — no hand-rolled CapMap lookalike.
+/// [`compose_sut`] with the boot seed chosen by the caller. The seed has two faces,
+/// one per arm, so the **builder owns boot+seed for every config** (the backend never
+/// escapes it):
+/// - `frontend_seed_org` — the org files the **frontend (ViewModel) arm** boots from;
+///   its session ingests them into the store (this is how the wide swap boots its
+///   working tree AS org over the SAME production builder the `general_e2e_pbt` swap
+///   targets — no hand-rolled CapMap lookalike). The non-frontend arms have no session
+///   and ignore it.
+/// - `seed_tree` — the working tree the **non-frontend arms** create directly into the
+///   canonical backend via `CoreOperations::create_block` (in list order, so children
+///   follow their parent). Empty for configs that need no working tree; the frontend
+///   arm ignores it (it seeds from org). The caller keeps the two faces in agreement
+///   (the wide swap derives both from the same fixed ids + contents).
 pub async fn compose_sut_seeded(
     set: &ComponentSet,
     resolver: &IdResolver,
     frontend_seed_org: &[(&str, &str)],
+    seed_tree: &[NewBlock],
 ) -> ComposedSut {
     let has_turso = set.has_storage(StorageAdapter::Turso);
     let has_loro = set.has_storage(StorageAdapter::Loro);
@@ -375,6 +385,29 @@ pub async fn compose_sut_seeded(
             unreachable!("compose_sut: a storage backend is asserted present above")
         };
         Arc::new(InMemEditorComponent::new_commit(commit)).register(&mut caps);
+    }
+
+    // Non-frontend seed: a storage-only config (Loro-only / Turso-only) has no session
+    // to ingest `frontend_seed_org`, so create the working tree directly into the
+    // canonical backend (the SAME store backing the `SutBackend` cap) — the transition
+    // alphabet only EDITS a pre-seeded tree (split/join/…); creating the initial tree is
+    // a boot concern, done here so the backend never leaves the builder. Frontend configs
+    // already seeded via the org boot above, so skip.
+    if !has_frontend && !seed_tree.is_empty() {
+        // Loro is the canonical backend for every non-frontend config the wide swap
+        // reaches (`set_for_wiring` makes Turso ⟹ ViewModel ⟹ frontend, so a
+        // storage-only seed config is Loro-backed). `BackendEngine` deliberately does
+        // not impl `CoreOperations`, so fail loud rather than silently skip the seed.
+        let backend = loro_backend.as_ref().expect(
+            "non-frontend seed_tree requires a Loro backend (Turso-only seeding has no \
+             CoreOperations path here); a non-frontend Turso config cannot be seeded this way",
+        );
+        for nb in seed_tree {
+            backend
+                .create_block(nb.parent_id.clone(), nb.content.clone(), nb.id.clone())
+                .await
+                .expect("seed non-frontend working tree block");
+        }
     }
 
     ComposedSut {

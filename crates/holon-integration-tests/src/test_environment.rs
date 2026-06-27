@@ -223,7 +223,7 @@ pub struct TestEnvironment {
     loro_backend: OnceCell<Arc<LoroBackend>>,
 
     /// Idle signal + keepalive for the no-Turso `FileSyncController` loop spawned
-    /// by `spawn_loro_org_sync`. Holding this strong `Arc` keeps the loop alive
+    /// by `spawn_loro_file_sync`. Holding this strong `Arc` keeps the loop alive
     /// (the loop holds a `Weak` and exits when this drops). `None` for a Turso
     /// session or before startup.
     loro_org_idle: OnceCell<std::sync::Arc<holon_orgmode::di::OrgSyncIdleSignal>>,
@@ -986,11 +986,14 @@ impl TestEnvironment {
         }
 
         // Ingest org files into the Loro backend through the SAME backend-blind
-        // FileSyncController the Turso path uses, via the Loro DI adapters.
-        let (mut org_ready, org_idle) = holon_app::spawn_loro_org_sync(
+        // FileSyncController the Turso path uses, via the Loro seam adapters. The
+        // store (Loro) is named; the format (org) is passed explicitly — neither is
+        // baked into a pair-named bootstrap (ADR 0004).
+        let (mut org_ready, org_idle) = holon_app::spawn_loro_file_sync(
             self.org_root.clone(),
             backend.clone(),
             shared_store.clone(),
+            std::sync::Arc::new(holon_orgmode::file_format::OrgFormatAdapter::new()),
             self.org_fs.clone(),
             self.org_fs.clone(),
         );

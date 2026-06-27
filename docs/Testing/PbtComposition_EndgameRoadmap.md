@@ -142,15 +142,75 @@ Decide before E3-1.
 
 ---
 
-## Round 1 + 2 outcome (landed as jj revs on `main`, not pushed)
+## Round 1 + 2 outcome (LANDED — all squashed into jj `kqmowyup` / git `4527c93e`)
 
-`kqmowyup` skill+roadmap+2 windowed invariants · `zqurskxy` E3 (SutEditorMirrorRead+SutSqlProjection,
-−2 tests) · `oyyzwtnk` E4 (real windowed input via UserDriver; `run_windowed_composed_check`
-single-sourced) · `wxtznwwy` Bundle D (degraded twin) · `mvmmpoqr` cargo-mutants gate · `xspwmswn`
-E3 SutViewModel. Tree compiles green; only pre-existing `block:journals` scaffolding reds remain.
+> **Provenance note (verified 2026-06-27):** the Round-1/2 work was **squashed into the single
+> commit `kqmowyup`** (`jj squash --from @ --into kqmowyup`) and the per-stream divergent revs
+> (`zqurskxy`/`oyyzwtnk`/`wxtznwwy`/`mvmmpoqr`/`xspwmswn`) were **abandoned** — so those rev names
+> no longer resolve, but every artifact is present in the tree. Confirmed in code: root
+> `mutants.toml` exists; `impl SutViewModel/SutEditorMirrorRead/SutSqlProjection for E2ESut` are
+> all gone; Bundle D twin `viewmodel_shows_source_when_no_query` exists; `peer_conflict_pbt.rs`
+> was deleted (the cross-stream decision resolved — `split_block_content_pbt.rs` kept/migrated to
+> `ComposedSut<WideE2E>`, peer_conflict dropped).
+
+Streams landed: E3 (SutEditorMirrorRead + SutSqlProjection, −2 tests) · E4 (real windowed input via
+UserDriver; `run_windowed_composed_check` single-sourced) · Bundle D (degraded twin) · cargo-mutants
+gate · E3 SutViewModel. Tree compiles green (`cargo build --lib --features pbt`); only pre-existing
+`block:journals` scaffolding reds remain.
 
 **Caps still on E2ESut:** `SutLoro`, `SutBlockTreeWrite`, `SutEditorMirrorWrite` (write/apply),
 `SutLayout`, `SutDriver` (windowed shell). **`SutViewModel` deleted Round 2.**
+
+## Round 3 (2026-06-27) — PARTIAL E5 step-1 **SUT-side seam** landed (behavior-preserving)
+
+The SUT-side parameterization seam for `WideE2E` is in place (`composed/wide_e2e.rs`), proven
+identical for `full_headless` so it cannot perturb today's keystone run:
+- **`set_for_wiring(&Wiring) -> ComponentSet`** — the wiring→headless-set normalizer (strip
+  `Actor::UI`; force `Loro` when Turso absent, mirroring `storage_selector_for_wiring`; `ViewModel`
+  only with Turso, `EditorState` always). Idempotent; `set_for_wiring(&full_headless().wiring) ==
+  full_headless()` (unit-tested).
+- **`cap_set_for_wiring(&Wiring) -> CapSet`** — per-distinct-`ComponentSet` cached boot (linear-scan
+  cache; `Wiring` is `Eq`-not-`Hash`). `full_headless_cap_set()` is now a thin alias over it.
+- **`boot_and_seed_wide` now reads `set_for_wiring(&ref_state.wiring)`** for the SUT (was hardcoded
+  `full_headless()`).
+
+### Round 3b (2026-06-27) — seed generalization ✅ DONE + ref generalization
+
+Sub-steps 1 and 2 below are now **landed and validated** (Loro-only lib test + full_headless keystone
+PASS 290s):
+
+- **Seed (sub-step 1) — done WITHOUT leaking the backend.** `compose_sut_seeded` gained a
+  `seed_tree: &[NewBlock]` param: the **builder** creates the working tree directly into the canonical
+  Loro backend (`CoreOperations::create_block`) for non-frontend configs — symmetric with the frontend
+  org-boot, backend never escapes the builder (an earlier `pub loro_backend` field on `ComposedSut` was
+  reverted — the CapMap's caps are read/edit-only, there is no create cap, so the initial-tree seed is
+  a *boot* concern the builder owns). `boot_and_seed_wide` passes `wide_seed_tree()` (frontend ignores
+  it; Loro-only seeds from it). Key insight: `set_for_wiring` makes **Turso ⟹ ViewModel ⟹ frontend**,
+  so the only non-frontend config reachable is **Loro-only** — one seed path, not three.
+- **Scaffold union (the `block:journals` fix).** `boot_and_seed_wide` now returns
+  `scaffold = (booted ∪ ref_block_ids) − {parent,c1,c2}`. A non-frontend SUT lacks the
+  oracle-modeled boot layout (journals/index.org from `build_started_ref`'s `seed_booted_layout_into_ref`),
+  so those ids must come from the **ref side** to be seed-injected and filtered — otherwise they
+  false-diverge (`block:journals present in ref but missing from SUT`). For full_headless the union is a
+  no-op (ref ⊆ booted), so the keystone is unchanged.
+- **Initial focus gated** to frontend configs (a Loro-only SUT has no `SutFocusWrite`).
+- **Ref (sub-step 2) — `wide_e2e_ref_for(wiring)` added** (behavior-preserving; `wide_e2e_ref` = thin
+  alias). The ref-side subsystem wiring **stays `wide_ref()`'s `{Loro, EditorState}` for every draw** —
+  it turned out NOT to need per-wiring tuning: the editor is always present (`set_for_wiring` always
+  adds `EditorState`), focus/Turso invariants are SUT-cap-gated out, and the editor is closed by the
+  boot's `NavigateFocus(page)` blur. Only `wiring` + `cap_set` vary per draw.
+
+### ⛔ Step-1 remaining sub-step (read before flipping `init_state`)
+
+3. **`WIDE_REQUIRED_INVARIANTS` must become wiring-conditional** (per-draw intersection) or a
+   Loro-only draw false-REDs the non-vacuity floor on its SQL/ViewModel ids (`wide_e2e.rs:142`). The
+   floor is a `const &'static [&str]` on the `ComposedSlice` impl, so making it per-draw needs either a
+   harness change (intersect the floor with the draw's selectable set) or moving the floor check to
+   honor the cap_set. `init_state` is still fixed to `wide_e2e_ref()` (full_headless) pending this.
+
+Once 3 lands, `init_state` draws `any_valid_wiring()` → `wide_e2e_ref_for(w)`, and the §8.10
+scaffolding-DOWN payoff follows: delete `subsystem_convergence_pbt` + the native `general_e2e_pbt(_sql_only)`
+slices (subsumed), then the native runner core (see "Refined E5 plan").
 
 ## ★ Key finding (Round 2 / E5 research): windowed-shell deletion is DEFERRED, not a permanent fork
 

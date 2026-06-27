@@ -10,8 +10,8 @@ use holon_api::{ContentType, EntityName, Region, Value};
 use holon_frontend::editor_caret;
 
 use super::action_actor_state::ActionActorState;
+use super::file_adapter_state::FileAdapterState;
 use super::mcp_server_actor_state::MCPServerActorState;
-use super::org_markdown_file_state::OrgMarkdownFileState;
 use super::query::{QuerySource, TestQuery, WatchSpec};
 use super::reference_domain_state::ReferenceDomainState;
 use super::ui_actor_state::UIActorState;
@@ -376,7 +376,7 @@ pub struct ReferenceState {
     /// Org/Markdown adapter file-state fragment (ADR 0004 Phase 5): the
     /// doc_uri -> filename mapping. An adapter concern (how org/markdown
     /// persist a document on disk), distinct from domain identity.
-    pub files: OrgMarkdownFileState,
+    pub files: FileAdapterState,
 
     /// Tier-3 UI actor fragment (ADR 0004/0006 Phase 3): navigation history,
     /// pins, per-region focus + cursor, view selection, drawer/toggle
@@ -708,7 +708,7 @@ impl ReferenceState {
             domain: ReferenceDomainState::new(),
             action: ActionActorState::new(),
             mcp: MCPServerActorState::new(),
-            files: OrgMarkdownFileState::new(),
+            files: FileAdapterState::new(),
             ui: UIActorState::new(),
             runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
             pre_startup_directories: Vec::new(),

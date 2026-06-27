@@ -7,6 +7,7 @@ pub mod action_actor_state;
 pub mod bisect_driver;
 pub mod composed;
 pub mod driver_input;
+pub mod file_adapter_state;
 pub mod fixtures;
 pub mod frontend_slice;
 pub mod generators;
@@ -19,7 +20,6 @@ pub mod loro_sync;
 pub mod mcp_server_actor_state;
 pub mod memory_slice;
 pub mod op_write_cap;
-pub mod org_markdown_file_state;
 pub mod panic_diag;
 pub mod peer_ops;
 pub mod phased;
@@ -69,8 +69,8 @@ pub fn is_synthetic_ref_id(id: &holon_api::EntityUri) -> bool {
 }
 
 pub use action_actor_state::ActionActorState;
+pub use file_adapter_state::FileAdapterState;
 pub use mcp_server_actor_state::MCPServerActorState;
-pub use org_markdown_file_state::OrgMarkdownFileState;
 pub use phased::{
     PbtPhaseState, PbtReadyContext, PbtReadyResult, PbtStepResult, PbtUiOperation,
     pbt_execute_operation, pbt_setup, pbt_step, pbt_step_confirm, pbt_teardown,
