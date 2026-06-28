@@ -21,11 +21,11 @@ Cross-crate **Property-Based Testing (PBT)** infrastructure and E2E integration 
 
 ## Golden Rule
 
-**Never add new PBT tests. Only use `general_e2e_pbt.rs`.** If a bug can't be reproduced by the PBT, make the PBT and production more similar (same code path, same data flow) so it can.
+**Never add new PBT tests. Only use `general_e2e_composed_pbt.rs` (the ONE composed keystone).** If a bug can't be reproduced by the PBT, make the PBT and production more similar (same code path, same data flow) so it can.
 
 ## Test Entrypoint
 
-`crates/holon-integration-tests/tests/general_e2e_pbt.rs` — the main E2E PBT. Runs proptest state machine with phased execution.
+`crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs` — the ONE composed keystone PBT (`ComposedSut<WideE2E>`), parameterized by subsystem wiring (`any_valid_wiring()`); the former `general_e2e_pbt.rs` was deleted 2026-06-29 once its last unique cap (`SutSeamMutate`, External/Bulk) landed on the keystone.
 
 ## PBT Architecture
 
@@ -137,7 +137,7 @@ inv10f: decompiled data matches query data from reference model
 
 Per project rule: always pipe test output through `tee` before filtering:
 ```bash
-cargo nextest run general_e2e_pbt 2>&1 | tee /tmp/pbt.log | grep FAIL
+cargo nextest run general_e2e_composed_pbt 2>&1 | tee /tmp/pbt.log | grep FAIL
 ```
 
 This preserves the full output (non-deterministic UUIDs, timing) for cross-referencing.

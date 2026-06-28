@@ -1,5 +1,5 @@
 # RULES
-- Whenever there's a bug in the UI, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_pbt.rs can reproduce it.
+- Whenever there's a bug in the UI, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs (the ONE composed keystone PBT) can reproduce it.
 - If the E2E test doesn't reproduce the issue think about how prod and E2E test can be made more similar, so that the E2E test can reproduce it.
 - **NEVER** swallow errors!! Use `Result` and enrich the error message with information.
 - **ALWAYS** `tee` before filtering output

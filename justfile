@@ -84,7 +84,7 @@ pbt name='general' cases='64' *FLAGS:
     case "{{name}}" in
         general)
             PROPTEST_CASES={{cases}} cargo test \
-                -p holon-integration-tests --test general_e2e_pbt \
+                -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-general.log
             ;;
         petri)
@@ -407,12 +407,12 @@ profile name='petri' cases='4' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{name}}" in
-        general)  pkg="holon-integration-tests"; test="general_e2e_pbt" ;;
-        petri)    pkg="holon"; test="petri_e2e_pbt" ;;
-        orgmode)  pkg="holon-orgmode"; test="round_trip_pbt" ;;
+        general)  pkg="holon-integration-tests"; test="general_e2e_composed_pbt"; feat="--features pbt" ;;
+        petri)    pkg="holon"; test="petri_e2e_pbt"; feat="" ;;
+        orgmode)  pkg="holon-orgmode"; test="round_trip_pbt"; feat="" ;;
         *)        echo "Unknown: {{name}}"; exit 1 ;;
     esac
-    bin=$(cargo test -p "$pkg" --test "$test" --no-run --message-format=json 2>/dev/null \
+    bin=$(cargo test -p "$pkg" $feat --test "$test" --no-run --message-format=json 2>/dev/null \
         | jq -r 'select(.executable) | .executable' | head -1)
     PROPTEST_CASES={{cases}} samply record "$bin" --nocapture {{FLAGS}}
 
@@ -421,12 +421,12 @@ sample-pbt name='general' cases='1' duration='5':
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{name}}" in
-        general)  pkg="holon-integration-tests"; test="general_e2e_pbt" ;;
-        petri)    pkg="holon"; test="petri_e2e_pbt" ;;
-        orgmode)  pkg="holon-orgmode"; test="round_trip_pbt" ;;
+        general)  pkg="holon-integration-tests"; test="general_e2e_composed_pbt"; feat="--features pbt" ;;
+        petri)    pkg="holon"; test="petri_e2e_pbt"; feat="" ;;
+        orgmode)  pkg="holon-orgmode"; test="round_trip_pbt"; feat="" ;;
         *)        echo "Unknown: {{name}}"; exit 1 ;;
     esac
-    bin=$(cargo test -p "$pkg" --test "$test" --no-run --message-format=json 2>/dev/null \
+    bin=$(cargo test -p "$pkg" $feat --test "$test" --no-run --message-format=json 2>/dev/null \
         | jq -r 'select(.executable) | .executable' | head -1)
     binary_name=$(basename "$bin")
     echo "Binary: $bin"

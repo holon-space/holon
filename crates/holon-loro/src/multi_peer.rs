@@ -2,7 +2,7 @@
 //!
 //! Provides `PeerState`, `GroupState`, `GroupTransition`, and helpers for
 //! generating, applying, and checking multi-peer Loro sync scenarios.
-//! Used by both `sync_pbt` (unit-level) and `general_e2e_pbt` (integration).
+//! Used by both `sync_pbt` (unit-level) and `general_e2e_composed_pbt` (integration).
 
 use loro::{Container, ExportMode, LoroDoc, LoroText, LoroTree, TreeID, ValueOrContainer};
 use proptest::prelude::*;

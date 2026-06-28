@@ -10,7 +10,7 @@
 ## Bugs Found (2026-02-27) — Custom Property Stripping
 
 ### Source Block Custom Properties Lost in Org Round-Trip
-- **Status**: Open, PBT reproducer in `general_e2e_pbt.rs`
+- **Status**: Open, PBT reproducer in `general_e2e_composed_pbt.rs`
 - **Issue**: Custom properties set on source blocks (content_type=Source) are lost during org sync round-trip
 - **Root Cause**: `source_block_to_org()` in `models.rs` doesn't render custom properties — source blocks in org format (`#+BEGIN_SRC/#+END_SRC`) have no `:PROPERTIES:` drawer
 - **Impact**: Properties like `column-priority` set programmatically on source blocks get stripped
