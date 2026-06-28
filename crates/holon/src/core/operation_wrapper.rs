@@ -18,14 +18,18 @@ use holon_api::{EntityName, OperationDescriptor};
 ///
 /// This decorator wraps an OperationProvider and automatically calls
 /// sync_changes() on the SyncableProvider after each operation completes.
-pub struct OperationWrapper<P, S> {
-    inner: Arc<P>,
+pub struct OperationWrapper<S> {
+    inner: Arc<dyn OperationProvider>,
     sync_provider: Option<Arc<S>>,
 }
 
-impl<P, S> OperationWrapper<P, S> {
+impl<S> OperationWrapper<S> {
     /// Create a new OperationWrapper with an inner provider and optional sync provider.
-    pub fn new(inner: Arc<P>, sync_provider: Option<Arc<S>>) -> Self {
+    ///
+    /// `inner` is a `dyn OperationProvider` so the wrapper is agnostic to which
+    /// backend owns the wrapped CRUD authority (Loro, SQL, …) — the caller picks
+    /// the authority and erases its concrete type at the boundary.
+    pub fn new(inner: Arc<dyn OperationProvider>, sync_provider: Option<Arc<S>>) -> Self {
         Self {
             inner,
             sync_provider,
@@ -33,7 +37,7 @@ impl<P, S> OperationWrapper<P, S> {
     }
 
     /// Create a wrapper without sync (passthrough mode)
-    pub fn without_sync(inner: Arc<P>) -> Self {
+    pub fn without_sync(inner: Arc<dyn OperationProvider>) -> Self {
         Self {
             inner,
             sync_provider: None,
@@ -42,9 +46,8 @@ impl<P, S> OperationWrapper<P, S> {
 }
 
 #[async_trait]
-impl<P, S> OperationProvider for OperationWrapper<P, S>
+impl<S> OperationProvider for OperationWrapper<S>
 where
-    P: OperationProvider + Send + Sync,
     S: SyncableProvider + Send + Sync,
 {
     fn operations(&self) -> Vec<OperationDescriptor> {
@@ -168,9 +171,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_wrapper_passthrough() {
-        let provider = Arc::new(MockProvider);
-        let wrapper: OperationWrapper<MockProvider, MockSyncProvider> =
-            OperationWrapper::without_sync(provider);
+        let provider: Arc<dyn OperationProvider> = Arc::new(MockProvider);
+        let wrapper: OperationWrapper<MockSyncProvider> = OperationWrapper::without_sync(provider);
 
         let result = wrapper
             .execute_operation(&EntityName::from("test"), "test_op", HashMap::new())

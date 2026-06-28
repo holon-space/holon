@@ -37,10 +37,10 @@ mod block_operations_tests;
 pub use operation_log::{OperationLogEntry, OperationStatus};
 pub use traits::{
     BlockDataSourceHelpers, BlockEntity, BlockMaintenanceHelpers, BlockOperations,
-    BlockQueryHelpers, CompletionStateInfo, CrudOperations, DataSource, EventOrigin, FieldDelta,
-    MarkOperations, MaybeSendSync, MoveOperations, OperationLogOperations, OperationProvider,
-    OperationRegistry, OperationResult, OriginTaggedWrites, RenameOperations, Result, TaskEntity,
-    TaskOperations, TextOperations, UndoAction, UnknownOperationError,
+    BlockQueryHelpers, CompletionStateInfo, CrudAuthority, CrudOperations, DataSource, EventOrigin,
+    FieldDelta, MarkOperations, MaybeSendSync, MoveOperations, OperationLogOperations,
+    OperationProvider, OperationRegistry, OperationResult, OriginTaggedWrites, RenameOperations,
+    Result, TaskEntity, TaskOperations, TextOperations, UndoAction, UnknownOperationError,
 };
 pub use undo::UndoStack;
 

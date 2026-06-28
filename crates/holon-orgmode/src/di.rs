@@ -32,11 +32,11 @@ use holon::core::queryable_cache::QueryableCache;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
-use holon::sync::LoroBlockOperations;
 use holon::type_registry::TypeRegistry;
 use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::CrudAuthority;
 use holon_core::EventOrigin;
 use holon_filesystem::{AliasRegistrar, BlockReader, DocumentManager, FileSyncController};
 
@@ -1033,14 +1033,17 @@ impl Module for OrgModeModule {
                     seed_default_org_assets(seed_fs.as_ref(), &config).await;
                 }
 
-                // Try to resolve Loro services (available if LoroModule was registered)
+                // Resolve the block-CRUD authority — registered at the app
+                // composition root as the Loro provider when a CRDT backend is
+                // enabled, absent in SqlOnly. orgmode picks the authority without
+                // naming a concrete backend type.
                 // ALLOW(ok): optional DI service
-                let loro_ops: Option<Arc<LoroBlockOperations>> =
-                    resolver.try_resolve::<LoroBlockOperations>().ok();
+                let crud_authority: Option<Arc<CrudAuthority>> =
+                    resolver.try_resolve::<CrudAuthority>().ok();
 
-                let loro_available = loro_ops.is_some();
+                let loro_available = crud_authority.is_some();
                 info!(
-                    "[OrgMode] Phase 1 complete: All DDL finished (loro={})",
+                    "[OrgMode] Phase 1 complete: All DDL finished (crud_authority={})",
                     loro_available
                 );
 
@@ -1175,13 +1178,17 @@ impl Module for OrgModeModule {
                 // which wins them on registration order; this provider only
                 // wins the CRUD ops that `SqlBlockOperations` does not
                 // advertise.
-                match loro_ops {
-                    Some(loro_ops) => {
-                        let wrapper = OperationWrapper::new(loro_ops, Some(sync_provider));
+                match crud_authority {
+                    Some(authority) => {
+                        let wrapper =
+                            OperationWrapper::new(authority.0.clone(), Some(sync_provider));
                         Arc::new(wrapper) as Arc<dyn OperationProvider>
                     }
                     None => {
-                        let wrapper = OperationWrapper::new(sql_ops.clone(), Some(sync_provider));
+                        let wrapper = OperationWrapper::new(
+                            sql_ops.clone() as Arc<dyn OperationProvider>,
+                            Some(sync_provider),
+                        );
                         Arc::new(wrapper) as Arc<dyn OperationProvider>
                     }
                 }

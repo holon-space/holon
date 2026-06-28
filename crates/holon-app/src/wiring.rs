@@ -17,6 +17,7 @@ use holon::di::DbHandleProvider;
 use holon::sync::{
     EventInfraModule, LoroBlockOperations, LoroConfig, LoroModule, PublishErrorTracker,
 };
+use holon_core::{CrudAuthority, OperationProvider};
 use holon_frontend::config::{HolonConfig, SessionConfig};
 use holon_frontend::preferences::{self, PrefKey};
 use holon_frontend::render_services::register_render_services;
@@ -141,6 +142,16 @@ impl FrontendInjectorExt for Injector {
                 Arc::new(crate::loro_seams::LoroAliasRegistrar {
                     doc_store: ops.shared_doc_store(),
                 }) as Arc<dyn holon_filesystem::AliasRegistrar>
+            }));
+
+            // Block-CRUD authority: when Loro is enabled it owns block CRUD (the
+            // source of truth the SQL projection mirrors), so register the Loro
+            // provider as the `CrudAuthority`. The org file-sync wiring resolves
+            // this marker to pick the authority without naming a concrete backend
+            // (SqlOnly registers none and falls back to its local SQL provider).
+            self.provide::<CrudAuthority>(Provider::root(|resolver| {
+                let ops = resolver.resolve::<LoroBlockOperations>();
+                Shared::new(CrudAuthority(ops as Arc<dyn OperationProvider>))
             }));
         }
 

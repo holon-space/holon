@@ -103,6 +103,18 @@ pub trait OperationProvider: Send + Sync {
     }
 }
 
+/// The single backend that owns block CRUD (set_field / create / update /
+/// delete) for a given session — the *authority* whose store is the source of
+/// truth, distinct from the structural-ops providers that also live in the
+/// `dyn OperationProvider` set.
+///
+/// The composition root registers exactly one of these per mode (the Loro
+/// provider when a CRDT backend is enabled, the SQL provider in SqlOnly mode)
+/// so consumers like the org file-sync wiring pick the CRUD authority by
+/// resolving this marker — never by naming a concrete backend type. Absent in
+/// SqlOnly when the consumer already holds the SQL provider locally.
+pub struct CrudAuthority(pub std::sync::Arc<dyn OperationProvider>);
+
 /// Origin-tagged write capability — execute operations while preserving the
 /// originating [`EventOrigin`] for CDC echo-suppression.
 ///
