@@ -256,6 +256,90 @@ repointed to `general_e2e_composed_pbt` (`invariant_runner.rs` NATIVE_ONLY_EXCLU
   `general_e2e_pbt(_sql_only)`. (`local_caps.rs:30` already frames this convergence.) Then the native
   runner core (see "Refined E5 plan").
 
+### Round 3d (2026-06-29) — `ApplyMutation` SOURCE-ROUTING prototype ✅ (Loro arm) + a sanctioned exception to "one cap per transition"
+
+`ApplyMutation` multiplexes 4 ingress SOURCES (UI / External-org / Action / LoroPeer) that, on the
+split-component composed `CapMap`, target DIFFERENT caps (driver / file-seam / `SutLoro`). Rather than
+split it into per-source transitions, we kept it as ONE transition with `source` as a **shrinkable
+field** and route `source → cap` at the transition level — so the subsystem/source shrinker can
+**localize** "diverges via org but not via Loro" (the same delta-debug mechanism as the driver ladder,
+Design §8.11, but for a *categorical ingress axis*, NOT a fidelity ladder — there is no "highest
+available" source). **DECISION:** the skill's "exactly one cap per transition" is a guideline, not a
+framework rule (`required_caps()` returns a `Vec`); a **source-routed transition** is a sanctioned
+exception. The routing lives in a hand-written `impl SutApplyMutation for CapMap` — the one place that
+can reach every sub-cap (`self.expect::<dyn …>()`); `impl … for E2ESut` is a **no-op** (its
+`block_tree_post_action` seam still owns the work, so E2ESut is byte-for-byte unchanged).
+
+**Landed (prototype, Loro arm):** new `SutApplyMutation` trait (`transitions/apply_mutation.rs`) +
+E2ESut no-op impl + CapMap routing impl (LoroPeer → `SutLoro` apply_peer_*); `ApplyMutation` bound
+flipped to `SutApplyMutation`; `required_caps` → `[SutLoro]` (gate = the implemented arm); generator
+gates the UI/External/layout/profile arms behind `!composed` (`state.cap_set.is_some()`) so the
+composed alphabet draws only the implemented LoroPeer arm; `SutApplyMutation` added to the `SutHandle`
+bundle; guard + builder cap-feasibility tests flipped. **Validated:** keystone PASS on `Loro;;` axis
+(24 cases, 5 confirmed composed LoroPeer routes — non-vacuous) AND default mixed-wiring axis; guard +
+3 builder/cap tests green.
+
+**External (org) arm + `BulkExternalAdd` — IMPLEMENTED, non-regressive, but NOT YET EXERCISED
+(2026-06-29).** Per the "don't proliferate traits" review: the External arm reuses the EXISTING
+`SutSeamMutate` (its `apply_mutation(event)` has the same signature as a bespoke cap would) rather than
+a new trait — and implementing `SutSeamMutate` fully on `HeadlessFrontendComponent` (both
+`apply_mutation` = External org-write + `bulk_external_add` = born-with-ids write) ALSO un-narrows
+`BulkExternalAdd` (its gate is `SutSeamMutate`). Both methods: resolve mutation ids (oracle→SUT) →
+`Mutation::apply_to` on `all_blocks()` → rewrite the seeded USER docs (`documents` excludes
+`index.org`, so a full rewrite is safe) → settle via the live `FileSyncController`. Registered on the
+frontend (`components.rs` `CapProvider`); CapMap routing's `External` arm calls
+`self.expect::<dyn SutSeamMutate>().apply_mutation(event)`; generator gates the composed External arm
+on `seam_present`. Keystone stays GREEN (default, Loro+Turso, and forced-full axes) with both hosted;
+`full_headless_capset_admits_toggle_apply_mutation_and_bulk` confirms cap-feasibility.
+
+  **✅ BLOCKER CLEARED + KEYSTONE GREEN (2026-06-29).** Enabling the External/Bulk arms on the
+  keystone surfaced **six** sequential defects in the composed headless seam (each exposed by the
+  prior fix), all now fixed; `general_e2e_composed_pbt` is GREEN on **both** axes — default
+  (272s/24 cases) and `HOLON_PBT_FORCE_FULL=1` (416s/24 cases), 0 divergences — exercising the full
+  External `ApplyMutation` (org), `BulkExternalAdd`, and `CreateDocument`+`BulkExternalAdd`-to-a-fresh-doc
+  combination. The six fixes:
+  1. **Wide ref registered NO document.** `structural_ref_wired` (`wide_e2e.rs`) left
+     `state.files.documents` EMPTY; both arms gate on `!files.documents.is_empty()`, so they never
+     generated. **Fix:** `files.documents.insert(page_root(), "structural-page.org")` — key = the SUT
+     doc key (org parser maps `#+ID: structural-page` → `EntityUri::block("structural-page")` =
+     `page_root()` = `HeadlessFrontendComponent.documents` key).
+  2. **Seam-mutate org rewrite WIPED the tree.** `apply_mutation`/`bulk_external_add` rebuilt the doc
+     org from `all_blocks()` = base `block_raw` (**no `tags` column**), losing the doc's `Page` tag →
+     `blocks_by_document` found no page → wrote an EMPTY org → re-ingest wiped the tree. **Fix:** source
+     from the `block` MATVIEW (`live_block_snapshot()`), which carries tags/requires.
+  3. **Per-tick reconcile mismatch on born-equal Creates.** An External `Create` writes the block WITH
+     its oracle id (`:ID:` drawer), so the SUT mints the SAME id the oracle holds; the harness counted it
+     as a newly-minted real with no matching synthetic and panicked. **Fix:** `harness.rs` reconcile
+     excludes `real_new` ids already in `ref_state.blocks` (born-equal — like the existing peer-id skip).
+  4. **`inv-displayed-text` vs SOURCE blocks.** `generate_mutation`'s `create_source` arm makes code
+     blocks (`content_type=Source`); a source block correctly renders as an execution-result widget
+     (`text "[no result]"`), but the invariant assumed displayed-text == raw content for *every* text
+     widget. **Fix:** both displayed-text arms skip non-text blocks via the existing `is_text_block` ref
+     cap (`displayed_text.rs`). (Surfaced only now because the composed headless keystone runs
+     displayed-text over a real reactive widget tree.)
+  5. **Created docs not tracked.** `BulkExternalAdd`/External can target a `CreateDocument`-minted doc
+     (`block:ref-doc-N`), but `self.documents` was boot-fixed → "no file for doc" panic. **Fix:**
+     `documents` is now `Mutex<…>` and `create_document` appends the new doc (its title==stem page id =
+     the same real id the harness reconcile maps `ref-doc-N` to).
+  6. **`/org` missed created-doc files.** `org_block_snapshot` (the `/org` SUT reader) iterated the
+     boot-fixed `org_paths`, never the created-doc files → bulk blocks reached `block_raw` but not the
+     on-disk `/org` comparison. **Fix:** read `union(org_paths, tracked-document-paths)`.
+  Also **removed** the speculative `settle_viewmodel_content` helper (added mid-debug for a text-block VM
+  lag that never actually occurred — source blocks were the real cause; it also stalled ≤25s/tick).
+
+  Org-vs-Loro differential is now LIVE → host nothing more.
+
+  **✅ DELETED `general_e2e_pbt(_sql_only)` (2026-06-29, user-approved).** Removed
+  `tests/general_e2e_pbt.rs` (both `component_pbt!` variants over E2ESut: `full_headless` +
+  `sql_only`) + its `.proptest-regressions`. Audit (Round 3c) had found only `SutSeamMutate`
+  (now hosted + green on the keystone) and `SutFixtureFs` (git/jj, negligible) unique to it; the
+  parity gate (`composed_catalog_covers_e1_relocated_caps`) stays green. Repointed the canonical-PBT
+  policy to the keystone: CLAUDE.md rule, `wiki/entities/holon-integration-tests.md`, TODO.md, the
+  justfile `general` recipes (`--features pbt --test general_e2e_composed_pbt`), and the
+  `multi_peer.rs` doc comment. **§8.10 ledger: −2 tests − 1 regressions file, +0 scaffolding (DOWN).**
+  Lingering `general_e2e_pbt` *string* refs remain only as (a) the native `PbtSuiteSpec` name and
+  (b) explanatory comments — both belong to the native-runner core that the NEXT §8.10 step deletes.
+
 ## ★ Key finding (Round 2 / E5 research): windowed-shell deletion is DEFERRED, not a permanent fork
 
 `SutLayout` + `SutDriver` are **not** mere read caps — they are load-bearing for E2ESut's

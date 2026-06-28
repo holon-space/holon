@@ -11,7 +11,6 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
-use crate::pbt::local_caps::SutSeamMutate;
 use crate::pbt::reference_state::ReferenceState;
 use holon_pbt_core::capabilities::SutLoro;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
@@ -43,8 +42,12 @@ pub struct ApplyMutation {
 
 impl TransitionFactory<ReferenceState> for ApplyMutation {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
+        // Routed by `SutApplyMutation` (source as a shrinkable axis). The gate names
+        // `SutLoro` so the composed alphabet admits `ApplyMutation` exactly when the
+        // peer mesh is wired (the implemented arm); the generator further restricts the
+        // composed source set to the implemented arms via `state.cap_set.is_some()`.
         vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutSeamMutate,
+            dyn ::holon_pbt_core::capabilities::SutLoro,
         >()]
     }
 
@@ -141,13 +144,23 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
 
             let mut arms: Vec<(u32, BoxedStrategy<ApplyMutation>)> = Vec::new();
 
+            // Source-routing: on the composed path, draw a source's arm only when its
+            // CapMap arm is implemented. `composed` (the ref carries a `cap_set`) gates the
+            // not-yet-composed UI/layout/profile arms to native; the External arm is gated
+            // instead on `SutSeamMutate` presence (native always; composed iff a frontend),
+            // and the LoroPeer arm self-gates on `enable_loro`+peers below.
+            let composed = state.cap_set.is_some();
+            let seam_present = state.caps_available(&[::holon_pbt_core::composition::CapId::of::<
+                dyn crate::pbt::local_caps::SutSeamMutate,
+            >()]);
+
             if !doc_uris.is_empty() {
                 // ui_mutation: weight 0 by default; opt-in with PBT_WEIGHT_UI_MUTATION=N
                 let ui_weight: u32 = std::env::var("PBT_WEIGHT_UI_MUTATION")
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                if ui_weight > 0 {
+                if !composed && ui_weight > 0 {
                     arms.push((
                         ui_weight,
                         generate_mutation(
@@ -167,23 +180,25 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                     ));
                 }
 
-                arms.push((
-                    1,
-                    generate_mutation(
-                        next_id,
-                        block_ids.clone(),
-                        text_block_ids.clone(),
-                        doc_uris.clone(),
-                        no_content_update.clone(),
-                    )
-                    .prop_map(|mutation| ApplyMutation {
-                        event: MutationEvent {
-                            source: MutationSource::External,
-                            mutation,
-                        },
-                    })
-                    .boxed(),
-                ));
+                if seam_present {
+                    arms.push((
+                        1,
+                        generate_mutation(
+                            next_id,
+                            block_ids.clone(),
+                            text_block_ids.clone(),
+                            doc_uris.clone(),
+                            no_content_update.clone(),
+                        )
+                        .prop_map(|mutation| ApplyMutation {
+                            event: MutationEvent {
+                                source: MutationSource::External,
+                                mutation,
+                            },
+                        })
+                        .boxed(),
+                    ));
+                }
             }
 
             // Axis 3 arm (extended gen): primary content edit on a block a
@@ -197,7 +212,10 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                     .filter(|id| !no_content_update.contains(id))
                     .cloned()
                     .collect();
-                if crate::pbt::generators::extended_gen_enabled() && !conflict_ids.is_empty() {
+                if !composed
+                    && crate::pbt::generators::extended_gen_enabled()
+                    && !conflict_ids.is_empty()
+                {
                     let conflict = (proptest::sample::select(conflict_ids), "[a-z]{4,8}")
                         .prop_map(|(id, content)| {
                             eprintln!(
@@ -226,7 +244,7 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                 }
             }
 
-            if LAYOUT_MUTATIONS_ENABLED {
+            if !composed && LAYOUT_MUTATIONS_ENABLED {
                 let seed_layout_block_ids: std::collections::HashSet<&str> = [
                     "block:default-main-panel",
                     "block:default-left-sidebar",
@@ -319,7 +337,7 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
 
             let profile_ids: Vec<EntityUri> =
                 state.domain.profile_block_ids.iter().cloned().collect();
-            if !profile_ids.is_empty() {
+            if !composed && !profile_ids.is_empty() {
                 arms.push((
                     1,
                     generate_profile_content_mutation(profile_ids)
@@ -632,10 +650,114 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
     }
 }
 
+/// SUT-side dispatch for [`ApplyMutation`], routed by the mutation's `source`.
+///
+/// This is the "one transition, source-as-shrinkable-axis" model (challenging the
+/// one-cap-per-transition guideline): a single mutation can arrive through different
+/// production INGRESS PATHS (org file-sync / Loro peer / UI gesture), and *which*
+/// path is a shrinkable field on the transition — so the subsystem/source shrinker can
+/// localize "diverges via org but not via Loro". Unlike `UserDriver` (a fidelity
+/// LADDER with auto-descend), sources are an ORTHOGONAL categorical axis: there is no
+/// "highest available" source; the generator samples among the *wired* ones.
+///
+/// The routing lives on the SUT, not in a single component, because the arms target
+/// DIFFERENT caps (Loro peer vs file-seam vs driver) that, on the composed `CapMap`,
+/// live on different components. `impl … for CapMap` is the one place that can reach
+/// every sub-cap (`self.expect::<dyn …>()`); `E2ESut` keeps its unified
+/// `block_tree_post_action` seam, so its impl is a no-op (the seam owns `ref_state`).
 #[allow(async_fn_in_trait)]
-impl<S: SutSeamMutate> TransitionImpl<ReferenceState, S> for ApplyMutation {
+pub trait SutApplyMutation {
+    async fn apply_mutation_routed(&self, event: MutationEvent);
+}
+
+/// `E2ESut` routes `ApplyMutation` through its `block_tree_post_action` seam (which
+/// owns `ref_state`), so the cap-level dispatch is a no-op — exactly as the old
+/// `SutSeamMutate` no-op was. Keeps the monolith's behavior identical.
+#[allow(async_fn_in_trait)]
+impl SutApplyMutation for E2ESut {
+    async fn apply_mutation_routed(&self, _: MutationEvent) {}
+}
+
+/// The composed `CapMap` has no seam, so it routes here. PROTOTYPE: the `LoroPeer`
+/// arm is implemented (routed to the already-hosted `SutLoro` peer cap, mirroring the
+/// seam's LoroPeer dispatch). The `External` (org) arm is the next increment — together
+/// they give the org-vs-Loro differential the shrinker can localize. Other sources are
+/// gated OUT of the composed alphabet by the generator (`state.cap_set.is_some()`), so
+/// they cannot reach this `panic!`.
+#[allow(async_fn_in_trait)]
+impl SutApplyMutation for holon_pbt_core::composition::CapMap {
+    async fn apply_mutation_routed(&self, event: MutationEvent) {
+        match event.source {
+            MutationSource::LoroPeer { peer_idx } => {
+                let loro = self.expect::<dyn SutLoro>();
+                match &event.mutation {
+                    Mutation::Create {
+                        id,
+                        parent_id,
+                        fields,
+                        ..
+                    } => {
+                        let parent_stable = if parent_id.is_no_parent() || parent_id.is_sentinel() {
+                            None
+                        } else {
+                            Some(parent_id.id().to_string())
+                        };
+                        let content = fields
+                            .get("content")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default()
+                            .to_string();
+                        loro.apply_peer_create(
+                            peer_idx,
+                            parent_stable.as_deref(),
+                            &content,
+                            id.id(),
+                        )
+                        .await;
+                    }
+                    Mutation::Update { id, fields, .. } => {
+                        let content = fields
+                            .get("content")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_else(|| {
+                                panic!("LoroPeer Update on {} carries no `content` field", id.id())
+                            })
+                            .to_string();
+                        loro.apply_peer_update(peer_idx, id.id(), &content).await;
+                    }
+                    Mutation::Delete { id, .. } => {
+                        loro.apply_peer_delete(peer_idx, id.id()).await;
+                    }
+                    Mutation::Move { id, .. } => panic!(
+                        "LoroPeer mutation on {} has no peer mapping for `Move`",
+                        id.id()
+                    ),
+                    Mutation::RestartApp => {
+                        panic!("LoroPeer mutation cannot be `RestartApp`")
+                    }
+                }
+            }
+            MutationSource::External => {
+                // Org-file ingress: rewrite the affected user doc(s) and let the live
+                // FileSyncController re-ingest. Reuses the same-signature `SutSeamMutate`
+                // cap (the frontend's real composed seam) — no bespoke trait.
+                self.expect::<dyn crate::pbt::local_caps::SutSeamMutate>()
+                    .apply_mutation(event)
+                    .await;
+            }
+            other => panic!(
+                "[composed ApplyMutation] source {other:?} is not yet routed on the CapMap \
+                 (implemented: LoroPeer, External). The generator gates the composed alphabet \
+                 to implemented arms, so UI/Action are unreachable here."
+            ),
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl<S: SutApplyMutation> TransitionImpl<ReferenceState, S> for ApplyMutation {
     async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_mutation(self.event.clone()).await;
+        sut.apply_mutation_routed(self.event.clone()).await;
     }
 }
 

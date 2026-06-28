@@ -522,9 +522,13 @@ mod required_caps_guard {
         one!(ArrowNavigate, fe::SutArrowNavigate);
         // Mutate (test-local)
         one!(ToggleState, lc::SutMutate);
-        // SeamMutate (test-local) — ApplyMutation/BulkExternalAdd moved off `SutMutate`
-        // to `SutSeamMutate` in Swap increment 4; the guard was left stale (pre-existing red).
-        one!(ApplyMutation, lc::SutSeamMutate);
+        // ApplyMutation is now SOURCE-ROUTED via `SutApplyMutation` (one transition,
+        // source as a shrinkable axis), so its dispatch trait and its GATE cap legitimately
+        // differ: the gate names `SutLoro` (the implemented composed arm — LoroPeer), while
+        // dispatch goes through `SutApplyMutation`. The "one fine-grained cap == bound" drift
+        // guard therefore tracks the GATE cap here, not the dispatch trait.
+        one!(ApplyMutation, c::SutLoro);
+        // BulkExternalAdd still binds the `SutSeamMutate` seam cap (pre-existing).
         one!(BulkExternalAdd, lc::SutSeamMutate);
         // FixtureFs (test-local)
         one!(CreateDirectory, lc::SutFixtureFs);

@@ -181,6 +181,7 @@ pub trait SutHandle:
     + ::holon_frontend::pbt_caps::SutArrowNavigate
     + crate::pbt::local_caps::SutMutate
     + crate::pbt::local_caps::SutSeamMutate
+    + crate::pbt::transitions::apply_mutation::SutApplyMutation
     + crate::pbt::local_caps::SutFixtureFs
     + crate::pbt::local_caps::SutAppLifecycle
 {
@@ -206,6 +207,7 @@ impl<T> SutHandle for T where
         + ::holon_frontend::pbt_caps::SutArrowNavigate
         + crate::pbt::local_caps::SutMutate
         + crate::pbt::local_caps::SutSeamMutate
+        + crate::pbt::transitions::apply_mutation::SutApplyMutation
         + crate::pbt::local_caps::SutFixtureFs
         + crate::pbt::local_caps::SutAppLifecycle
 {

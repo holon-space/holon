@@ -836,7 +836,7 @@ mod tests {
             rc::<t::SetupWatch>(),    // SutWatchRegister
             rc::<t::SwitchView>(),    // SutViewControl
             rc::<t::StartApp>(),      // SutAppLifecycle
-            rc::<t::ApplyMutation>(), // SutSeamMutate
+            rc::<t::ApplyMutation>(), // SutLoro (absent in turso_only → still gated out)
             rc::<t::ArrowNavigate>(), // SutArrowNavigate
         ] {
             assert!(
@@ -913,18 +913,18 @@ mod tests {
         }
     }
 
-    /// Swap-track discrimination: under the FULL `full_headless` composed config,
-    /// `ToggleState` is cap-feasible (the headless component provides `SutMutate` —
-    /// `toggle_state` is a real composed op) but `ApplyMutation`/`BulkExternalAdd` are
-    /// NOT (their `SutSeamMutate` cap is seam-relocated on `E2ESut` with no composed
-    /// equivalent, so the headless component doesn't provide it). This is the precise
-    /// payoff of splitting the no-op seam-mutate methods off `SutMutate`: when the
-    /// `general_e2e_pbt` SUT is swapped to `ComposedSut`, the seam-mutate family
-    /// AUTO-NARROWS out of the alphabet (honest cap-presence) instead of generating and
-    /// either silently passing on a no-op or diverging. (`E2ESut`'s own runs keep them:
-    /// concrete-SUT runs leave `cap_set = None`, so the gate admits everything.)
+    /// Swap-track discrimination under the FULL `full_headless` composed config:
+    /// - `ToggleState` is cap-feasible (the headless component provides `SutMutate`).
+    /// - `ApplyMutation` is NOW cap-feasible too: it is SOURCE-ROUTED via `SutApplyMutation`
+    ///   and its gate names `SutLoro` (the implemented LoroPeer arm), which `full_headless`
+    ///   provides. The composed generator restricts its source set to the implemented arms
+    ///   (`state.cap_set.is_some()` → LoroPeer only for now).
+    /// - `BulkExternalAdd` is NOW cap-feasible too: `HeadlessFrontendComponent` provides a real
+    ///   composed `SutSeamMutate` (org write via the live FileSyncController), which is its gate.
+    /// (`E2ESut`'s own runs keep everything: concrete-SUT runs leave `cap_set = None`, so the
+    /// gate admits all.)
     #[test]
-    fn full_headless_capset_admits_toggle_but_not_seam_mutate() {
+    fn full_headless_capset_admits_toggle_apply_mutation_and_bulk() {
         use crate::pbt::reference_state::ReferenceState;
         use crate::pbt::state_machine::fresh_reference_state;
         use crate::pbt::transitions as t;
@@ -951,12 +951,12 @@ mod tests {
             "full_headless provides SutMutate → ToggleState is cap-feasible"
         );
         assert!(
-            !state.caps_available(&rc::<t::ApplyMutation>()),
-            "full_headless lacks SutSeamMutate → ApplyMutation auto-narrows out"
+            state.caps_available(&rc::<t::ApplyMutation>()),
+            "full_headless provides SutLoro → source-routed ApplyMutation is cap-feasible"
         );
         assert!(
-            !state.caps_available(&rc::<t::BulkExternalAdd>()),
-            "full_headless lacks SutSeamMutate → BulkExternalAdd auto-narrows out"
+            state.caps_available(&rc::<t::BulkExternalAdd>()),
+            "full_headless frontend now provides SutSeamMutate → BulkExternalAdd is cap-feasible"
         );
         assert!(
             state.caps_available(&rc::<t::SetEdgeField>()),

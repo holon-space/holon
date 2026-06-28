@@ -83,6 +83,17 @@ pub fn structural_ref_wired(
         .block_documents
         .insert(page.clone(), EntityUri::no_parent());
 
+    // The page IS a user document: its org file is `structural-page.org` (what
+    // `boot_and_seed_wide` writes `WIDE_TREE_ORG` to) and its doc-uri is the page id
+    // (`block:structural-page` — the `#+ID:`-derived `file_id` the parser hands the SUT's
+    // `documents` key). Populating this un-gates the External (org) `ApplyMutation` arm and
+    // `BulkExternalAdd` (both require a non-empty `files.documents`); the value matches the
+    // SUT org filename so the native StartApp name-reconcile stays aligned too.
+    state
+        .files
+        .documents
+        .insert(page.clone(), "structural-page.org".to_string());
+
     // Re-root parent/c1/c2 as leaf siblings directly under the page.
     for (i, id) in [&ids.parent, &ids.c1, &ids.c2].into_iter().enumerate() {
         let b = state
@@ -411,6 +422,14 @@ impl ReferenceStateMachine for WideE2EMachine {
         // context with no ambient runtime (see `loro_only_wide_seed_runs_block_invariants_green`).
         // The per-draw non-vacuity floor (`required_invariants`) keeps a Loro-only draw from
         // false-REDing on the SQL/ViewModel ids it has no caps for.
+        // `HOLON_PBT_FORCE_FULL=1` pins every draw to `full_headless` — the deterministic
+        // exerciser for the frontend-only composed arms (`ApplyMutation` External /
+        // `BulkExternalAdd`), which `any_valid_wiring` only reaches on a rare Turso draw.
+        if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
+            return ::proptest::strategy::Strategy::boxed(
+                ::proptest::prelude::Just(wide_e2e_ref()),
+            );
+        }
         holon_pbt_core::any_valid_wiring()
             .prop_map(|w| wide_e2e_ref_for(&w))
             .boxed()

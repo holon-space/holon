@@ -101,7 +101,11 @@ where
             &samples,
             ref_.active_editor_block().as_ref(),
             ref_.active_editor_text(),
-            |id| ref_.block_content(id).map(str::to_string),
+            |id| {
+                ref_.is_text_block(id)
+                    .then(|| ref_.block_content(id).map(str::to_string))
+                    .flatten()
+            },
             // The geometry layer is the on-screen truth: the active editor's
             // live `InputState` value is checked here, not skipped.
             false,
@@ -175,7 +179,11 @@ where
             &samples,
             ref_.active_editor_block().as_ref(),
             ref_.active_editor_text(),
-            |id| ref_.block_content(id).map(str::to_string),
+            |id| {
+                ref_.is_text_block(id)
+                    .then(|| ref_.block_content(id).map(str::to_string))
+                    .flatten()
+            },
             // The actively-edited block's uncommitted text lives in InputState,
             // not the ViewModel tree — skip it here to avoid a false positive on
             // every in-flight edit; the `/widget` arm owns that case.

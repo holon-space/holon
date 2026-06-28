@@ -254,9 +254,17 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // stable id already shared with the oracle — they need no synthetic→real mapping,
         // so exclude them from `real_new` to keep the 1:1 split/doc guard intact (a
         // `MergeFromPeer` would otherwise make `real_new` outrun `synthetic` and panic).
+        // Born-equal ids (External `ApplyMutation::Create` and `BulkExternalAdd` write the
+        // block WITH its oracle id in the `:ID:` drawer, so `resolve_mutation_ids` leaves a
+        // Create's NEW id as-is) surface in the SUT with the SAME id the oracle already
+        // holds. Like peer-merged blocks they are shared, need no synthetic→real mapping,
+        // and would otherwise make `real_new` outrun `synthetic` (which only counts
+        // synthetic-scheme oracle ids) and panic. `resolve_id` passes unmapped ids through
+        // as identity, so dropping them here is correct.
         let real_new: Vec<EntityUri> = after
             .difference(&before)
             .filter(|id| !is_peer_scheme_id(id))
+            .filter(|id| !ref_state.domain.block_state.blocks.contains_key(*id))
             .cloned()
             .collect();
         assert_eq!(

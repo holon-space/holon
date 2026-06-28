@@ -36,9 +36,10 @@ use holon_pbt_core::capabilities::{
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use tempfile::TempDir;
 
-use crate::pbt::local_caps::{SutAppLifecycle, SutMutate};
+use crate::pbt::local_caps::{SutAppLifecycle, SutMutate, SutSeamMutate};
 use crate::pbt::query::TestQuery;
 use crate::pbt::transitions::toggle_state::{CycleTarget, cycle_click_count};
+use crate::pbt::types::{Mutation, MutationEvent};
 
 use crate::pbt::sut_capabilities::view_model_to_snapshot;
 use crate::pbt::sut_row_parsing::{
@@ -81,7 +82,10 @@ pub struct HeadlessFrontendComponent {
     org_paths: Vec<PathBuf>,
     /// `(resolved doc-block id, file path)` per tracked org file, cached from a
     /// clean boot parse — the disk-independent doc mapping `SutOrgRender` renders by.
-    documents: Vec<(EntityUri, PathBuf)>,
+    /// Tracked user-doc org files (doc page id → path). Interior-mutable: seeded at
+    /// boot AND appended by `create_document` so a mid-run `CreateDocument` doc becomes a
+    /// valid target for `BulkExternalAdd`/External `ApplyMutation` (which look up the file).
+    documents: Mutex<Vec<(EntityUri, PathBuf)>>,
     /// The captured DI injector — `SutOrgRender` resolves the
     /// `QueryableCache<Block>` from it to build the production `CacheBlockReader`
     /// (the doc-scoped recursive CTE ordered by `sort_key, id`, so descendants
@@ -251,7 +255,7 @@ impl HeadlessFrontendComponent {
             session,
             _temp: temp,
             watches: Mutex::new(Vec::new()),
-            documents,
+            documents: Mutex::new(documents),
             org_fs,
             org_root,
             org_paths,
@@ -946,8 +950,18 @@ impl SutOrgRead for HeadlessFrontendComponent {
         use holon_filesystem::FileSystem;
         use holon_orgmode::parser::parse_org_file;
 
+        // Boot org files PLUS any doc files created mid-run (`create_document` tracks
+        // them in `documents` but not the boot-fixed `org_paths`); without the union a
+        // `CreateDocument`+`BulkExternalAdd` doc's on-disk blocks are never read and
+        // `/org` false-diverges (oracle has them, SUT-org misses them).
+        let mut paths: Vec<PathBuf> = self.org_paths.clone();
+        for (_, p) in self.documents.lock().expect("documents lock").iter() {
+            if !paths.contains(p) {
+                paths.push(p.clone());
+            }
+        }
         let mut all_blocks = Vec::new();
-        for path in &self.org_paths {
+        for path in &paths {
             let raw = FileSystem::read_to_string(self.org_fs.as_ref(), path)
                 .await
                 .expect("SutOrgRead: read org file");
@@ -1001,7 +1015,8 @@ impl SutOrgRender for HeadlessFrontendComponent {
             .collect();
 
         let mut out = Vec::new();
-        for (doc_id, path) in &self.documents {
+        let docs_snapshot = self.documents.lock().expect("documents lock").clone();
+        for (doc_id, path) in &docs_snapshot {
             // disk-INDEPENDENT doc id (cached at boot), so a corrupted disk is
             // compared, not skipped.
             let Some(doc_block) = doc_blocks.get(doc_id.as_str()) else {
@@ -1467,12 +1482,132 @@ impl SutMutate for HeadlessFrontendComponent {
     }
 }
 
-// NB: `HeadlessFrontendComponent` deliberately does NOT implement `SutSeamMutate`
-// (`apply_mutation`/`bulk_external_add`). Those are seam-relocated on `E2ESut`
-// (`block_tree_post_action`) with no composed equivalent yet — a no-op impl would be a
-// FAKE (silent-pass). Its absence keeps the cap-presence honest, so `ApplyMutation` /
-// `BulkExternalAdd` AUTO-NARROW out of any composed alphabet (their `required_caps` name
-// a cap the composed `CapMap` doesn't provide) instead of generating + diverging.
+impl HeadlessFrontendComponent {
+    /// Settle barrier shared by the seam-mutate methods: poll `block_raw` until its
+    /// id-set is stable across two consecutive reads (the live `FileSyncController`
+    /// finished re-ingesting the org write). Same shape as `simulate_restart`'s settle.
+    async fn settle_block_ids_stable(&self, timeout: Duration) {
+        let start = std::time::Instant::now();
+        let mut prev: BTreeSet<EntityUri> =
+            self.all_blocks().await.into_iter().map(|b| b.id).collect();
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now: BTreeSet<EntityUri> =
+                self.all_blocks().await.into_iter().map(|b| b.id).collect();
+            if now == prev {
+                break;
+            }
+            prev = now;
+            assert!(
+                start.elapsed() < timeout,
+                "[settle_block_ids_stable] block_raw id-set never stabilized after org write"
+            );
+        }
+    }
+}
+
+/// Resolve a mutation's *referenced* ids (oracle synthetic → SUT real) via `resolve`, so
+/// `Mutation::apply_to` matches the live `block_raw` rows. A `Create`'s NEW id is left as-is
+/// (born-equal: the org write carries it in an `:ID:` drawer and both sides agree).
+fn resolve_mutation_ids(
+    mutation: &Mutation,
+    resolve: &dyn Fn(&EntityUri) -> EntityUri,
+) -> Mutation {
+    let mut m = mutation.clone();
+    match &mut m {
+        Mutation::Create { parent_id, .. } => *parent_id = resolve(parent_id),
+        Mutation::Update { id, .. } => *id = resolve(id),
+        Mutation::Delete { id, .. } => *id = resolve(id),
+        Mutation::Move {
+            id, new_parent_id, ..
+        } => {
+            *id = resolve(id);
+            *new_parent_id = resolve(new_parent_id);
+        }
+        Mutation::RestartApp => {}
+    }
+    m
+}
+
+/// `SutSeamMutate` over the headless component — the real composed equivalent of the
+/// `E2ESut` `block_tree_post_action` seam (which is `ref_state`-driven). Both methods
+/// rewrite the seeded USER docs' org files and let the live `FileSyncController`
+/// re-ingest — `documents` excludes the layout `index.org`, so a full rewrite is safe.
+/// `ref_state`-free: the post-state is reconstructed from the live `block` matview snapshot
+/// plus the typed transition args, not the oracle. Hosting this un-narrows `ApplyMutation`'s
+/// External arm AND `BulkExternalAdd` onto the composed alphabet. (The `BulkExternalAdd`
+/// Flutter-startup concurrent-watch race the `E2ESut` seam adds is NOT replicated here — it
+/// is a startup-scheduler probe already gated by `phantom_loro_exists_repro`; the composed
+/// catalog verifies the blocks landed every tick.)
+#[async_trait::async_trait(?Send)]
+impl SutSeamMutate for HeadlessFrontendComponent {
+    async fn apply_mutation(&self, event: MutationEvent) {
+        use holon_filesystem::FileSystem;
+        let resolved = resolve_mutation_ids(&event.mutation, &|id| self.resolve_id(id));
+        // Source from the `block` MATVIEW (`live_block_snapshot`), NOT the base `block_raw`
+        // table (`all_blocks`): block_raw has no `tags` column, so the doc block's `Page`
+        // tag is lost and `blocks_by_document` finds no page → it would serialize an EMPTY
+        // org file and the live re-ingest would WIPE the whole tree. The matview carries
+        // tags/requires, so page-ness (and any other edge fields) round-trip faithfully.
+        let mut current = self.live_block_snapshot().await;
+        resolved.apply_to(&mut current);
+        let grouped = holon_api::blocks_by_document(&current);
+        let docs_snapshot = self.documents.lock().expect("documents lock").clone();
+        for (doc_uri, file_path) in &docs_snapshot {
+            let doc_blocks: Vec<&Block> = grouped
+                .iter()
+                .find(|(u, _)| u == doc_uri)
+                .map(|(_, b)| b.iter().collect())
+                .unwrap_or_default();
+            let doc_block = current.iter().find(|b| b.id == *doc_uri && b.is_page());
+            let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, doc_uri, doc_block);
+            FileSystem::write(self.org_fs.as_ref(), file_path, org.as_bytes())
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("[apply_mutation/External] write {file_path:?} failed: {e:#}")
+                });
+        }
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+
+    async fn bulk_external_add(&self, doc_uri: &EntityUri, blocks: &[Block]) {
+        use holon_filesystem::FileSystem;
+        let resolved_doc = self.resolve_id(doc_uri);
+        let file_path = self
+            .documents
+            .lock()
+            .expect("documents lock")
+            .iter()
+            .find(|(u, _)| *u == resolved_doc)
+            .map(|(_, p)| p.clone())
+            .unwrap_or_else(|| {
+                panic!("[bulk_external_add] no file for doc {doc_uri} (resolved {resolved_doc})")
+            });
+        // New blocks are born with their oracle ids (`block:bulk-N-i`) → write verbatim
+        // (matched born-equal). Only resolve parent refs to pre-existing entities (the doc);
+        // refs to sibling bulk-N-k stay (born too, present in `current` after this loop).
+        // Matview snapshot (not `all_blocks`) so the doc block's `Page` tag survives — see
+        // `apply_mutation` above for why block_raw's missing tags would wipe the tree.
+        let mut current = self.live_block_snapshot().await;
+        for b in blocks {
+            let mut nb = b.clone();
+            nb.parent_id = self.resolve_id(&nb.parent_id);
+            current.push(nb);
+        }
+        let grouped = holon_api::blocks_by_document(&current);
+        let doc_blocks: Vec<&Block> = grouped
+            .iter()
+            .find(|(u, _)| *u == resolved_doc)
+            .map(|(_, b)| b.iter().collect())
+            .unwrap_or_default();
+        let doc_block = current.iter().find(|b| b.id == resolved_doc && b.is_page());
+        let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, &resolved_doc, doc_block);
+        FileSystem::write(self.org_fs.as_ref(), &file_path, org.as_bytes())
+            .await
+            .unwrap_or_else(|e| panic!("[bulk_external_add] write {file_path:?} failed: {e:#}"));
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+}
 
 /// `SutAppLifecycle` over the headless component — the seam-rebuild entry point.
 /// Only `create_document` is realized so far: it writes an empty org file into the
@@ -1568,9 +1703,14 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
             .to_string();
         let timeout = Duration::from_secs(5);
         let start = std::time::Instant::now();
-        loop {
-            if self.all_blocks().await.iter().any(|b| b.title() == stem) {
-                break;
+        let doc_id = loop {
+            if let Some(b) = self
+                .all_blocks()
+                .await
+                .into_iter()
+                .find(|b| b.title() == stem)
+            {
+                break b.id;
             }
             assert!(
                 start.elapsed() < timeout,
@@ -1578,6 +1718,17 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                  (title {stem:?}) to land in block_raw after writing {file_name}"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        // Track the new doc so a later `BulkExternalAdd` / External `ApplyMutation` targeting
+        // it resolves a file path. `doc_id` is the minted doc-page block (title == file stem)
+        // — the SAME real id the harness reconcile maps the oracle's `block:ref-doc-N` to (the
+        // single block minted by this ingest), so the seam lookup keyed on `resolve_id(...)`
+        // hits. Idempotent: skip if already tracked (re-create of the same file).
+        {
+            let mut docs = self.documents.lock().expect("documents lock");
+            if !docs.iter().any(|(u, _)| *u == doc_id) {
+                docs.push((doc_id, file_path.clone()));
+            }
         }
     }
 
@@ -1600,6 +1751,8 @@ impl SutErrorLog for HeadlessFrontendComponent {
     /// The documents resolved at boot — context for the failure message.
     async fn app_error_context(&self) -> Vec<String> {
         self.documents
+            .lock()
+            .expect("documents lock")
             .iter()
             .map(|(uri, _)| uri.to_string())
             .collect()
@@ -1656,6 +1809,10 @@ impl CapProvider for HeadlessFrontendComponent {
         // `Needs` it); lets the `ToggleState` transition drive this component's
         // headless `set_field task_state` op through `apply_to_sut(&mut CapMap)`.
         caps.insert(self.clone() as Arc<dyn SutMutate>);
+        // `SutSeamMutate` over the live `FileSyncController`: the real composed home for
+        // `ApplyMutation`'s External (org) arm and `BulkExternalAdd`, un-narrowing both onto
+        // any frontend CapMap. A write cap (no invariant `Needs` it), safe in `register`.
+        caps.insert(self.clone() as Arc<dyn SutSeamMutate>);
         // `SutEditorMirrorWrite` (TypeChars/DeleteBackward/MoveCursor) over the
         // production headless editor pipeline — selection-neutral write cap (no
         // invariant `Needs` a write cap), so it's safe in the general `register`;
