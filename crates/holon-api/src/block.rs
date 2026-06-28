@@ -908,6 +908,17 @@ pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
     result
 }
 
+/// A block paired with its **internal fractional index** `sort_key` — the
+/// ordering encoding a storage adapter keeps alongside the block (e.g. the
+/// Loro tree's `fractional_index`, hex-formatted). The domain `Block` no
+/// longer carries `sort_key` (ADR 0005); the file-sync diff base and the SQL
+/// projector read the ordering from here and `block` for everything else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotBlock {
+    pub block: Block,
+    pub sort_key: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

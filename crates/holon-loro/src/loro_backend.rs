@@ -424,17 +424,11 @@ fn read_block_from_tree(
     block
 }
 
-/// A block snapshotted from a Loro doc, paired with its **internal fractional
-/// index** — the ordering encoding the Loro adapter keeps inside the tree
-/// (`tree.fractional_index`, hex format matching
-/// `loro_fractional_index::FractionalIndex::to_string()`). The domain `Block`
-/// no longer carries `sort_key` (ADR 0005); the projector reads `sort_key`
-/// here to write the SQL ordering column and `block` for everything else.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SnapshotBlock {
-    pub block: Block,
-    pub sort_key: String,
-}
+// `SnapshotBlock` is a backend-neutral data type (a `Block` + its fractional
+// `sort_key`); it now lives in `holon-api`. The Loro adapter still builds it
+// here from a `LoroDoc` (see `snapshot_blocks_from_doc*`), but the type itself
+// is shared. Re-exported so `crate::loro_backend::SnapshotBlock` keeps resolving.
+pub use holon_api::SnapshotBlock;
 
 /// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty
 /// `Vec` when the key is absent ("no tags"). Malformed JSON in a present value
