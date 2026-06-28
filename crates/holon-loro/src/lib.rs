@@ -6,7 +6,6 @@
 //! Re-exported into `holon::sync` so existing `holon::sync::*` paths resolve.
 
 pub mod block_cell_registry;
-pub mod canonical_path;
 pub mod capability;
 pub mod consolidator;
 
@@ -73,7 +72,6 @@ pub mod text_merge_provider;
 ))]
 pub mod ticket;
 
-pub use canonical_path::CanonicalPath;
 pub use capability::{CapabilityProfile, Consolidator, SessionCapabilities};
 pub use consolidator::BlockConsolidator;
 #[cfg(all(
@@ -84,6 +82,7 @@ pub use degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedRea
 pub use event_bus::*;
 pub use event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
 pub use holon_api::EntityUri;
+pub use holon_core::CanonicalPath;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

@@ -7,7 +7,7 @@
 //!
 //! Echo suppression lives in `FileSyncController::last_projection`, not here.
 
-use holon::sync::CanonicalPath;
+use holon_core::CanonicalPath;
 use holon_filesystem::FileChangeSource;
 use ignore::gitignore::Gitignore;
 use std::path::{Path, PathBuf};

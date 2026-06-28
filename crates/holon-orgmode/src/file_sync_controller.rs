@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use holon::api::SnapshotBlock;
-use holon::sync::CanonicalPath;
+use holon_core::CanonicalPath;
 use holon::sync::{BaseKey, BaseStore, SyncBaseStore};
 use holon_api::block::Block;
 use holon_api::capability::Consolidator;

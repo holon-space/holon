@@ -12,6 +12,7 @@
 //! - `TaskOperations`: Task-specific operations (set_state, set_priority, set_due_date)
 
 pub mod block_ordering;
+pub mod canonical_path;
 pub mod cell;
 pub mod cell_registry;
 pub mod core;
@@ -25,6 +26,7 @@ pub mod traits;
 pub mod undo;
 pub mod util;
 
+pub use canonical_path::CanonicalPath;
 pub use downstream_projection::DownstreamProjection;
 pub use file_format::{FileFormatAdapter, FileFormatParseResult};
 pub use publish_errors::PublishErrorTracker;

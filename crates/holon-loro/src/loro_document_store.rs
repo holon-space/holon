@@ -10,7 +10,7 @@
 //! but all internally delegate to the single global document.
 
 use crate::LoroDocument;
-use crate::canonical_path::CanonicalPath;
+use crate::CanonicalPath;
 use crate::loro_backend::LoroBackend;
 use anyhow::Result;
 use std::collections::HashMap;

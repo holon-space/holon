@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 ///
 /// # Example
 /// ```ignore
-/// use holon::sync::CanonicalPath;
+/// use holon_core::CanonicalPath;
 ///
 /// // On macOS, both of these resolve to the same canonical path
 /// let p1 = CanonicalPath::new("/var/folders/test");
