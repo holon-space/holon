@@ -97,7 +97,7 @@ pub use inline_mark::{
 // Re-export entity types (for Entity derive macro)
 pub use entity::{
     DynamicEntity, FieldLifetime, FieldSchema, IntoEntity, ProfileVariant, StorageEntity,
-    TryFromEntity, TypeDefinition, TypeSource,
+    TryFromEntity, TypeDefinition, TypeSource, POSITION_AFTER_BLOCK_ID_PARAM, ROUTING_DOC_URI_KEY,
 };
 
 // Re-export CompiledExpr from holon-expr for FieldLifetime::Computed

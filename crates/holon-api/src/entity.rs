@@ -544,6 +544,33 @@ impl TryFromEntity for DynamicEntity {
 pub type StorageEntity = HashMap<std::sync::Arc<str>, Value>;
 
 // =============================================================================
+// StorageEntity operation-param keys (the write-path param contract)
+// =============================================================================
+//
+// These name operation-control entries that producers add to the params
+// `StorageEntity` they hand to a create/update/delete op. They are part of the
+// shared kernel (this is where `StorageEntity` itself lives), not specific to
+// any backend — `SqlOperationProvider` reads them and keeps them out of the
+// persisted row. `holon-loro`'s `event_bus` re-exports these for back-compat.
+
+/// Param-side name for the document-routing hint — names the document URI that
+/// owns the block this op applies to. Producers (`build_block_params` in
+/// `holon-orgmode`, plus internal lookups in `SqlOperationProvider`) add this to
+/// the params HashMap they hand to a create/update/delete op. The leading
+/// underscore lets `SqlOperationProvider::partition_params` recognise it as
+/// operation-control metadata (via the `_routing_` prefix) and keep it out of
+/// the persisted row.
+// ALLOW(routing_payload_key): producer-side param const, see doc-comment above.
+pub const ROUTING_DOC_URI_KEY: &str = "_routing_doc_uri";
+
+/// Param-side name for the typed positional intent — names the predecessor
+/// sibling a freshly-created block should sit after. Producers
+/// (`BlockOperations::split_block`, `FileSyncController::on_file_changed`) add
+/// this key to the params HashMap they hand to a create op; `SqlOperationProvider`
+/// reads it (to drive sibling ordering) and drops it from the persisted row.
+pub const POSITION_AFTER_BLOCK_ID_PARAM: &str = "after_block_id";
+
+// =============================================================================
 // Graph schema intermediate types
 // =============================================================================
 

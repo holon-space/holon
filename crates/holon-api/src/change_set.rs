@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::entity::StorageEntity;
+use crate::entity::{StorageEntity, POSITION_AFTER_BLOCK_ID_PARAM};
 use crate::entity_uri::EntityUri;
 use crate::Value;
 
@@ -239,10 +239,8 @@ fn decode_create(params: &StorageEntity) -> ChangeOp {
         .unwrap_or_default()
         .to_string();
     // Positional intent: a predecessor block id, never a sort_key.
-    // Canonical key is holon::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM
-    // = "after_block_id"; holon-api is a leaf crate so we inline the literal.
     let after_sibling = params
-        .get("after_block_id")
+        .get(POSITION_AFTER_BLOCK_ID_PARAM)
         .and_then(Value::as_string)
         // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the StorageEntity operation-params map
         .map(|s| EntityUri::from_raw(s));
@@ -271,7 +269,8 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
     // ALLOW(fallback): until the Phase 5 flip, structural moves emit `sort_key`
     // but not `after_block_id`; accepting both keys keeps Relocate firing for
     // indent/outdent/move.
-    let order_changed = params.contains_key("after_block_id") || params.contains_key("sort_key");
+    let order_changed =
+        params.contains_key(POSITION_AFTER_BLOCK_ID_PARAM) || params.contains_key("sort_key");
     if parent_changed || order_changed {
         out.push(ChangeOp::Relocate {
             id: id.clone(),
@@ -280,7 +279,7 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
                 .and_then(Value::as_string)
                 .map(str::to_string),
             after_sibling: params
-                .get("after_block_id")
+                .get(POSITION_AFTER_BLOCK_ID_PARAM)
                 .and_then(Value::as_string)
                 // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the StorageEntity operation-params map
                 .map(|s| EntityUri::from_raw(s)),

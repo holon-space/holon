@@ -10,19 +10,8 @@
 pub use holon_core::EventOrigin;
 pub use holon_core::PublishErrorTracker;
 
-/// Param-side name for the document-routing hint — names the document URI that
-/// owns the block this op applies to. Producers (`build_block_params` in
-/// `holon-orgmode`, plus internal lookups in `SqlOperationProvider`) add this to
-/// the params HashMap they hand to a create/update/delete op. The leading
-/// underscore lets `SqlOperationProvider::partition_params` recognise it as
-/// operation-control metadata (via the `_routing_` prefix) and keep it out of
-/// the persisted row.
-// ALLOW(routing_payload_key): producer-side param const, see doc-comment above.
-pub const ROUTING_DOC_URI_KEY: &str = "_routing_doc_uri";
-
-/// Param-side name for the typed positional intent — names the predecessor
-/// sibling a freshly-created block should sit after. Producers
-/// (`BlockOperations::split_block`, `FileSyncController::on_file_changed`) add
-/// this key to the params HashMap they hand to a create op; `SqlOperationProvider`
-/// reads it (to drive sibling ordering) and drops it from the persisted row.
-pub const POSITION_AFTER_BLOCK_ID_PARAM: &str = "after_block_id";
+// The operation-control param keys now live in `holon-api` alongside the
+// `StorageEntity` type they belong to (the write-path param contract is shared
+// kernel, not Loro-specific). Re-exported here for back-compat with the
+// `holon::sync::event_bus::*` consumers.
+pub use holon_api::{POSITION_AFTER_BLOCK_ID_PARAM, ROUTING_DOC_URI_KEY};
