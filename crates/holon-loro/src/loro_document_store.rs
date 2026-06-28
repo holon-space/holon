@@ -9,8 +9,8 @@
 // backend, tests); covered separately by the cell-authority cleanup roadmap.
 //! but all internally delegate to the single global document.
 
-use crate::LoroDocument;
 use crate::CanonicalPath;
+use crate::LoroDocument;
 use crate::loro_backend::LoroBackend;
 use anyhow::Result;
 use std::collections::HashMap;

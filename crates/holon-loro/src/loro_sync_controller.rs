@@ -40,7 +40,7 @@ use crate::LoroDocumentStore;
 use crate::loro_backend::{
     SnapshotBlock, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled,
 };
-use crate::sync_base_store::{BaseKey, BaseStore};
+use crate::{BaseKey, BaseStore};
 use holon_core::OriginTaggedWrites;
 
 /// Filename of the sidecar file that persists the sync watermark next to the
@@ -261,7 +261,7 @@ pub struct LoroProjection {
     /// (Loro authority vs this base) runs alongside the live sink-diff and
     /// asserts op-multiset agreement before the diff source is flipped. See
     /// [`crate::sync_base_store`].
-    base_store: crate::sync_base_store::SyncBaseStore,
+    base_store: crate::SyncBaseStore,
 }
 
 impl LoroProjection {
@@ -272,8 +272,7 @@ impl LoroProjection {
         sink_reader: Arc<dyn SinkReader>,
         sidecar_path: PathBuf,
     ) -> Self {
-        let base_store =
-            crate::sync_base_store::SyncBaseStore::from_frontiers_sidecar(&sidecar_path);
+        let base_store = crate::SyncBaseStore::from_frontiers_sidecar(&sidecar_path);
         // A `LoroProjection` exists only in the Loro-present config (it IS the
         // Loro→SQL projection), so the consolidator is pinned to Loro.
         let caps = crate::capability::SessionCapabilities::detect_and_pin(true);

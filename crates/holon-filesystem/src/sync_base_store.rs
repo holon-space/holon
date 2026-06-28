@@ -1,32 +1,34 @@
 //! Per-component last-synced *base* snapshot for 3-way block-sync diffing.
 //!
-//! The Loro→SQL projection historically diffed the live Loro authority against
-//! the live SQL sink. That couples the diff to a transient, lossy cache: a
-//! momentarily-incomplete sink row looks "deleted" (CDC churn), a lossy
-//! `sort_key`/`properties` round-trip looks "changed" (update churn), and a
-//! SQL-only delete that left the node alive in Loro gets *resurrected*.
+//! A block→SQL projection that diffs the live authority against the live SQL
+//! sink couples the diff to a transient, lossy cache: a momentarily-incomplete
+//! sink row looks "deleted" (CDC churn), a lossy `sort_key`/`properties`
+//! round-trip looks "changed" (update churn), and a SQL-only delete that left
+//! the node alive in the authority gets *resurrected*.
 //!
 //! [`SyncBaseStore`] holds the **last state the projection actually wrote** —
-//! a stable base, in Loro's own representation. Diffing the live Loro authority
-//! against this base (never the cache) means re-projecting an unchanged
-//! snapshot emits zero ops, and the cache's transient state can't drive the
-//! diff. (Phase 3 of the block-sync rework.)
+//! a stable base, in the authority's own representation. Diffing the live
+//! authority against this base (never the cache) means re-projecting an
+//! unchanged snapshot emits zero ops, and the cache's transient state can't
+//! drive the diff. (Phase 3 of the block-sync rework.)
 //!
-//! One global doc today; the keying is a forward seam for per-`(peer, file)`
-//! bases. In-memory with sidecar persistence (so the base survives restart and
-//! the first post-boot projection doesn't re-emit the whole tree).
+//! Storage-backend-agnostic: it stores [`holon_api::SnapshotBlock`] values and
+//! knows nothing about Loro or Turso. One global doc today; the keying is a
+//! forward seam for per-`(peer, file)` bases. In-memory with sidecar
+//! persistence (so the base survives restart and the first post-boot
+//! projection doesn't re-emit the whole tree).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::loro_backend::SnapshotBlock;
 #[cfg(test)]
 use holon_api::block::Block;
+use holon_api::SnapshotBlock;
 use tracing::{info, warn};
 
-/// Sidecar filename for the persisted base snapshot, alongside the Loro
-/// frontiers sidecar (`SIDECAR_FILENAME`).
+/// Sidecar filename for the persisted base snapshot, written alongside the
+/// authority's own frontiers/state sidecar.
 pub const BASE_SIDECAR_FILENAME: &str = "holon_tree.sync_base.json";
 
 /// Identifies *whose* base for *which* file. A forward seam for the
@@ -43,8 +45,8 @@ pub struct BaseKey {
 }
 
 impl BaseKey {
-    /// The single global base used while there is one Loro doc for the whole
-    /// tree (the Loro→SQL projection's base). Coexists with per-`(peer, file)`
+    /// The single global base used while there is one authority doc for the whole
+    /// tree (the block→SQL projection's base). Coexists with per-`(peer, file)`
     /// keys used by domain-scoped consumers (the org reconciler).
     pub fn global() -> Self {
         Self {
@@ -99,7 +101,7 @@ pub trait BaseStore: Send + Sync {
 /// key being *present* (even with an empty inner map) means "seeded" — that
 /// distinguishes a genuinely-empty base from a cold-boot one not yet projected.
 ///
-/// `sidecar_path` is `Some` for persisted bases (the Loro→SQL projection, so the
+/// `sidecar_path` is `Some` for persisted bases (the block→SQL projection, so the
 /// base survives restart) and `None` for in-memory bases (the org reconciler,
 /// which re-seeds per file from the consolidated store each session).
 pub struct SyncBaseStore {
@@ -109,7 +111,7 @@ pub struct SyncBaseStore {
 
 impl SyncBaseStore {
     /// Build a persisted base store whose sidecar lives next to
-    /// `frontiers_sidecar`. Used by the Loro→SQL projection.
+    /// `frontiers_sidecar`. Used by the block→SQL projection.
     pub fn from_frontiers_sidecar(frontiers_sidecar: &Path) -> Self {
         let sidecar_path = frontiers_sidecar.with_file_name(BASE_SIDECAR_FILENAME);
         let base = load_base(&sidecar_path);
@@ -248,7 +250,7 @@ mod tests {
 
     /// `ids` are BARE block ids (no scheme) — `block()` mints the `EntityUri`.
     /// The map is keyed by the schemed `EntityUri` string, mirroring production
-    /// (`loro_backend::snapshot_blocks_from_doc_settled` keys by
+    /// (the authority's settled snapshot reader keys by
     /// `block.id.to_string()`).
     fn snapshot(ids: &[&str]) -> HashMap<String, SnapshotBlock> {
         ids.iter()

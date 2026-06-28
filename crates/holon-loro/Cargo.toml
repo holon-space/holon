@@ -18,6 +18,7 @@ futures.workspace = true
 futures-signals.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
+holon-filesystem.workspace = true
 holon-macros.workspace = true
 iroh = { workspace = true, features = ["default"], optional = true }
 loro.workspace = true

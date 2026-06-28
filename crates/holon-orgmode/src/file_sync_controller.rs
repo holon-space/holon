@@ -14,14 +14,14 @@
 
 use anyhow::{Context, Result};
 use holon::api::SnapshotBlock;
-use holon_core::CanonicalPath;
-use holon::sync::{BaseKey, BaseStore, SyncBaseStore};
 use holon_api::block::Block;
 use holon_api::capability::Consolidator;
 use holon_api::{EntityUri, Value};
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::fractional_index::default_sort_key;
+use holon_core::CanonicalPath;
 use holon_filesystem::FileSystem;
+use holon_filesystem::{BaseKey, BaseStore, SyncBaseStore};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

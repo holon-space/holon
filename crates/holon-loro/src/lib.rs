@@ -64,7 +64,6 @@ pub mod share_peer_id;
 ))]
 pub mod shared_snapshot_store;
 pub mod shared_tree;
-pub mod sync_base_store;
 pub mod text_merge_provider;
 #[cfg(all(
     feature = "iroh-sync",
@@ -83,6 +82,7 @@ pub use event_bus::*;
 pub use event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
 pub use holon_api::EntityUri;
 pub use holon_core::CanonicalPath;
+pub use holon_filesystem::{BaseKey, BaseStore, SyncBaseStore};
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -102,5 +102,4 @@ pub use loro_document_store::*;
 pub use loro_sync_controller::{
     LoroProjection, LoroSyncController, LoroSyncControllerHandle, SinkReader, block_to_params,
 };
-pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
 pub use text_merge_provider::{TextHandle, TextMergeProvider};
