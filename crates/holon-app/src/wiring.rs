@@ -100,9 +100,9 @@ impl FrontendInjectorExt for Injector {
         }));
 
         // Conditional modules
-        let orgmode_root = holon_config.orgmode.root_directory.clone();
-        let loro_enabled = holon_config.loro_enabled();
-        let loro_storage_dir = holon_config.loro.storage_dir.clone();
+        let orgmode_root = holon_config.vault.root.clone();
+        let loro_enabled = holon_config.crdt_enabled();
+        let loro_storage_dir = holon_config.crdt.storage_dir.clone();
         #[cfg(not(target_arch = "wasm32"))]
         let mcp_integrations_dir = holon_config.resolve_mcp_integrations_dir(&config_dir);
 

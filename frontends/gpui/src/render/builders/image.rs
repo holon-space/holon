@@ -91,7 +91,7 @@ fn copy_image_to_clipboard(path: &PathBuf, cx: &mut gpui::App) {
 }
 
 fn org_root() -> Option<PathBuf> {
-    std::env::var("HOLON_ORGMODE_ROOT_DIRECTORY")
+    std::env::var("HOLON_VAULT_ROOT")
         .ok()
         .map(PathBuf::from)
         .or_else(|| std::env::var("HOLON_WORKSPACE_ROOT").ok().map(PathBuf::from))

@@ -163,7 +163,7 @@ cd .water/apple && xcodebuild -project WaterUIApp.xcodeproj -scheme WaterUIApp \
 The app is an FFI library loaded by the Swift host — env vars must be passed at launch time:
 ```sh
 HOLON_DB_PATH=/tmp/holon-water.db \
-HOLON_ORGMODE_ROOT=/path/to/orgfiles/ \
+HOLON_VAULT_ROOT=/path/to/orgfiles/ \
 .water/apple/.water/DerivedData/Build/Products/Debug/WaterUIApp.app/Contents/MacOS/WaterUIApp
 ```
 

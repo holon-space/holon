@@ -592,7 +592,7 @@ injector.add_mcp_server(8520)?;
 let session = injector.resolve_async::<FrontendSession>().await;
 ```
 
-Conditional registration: when `HOLON_LORO_ENABLED` is set, `LoroModule` registers `LoroBlockOperations` as the authority for blocks and `LoroTextCellBacking` for `content` cells. When unset, `SqlOperationProvider` + LWW cell backings are registered instead. The same `FrontendSession` resolution path works for both — the DI container is the switch, not runtime branches.
+Conditional registration: when `HOLON_CRDT_ENABLED` is set, `LoroModule` registers `LoroBlockOperations` as the authority for blocks and `LoroTextCellBacking` for `content` cells. When unset, `SqlOperationProvider` + LWW cell backings are registered instead. The same `FrontendSession` resolution path works for both — the DI container is the switch, not runtime branches.
 
 This enables:
 - Testability (mock providers, in-memory filesystem)

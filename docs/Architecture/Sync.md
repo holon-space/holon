@@ -89,8 +89,8 @@ Loro, OrgMode, and Iroh are independently toggleable via environment variables:
 
 | Component | Env Var | Default |
 |-----------|---------|---------|
-| OrgMode | `HOLON_ORGMODE_ROOT` (path) | OFF |
-| Loro | `HOLON_LORO_ENABLED` (truthy) | OFF |
+| OrgMode | `HOLON_VAULT_ROOT` (path) | OFF |
+| Loro | `HOLON_CRDT_ENABLED` (truthy) | OFF |
 | Iroh | (bundled with Loro, future: separate) | OFF |
 
 All 4 combinations of OrgMode × Loro are valid:

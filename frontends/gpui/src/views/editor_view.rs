@@ -1304,7 +1304,7 @@ fn save_clipboard_image(bytes: &[u8], extension: &str) -> Result<String, std::io
 }
 
 fn org_root_dir() -> std::path::PathBuf {
-    if let Ok(root) = std::env::var("HOLON_ORGMODE_ROOT_DIRECTORY") {
+    if let Ok(root) = std::env::var("HOLON_VAULT_ROOT") {
         return std::path::PathBuf::from(root);
     }
     if let Ok(root) = std::env::var("HOLON_WORKSPACE_ROOT") {

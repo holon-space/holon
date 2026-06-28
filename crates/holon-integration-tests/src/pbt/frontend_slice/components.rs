@@ -147,10 +147,10 @@ impl HeadlessFrontendComponent {
 
         let holon_config = HolonConfig {
             db_path: Some(temp.path().join("test.db")),
-            orgmode: holon_frontend::config::OrgmodeConfig {
-                root_directory: Some(temp.path().to_path_buf()),
+            vault: holon_frontend::config::VaultConfig {
+                root: Some(temp.path().to_path_buf()),
             },
-            loro: holon_frontend::config::LoroPreferences {
+            crdt: holon_frontend::config::CrdtPreferences {
                 enabled: Some(loro_enabled),
                 ..Default::default()
             },

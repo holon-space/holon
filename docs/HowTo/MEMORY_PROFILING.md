@@ -38,7 +38,7 @@ cargo build -p <frontend> --features holon-frontend/heap-profile
 ### Step 2: Run and reproduce the leak
 
 ```bash
-HOLON_ORGMODE_ROOT=/path/to/org/files RUST_LOG=info ./target/debug/holon-dioxus
+HOLON_VAULT_ROOT=/path/to/org/files RUST_LOG=info ./target/debug/holon-dioxus
 ```
 
 Let the app run until memory growth is visible in the monitor logs.

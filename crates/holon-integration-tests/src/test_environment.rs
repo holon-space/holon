@@ -381,10 +381,10 @@ impl TestEnvironmentBuilder {
 
         let holon_config = HolonConfig {
             db_path: Some(temp_dir.path().join("test.db")),
-            orgmode: holon_frontend::config::OrgmodeConfig {
-                root_directory: Some(temp_dir.path().to_path_buf()),
+            vault: holon_frontend::config::VaultConfig {
+                root: Some(temp_dir.path().to_path_buf()),
             },
-            loro: holon_frontend::config::LoroPreferences {
+            crdt: holon_frontend::config::CrdtPreferences {
                 enabled: if enable_loro { Some(true) } else { None },
                 ..Default::default()
             },
@@ -740,10 +740,10 @@ impl TestEnvironment {
 
         let holon_config = HolonConfig {
             db_path: Some(self.temp_dir.path().join("test.db")),
-            orgmode: holon_frontend::config::OrgmodeConfig {
-                root_directory: Some(self.temp_dir.path().to_path_buf()),
+            vault: holon_frontend::config::VaultConfig {
+                root: Some(self.temp_dir.path().to_path_buf()),
             },
-            loro: holon_frontend::config::LoroPreferences {
+            crdt: holon_frontend::config::CrdtPreferences {
                 enabled: if self.enable_loro.get() {
                     Some(true)
                 } else {

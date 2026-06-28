@@ -23,9 +23,7 @@ fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Optio
         };
         let mut holon_config = HolonConfig {
             db_path: db_path,
-            orgmode: holon_frontend::config::OrgmodeConfig {
-                root_directory: orgmode_root,
-            },
+            vault: holon_frontend::config::VaultConfig { root: orgmode_root },
             ..Default::default()
         };
         // Mobile builds don't read `~/.config/holon/holon.toml`, so the

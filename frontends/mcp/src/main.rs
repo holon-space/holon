@@ -51,7 +51,7 @@ fn parse_args() -> Result<Config> {
     let mut transport_mode = TransportMode::Stdio;
     let mut orgmode_root: Option<PathBuf> = None;
     let mut orgmode_loro_dir: Option<PathBuf> = None;
-    let mut loro_enabled = std::env::var("HOLON_LORO_ENABLED")
+    let mut loro_enabled = std::env::var("HOLON_CRDT_ENABLED")
         .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
         .unwrap_or(false);
 
@@ -352,10 +352,10 @@ async fn main() -> Result<()> {
     // Build HolonConfig from parsed MCP args
     let holon_config = holon_frontend::HolonConfig {
         db_path: Some(config.db_path),
-        orgmode: holon_frontend::config::OrgmodeConfig {
-            root_directory: config.orgmode_root,
+        vault: holon_frontend::config::VaultConfig {
+            root: config.orgmode_root,
         },
-        loro: holon_frontend::config::LoroPreferences {
+        crdt: holon_frontend::config::CrdtPreferences {
             enabled: if config.loro_enabled {
                 Some(true)
             } else {
@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
     let config_dir = holon_frontend::config::resolve_config_dir(None);
     let session_config = holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive());
 
-    let orgmode_root_for_debug = holon_config.orgmode.root_directory.clone();
+    let orgmode_root_for_debug = holon_config.vault.root.clone();
 
     let app = {
         use fluxdi::{Injector, Module, ModuleLifecycleFuture, Shared};

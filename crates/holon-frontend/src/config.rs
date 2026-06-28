@@ -38,6 +38,11 @@ use crate::preferences::PrefKey;
     not(target_arch = "wasm32"),
     command(author, version, about = "Holon personal knowledge manager")
 )]
+// Fail loud on stale config keys: a renamed section (e.g. an old `[orgmode]` /
+// `[loro]` from before the Vault/Crdt rename) would otherwise deserialize to
+// defaults and silently boot against the wrong vault root. `load_runtime`
+// turns the resulting error into a migration message.
+#[serde(deny_unknown_fields)]
 pub struct HolonConfig {
     /// Config directory (determines holon.toml location and default db_path).
     /// Not stored in holon.toml itself.
@@ -52,11 +57,11 @@ pub struct HolonConfig {
 
     #[cfg_attr(not(target_arch = "wasm32"), command(flatten))]
     #[serde(default)]
-    pub orgmode: OrgmodeConfig,
+    pub vault: VaultConfig,
 
     #[cfg_attr(not(target_arch = "wasm32"), command(flatten))]
     #[serde(default)]
-    pub loro: LoroPreferences,
+    pub crdt: CrdtPreferences,
 
     /// Storage substrate the DI container is assembled with (ADR 0004 Phase 9).
     /// `turso` (default) is the full substrate; `loro_memory` assembles a
@@ -95,33 +100,39 @@ impl premortem::validate::Validate for HolonConfig {
     }
 }
 
+/// The vault: the tree of structured-text files (.org / .md) the app syncs.
+/// Named after the substrate concept, not a concrete file format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(clap::Args))]
-pub struct OrgmodeConfig {
-    /// Root directory containing .org files (scanned recursively)
+#[serde(deny_unknown_fields)]
+pub struct VaultConfig {
+    /// Root directory of the vault (scanned recursively for structured-text files).
     #[cfg_attr(
         not(target_arch = "wasm32"),
-        arg(long = "orgmode-root-directory", env = "HOLON_ORGMODE_ROOT_DIRECTORY")
+        arg(long = "vault-root", env = "HOLON_VAULT_ROOT")
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root_directory: Option<PathBuf>,
+    pub root: Option<PathBuf>,
 }
 
+/// Preferences for the CRDT (collaborative / offline-merge) storage layer.
+/// Named after the substrate concept, not the concrete CRDT engine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(clap::Args))]
-pub struct LoroPreferences {
-    /// Enable the Loro CRDT layer
+#[serde(deny_unknown_fields)]
+pub struct CrdtPreferences {
+    /// Enable the CRDT layer.
     #[cfg_attr(
         not(target_arch = "wasm32"),
-        arg(long = "loro-enabled", env = "HOLON_LORO_ENABLED")
+        arg(long = "crdt-enabled", env = "HOLON_CRDT_ENABLED")
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
-    /// Loro storage directory (default: `{orgmode_root}/.loro` or `{config_dir}/.loro`)
+    /// CRDT storage directory (default: `{vault_root}/.loro` or `{config_dir}/.loro`).
     #[cfg_attr(
         not(target_arch = "wasm32"),
-        arg(long = "loro-storage-dir", env = "HOLON_LORO_STORAGE_DIR")
+        arg(long = "crdt-storage-dir", env = "HOLON_CRDT_STORAGE_DIR")
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_dir: Option<PathBuf>,
@@ -412,21 +423,18 @@ impl HolonConfig {
         )
     }
 
-    pub fn resolve_loro_storage_dir(&self, config_dir: &Path) -> PathBuf {
-        self.loro
+    pub fn resolve_crdt_storage_dir(&self, config_dir: &Path) -> PathBuf {
+        self.crdt
             .storage_dir
             .clone()
-            .or_else(|| {
-                self.orgmode
-                    .root_directory
-                    .as_ref()
-                    .map(|r| r.join(".loro"))
-            })
+            // CRDT state defaults under the vault root. Keep the `.loro` dir name
+            // byte-identical so existing on-disk CRDT state is not orphaned.
+            .or_else(|| self.vault.root.as_ref().map(|r| r.join(".loro")))
             .unwrap_or_else(|| config_dir.join(".loro"))
     }
 
-    pub fn loro_enabled(&self) -> bool {
-        self.loro.enabled.unwrap_or(false)
+    pub fn crdt_enabled(&self) -> bool {
+        self.crdt.enabled.unwrap_or(false)
     }
 
     pub fn glass_background(&self) -> bool {
@@ -452,8 +460,19 @@ impl HolonConfig {
         {
             let path = config_dir.join("holon.toml");
             match std::fs::read_to_string(&path) {
-                Ok(content) => toml::from_str(&content)
-                    .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path.display(), e)),
+                Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
+                    let hint = if content.contains("[orgmode]")
+                        || content.contains("[loro]")
+                        || content.contains("root_directory")
+                    {
+                        "\n\nConfig keys were renamed: `[orgmode]` → `[vault]` \
+                         (root_directory → root), `[loro]` → `[crdt]`. Update \
+                         holon.toml to the new section names."
+                    } else {
+                        ""
+                    };
+                    panic!("Failed to parse {}: {}{}", path.display(), e, hint)
+                }),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
                 Err(e) => panic!("Failed to read {}: {}", path.display(), e),
             }
@@ -537,7 +556,7 @@ mod tests {
         let config = HolonConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(
-            !toml_str.contains("root_directory"),
+            !toml_str.contains("root = "),
             "None fields should be skipped: {toml_str}"
         );
     }
@@ -545,8 +564,8 @@ mod tests {
     #[test]
     fn flatten_toml_produces_dotted_paths() {
         let config = HolonConfig {
-            orgmode: OrgmodeConfig {
-                root_directory: Some(PathBuf::from("/org")),
+            vault: VaultConfig {
+                root: Some(PathBuf::from("/org")),
             },
             ui: UiConfig {
                 theme: Some("dracula".into()),
@@ -558,24 +577,19 @@ mod tests {
         let mut values = ConfigValues::empty();
         flatten_toml("", &table, &mut values);
 
-        assert!(values.contains("orgmode.root_directory"));
+        assert!(values.contains("vault.root"));
         assert!(values.contains("ui.theme"));
     }
 
     #[test]
     fn save_preference_creates_nested_tables() {
         let dir = tempfile::tempdir().unwrap();
-        save_preference(
-            dir.path(),
-            "orgmode.root_directory",
-            toml::Value::String("/org".into()),
-        )
-        .unwrap();
+        save_preference(dir.path(), "vault.root", toml::Value::String("/org".into())).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("holon.toml")).unwrap();
         let table: toml::Table = content.parse().unwrap();
-        let orgmode = table["orgmode"].as_table().unwrap();
-        assert_eq!(orgmode["root_directory"].as_str().unwrap(), "/org");
+        let vault = table["vault"].as_table().unwrap();
+        assert_eq!(vault["root"].as_str().unwrap(), "/org");
     }
 
     #[test]
@@ -584,17 +598,12 @@ mod tests {
         let initial = "[ui]\ntheme = \"light\"\n";
         std::fs::write(dir.path().join("holon.toml"), initial).unwrap();
 
-        save_preference(
-            dir.path(),
-            "orgmode.root_directory",
-            toml::Value::String("/org".into()),
-        )
-        .unwrap();
+        save_preference(dir.path(), "vault.root", toml::Value::String("/org".into())).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("holon.toml")).unwrap();
         let table: toml::Table = content.parse().unwrap();
         assert_eq!(table["ui"]["theme"].as_str().unwrap(), "light");
-        assert_eq!(table["orgmode"]["root_directory"].as_str().unwrap(), "/org");
+        assert_eq!(table["vault"]["root"].as_str().unwrap(), "/org");
     }
 
     #[test]
@@ -615,5 +624,19 @@ mod tests {
             config.resolve_db_path(dir),
             PathBuf::from("/custom/db.sqlite")
         );
+    }
+
+    /// HYP-5: a pre-rename `[orgmode]` section must fail loud with a migration
+    /// hint, not silently deserialize to defaults (wrong vault root, no error).
+    #[test]
+    #[should_panic(expected = "renamed")]
+    fn stale_orgmode_section_fails_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("holon.toml"),
+            "[orgmode]\nroot_directory = \"/org\"\n",
+        )
+        .unwrap();
+        HolonConfig::load_runtime(dir.path());
     }
 }

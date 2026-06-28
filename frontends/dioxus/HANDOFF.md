@@ -84,7 +84,7 @@ check or run it, temporarily resolve it in isolation:
 
 Run (after the same swap):
 ```sh
-HOLON_DB_PATH=/path/to/db HOLON_ORGMODE_ROOT=/path/to/orgfiles/ cargo run -p holon-dioxus
+HOLON_DB_PATH=/path/to/db HOLON_VAULT_ROOT=/path/to/orgfiles/ cargo run -p holon-dioxus
 ```
 
 ## Shared-crate change

@@ -159,9 +159,9 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
             requires_restart: true,
         },
         PreferenceDef {
-            key: PrefKey::new("orgmode.root_directory"),
-            label: "OrgMode Directory".into(),
-            description: "Select the root directory containing your .org files. The directory will be scanned recursively.".into(),
+            key: PrefKey::new("vault.root"),
+            label: "Vault Root".into(),
+            description: "Select the root directory of your vault (the tree of structured-text files). The directory will be scanned recursively.".into(),
             section: data,
             pref_type: PrefType::DirectoryPath,
             default: toml::Value::String(String::new()),

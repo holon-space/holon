@@ -93,10 +93,10 @@ pub fn app(env: Environment) -> App {
 
     let holon_config = HolonConfig {
         db_path: env_config.db_path,
-        orgmode: holon_frontend::config::OrgmodeConfig {
-            root_directory: env_config.orgmode_root,
+        vault: holon_frontend::config::VaultConfig {
+            root: env_config.orgmode_root,
         },
-        loro: holon_frontend::config::LoroPreferences {
+        crdt: holon_frontend::config::CrdtPreferences {
             enabled: if env_config.loro_enabled { Some(true) } else { None },
             storage_dir: None,
         },
@@ -183,8 +183,8 @@ struct EnvConfig {
 fn parse_env_config() -> EnvConfig {
     EnvConfig {
         db_path: std::env::var("HOLON_DB_PATH").ok().map(PathBuf::from),
-        orgmode_root: std::env::var("HOLON_ORGMODE_ROOT").ok().map(PathBuf::from),
-        loro_enabled: std::env::var("HOLON_LORO_ENABLED")
+        orgmode_root: std::env::var("HOLON_VAULT_ROOT").ok().map(PathBuf::from),
+        loro_enabled: std::env::var("HOLON_CRDT_ENABLED")
             .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false),
     }

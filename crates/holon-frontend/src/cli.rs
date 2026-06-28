@@ -39,8 +39,8 @@ pub fn build_session(
         "Config dir: {}, db: {}, orgmode: {:?}, loro: {}",
         config_dir.display(),
         holon_config.resolve_db_path(&config_dir).display(),
-        holon_config.orgmode.root_directory,
-        holon_config.loro_enabled(),
+        holon_config.vault.root,
+        holon_config.crdt_enabled(),
     );
 
     Ok((holon_config, session_config, config_dir, locked))
