@@ -914,9 +914,49 @@ pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
 /// longer carries `sort_key` (ADR 0005); the file-sync diff base and the SQL
 /// projector read the ordering from here and `block` for everything else.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(into = "SnapshotBlockWire", from = "SnapshotBlockWire")]
 pub struct SnapshotBlock {
     pub block: Block,
     pub sort_key: String,
+}
+
+/// On-disk serde representation for [`SnapshotBlock`]. `Block`'s `tags`/`requires`
+/// are `#[serde(skip)]` (they are junction-derived, not Block columns), so a plain
+/// derive would round-trip them as empty through the file-sync diff base / projection
+/// sidecar and make every cold boot re-emit a spurious edge-field write (BUG H1).
+/// Carrying them as explicit sibling fields here makes the round-trip lossless. Back-
+/// conversion is infallible, so `from` (not `try_from`).
+#[derive(Serialize, Deserialize)]
+struct SnapshotBlockWire {
+    block: Block,
+    tags: Vec<String>,
+    requires: Vec<EntityUri>,
+    sort_key: String,
+}
+
+impl From<SnapshotBlock> for SnapshotBlockWire {
+    fn from(s: SnapshotBlock) -> Self {
+        let tags = s.block.tags.to_vec();
+        let requires = s.block.requires.clone();
+        SnapshotBlockWire {
+            block: s.block,
+            tags,
+            requires,
+            sort_key: s.sort_key,
+        }
+    }
+}
+
+impl From<SnapshotBlockWire> for SnapshotBlock {
+    fn from(w: SnapshotBlockWire) -> Self {
+        let mut block = w.block;
+        block.tags = w.tags.into();
+        block.requires = w.requires;
+        SnapshotBlock {
+            block,
+            sort_key: w.sort_key,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -940,5 +980,36 @@ mod tests {
             !schema.field_is_jsonb("parent_id"),
             "parent_id should NOT be JSONB"
         );
+    }
+
+    /// BUG H1 regression: the file-sync diff base / projection sidecar serde-
+    /// persists `SnapshotBlock`, which embeds a `Block` whose `tags`/`requires`
+    /// are `#[serde(skip)]`. Without the `SnapshotBlockWire` DTO this round-trip
+    /// drops both edge fields, so a cold boot re-emits spurious edge-field writes
+    /// for every tagged block. Must carry NON-empty `tags` AND `requires`.
+    #[test]
+    fn snapshot_block_serde_round_trip_preserves_edge_fields() {
+        let expected_tags: Tags = vec!["Inbox".to_string(), "Page".to_string()].into();
+        let expected_requires = vec![EntityUri::block("dep1"), EntityUri::block("dep2")];
+
+        let mut block = Block::new_text(
+            EntityUri::block("h1"),
+            EntityUri::no_parent(),
+            "x".to_string(),
+        );
+        block.tags = expected_tags.clone();
+        block.requires = expected_requires.clone();
+        let snap = SnapshotBlock {
+            block,
+            sort_key: "a0".to_string(),
+        };
+
+        let bytes = serde_json::to_vec(&snap).expect("serialize SnapshotBlock");
+        let back: SnapshotBlock =
+            serde_json::from_slice(&bytes).expect("deserialize SnapshotBlock");
+
+        assert_eq!(back.block.tags, expected_tags);
+        assert_eq!(back.block.requires, expected_requires);
+        assert_eq!(back.sort_key, "a0");
     }
 }

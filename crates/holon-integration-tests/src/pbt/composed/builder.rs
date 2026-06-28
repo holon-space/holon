@@ -31,7 +31,8 @@ use holon_api::EntityUri;
 use holon_api::repository::{CoreOperations, NewBlock};
 use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutQueryResults, SutSqlProjection,
+    SutBackend, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead, SutQueryResults,
+    SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use holon_pbt_core::{Actor, ComponentSet, Projection, StorageAdapter};
@@ -233,6 +234,18 @@ pub async fn compose_sut_seeded(
             resolver.clone(),
             structural_fallback,
         )) as Arc<dyn SutBlockTreeWrite>);
+        // Edge-field write cap (`tags` / `requires` on an existing block) — hosted
+        // only when a Loro authority doc is present (`loro_doc_store()` is `Some`
+        // iff Loro is on for this build). Routes through the production
+        // `set_block_{tags,requires}` over that doc → `project()` → SQL, so the
+        // composed `/matview` invariant catches a dropped edge-field re-projection
+        // (H12). Absent Loro → not hosted → `SetEdgeField` honestly narrows out.
+        if let Some(loro_store) = comp.loro_doc_store() {
+            caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
+                loro_store,
+                resolver.clone(),
+            )) as Arc<dyn SutEdgeFieldWrite>);
+        }
         // The VM-rung driver (§8.11 layer-localization): install the frontend's OWN
         // headless `ReactiveEngineDriver` as THE driver backing the gesture caps, so
         // the composed `CapMap` drives user gestures UI-adjacently (click-intent
@@ -944,6 +957,10 @@ mod tests {
         assert!(
             !state.caps_available(&rc::<t::BulkExternalAdd>()),
             "full_headless lacks SutSeamMutate → BulkExternalAdd auto-narrows out"
+        );
+        assert!(
+            state.caps_available(&rc::<t::SetEdgeField>()),
+            "full_headless hosts SutEdgeFieldWrite → SetEdgeField is cap-feasible"
         );
     }
 

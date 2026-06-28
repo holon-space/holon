@@ -425,9 +425,10 @@ fn read_block_from_tree(
 }
 
 // `SnapshotBlock` is a backend-neutral data type (a `Block` + its fractional
-// `sort_key`); it now lives in `holon-api`. The Loro adapter still builds it
-// here from a `LoroDoc` (see `snapshot_blocks_from_doc*`), but the type itself
-// is shared. Re-exported so `crate::loro_backend::SnapshotBlock` keeps resolving.
+// `sort_key`); it now lives in `holon-api` (along with the `SnapshotBlockWire`
+// lossless-serde representation — BUG H1). The Loro adapter still builds it here
+// from a `LoroDoc` (see `snapshot_blocks_from_doc*`), but the type itself is
+// shared. Re-exported so `crate::loro_backend::SnapshotBlock` keeps resolving.
 pub use holon_api::SnapshotBlock;
 
 /// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty

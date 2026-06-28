@@ -168,6 +168,7 @@ fn parse_weight_env() -> Vec<(WeightPattern, u32)> {
 pub trait SutHandle:
     ::holon_pbt_core::capabilities::SutEditorMirrorWrite
     + ::holon_pbt_core::capabilities::SutBlockTreeWrite
+    + ::holon_pbt_core::capabilities::SutEdgeFieldWrite
     + ::holon_pbt_core::capabilities::SutLoro
     + ::holon_pbt_core::capabilities::SutFocusWrite
     + ::holon_pbt_core::capabilities::SutNavHistoryWrite
@@ -192,6 +193,7 @@ pub trait SutHandle:
 impl<T> SutHandle for T where
     T: ::holon_pbt_core::capabilities::SutEditorMirrorWrite
         + ::holon_pbt_core::capabilities::SutBlockTreeWrite
+        + ::holon_pbt_core::capabilities::SutEdgeFieldWrite
         + ::holon_pbt_core::capabilities::SutLoro
         + ::holon_pbt_core::capabilities::SutFocusWrite
         + ::holon_pbt_core::capabilities::SutNavHistoryWrite

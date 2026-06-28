@@ -1,8 +1,17 @@
 # ADR: Unified Block Architecture with LoroTree + Content LoroDocs
 
-**Status:** Proposed (2026-03-26)
+**Status:** Superseded (2026-03-26) by [ADR 0003: All-in-LoroTree Architecture](0003-all-in-lorotree-architecture.md)
 **Deciders:** Martin
 **Context:** Cross-device sync, collaboration, block/document unification
+
+> **⚠️ This is a rejected proposal, kept for the rationale only — it does NOT
+> describe the shipped system.** It proposed a *two-layer* model: a structural
+> `LoroTree` plus a **separate content `LoroDoc` per block**. On the same day,
+> [ADR 0003](0003-all-in-lorotree-architecture.md) was Accepted with the simpler
+> *all-in-one-`LoroTree`* design (block content lives in each node's meta `LoroMap`,
+> no per-block content docs), and that is what the code implements. Read ADR 0003
+> for the current architecture; read this file only to understand which trade-offs
+> were weighed and why the two-layer split was dropped.
 
 ## Problem
 

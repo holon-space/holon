@@ -35,6 +35,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+pub use holon_api::EdgeFieldUpdate;
 pub use holon_api::EntityUri;
 
 /// Block identifier carried in capability-trait signatures. Aliased to
@@ -362,6 +363,22 @@ pub trait SutBlockTreeWrite {
     async fn apply_outdent(&self, id: &EntityUri);
     async fn apply_move_up(&self, id: &EntityUri);
     async fn apply_move_down(&self, id: &EntityUri);
+}
+
+/// SUT capability: write a block **edge field** (`tags`/`requires`, the
+/// junction-backed set-valued attributes) on an EXISTING block, parameterized
+/// over *which* field via [`EdgeFieldUpdate`] so neither is special-cased.
+///
+/// `&self` + interior mutability like the other write caps, so `#[capmap_adapter]`
+/// hosts it on `CapMap` — the composed `CapMap` IS the `SutTransitionTarget`. The
+/// realization calls the production edge-field writers (`set_block_tags` /
+/// `set_block_requires` on the Loro backend — the same functions the org re-scan
+/// reconciliation uses), so the write flows Loro → `project()` → SQL exactly as
+/// production does. That is what lets the composed `/matview` invariant observe a
+/// dropped edge-field re-projection (e.g. H12: `blocks_differ` omitting `requires`).
+#[holon_macros::capmap_adapter]
+pub trait SutEdgeFieldWrite {
+    async fn apply_set_edge_field(&self, id: &EntityUri, update: &EdgeFieldUpdate);
 }
 
 #[holon_macros::capmap_adapter]

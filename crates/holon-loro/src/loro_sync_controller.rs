@@ -908,6 +908,7 @@ fn blocks_differ(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
         || a.block.source_language != b.block.source_language
         || a.block.source_name != b.block.source_name
         || a.block.tags != b.block.tags
+        || a.block.requires != b.block.requires
         || a.block.properties_map() != b.block.properties_map()
         || a.block.marks != b.block.marks
 }

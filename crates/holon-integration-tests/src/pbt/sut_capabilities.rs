@@ -7,12 +7,47 @@
 use std::time::Duration;
 
 use holon_pbt_core::capabilities::{
-    EngineFocus, EntityUri, PeerEditOp, RenderedElement, SutBlockTreeWrite, SutDriver,
-    SutEditorMirrorWrite, SutLayout, SutLoro, TextOp,
+    EdgeFieldUpdate, EngineFocus, EntityUri, PeerEditOp, RenderedElement, SutBlockTreeWrite,
+    SutDriver, SutEdgeFieldWrite, SutEditorMirrorWrite, SutLayout, SutLoro, TextOp,
 };
 
 use super::sut::E2ESut;
 use holon_frontend::reactive::BuilderServices;
+
+// ─── SutEdgeFieldWrite (forwarding to the Loro authority) ─────────────
+//
+// Required because the shared `E2ETransition` alphabet is type-checked against
+// `E2ESut` (`SutHandle` bundles every cap). The transition's generator gates on a
+// composed config (`cap_set.is_some()`), and `E2ESut` always leaves `cap_set ==
+// None`, so `SetEdgeField` never generates against `E2ESut` and this impl is a
+// compile-required, fail-loud guard rather than a live path. (Kept faithful — not
+// a no-op — so it can't silently mask a future wiring that does reach it.)
+#[async_trait::async_trait(?Send)]
+impl SutEdgeFieldWrite for E2ESut {
+    async fn apply_set_edge_field(&self, id: &EntityUri, update: &EdgeFieldUpdate) {
+        let backend = self.loro_backend().cloned().expect(
+            "SetEdgeField reached E2ESut, but its generator gates on a composed config \
+             (`cap_set.is_some()`) and E2ESut leaves `cap_set == None` — so this should be \
+             unreachable. If a config ever routes it here, it needs a latched `loro_backend`.",
+        );
+        let rid = self.resolve_uri(id);
+        match update {
+            EdgeFieldUpdate::Tags(tags) => {
+                backend
+                    .set_block_tags(rid.as_str(), &tags.to_vec())
+                    .await
+                    .unwrap_or_else(|e| panic!("E2ESut set_block_tags({rid}) failed: {e:#}"));
+            }
+            EdgeFieldUpdate::Requires(reqs) => {
+                let resolved: Vec<EntityUri> = reqs.iter().map(|t| self.resolve_uri(t)).collect();
+                backend
+                    .set_block_requires(rid.as_str(), &resolved)
+                    .await
+                    .unwrap_or_else(|e| panic!("E2ESut set_block_requires({rid}) failed: {e:#}"));
+            }
+        }
+    }
+}
 
 // ─── SutLoro (forwarding) ─────────────────────────────────────────────
 //

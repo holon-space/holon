@@ -111,6 +111,7 @@ mod pin_block;
 mod press_key;
 mod redo;
 mod remove_watch;
+pub mod set_edge_field;
 mod setup_watch;
 mod simulate_restart;
 pub mod split_block;
@@ -164,6 +165,7 @@ pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
 pub use remove_watch::RemoveWatch;
+pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
 pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
@@ -253,6 +255,7 @@ crate::declare_e2e_transitions! {
         Redo(Redo),
         SimulateRestart(SimulateRestart),
         RemoveWatch(RemoveWatch),
+        SetEdgeField(SetEdgeField),
         SplitBlock(SplitBlock),
         SwitchView(SwitchView),
         SetupWatch(SetupWatch),

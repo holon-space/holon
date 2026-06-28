@@ -17,6 +17,7 @@ pub mod capability;
 pub mod change_set;
 pub mod clock;
 pub mod computed;
+pub mod edge_field;
 pub mod entity;
 pub mod entity_profile;
 pub mod entity_uri;
@@ -88,6 +89,9 @@ pub use types::{
 
 // Re-export entity URI type
 pub use entity_uri::EntityUri;
+
+// Re-export the block edge-field category
+pub use edge_field::EdgeFieldUpdate;
 
 // Re-export inline-mark types (rich text)
 pub use inline_mark::{

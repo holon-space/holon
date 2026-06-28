@@ -146,6 +146,13 @@ pub const WIDE_REQUIRED_INVARIANTS: &[&str] = &[
     "inv-no-orphan-blocks",
     "inv-no-parent-cycles",
     "inv-blocks-match-ref/block_raw",
+    // SQL-matview per-block equality INCLUDING the junction edge fields (`tags`,
+    // `requires`) — the `/block_raw` variant compares only the {content, properties}
+    // subset and lacks the junction columns. `full_headless` hosts `SutBackend +
+    // SutSqlProjection`, so requiring it every tick makes the ONE PBT the owner of
+    // the Loro→SQL edge-field projection check (catches H12: `blocks_differ`
+    // omitting `requires` from its change gate). Uses `retry_until_ok` (5s) per tick.
+    "inv-blocks-match-ref/matview",
     "inv-block-parent-matches-ref/block_raw",
     "inv-blocks-match-ref/org",
     "inv-navigation-focus",

@@ -340,6 +340,11 @@ impl BlockState {
                 let mut b = b.clone();
                 b.id = resolve(&b.id);
                 b.parent_id = resolve(&b.parent_id);
+                // `requires` is an edge field of block-id references; remap its
+                // targets into SUT ID space too so an edge-field comparison
+                // (e.g. `/matview`) matches when a dependency points at a
+                // minted (split-reconciled) block, not just a stable seed id.
+                b.requires = b.requires.iter().map(|u| resolve(u)).collect();
                 (b.id.clone(), b)
             })
             .collect();
