@@ -4976,6 +4976,7 @@ dependencies = [
  "holon-api",
  "holon-app",
  "holon-block-roundtrip-testing",
+ "holon-core",
  "holon-filesystem",
  "holon-frontend",
  "holon-layout-testing",

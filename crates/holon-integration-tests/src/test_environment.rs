@@ -222,10 +222,10 @@ pub struct TestEnvironment {
     /// `start_app`; `None` for a Turso session or before startup.
     loro_backend: OnceCell<Arc<LoroBackend>>,
 
-    /// Idle signal + keepalive for the no-Turso `FileSyncController` loop spawned
-    /// by `spawn_loro_file_sync`. Holding this strong `Arc` keeps the loop alive
-    /// (the loop holds a `Weak` and exits when this drops). `None` for a Turso
-    /// session or before startup.
+    /// Idle signal + keepalive for the no-Turso `FileSyncController` loop started
+    /// by resolving `FileSyncStarted`. Holding this strong `Arc` keeps the loop
+    /// alive (the loop holds a `Weak` and exits when this drops). `None` for a
+    /// Turso session or before startup.
     loro_org_idle: OnceCell<std::sync::Arc<holon_orgmode::di::OrgSyncIdleSignal>>,
 
     /// Shared in-memory org filesystem (ADR 0011 P3). All harness org-file
@@ -922,10 +922,68 @@ impl TestEnvironment {
         let injector = build_no_turso_container(storage_dir, {
             let backend = backend.clone();
             let shared_store = shared_store.clone();
+            let org_fs = self.org_fs.clone();
+            let org_root = self.org_root.clone();
             move |injector| {
+                use holon_app::loro_seams::{
+                    LoroBlockOrdering, LoroBlockReader, LoroDocumentManager,
+                };
                 register_loro_block_query_source(injector, backend.clone());
                 register_loro_operation_engine(injector, shared_store.clone());
                 register_block_query_frontend(injector);
+
+                // Org file-sync over the Loro seams — the SAME backend-blind
+                // core the Turso path uses (ADR 0004). Register the three seams +
+                // alias registrar + config, then the core; resolving the
+                // `FileSyncStarted` marker (post-seed, below) spawns the
+                // controller. No `spawn_*` call.
+                injector.provide::<holon_orgmode::OrgModeConfig>(fluxdi::Provider::root(
+                    move |_| {
+                        fluxdi::Shared::new(holon_orgmode::OrgModeConfig::new(org_root.clone()))
+                    },
+                ));
+                {
+                    let b = backend.clone();
+                    injector.provide::<dyn holon_orgmode::traits::BlockReader>(
+                        fluxdi::Provider::root(move |_| {
+                            Arc::new(LoroBlockReader::new(b.clone()))
+                                as Arc<dyn holon_orgmode::traits::BlockReader>
+                        }),
+                    );
+                }
+                {
+                    let b = backend.clone();
+                    injector.provide::<dyn holon_orgmode::traits::DocumentManager>(
+                        fluxdi::Provider::root(move |_| {
+                            Arc::new(LoroDocumentManager::new(b.clone()))
+                                as Arc<dyn holon_orgmode::traits::DocumentManager>
+                        }),
+                    );
+                }
+                {
+                    let b = backend.clone();
+                    injector.provide::<dyn holon_core::block_ordering::BlockOrdering>(
+                        fluxdi::Provider::root(move |_| {
+                            Arc::new(LoroBlockOrdering::new(b.clone()))
+                                as Arc<dyn holon_core::block_ordering::BlockOrdering>
+                        }),
+                    );
+                }
+                {
+                    let store = shared_store.clone();
+                    injector.provide::<dyn holon_orgmode::file_sync_controller::AliasRegistrar>(
+                        fluxdi::Provider::root(move |_| {
+                            Arc::new(holon_orgmode::di::LoroAliasRegistrar {
+                                doc_store: store.clone(),
+                            })
+                                as Arc<dyn holon_orgmode::file_sync_controller::AliasRegistrar>
+                        }),
+                    );
+                }
+                holon_orgmode::di::register_org_file_sync_core(injector)
+                    .map_err(|e| anyhow::anyhow!("register_org_file_sync_core: {e}"))?;
+                // Force the in-memory org fs over the core's real-disk defaults.
+                override_org_fs_bindings(injector, &org_fs);
                 Ok(())
             }
         })
@@ -985,18 +1043,16 @@ impl TestEnvironment {
             }
         }
 
-        // Ingest org files into the Loro backend through the SAME backend-blind
-        // FileSyncController the Turso path uses, via the Loro seam adapters. The
-        // store (Loro) is named; the format (org) is passed explicitly — neither is
-        // baked into a pair-named bootstrap (ADR 0004).
-        let (mut org_ready, org_idle) = holon_app::spawn_loro_file_sync(
-            self.org_root.clone(),
-            backend.clone(),
-            shared_store.clone(),
-            std::sync::Arc::new(holon_orgmode::file_format::OrgFormatAdapter::new()),
-            self.org_fs.clone(),
-            self.org_fs.clone(),
-        );
+        // Start org sync by resolving the backend-blind FileSyncStarted marker
+        // (registered above via register_org_file_sync_core). Same self-starting
+        // DI path the Turso container uses — no `spawn_*` call, no hardcoded
+        // adapters. Done AFTER seeding so the initial scan sees a seeded vault.
+        injector
+            .resolve_async::<holon_orgmode::di::FileSyncStarted>()
+            .await;
+        let mut org_ready = (*injector.resolve::<holon_orgmode::FileWatcherReadySignal>())
+            .clone()
+            .into_receiver();
         org_ready
             .wait_for(|v| v.is_some())
             .await
@@ -1005,7 +1061,7 @@ impl TestEnvironment {
             Ok(()) => {}
             Err(msg) => anyhow::bail!("no-Turso org sync startup failed: {msg}"),
         }
-        self.latch_loro_org_idle(org_idle);
+        self.latch_loro_org_idle(injector.resolve::<holon_orgmode::OrgSyncIdleSignal>());
 
         self.latch_loro_backend(backend);
         self.latch_loro_doc_store(shared_store);

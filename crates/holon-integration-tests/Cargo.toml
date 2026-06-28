@@ -15,6 +15,7 @@ test-infra = [
     "dep:holon-frontend",
     "dep:holon-app",
     "dep:holon-orgmode",
+    "dep:holon-core",
     "dep:holon-filesystem",
     "dep:holon-api",
     "dep:tokio",
@@ -69,6 +70,7 @@ holon = { workspace = true, features = ["test-helpers"], optional = true }
 holon-frontend = { workspace = true, optional = true }
 holon-app = { workspace = true, optional = true }
 holon-orgmode = { workspace = true, optional = true }
+holon-core = { workspace = true, optional = true }
 holon-filesystem = { workspace = true, optional = true }
 holon-api = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs", "sync"], optional = true }

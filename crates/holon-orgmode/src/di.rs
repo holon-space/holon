@@ -761,6 +761,211 @@ async fn seed_default_org_assets(fs: &dyn holon_filesystem::FileSystem, config: 
     }
 }
 
+/// Register the backend-blind file-sync core: FileSystem/FileChangeSource
+/// port defaults, the ready/idle signals, OrgRenderer, and the
+/// [`FileSyncStarted`] marker whose resolution spawns the controller over
+/// whatever seams the container provides. Called by [`OrgModeModule`] (Turso)
+/// and by the no-Turso container so both self-start identically.
+pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
+    use tracing::info;
+
+    // FileSystem port (ADR 0011): default-bind the real-disk adapter.
+    // First binding wins in fluxdi, so a test harness that registered an
+    // in-memory FileSystem before this module keeps its binding — that
+    // case is expected and disclosed below, any other provide error is not.
+    match injector.try_provide::<dyn holon_filesystem::FileSystem>(Provider::root(|_| {
+        Arc::new(holon_filesystem::RealFileSystem) as Arc<dyn holon_filesystem::FileSystem>
+    })) {
+        Ok(()) => {}
+        // Published fluxdi (dev @ 24b6eebb) models this as a struct
+        // `Error { kind, .. }`, not an enum variant.
+        Err(e) if matches!(e.kind, fluxdi::ErrorKind::ProviderAlreadyRegistered) => {
+            info!(
+                "[OrgModeModule] dyn FileSystem already bound — keeping the \
+                     existing (test-override) binding"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // FileChangeSource port (ADR 0011): default-bind the notify adapter.
+    // Same first-binding-wins override contract as dyn FileSystem above.
+    match injector.try_provide::<dyn holon_filesystem::FileChangeSource>(Provider::root(|_| {
+        Arc::new(
+            holon_filesystem::NotifyWatcher::new_unarmed()
+                .expect("notify watcher construction failed"),
+        ) as Arc<dyn holon_filesystem::FileChangeSource>
+    })) {
+        Ok(()) => {}
+        Err(e) if matches!(e.kind, fluxdi::ErrorKind::ProviderAlreadyRegistered) => {
+            info!(
+                "[OrgModeModule] dyn FileChangeSource already bound — keeping \
+                     the existing (test-override) binding"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Create and register FileWatcherReadySignal
+    // Tests can wait on this to ensure file watcher is ready before external mutations
+    let (ready_sender, ready_signal) = FileWatcherReadySignal::new();
+    let ready_signal = std::sync::Arc::new(std::sync::Mutex::new(Some(ready_signal)));
+    injector.provide::<FileWatcherReadySignal>(Provider::root(move |_| {
+        let signal = ready_signal
+            .lock()
+            .unwrap()
+            .take()
+            .expect("FileWatcherReadySignal factory called twice");
+        Shared::new(signal)
+    }));
+    // Store sender in Arc<Mutex> so we can move it into the spawned task later
+    let ready_sender = std::sync::Arc::new(std::sync::Mutex::new(Some(ready_sender)));
+    let ready_sender_for_factory = ready_sender.clone();
+
+    // Create and register OrgSyncIdleSignal
+    // Tests use this to skip mtime polling on the hot path.
+    let idle_signal = OrgSyncIdleSignal::new();
+    let idle_signal_for_factory = idle_signal.clone();
+    injector.provide::<OrgSyncIdleSignal>(Provider::root(move |_| idle_signal_for_factory.clone()));
+    let idle_signal_for_loop = idle_signal;
+
+    // Register OrgRenderer
+    injector.provide::<OrgRenderer>(Provider::root(|_resolver| Shared::new(OrgRenderer)));
+
+    // FileSyncStarted: resolving this marker builds the backend-blind
+    // FileSyncController over the DI-provided seams and spawns its loop.
+    // Root scope => built once. Both backends resolve it AFTER seeding
+    // (Turso: in the OperationProvider factory below; no-Turso: after layout
+    // seeding) — a side-effect-on-resolve start, the analog of the Turso
+    // dispatcher pulling the provider set.
+    {
+        let ready_sender_for_fs = ready_sender_for_factory.clone();
+        let idle_signal_for_fs = idle_signal_for_loop.clone();
+        injector.provide::<FileSyncStarted>(Provider::root_async(move |resolver| {
+            let ready_sender = ready_sender_for_fs.clone();
+            let idle_signal = idle_signal_for_fs.clone();
+            async move {
+                let block_reader = resolver.resolve_async::<dyn BlockReader>().await;
+                let doc_manager = resolver.resolve_async::<dyn DocumentManager>().await;
+                let ordering = resolver.resolve_async::<dyn BlockOrdering>().await;
+                let config = resolver.resolve::<OrgModeConfig>();
+                let fs = resolver.resolve::<dyn holon_filesystem::FileSystem>();
+                let change_source = resolver.resolve::<dyn holon_filesystem::FileChangeSource>();
+                let downstream = resolver
+                    .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
+                    .await;
+                let block_feed = resolver
+                    .optional_resolve_async::<holon::sync::event_infra_module::BlockFeed>()
+                    .await
+                    .map(|bf| bf.0.clone());
+                let format = resolver
+                    .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
+                    .await
+                    .unwrap_or_else(|| {
+                        Arc::new(crate::file_format::OrgFormatAdapter::new())
+                            as Arc<dyn holon_core::FileFormatAdapter>
+                    });
+                // Single alias-registrar source: the container's DI-provided
+                // registrar (no-Turso registers LoroAliasRegistrar), else the
+                // Loro-under-Turso registrar derived from LoroBlockOperations.
+                let alias_registrar = match resolver
+                    .optional_resolve_async::<dyn crate::file_sync_controller::AliasRegistrar>()
+                    .await
+                {
+                    Some(registrar) => Some(registrar),
+                    // ALLOW(ok): optional DI service — Loro registrar absent in SqlOnly
+                    None => resolver
+                        .try_resolve::<LoroBlockOperations>()
+                        .ok()
+                        .map(|ops| {
+                            Arc::new(LoroAliasRegistrar {
+                                doc_store: ops.shared_doc_store(),
+                            })
+                                as Arc<dyn crate::file_sync_controller::AliasRegistrar>
+                        }),
+                };
+
+                let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
+
+                let mut controller = FileSyncController::with_format(
+                    block_reader,
+                    doc_manager,
+                    config.root_directory.clone(),
+                    format,
+                    ordering,
+                    fs.clone(),
+                );
+                if let Some(hook_cmd) = config.post_org_write_hook.clone() {
+                    controller = controller.with_post_org_write_hook(hook_cmd);
+                }
+                if let Some(downstream) = downstream {
+                    controller = controller.with_downstream_projection(downstream);
+                }
+                if let Some(registrar) = alias_registrar {
+                    controller = controller.with_alias_registrar(registrar);
+                }
+
+                let (rerender_tx, rerender_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
+                if let Some(feed) = block_feed.clone() {
+                    let resolver_feed = feed.clone();
+                    let tx = rerender_tx.clone();
+                    tokio::spawn(async move {
+                        use futures_signals::signal_map::{MapDiff, SignalMapExt};
+                        resolver_feed
+                            .signal_map()
+                            .for_each(move |diff| {
+                                let tx = tx.clone();
+                                let feed = feed.clone();
+                                async move {
+                                    let msg = match diff {
+                                        MapDiff::Insert { value, .. }
+                                        | MapDiff::Update { value, .. } => {
+                                            match resolve_doc_for_block(&feed, &value) {
+                                                Some(doc) => OrgRerender::Doc(doc),
+                                                // ALLOW(fallback): doc unresolved (matview lag / nested) → full re-render
+                                                None => OrgRerender::All,
+                                            }
+                                        }
+                                        MapDiff::Remove { .. }
+                                        | MapDiff::Replace { .. }
+                                        | MapDiff::Clear {} => OrgRerender::All,
+                                    };
+                                    let _ = tx.send(msg);
+                                }
+                            })
+                            .await;
+                    });
+                }
+                drop(rerender_tx);
+
+                tokio::spawn(run_file_sync_controller(
+                    controller,
+                    config.root_directory.clone(),
+                    idle_signal_weak,
+                    rerender_rx,
+                    ready_sender,
+                    fs,
+                    change_source,
+                ));
+
+                Shared::new(FileSyncStarted)
+            }
+        }));
+    }
+
+    Ok(())
+}
+
+/// Marker resolved to start the backend-blind `FileSyncController`.
+///
+/// Registering the seams (`BlockReader` / `DocumentManager` / `BlockOrdering`)
+/// and resolving this type spawns the controller over whatever the container
+/// provides — no per-backend `spawn_*` call. Root-scoped, so the build+spawn
+/// happens exactly once however many times it is resolved.
+#[derive(Clone)]
+pub struct FileSyncStarted;
+
 /// ServiceModule for OrgMode integration
 ///
 /// Registers OrgMode-specific services in the DI container.
@@ -776,66 +981,7 @@ impl Module for OrgModeModule {
 
         info!("[OrgModeModule] register_services called");
 
-        // FileSystem port (ADR 0011): default-bind the real-disk adapter.
-        // First binding wins in fluxdi, so a test harness that registered an
-        // in-memory FileSystem before this module keeps its binding — that
-        // case is expected and disclosed below, any other provide error is not.
-        match injector.try_provide::<dyn holon_filesystem::FileSystem>(Provider::root(|_| {
-            Arc::new(holon_filesystem::RealFileSystem) as Arc<dyn holon_filesystem::FileSystem>
-        })) {
-            Ok(()) => {}
-            // Published fluxdi (dev @ 24b6eebb) models this as a struct
-            // `Error { kind, .. }`, not an enum variant.
-            Err(e) if matches!(e.kind, fluxdi::ErrorKind::ProviderAlreadyRegistered) => {
-                info!(
-                    "[OrgModeModule] dyn FileSystem already bound — keeping the \
-                     existing (test-override) binding"
-                );
-            }
-            Err(e) => return Err(e),
-        }
-
-        // FileChangeSource port (ADR 0011): default-bind the notify adapter.
-        // Same first-binding-wins override contract as dyn FileSystem above.
-        match injector.try_provide::<dyn holon_filesystem::FileChangeSource>(Provider::root(|_| {
-            Arc::new(
-                holon_filesystem::NotifyWatcher::new_unarmed()
-                    .expect("notify watcher construction failed"),
-            ) as Arc<dyn holon_filesystem::FileChangeSource>
-        })) {
-            Ok(()) => {}
-            Err(e) if matches!(e.kind, fluxdi::ErrorKind::ProviderAlreadyRegistered) => {
-                info!(
-                    "[OrgModeModule] dyn FileChangeSource already bound — keeping \
-                     the existing (test-override) binding"
-                );
-            }
-            Err(e) => return Err(e),
-        }
-
-        // Create and register FileWatcherReadySignal
-        // Tests can wait on this to ensure file watcher is ready before external mutations
-        let (ready_sender, ready_signal) = FileWatcherReadySignal::new();
-        let ready_signal = std::sync::Arc::new(std::sync::Mutex::new(Some(ready_signal)));
-        injector.provide::<FileWatcherReadySignal>(Provider::root(move |_| {
-            let signal = ready_signal
-                .lock()
-                .unwrap()
-                .take()
-                .expect("FileWatcherReadySignal factory called twice");
-            Shared::new(signal)
-        }));
-        // Store sender in Arc<Mutex> so we can move it into the spawned task later
-        let ready_sender = std::sync::Arc::new(std::sync::Mutex::new(Some(ready_sender)));
-        let ready_sender_for_factory = ready_sender.clone();
-
-        // Create and register OrgSyncIdleSignal
-        // Tests use this to skip mtime polling on the hot path.
-        let idle_signal = OrgSyncIdleSignal::new();
-        let idle_signal_for_factory = idle_signal.clone();
-        injector
-            .provide::<OrgSyncIdleSignal>(Provider::root(move |_| idle_signal_for_factory.clone()));
-        let idle_signal_for_loop = idle_signal;
+        register_org_file_sync_core(injector)?;
 
         // Register OrgModeSyncProvider as a factory
         injector.provide::<OrgModeSyncProvider>(Provider::root_async(async |resolver| {
@@ -875,15 +1021,42 @@ impl Module for OrgModeModule {
             Shared::new(holon::di::create_queryable_cache_async(&r).await)
         }));
 
-        // Register OrgRenderer
-        injector.provide::<OrgRenderer>(Provider::root(|_resolver| Shared::new(OrgRenderer)));
+        // File-sync seams (Turso backend). The no-Turso container registers the
+        // Loro counterparts (LoroBlockReader / LoroDocumentManager); the
+        // FileSyncStarted core below resolves whichever the container provides,
+        // so it stays backend-blind per ADR 0004. `dyn BlockOrdering` is already
+        // provided (SqlBlockOperations via EventInfraModule).
+        injector.provide::<dyn BlockReader>(Provider::root_async(|r| async move {
+            let block_cache = r.resolve_async::<QueryableCache<Block>>().await;
+            let mut reader = CacheBlockReader::new(block_cache);
+            if let Some(feed) = r
+                .optional_resolve_async::<holon::sync::event_infra_module::BlockFeed>()
+                .await
+            {
+                reader = reader.with_block_feed(feed.0.clone());
+            }
+            Arc::new(reader) as Arc<dyn BlockReader>
+        }));
+        injector.provide::<dyn DocumentManager>(Provider::root_async(|r| async move {
+            let db_handle = r.resolve::<dyn holon::di::DbHandleProvider>().handle();
+            let sql_ops = Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
+                db_handle.clone(),
+                BLOCK_WRITE_TABLE.to_string(),
+                "block".to_string(),
+                "block".to_string(),
+                BlockSchemaModule.edge_fields(),
+            ));
+            let command_bus: Arc<dyn OriginTaggedWrites> = sql_ops as Arc<dyn OriginTaggedWrites>;
+            let mgr = LiveDocumentManager::new(command_bus, db_handle)
+                .await
+                .expect("Failed to create LiveDocumentManager");
+            Arc::new(mgr) as Arc<dyn DocumentManager>
+        }));
 
         // Set up event bus wiring and background tasks.
         // This factory resolves LoroBlockOperations if available (Loro enabled),
         // otherwise creates a SqlOperationProvider for direct SQL block operations.
         injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(move |resolver| {
-            let ready_sender_clone = ready_sender_for_factory.clone();
-            let idle_signal_clone = idle_signal_for_loop.clone();
             async move {
                 // ============================================================
                 // PHASE 1: Resolve ALL services that run DDL
@@ -932,9 +1105,6 @@ impl Module for OrgModeModule {
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
                 ));
-
-                let command_bus: Arc<dyn OriginTaggedWrites> =
-                    sql_ops.clone() as Arc<dyn OriginTaggedWrites>;
 
                 // ============================================================
                 // PHASE 2: Create FileSyncController
@@ -1024,145 +1194,13 @@ impl Module for OrgModeModule {
                 // Loro ↔ command/event bus is wired by `LoroModule` via
                 // `LoroSyncControllerHandle`; see `crates/holon/src/sync/loro_module.rs`.
 
-                // FileSyncController: unified file ↔ block sync
-                // Reacts to block changes via the shared `LiveData<Block>` feed
-                // (works with both Loro and SQL paths). Runs on a single task via
-                // tokio::select!, serializing on_file_changed and on_block_changed
-                // — no locks needed.
-                {
-                    let command_bus = command_bus.clone();
-                    let config_clone = config.clone();
-                    let ready_sender_clone = ready_sender_clone.clone();
-                    // Weak reference to detect session shutdown: when the
-                    // injector + FrontendSession drop their strong refs,
-                    // upgrade() returns None and the file-watcher loop exits.
-                    // Without this, shared-runtime PBT (sut.rs:5320) leaks one
-                    // file-watcher per case → poll rate climbs from 9 → 120 Hz.
-                    let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal_clone);
-
-                    let loro_ops_clone = loro_ops.clone();
-                    let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
-                    let ordering = resolver.resolve_async::<dyn BlockOrdering>().await;
-                    // Downstream consolidator→sink projection. Present only when a
-                    // separate consolidator owns block storage (registered by
-                    // LoroModule); absent in the degraded SQL-only config, where
-                    // the controller routes creates through the command bus.
-                    let downstream = resolver
-                        .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
-                        .await;
-                    let db_handle_for_live_docs = db_handle.clone();
-                    let command_bus_for_docs = command_bus.clone();
-                    // Phase 5 keystone: the convergent block feed for the shadow
-                    // `wait_for_blocks_in_feed`. Present in both modes (EventInfraModule
-                    // registers it); `None` only in configs without it.
-                    let block_feed = resolver
-                        .optional_resolve_async::<holon::sync::event_infra_module::BlockFeed>()
-                        .await
-                        .map(|bf| bf.0.clone());
-                    let fs = resolver.resolve::<dyn holon_filesystem::FileSystem>();
-                    let change_source =
-                        resolver.resolve::<dyn holon_filesystem::FileChangeSource>();
-
-                    tokio::spawn(async move {
-                        use tracing::Instrument;
-                        let doc_manager: Arc<dyn DocumentManager> = Arc::new(
-                            async {
-                                LiveDocumentManager::new(
-                                    command_bus_for_docs,
-                                    db_handle_for_live_docs,
-                                )
-                                .await
-                                .expect("Failed to create LiveDocumentManager")
-                            }
-                            .instrument(tracing::info_span!("org.startup.live_doc_manager_new"))
-                            .await,
-                        );
-
-                        let mut reader = CacheBlockReader::new(block_cache);
-                        if let Some(feed) = &block_feed {
-                            reader = reader.with_block_feed(feed.clone());
-                        }
-                        let block_reader: Arc<dyn BlockReader> = Arc::new(reader);
-
-                        let mut controller = FileSyncController::new(
-                            block_reader,
-                            doc_manager,
-                            config_clone.root_directory.clone(),
-                            ordering,
-                            fs.clone(),
-                        );
-
-                        if let Some(hook_cmd) = config_clone.post_org_write_hook.clone() {
-                            controller = controller.with_post_org_write_hook(hook_cmd);
-                        }
-
-                        if let Some(downstream) = downstream {
-                            controller = controller.with_downstream_projection(downstream);
-                        }
-
-                        if let Some(ref ops) = loro_ops_clone {
-                            let shared_doc_store = ops.shared_doc_store();
-                            let alias_registrar: Arc<
-                                dyn crate::file_sync_controller::AliasRegistrar,
-                            > = Arc::new(LoroAliasRegistrar {
-                                doc_store: shared_doc_store,
-                            });
-                            controller = controller.with_alias_registrar(alias_registrar);
-                        }
-
-                        // Phase 5: drive org re-render from the convergent block feed
-                        // (`LiveData<Block>`), replacing the EventBus `Consumer::ORG`
-                        // block subscription. A resolver task consumes the feed's
-                        // `MapDiff` stream, maps each changed block to its owning
-                        // document (walk `parent_id` up to the nearest `Page`), and
-                        // funnels re-render requests over a channel into the
-                        // single-owner `select!` loop below (which alone holds
-                        // `&mut controller`). Mirrors the Phase-4b link re-feed.
-                        let (rerender_tx, rerender_rx) =
-                            tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
-                        if let Some(feed) = block_feed.clone() {
-                            let resolver_feed = feed.clone();
-                            let tx = rerender_tx.clone();
-                            tokio::spawn(async move {
-                                use futures_signals::signal_map::{MapDiff, SignalMapExt};
-                                resolver_feed
-                                    .signal_map()
-                                    .for_each(move |diff| {
-                                        let tx = tx.clone();
-                                        let feed = feed.clone();
-                                        async move {
-                                            let msg = match diff {
-                                                MapDiff::Insert { value, .. }
-                                                | MapDiff::Update { value, .. } => {
-                                                    match resolve_doc_for_block(&feed, &value) {
-                                                        Some(doc) => OrgRerender::Doc(doc),
-                                                        // ALLOW(fallback): doc unresolved (matview lag / nested) → full re-render
-                                                        None => OrgRerender::All,
-                                                    }
-                                                }
-                                                MapDiff::Remove { .. }
-                                                | MapDiff::Replace { .. }
-                                                | MapDiff::Clear {} => OrgRerender::All,
-                                            };
-                                            let _ = tx.send(msg);
-                                        }
-                                    })
-                                    .await;
-                            });
-                        }
-
-                        run_file_sync_controller(
-                            controller,
-                            config_clone.root_directory.clone(),
-                            idle_signal_weak,
-                            rerender_rx,
-                            ready_sender_clone,
-                            fs,
-                            change_source,
-                        )
-                        .await;
-                    });
-                }
+                // FileSyncController: backend-blind file ↔ block sync.
+                // Resolving FileSyncStarted (registered in configure above)
+                // builds the controller over the DI-provided seams and spawns
+                // its loop. Done HERE — after Phase-1 DDL + seeding — so the
+                // initial scan sees a seeded vault. The no-Turso container
+                // resolves the same marker after its own seeding.
+                resolver.resolve_async::<FileSyncStarted>().await;
 
                 // Block command-path provider for the UI dispatcher.
                 //
@@ -1232,68 +1270,6 @@ fn resolve_doc_for_block(feed: &holon::sync::LiveData<Block>, block: &Block) -> 
         }
     }
     None
-}
-
-/// Generic boot-time file-sync spawn: build a [`FileSyncController`] over the given domain
-/// seams (`BlockReader` / `DocumentManager` / `BlockOrdering`) and `FileFormatAdapter`, then
-/// `tokio::spawn` [`run_file_sync_controller`]. Backend- AND format-agnostic per ADR 0004:
-/// the caller injects the seam adapters for whichever store is canonical and the format
-/// adapter for whichever on-disk serialization (org / markdown / …) — there is no
-/// adapter-pair-named bootstrap. The returned strong `Arc<OrgSyncIdleSignal>` keeps the loop
-/// alive (the loop holds a `Weak` and exits when the caller drops it). Call from an async
-/// tokio context (so `tokio::spawn` has a runtime).
-///
-/// Block→file re-render is the caller's concern and stays dormant here (a closed rerender
-/// channel) — matching the no-Turso bootstrap.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_file_sync(
-    root_directory: PathBuf,
-    block_reader: Arc<dyn BlockReader>,
-    doc_manager: Arc<dyn DocumentManager>,
-    ordering: Arc<dyn BlockOrdering>,
-    format: Arc<dyn holon_core::FileFormatAdapter>,
-    alias_registrar: Option<Arc<dyn crate::file_sync_controller::AliasRegistrar>>,
-    fs: Arc<dyn holon_filesystem::FileSystem>,
-    change_source: Arc<dyn holon_filesystem::FileChangeSource>,
-) -> (
-    tokio::sync::watch::Receiver<Option<Result<(), String>>>,
-    Arc<OrgSyncIdleSignal>,
-) {
-    // Canonicalize the root the way `OrgModeConfig::new` does so `scan_org_files` and
-    // `on_file_changed` strip_prefix against the canonical form (macOS /tmp → /private/tmp).
-    let root_directory = fs.canonicalize(&root_directory).unwrap_or(root_directory);
-    let mut controller = FileSyncController::with_format(
-        block_reader,
-        doc_manager,
-        root_directory.clone(),
-        format,
-        ordering,
-        fs.clone(),
-    );
-    if let Some(registrar) = alias_registrar {
-        controller = controller.with_alias_registrar(registrar);
-    }
-
-    let (ready_sender, ready_signal) = FileWatcherReadySignal::new();
-    let ready_sender_arc = Arc::new(std::sync::Mutex::new(Some(ready_sender)));
-
-    let idle = OrgSyncIdleSignal::new();
-    let idle_weak = Arc::downgrade(&idle);
-
-    // Dormant rerender channel — dropping `_tx` keeps the `rerender_rx` select arm idle.
-    let (_tx, rerender_rx) = tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
-
-    tokio::spawn(run_file_sync_controller(
-        controller,
-        root_directory,
-        idle_weak,
-        rerender_rx,
-        ready_sender_arc,
-        fs,
-        change_source,
-    ));
-
-    (ready_signal.into_receiver(), idle)
 }
 
 /// Backend-blind FileSyncController driver: initialize, build the file watcher,

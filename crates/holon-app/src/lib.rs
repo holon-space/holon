@@ -33,7 +33,6 @@ pub mod session;
 pub mod wiring;
 
 pub use headless_builder_services::HeadlessBuilderServices;
-pub use loro_seams::spawn_loro_file_sync;
 pub use mcp_integrations::{McpIntegrationRegistry, McpIntegrationsModule};
 pub use no_turso::{from_block_query_source, register_block_query_frontend};
 pub use seed::seed_default_layout;

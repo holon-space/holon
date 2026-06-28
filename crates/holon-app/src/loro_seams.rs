@@ -1,7 +1,6 @@
-//! **Loro** seam adapters for the backend-blind file-sync controller, plus a
-//! Loro-store convenience bootstrap (`spawn_loro_file_sync`).
+//! **Loro** seam adapters for the backend-blind file-sync controller.
 //!
-//! ADR 0004 Phase 9, task #4: the file-sync controller speaks only to the
+//! ADR 0004 Phase 9: the file-sync controller speaks only to the
 //! [`BlockReader`], [`DocumentManager`], and [`BlockOrdering`] seams. These three
 //! adapters implement those seams directly against a [`LoroBackend`] tree — no
 //! Turso, no `QueryableCache`, no cell registry, no command bus. They are the
@@ -9,10 +8,10 @@
 //! holon-orgmode's `di.rs` and of the `Upstream` branch of `impl BlockOrdering
 //! for SqlBlockOperations`.
 //!
-//! This module names exactly ONE adapter (Loro) — ADR-0004-compliant. The
-//! **file format** is NOT baked in: `spawn_loro_file_sync` takes a
-//! `FileFormatAdapter` and delegates to the generic, format-agnostic
-//! [`holon_orgmode::di::spawn_file_sync`]. There is no `loro × org` pair module.
+//! These are registered as the `dyn BlockReader` / `dyn DocumentManager` /
+//! `dyn BlockOrdering` providers in the no-Turso container; resolving
+//! [`holon_orgmode::di::FileSyncStarted`] then self-starts the controller over
+//! them — the same DI-driven path the Turso container uses, no `spawn_*` call.
 //!
 //! They live in holon-app (Phase 2.5, C1/C2 of the architecture plan): only the
 //! wiring crate may name a concrete backend type, so holon-orgmode stays
@@ -24,7 +23,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -546,41 +544,4 @@ impl BlockOrdering for LoroBlockOrdering {
     async fn project_sort_keys(&self, _: &[EntityUri]) -> BlockOrderingResult<()> {
         Ok(())
     }
-}
-
-/// Construct the three **Loro** seam adapters and hand them to the generic,
-/// format-agnostic [`holon_orgmode::di::spawn_file_sync`]. This names only the *store*
-/// (Loro) — ADR-0004-compliant — and takes the on-disk `format` as a parameter (org,
-/// markdown, …), so it bakes in neither an adapter pair nor a privileged format. The
-/// returned strong `Arc<OrgSyncIdleSignal>` keeps the loop alive. Call from an async
-/// tokio context (so `tokio::spawn` has a runtime).
-pub fn spawn_loro_file_sync(
-    root_directory: PathBuf,
-    backend: Arc<LoroBackend>,
-    doc_store: Arc<tokio::sync::RwLock<holon::sync::LoroDocumentStore>>,
-    format: Arc<dyn holon_core::FileFormatAdapter>,
-    fs: Arc<dyn holon_filesystem::FileSystem>,
-    change_source: Arc<dyn holon_filesystem::FileChangeSource>,
-) -> (
-    tokio::sync::watch::Receiver<Option<Result<(), String>>>,
-    Arc<holon_orgmode::OrgSyncIdleSignal>,
-) {
-    use holon_orgmode::di::{spawn_file_sync, LoroAliasRegistrar};
-
-    let block_reader: Arc<dyn BlockReader> = Arc::new(LoroBlockReader::new(backend.clone()));
-    let doc_manager: Arc<dyn DocumentManager> = Arc::new(LoroDocumentManager::new(backend.clone()));
-    let ordering: Arc<dyn BlockOrdering> = Arc::new(LoroBlockOrdering::new(backend.clone()));
-    let registrar: Arc<dyn holon_orgmode::file_sync_controller::AliasRegistrar> =
-        Arc::new(LoroAliasRegistrar { doc_store });
-
-    spawn_file_sync(
-        root_directory,
-        block_reader,
-        doc_manager,
-        ordering,
-        format,
-        Some(registrar),
-        fs,
-        change_source,
-    )
 }
