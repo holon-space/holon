@@ -43,7 +43,6 @@ pub mod file_io;
 pub mod file_sync_controller;
 pub mod file_watcher;
 pub mod orgmode_sync_provider;
-pub mod traits;
 
 // Re-export key types
 #[cfg(feature = "di")]
@@ -62,9 +61,6 @@ pub use models::{
     HashMapBlockResolver,
 };
 pub use models::{OrgBlockExt, OrgDocumentExt, SourceBlock, ToOrg};
-
-// Traits for decoupling from storage backends
-pub use traits::{BlockReader, DocumentManager};
 
 // Sync providers and adapters
 pub use block_diff::{blocks_to_map, diff_blocks, BlockDiff};

@@ -39,7 +39,7 @@ use holon_api::{BlockContent, Value};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
 
-use holon_orgmode::traits::{BlockReader, DocumentManager};
+use holon_filesystem::{BlockReader, DocumentManager};
 
 /// Box a Loro `ApiError` (or any error) into the `BlockOrdering` error type,
 /// preserving the full chain via `{e:#}` — mirrors `SqlBlockOperations`.

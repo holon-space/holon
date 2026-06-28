@@ -18,13 +18,13 @@ use holon_api::types::{ContentType, Priority, Tags, TaskState, Timestamp};
 use holon_api::Value;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
-use holon_orgmode::file_sync_controller::FileSyncController;
+use holon_filesystem::{BlockReader, DocumentManager, FileSyncController};
+use holon_orgmode::file_sync_controller::new_org_sync_controller;
 use holon_orgmode::models::{
     OrgBlockExt, OrgDocumentExt, DEFAULT_ACTIVE_KEYWORDS, DEFAULT_DONE_KEYWORDS,
 };
 use holon_orgmode::org_renderer::OrgRenderer;
 use holon_orgmode::parser::parse_org_file;
-use holon_orgmode::traits::{BlockReader, DocumentManager};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -616,7 +616,7 @@ impl TestFixture {
             .canonicalize()
             .unwrap_or_else(|_| temp_dir.to_path_buf());
         let ordering = Arc::new(StubBlockOrdering::new(store.clone()));
-        let controller = FileSyncController::new(
+        let controller = new_org_sync_controller(
             store.clone(),
             doc_manager.clone(),
             root_dir.clone(),
@@ -1873,7 +1873,7 @@ mod ordering_replay_tests {
         let ordering = Arc::new(ConfigurableOrderingStub::new(live_order, store.clone()));
 
         let root_dir = temp_dir.to_path_buf();
-        let controller = FileSyncController::new(
+        let controller = new_org_sync_controller(
             store.clone(),
             doc_manager.clone(),
             root_dir.clone(),

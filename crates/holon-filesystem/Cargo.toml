@@ -10,6 +10,9 @@ tokio = { workspace = true, features = ["fs", "sync"] }
 walkdir.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+sha2.workspace = true
+hex.workspace = true
+percent-encoding = "2.3"
 futures.workspace = true
 tokio-stream.workspace = true
 serde.workspace = true

@@ -13,18 +13,22 @@ pub mod change_source;
 pub mod directory;
 pub mod error;
 pub mod file;
+pub mod file_sync_controller;
 pub mod fs_port;
 pub mod in_memory;
 pub mod sync_base_store;
+pub mod sync_ports;
 
 pub use change_source::{FileChange, FileChangeKind, FileChangeSource, NotifyWatcher};
 pub use directory::{ChangesWithMetadata, DirectoryChangeProvider, DirectoryDataSource};
 pub use directory::{Directory, ROOT_ID};
 pub use error::FilesystemError;
 pub use file::File;
+pub use file_sync_controller::{FileSyncController, RENDERER_VERSION};
 pub use fs_port::{FileMeta, FileSystem, RealFileSystem, ScannedEntries};
 pub use in_memory::InMemoryFileSystem;
 pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
+pub use sync_ports::{AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider};
 
 use std::path::Path;
 

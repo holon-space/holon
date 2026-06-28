@@ -21,10 +21,8 @@ use fluxdi::{Injector, Module, Provider, Shared};
 use holon_filesystem::directory::Directory;
 use holon_filesystem::File;
 
-use crate::file_sync_controller::FileSyncController;
 use crate::file_watcher::OrgFileWatcher;
 use crate::org_renderer::OrgRenderer;
-use crate::traits::{BlockReader, DocumentManager};
 use crate::OrgModeSyncProvider;
 use holon::core::datasource::{
     OperationProvider, OriginTaggedWrites, SyncTokenStore, SyncableProvider,
@@ -40,6 +38,7 @@ use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::EventOrigin;
+use holon_filesystem::{AliasRegistrar, BlockReader, DocumentManager, FileSyncController};
 
 /// Signal that indicates the FileWatcher is ready to receive file change events.
 ///
@@ -680,7 +679,7 @@ pub struct LoroAliasRegistrar {
 }
 
 #[async_trait::async_trait]
-impl crate::file_sync_controller::AliasRegistrar for LoroAliasRegistrar {
+impl AliasRegistrar for LoroAliasRegistrar {
     async fn register_alias(&self, doc_id: &EntityUri, path: &Path) {
         let store = self.doc_store.read().await;
         store.register_alias(doc_id.as_str(), path).await;
@@ -869,7 +868,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 // registrar (no-Turso registers LoroAliasRegistrar), else the
                 // Loro-under-Turso registrar derived from LoroBlockOperations.
                 let alias_registrar = match resolver
-                    .optional_resolve_async::<dyn crate::file_sync_controller::AliasRegistrar>()
+                    .optional_resolve_async::<dyn AliasRegistrar>()
                     .await
                 {
                     Some(registrar) => Some(registrar),
@@ -880,8 +879,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         .map(|ops| {
                             Arc::new(LoroAliasRegistrar {
                                 doc_store: ops.shared_doc_store(),
-                            })
-                                as Arc<dyn crate::file_sync_controller::AliasRegistrar>
+                            }) as Arc<dyn AliasRegistrar>
                         }),
                 };
 

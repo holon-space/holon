@@ -944,19 +944,19 @@ impl TestEnvironment {
                 ));
                 {
                     let b = backend.clone();
-                    injector.provide::<dyn holon_orgmode::traits::BlockReader>(
-                        fluxdi::Provider::root(move |_| {
+                    injector.provide::<dyn holon_filesystem::BlockReader>(fluxdi::Provider::root(
+                        move |_| {
                             Arc::new(LoroBlockReader::new(b.clone()))
-                                as Arc<dyn holon_orgmode::traits::BlockReader>
-                        }),
-                    );
+                                as Arc<dyn holon_filesystem::BlockReader>
+                        },
+                    ));
                 }
                 {
                     let b = backend.clone();
-                    injector.provide::<dyn holon_orgmode::traits::DocumentManager>(
+                    injector.provide::<dyn holon_filesystem::DocumentManager>(
                         fluxdi::Provider::root(move |_| {
                             Arc::new(LoroDocumentManager::new(b.clone()))
-                                as Arc<dyn holon_orgmode::traits::DocumentManager>
+                                as Arc<dyn holon_filesystem::DocumentManager>
                         }),
                     );
                 }
@@ -971,12 +971,12 @@ impl TestEnvironment {
                 }
                 {
                     let store = shared_store.clone();
-                    injector.provide::<dyn holon_orgmode::file_sync_controller::AliasRegistrar>(
+                    injector.provide::<dyn holon_filesystem::AliasRegistrar>(
                         fluxdi::Provider::root(move |_| {
                             Arc::new(holon_orgmode::di::LoroAliasRegistrar {
                                 doc_store: store.clone(),
                             })
-                                as Arc<dyn holon_orgmode::file_sync_controller::AliasRegistrar>
+                                as Arc<dyn holon_filesystem::AliasRegistrar>
                         }),
                     );
                 }

@@ -1,12 +1,15 @@
-//! Trait definitions for decoupling org-mode sync from concrete storage backends.
+//! Consumer-side ports for the format-agnostic file-sync engine.
 //!
-//! The org crate never imports Loro or Turso types directly. All interaction
-//! goes through these traits, which are implemented in the DI wiring layer.
+//! `FileSyncController` reads/writes blocks and documents, and registers
+//! doc-id → path aliases, only through these traits — it never imports a
+//! concrete storage backend (Loro, Turso, in-memory). The impls live in the
+//! DI wiring layer of each backend crate.
 
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::block::Block;
 use holon_api::EntityUri;
+use std::path::{Path, PathBuf};
 
 /// Read-only access to blocks, organized by document.
 ///
@@ -210,4 +213,12 @@ pub trait ImageDataProvider: Send + Sync {
 
     /// Store image bytes for a block.
     async fn write_image_data(&self, block_id: &EntityUri, data: Vec<u8>) -> Result<()>;
+}
+
+/// Callback for registering doc_id → path aliases in the storage layer.
+/// Implemented by Loro wiring; the controller itself doesn't know about Loro.
+#[async_trait]
+pub trait AliasRegistrar: Send + Sync {
+    async fn register_alias(&self, doc_id: &EntityUri, path: &Path);
+    async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf>;
 }
