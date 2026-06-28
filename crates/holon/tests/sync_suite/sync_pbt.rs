@@ -393,7 +393,7 @@ mod tests {
         /// Locate `suffix` in the shared root text and apply `kind` over
         /// the matching scalar range. Returns `true` on success.
         ///
-        /// Uses `holon::api::loro_backend::mark_to_loro_value` so the
+        /// Uses `holon_loro::mark_to_loro_value` so the
         /// applied mark value matches what the production
         /// `update_block_marked` / `apply_inline_mark` paths use — which
         /// is the same path the editor will eventually drive.
@@ -416,7 +416,7 @@ mod tests {
                 return false;
             }
             let mark = kind.to_inline();
-            let value = holon::api::loro_backend::mark_to_loro_value(&mark);
+            let value = holon_loro::mark_to_loro_value(&mark);
             t.mark(start..end, mark.loro_key(), value)
                 .expect("LoroText mark");
             doc.commit();
@@ -448,7 +448,7 @@ mod tests {
                 Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => t,
                 _ => return expected.iter().map(|m| (m.suffix.clone(), m.key)).collect(),
             };
-            let observed = holon::api::loro_backend::read_marks_from_text(&t);
+            let observed = holon_loro::read_marks_from_text(&t);
             let s = t.to_string();
             let mut missing = Vec::new();
             for em in expected {
@@ -676,7 +676,7 @@ mod tests {
                 Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => t,
                 _ => return Vec::new(),
             };
-            holon::api::loro_backend::read_marks_from_text(&t)
+            holon_loro::read_marks_from_text(&t)
                 .into_iter()
                 .map(|m| (m.start, m.end, m.mark.loro_key()))
                 .collect()

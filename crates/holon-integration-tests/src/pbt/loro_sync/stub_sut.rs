@@ -261,7 +261,7 @@ impl LoroSyncSut for StubSut {
         };
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
-        let blocks = holon::api::snapshot_blocks_from_doc(doc);
+        let blocks = holon_loro::snapshot_blocks_from_doc(doc);
         blocks
             .into_iter()
             .map(|(id, snap)| {

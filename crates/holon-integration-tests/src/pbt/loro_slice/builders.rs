@@ -1,7 +1,7 @@
 //! Compose the Loro slice's SUT `CapMap` from its component — "a slice is a
 //! component list" (§1). A second storage backing the *same* shared catalog.
 
-use holon::api::LoroBackend;
+use holon_loro::LoroBackend;
 use holon_pbt_core::composition::{CapMap, Config};
 
 use super::components::LoroBackendComponent;

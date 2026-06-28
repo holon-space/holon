@@ -25,9 +25,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon::api::loro_backend::LoroBackend;
 use holon_api::Value;
 use holon_integration_tests::TestEnvironment;
+use holon_loro::LoroBackend;
 
 #[test]
 fn restart_with_loro_enabled_over_populated_sql_vault() {

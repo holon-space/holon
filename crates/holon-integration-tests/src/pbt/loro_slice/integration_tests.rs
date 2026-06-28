@@ -5,8 +5,8 @@
 //! triads (incl. the Loro-specific ones) live with their invariant in
 //! `super::super::composed::invariants`, fixture-driven.
 
-use holon::api::LoroBackend;
 use holon_api::repository::{CoreOperations, Lifecycle};
+use holon_loro::LoroBackend;
 
 use crate::pbt::composed::fixtures::*;
 use crate::pbt::composed::subsystem_seed::{assert_ref_seeded, run_with_seeded_ref, seed_ref};

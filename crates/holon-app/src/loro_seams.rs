@@ -29,7 +29,6 @@ use std::sync::Arc;
 
 use anyhow::Result as AnyhowResult;
 use async_trait::async_trait;
-use holon::api::loro_backend::LoroBackend;
 use holon::api::repository::CoreOperations;
 use holon::api::types::Traversal;
 use holon::sync::LoroDocumentStore;
@@ -40,6 +39,7 @@ use holon_api::types::{ContentType, Tags};
 use holon_api::{BlockContent, Value};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
+use holon_loro::LoroBackend;
 use tokio::sync::RwLock;
 
 use holon_filesystem::{AliasRegistrar, BlockReader, DocumentManager};

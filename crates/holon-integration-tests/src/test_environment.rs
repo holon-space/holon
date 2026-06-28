@@ -26,7 +26,6 @@ use tokio::sync::RwLock;
 use crate::{assign_reference_sequences, wait_for_file_condition};
 use holon_api::reactive::CdcAccumulator;
 
-use holon::api::loro_backend::LoroBackend;
 use holon::api::{BackendEngine, RowChangeStream};
 use holon::di::{StorageSelector, build_no_turso_container};
 use holon::sync::LoroDocumentStore;
@@ -43,6 +42,7 @@ use holon_app::register_block_query_frontend;
 use holon_filesystem::FileSystem;
 use holon_frontend::reactive::{BuilderServices, BuilderServicesSlot, ReactiveEngine};
 use holon_frontend::{FrontendSession, HolonConfig, SessionConfig};
+use holon_loro::LoroBackend;
 
 /// Types of corruption for stale .loro files (for testing recovery)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

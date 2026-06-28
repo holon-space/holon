@@ -28,10 +28,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use holon::api::{LoroBackend, MemoryBackend};
+use holon::api::MemoryBackend;
 use holon_api::Region;
 use holon_api::repository::{CoreOperations, Lifecycle};
 use holon_api::types::ContentType;
+use holon_loro::LoroBackend;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::composition::{CapProvider, RunReport};
 

@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon::api::loro_backend::LoroBackend;
 use holon_api::Value;
 use holon_integration_tests::TestEnvironment;
+use holon_loro::LoroBackend;
 
 #[test]
 fn split_block_on_sql_only_block_succeeds_without_poisoning_loro_tree() {

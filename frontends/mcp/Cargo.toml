@@ -25,6 +25,7 @@ holon-frontend = { workspace = true }
 holon-app.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
 holon-filesystem = { workspace = true }
+holon-loro = { workspace = true }
 fluxdi.workspace = true
 uuid = { workspace = true }
 tracing = { workspace = true }

@@ -20,7 +20,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon::api::loro_backend::LoroBackend;
 use holon::di::build_no_turso_container;
 use holon::sync::loro_block_query_source::register_loro_block_query_source;
 use holon_api::repository::{CoreOperations, Lifecycle};
@@ -30,6 +29,7 @@ use holon_frontend::FrontendSession;
 use holon_frontend::reactive::{
     BuilderServices, BuilderServicesSlot, ReactiveEngine, ReactiveRenderedRows,
 };
+use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{SutRenderer, WidgetSnapshot};
 use holon_pbt_core::composition::{CapMap, CapProvider};
 

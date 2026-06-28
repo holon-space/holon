@@ -3,8 +3,8 @@
 //! Wraps `multi_peer` helpers with UUID-based block identity so that
 //! peer-created blocks carry the same stable IDs as the primary instance.
 
-use holon::api::loro_backend::STABLE_ID;
 use holon::sync::multi_peer;
+use holon_loro::STABLE_ID;
 use loro::{LoroDoc, TreeID};
 
 /// A lightweight block representation for peer reference state tracking.

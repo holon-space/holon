@@ -591,7 +591,7 @@ pub fn apply_transition(mut state: GroupState<()>, transition: &GroupTransition)
                         Some(nodes[*parent_idx % nodes.len()])
                     };
                     // Use `create_block_with_id` so every created node
-                    // carries a stable UUID — `holon::api::loro_backend`
+                    // carries a stable UUID — `holon_loro`
                     // requires STABLE_ID metadata on every tree node.
                     let stable_id = uuid::Uuid::new_v4().to_string();
                     create_block_with_id(&peer.doc, parent, content, &stable_id);

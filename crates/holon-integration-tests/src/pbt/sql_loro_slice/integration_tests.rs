@@ -10,9 +10,9 @@
 
 use std::collections::HashMap;
 
-use holon::api::LoroBackend;
 use holon_api::Value;
 use holon_api::repository::{CoreOperations, Lifecycle};
+use holon_loro::LoroBackend;
 
 use crate::pbt::composed::fixtures::*;
 use crate::pbt::loro_slice::components::LoroBackendComponent;

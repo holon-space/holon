@@ -1,6 +1,6 @@
 //! Inline rich-text marks: syntax-neutral model used by the rich-text editor,
 //! the org parser/renderer, the SQL `marks` projection, and (via a separate
-//! adapter in `holon::api::loro_backend`) Loro Peritext.
+//! adapter in `holon_loro`) Loro Peritext.
 //!
 //! # Indexing
 //!

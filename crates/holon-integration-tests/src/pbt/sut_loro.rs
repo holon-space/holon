@@ -15,10 +15,11 @@ use crate::assertions::normalize_block;
 use crate::pbt::retry::retry_until_ok;
 use crate::pbt::types::DocUriMap;
 use crate::test_environment::wait_for_loro_quiescence_on;
-use holon::api::{CoreOperations, LoroBackend};
+use holon::api::CoreOperations;
 use holon::sync::{LoroDocumentStore, LoroSyncControllerHandle};
 use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{PeerEditOp, SutLoro, TextOp};
 use holon_pbt_core::composition::{CapMap, CapProvider};
 
@@ -108,7 +109,7 @@ impl LoroSut {
             .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
         let doc_arc = collab_doc.doc();
         let doc = &*doc_arc;
-        Ok(holon::api::snapshot_blocks_from_doc(doc)
+        Ok(holon_loro::snapshot_blocks_from_doc(doc)
             .into_values()
             .collect())
     }

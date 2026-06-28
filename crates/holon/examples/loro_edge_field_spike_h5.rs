@@ -42,9 +42,9 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use holon::api::loro_backend::LoroBackend;
 use holon::api::repository::{CoreOperations, Lifecycle};
 use holon_api::{BlockContent, EntityUri, Value};
+use holon_loro::LoroBackend;
 
 #[tokio::main]
 async fn main() -> Result<()> {

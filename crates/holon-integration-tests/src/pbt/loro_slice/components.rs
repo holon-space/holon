@@ -13,9 +13,9 @@
 
 use std::sync::Arc;
 
-use holon::api::LoroBackend;
 use holon::api::types::Traversal;
 use holon_api::repository::CoreOperations;
+use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{SutBackend, SutLoroLog, SutLoroTaskState};
 use holon_pbt_core::composition::{CapMap, CapProvider};
 

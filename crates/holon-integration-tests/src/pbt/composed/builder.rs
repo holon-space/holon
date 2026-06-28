@@ -25,10 +25,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon::api::{BackendEngine, LoroBackend};
+use holon::api::BackendEngine;
 use holon::sync::LoroDocumentStore;
 use holon_api::EntityUri;
 use holon_api::repository::{CoreOperations, NewBlock};
+use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{
     SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutQueryResults, SutSqlProjection,
 };

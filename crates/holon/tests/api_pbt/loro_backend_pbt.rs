@@ -5,7 +5,6 @@
 
 #[cfg(test)]
 mod stateful_tests {
-    use holon::api::loro_backend::LoroBackend;
     use holon::api::memory_backend::MemoryBackend;
     use holon::api::pbt_infrastructure::{
         BlockTransition, apply_transition, check_transition_preconditions,
@@ -16,6 +15,7 @@ mod stateful_tests {
     use holon::api::types::Traversal;
     use holon_api::streaming::ChangeNotifications;
     use holon_api::{ApiError, Block, Change, StreamPosition};
+    use holon_loro::LoroBackend;
     use proptest::prelude::*;
     use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
     use std::collections::HashMap;
@@ -791,9 +791,9 @@ mod stateful_tests {
 /// to prove or disprove that hypothesis at the LoroBackend layer.
 #[cfg(test)]
 mod custom_properties_round_trip {
-    use holon::api::loro_backend::{LoroBackend, snapshot_blocks_from_doc};
     use holon::api::repository::{CoreOperations, Lifecycle};
     use holon_api::{BlockContent, EntityUri, Value};
+    use holon_loro::{LoroBackend, snapshot_blocks_from_doc};
     use std::collections::HashMap;
 
     async fn backend() -> LoroBackend {
