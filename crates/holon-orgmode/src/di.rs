@@ -676,8 +676,6 @@ impl DocumentManager for LiveDocumentManager {
 pub struct OrgModeConfig {
     /// Root directory containing .org files
     pub root_directory: PathBuf,
-    /// Directory where .loro files are stored (legacy, used when Loro is managed by OrgMode)
-    pub loro_storage_dir: PathBuf,
     /// Shell command to run after each org file write (e.g. "jj new").
     /// Runs in root_directory with HOLON_FILE env var set to the written path.
     pub post_org_write_hook: Option<String>,
@@ -693,22 +691,8 @@ impl OrgModeConfig {
         // This ensures path comparisons work correctly when file watcher reports
         // canonicalized paths
         let root_directory = std::fs::canonicalize(&root_directory).unwrap_or(root_directory);
-        let loro_storage_dir = root_directory.join(".loro");
         Self {
             root_directory,
-            loro_storage_dir,
-            post_org_write_hook: None,
-            seed_assets: Vec::new(),
-        }
-    }
-
-    pub fn with_loro_storage(root_directory: PathBuf, loro_storage_dir: PathBuf) -> Self {
-        // Canonicalize to resolve symlinks (e.g., /var -> /private/var on macOS)
-        let root_directory = std::fs::canonicalize(&root_directory).unwrap_or(root_directory);
-        let loro_storage_dir = std::fs::canonicalize(&loro_storage_dir).unwrap_or(loro_storage_dir);
-        Self {
-            root_directory,
-            loro_storage_dir,
             post_org_write_hook: None,
             seed_assets: Vec::new(),
         }

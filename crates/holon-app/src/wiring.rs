@@ -113,14 +113,13 @@ impl FrontendInjectorExt for Injector {
         }
 
         // Loro CRDT (must be before OrgMode so OrgMode can detect it)
-        let resolved_loro_dir = if loro_enabled {
+        if loro_enabled {
             let loro_dir = loro_storage_dir
                 .clone()
                 .or_else(|| orgmode_root.as_ref().map(|r| r.join(".loro")))
                 .unwrap_or_else(|| db_path.parent().unwrap_or(&db_path).join(".loro"));
-            let loro_dir_for_provider = loro_dir.clone();
             self.provide::<LoroConfig>(Provider::root(move |_| {
-                Shared::new(LoroConfig::new(loro_dir_for_provider.clone()))
+                Shared::new(LoroConfig::new(loro_dir.clone()))
             }));
             LoroModule
                 .configure(self)
@@ -143,11 +142,7 @@ impl FrontendInjectorExt for Injector {
                     doc_store: ops.shared_doc_store(),
                 }) as Arc<dyn holon_filesystem::AliasRegistrar>
             }));
-
-            Some(loro_dir)
-        } else {
-            None
-        };
+        }
 
         // OrgMode (native-only — holon-orgmode uses tokio::fs + tokio::process)
         #[cfg(not(target_arch = "wasm32"))]
@@ -164,11 +159,7 @@ impl FrontendInjectorExt for Injector {
                 std::fs::create_dir_all(&root).expect("Failed to create org root directory");
             }
 
-            let mut org_config = if let Some(loro_dir) = resolved_loro_dir {
-                OrgModeConfig::with_loro_storage(root, loro_dir)
-            } else {
-                OrgModeConfig::new(root)
-            };
+            let mut org_config = OrgModeConfig::new(root);
             org_config.post_org_write_hook = post_org_write_hook;
             org_config.seed_assets = holon_frontend::DEFAULT_ASSETS
                 .iter()
