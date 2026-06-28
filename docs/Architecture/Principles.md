@@ -334,6 +334,8 @@ Holon's data flow is layered. Each layer has one job:
 
 **Authority + Projection rule**: each entity type has exactly one *authority* (the system that can refuse a write). Turso is uniformly downstream — it never holds state the authority hasn't accepted. The UI never queries an authority directly; it always reads cells (Layer 2), which project from the authority through the event log (Layer 1) and matviews (Layer 3).
 
+> The concrete names in these diagrams — *Loro* for the block authority, *Turso* for the projection cache — are the **default `StorageSelector` wiring**, not structural facts. They are pluggable adapters behind the `StorageBackend` / `OperationProvider` ports (and `FileFormatAdapter` for the file layer); the composition root selects them. See [§Authority by Data Type](#authority-by-data-type-default-wiring) below and [ADR 0004 — Domain/Adapter/Actor split](../adr/0004-domain-adapter-actor-split.md).
+
 ### Unified Query Cache (Turso, projection only)
 
 ```
@@ -385,9 +387,9 @@ Cells (`Cell<T>`) are the system's universal reactive read primitive. Each cell 
 - `signal() -> impl Signal<Item = T>` — reactive stream of updates
 - `set(T)` — write that dispatches via the entity's typed `CrudOperations` methods (NOT through `OperationDispatcher` — that would re-enter dispatch and double-log undo/trace)
 
-`MutableText` is `Cell<String>` with rich-op methods (`apply_text_op(TextOp)`, cursor anchors, `remote_deltas()`). Loro-backed text cells supply rich behaviour natively; LWW backings degrade gracefully to compute-then-replace.
+`MutableText` is `Cell<String>` with rich-op methods (`apply_text_op(TextOp)`, cursor anchors, `remote_deltas()`). A CRDT-backed text cell (Loro in the default wiring) supplies rich behaviour natively; LWW backings degrade gracefully to compute-then-replace.
 
-Per-entity-type cell registries hold the cells. `BlockCellRegistry` knows how to construct each block field's backing (Loro-meta-backed for `completed`/`collapsed`/etc., Loro-text-backed for `content`, LWW-scalar-backed in SqlOnly mode). Cells are `Weak`-keyed: held alive while consumers reference them; reaped when the last consumer drops.
+Per-entity-type cell registries hold the cells. `BlockCellRegistry` knows how to construct each block field's backing — in the default (CRDT-enabled) wiring: meta-backed for `completed`/`collapsed`/etc., text-backed for `content`; LWW-scalar-backed in SqlOnly mode. The backing kind is a wiring choice, not a property of the field. Cells are `Weak`-keyed: held alive while consumers reference them; reaped when the last consumer drops.
 
 **Cells vs `Mutable<T>`**: `Cell<T>` is for entity field state (has identity, has authority, could be persisted/queried/synced). Per-VM `Mutable<T>` (FU-1 pattern) is for per-instance widget state (tree-item `expanded`, view-mode-switcher selection, focused_block) — same-id entities in different render slots need independent state. Genuinely-ephemeral state (cursor blink, hover, drag offset) stays raw `Mutable<T>` too.
 
@@ -414,13 +416,15 @@ Local files (Markdown or Org Mode) provide an additional interface to owned data
 └─────────────────────────────────────────┘
 ```
 
+The "bidirectional sync" arrow is not a direct file↔Loro coupling: it runs through ports. A format-agnostic `FileSyncController` (in `holon-filesystem`) drives the sync, parsing/rendering each file through a `FileFormatAdapter` (`OrgFormatAdapter` / `MarkdownFormatAdapter`) and writing through the `StorageBackend` / `OperationProvider` ports — so Org and Markdown are peer file formats, and the CRDT box is the default-wired backend, both swappable. See [Sync.md §FileFormatAdapter](Sync.md) and [ADR 0004](../adr/0004-domain-adapter-actor-split.md).
+
 **Capabilities**:
-- Files act as a bidirectional cache of CRDT content
-- External edits to files are detected and merged into CRDTs
+- Files act as a bidirectional cache of owned (CRDT-backed, in the default wiring) content
+- External edits to files are detected and merged through the file-sync engine
 - Enables interop with other tools
 - Provides human-readable backup and portability
 
-**Open questions**: Exact reconciliation strategy between file edits and CRDT state is TBD. Goal: you can always edit your notes in any text editor, and Holon will incorporate those changes.
+**Open questions**: Exact reconciliation strategy between file edits and backend state is TBD. Goal: you can always edit your notes in any text editor, and Holon will incorporate those changes.
 
 ### Sync Token Management
 
