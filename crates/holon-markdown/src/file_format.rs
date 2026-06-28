@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use holon_api::block::Block;
-use holon_api::EntityUri;
+use holon_api::{EntityUri, StorageEntity};
 use holon_core::file_format::{FileFormatAdapter, FileFormatParseResult};
 use std::path::Path;
 
@@ -89,6 +89,41 @@ impl FileFormatAdapter for MarkdownFormatAdapter {
 
     fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String {
         MarkdownRenderer::new(self.dialect.clone()).render_blocks(blocks, file_path, file_id)
+    }
+
+    // The write-path / identity seam below is exercised only when a
+    // `FileSyncController` drives a markdown vault back to a backend. That
+    // wiring does not exist yet (markdown is read/render-complete; bidirectional
+    // sync is future work), and markdown has no established id-in-content or
+    // op-param convention. Fail loud rather than fake a convention: an
+    // implementor wiring markdown sync gets a precise pointer here.
+
+    fn doc_id_from_content(&self, _: &str) -> Option<String> {
+        unimplemented!(
+            "MarkdownFormatAdapter::doc_id_from_content — markdown vault write-sync \
+             is not wired; define the frontmatter id convention before enabling it"
+        )
+    }
+
+    fn build_block_params(&self, _: &Block, _: &EntityUri, _: &EntityUri) -> StorageEntity {
+        unimplemented!(
+            "MarkdownFormatAdapter::build_block_params — markdown vault write-sync \
+             is not wired; define the op-param mapping before enabling it"
+        )
+    }
+
+    fn content_differs(&self, _: &Block, _: &Block) -> bool {
+        unimplemented!(
+            "MarkdownFormatAdapter::content_differs — markdown vault write-sync \
+             is not wired; define content-equivalence before enabling it"
+        )
+    }
+
+    fn sync_document_metadata(&self, _: &Block, _: &mut Block) -> bool {
+        unimplemented!(
+            "MarkdownFormatAdapter::sync_document_metadata — markdown vault write-sync \
+             is not wired; markdown has no #+TODO:-style header metadata to reconcile"
+        )
     }
 }
 

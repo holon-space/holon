@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use holon_api::block::Block;
-use holon_api::EntityUri;
+use holon_api::{EntityUri, StorageEntity};
 use std::path::Path;
 
 /// Result of parsing a structured-text file. Format-neutral.
@@ -71,4 +71,41 @@ pub trait FileFormatAdapter: Send + Sync {
     /// controller has blocks but no `Block` for the document entity itself
     /// (e.g. during initialization before the document row is loaded).
     fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String;
+
+    /// Extract the document's stable bare id from raw file content, if the
+    /// format embeds one (e.g. org's `#+ID:` header). Returns `None` when the
+    /// file carries no explicit identity — the controller then falls back to
+    /// name-chain resolution. Cheaper than a full `parse` because the
+    /// controller only needs the id to resolve the document entity before
+    /// committing to a full parse.
+    fn doc_id_from_content(&self, content: &str) -> Option<String>;
+
+    /// Build the operation-params `StorageEntity` for a create/update of
+    /// `block`, as handed to `OperationProvider::execute_operation`. The
+    /// `document_uri` is recorded under `ROUTING_DOC_URI_KEY` so the consumer
+    /// can route the op to the owning document regardless of where `parent_id`
+    /// points. Format-specific because the param shape encodes the format's
+    /// structured fields (org drawer properties, task state, scheduling, …).
+    fn build_block_params(
+        &self,
+        block: &Block,
+        parent_id: &EntityUri,
+        document_uri: &EntityUri,
+    ) -> StorageEntity;
+
+    /// Decide whether two blocks differ in a way that warrants re-emitting an
+    /// update op. Format-specific because "content-equivalent" depends on the
+    /// format's structured fields (e.g. org task state / priority / scheduling
+    /// read from the properties drawer). Sibling order is intentionally
+    /// excluded — it is derived from document position, not a per-block field.
+    fn content_differs(&self, a: &Block, b: &Block) -> bool;
+
+    /// Reconcile format-specific document-header metadata from a freshly-parsed
+    /// document block onto the persisted document entity — e.g. org's `#+TODO:`
+    /// keyword config, which the parser reads from the file header but the
+    /// stored entity (created via `DocumentManager`) doesn't carry, so a
+    /// re-render would otherwise drop the header. Mutates `persisted` in place
+    /// and returns whether it changed; the controller persists via
+    /// `update_metadata` only when `true`.
+    fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool;
 }

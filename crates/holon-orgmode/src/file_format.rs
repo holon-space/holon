@@ -6,12 +6,14 @@
 
 use anyhow::Result;
 use holon_api::block::Block;
-use holon_api::EntityUri;
+use holon_api::{EntityUri, StorageEntity};
 use holon_core::file_format::{FileFormatAdapter, FileFormatParseResult};
 use std::path::Path;
 
+use crate::block_params::build_block_params;
+use crate::models::{OrgBlockExt, OrgDocumentExt};
 use crate::org_renderer::OrgRenderer;
-use crate::parser::parse_org_file;
+use crate::parser::{parse_doc_id, parse_org_file};
 
 pub struct OrgFormatAdapter;
 
@@ -59,6 +61,47 @@ impl FileFormatAdapter for OrgFormatAdapter {
 
     fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String {
         OrgRenderer::render_entitys(blocks, file_path, file_id)
+    }
+
+    fn doc_id_from_content(&self, content: &str) -> Option<String> {
+        parse_doc_id(content)
+    }
+
+    fn build_block_params(
+        &self,
+        block: &Block,
+        parent_id: &EntityUri,
+        document_uri: &EntityUri,
+    ) -> StorageEntity {
+        build_block_params(block, parent_id, document_uri)
+    }
+
+    fn content_differs(&self, a: &Block, b: &Block) -> bool {
+        a.content != b.content
+            || a.parent_id != b.parent_id
+            || a.content_type != b.content_type
+            || a.source_language != b.source_language
+            || a.source_name != b.source_name
+            || a.task_state() != b.task_state()
+            || a.priority() != b.priority()
+            || a.tags() != b.tags()
+            || a.scheduled() != b.scheduled()
+            || a.deadline() != b.deadline()
+            || a.drawer_properties() != b.drawer_properties()
+            || a.sequence() != b.sequence()
+        // Sibling order is no longer a per-block field (ADR 0005): it is derived
+        // from document position and applied via `place_all`, so it is not part
+        // of this content-equivalence check.
+    }
+
+    fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool {
+        let parsed_kws = parsed.todo_keywords();
+        if parsed_kws != persisted.todo_keywords() {
+            persisted.set_todo_keywords(parsed_kws);
+            true
+        } else {
+            false
+        }
     }
 }
 
