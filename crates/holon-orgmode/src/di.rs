@@ -13,7 +13,7 @@
 //! services.add_orgmode(PathBuf::from("/path/to/org/files"))?;
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use fluxdi::{Injector, Module, Provider, Shared};
@@ -32,7 +32,7 @@ use holon::core::queryable_cache::QueryableCache;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
-use holon::sync::{LoroBlockOperations, LoroDocumentStore};
+use holon::sync::LoroBlockOperations;
 use holon::type_registry::TypeRegistry;
 use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
@@ -671,26 +671,6 @@ impl DocumentManager for LiveDocumentManager {
     }
 }
 
-/// AliasRegistrar backed by LoroDocumentStore.
-///
-/// Must share the same `Arc<RwLock<LoroDocumentStore>>` as LoroBlockReader/LoroBlockOperations.
-pub struct LoroAliasRegistrar {
-    pub doc_store: Arc<tokio::sync::RwLock<LoroDocumentStore>>,
-}
-
-#[async_trait::async_trait]
-impl AliasRegistrar for LoroAliasRegistrar {
-    async fn register_alias(&self, doc_id: &EntityUri, path: &Path) {
-        let store = self.doc_store.read().await;
-        store.register_alias(doc_id.as_str(), path).await;
-    }
-
-    async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
-        let store = self.doc_store.read().await;
-        store.resolve_alias_to_path(doc_id.as_str()).await
-    }
-}
-
 /// Configuration for OrgMode integration
 #[derive(Clone, Debug)]
 pub struct OrgModeConfig {
@@ -864,24 +844,14 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         Arc::new(crate::file_format::OrgFormatAdapter::new())
                             as Arc<dyn holon_core::FileFormatAdapter>
                     });
-                // Single alias-registrar source: the container's DI-provided
-                // registrar (no-Turso registers LoroAliasRegistrar), else the
-                // Loro-under-Turso registrar derived from LoroBlockOperations.
-                let alias_registrar = match resolver
+                // The alias registrar (doc_id ↔ path) is a Loro-backed seam
+                // registered at the composition root — `dyn AliasRegistrar` in
+                // both the Turso container (app `wiring.rs`, off `LoroBlockOperations`)
+                // and the no-Turso/test container (`LoroAliasRegistrar` directly).
+                // Absent in SqlOnly mode; the controller then runs without it.
+                let alias_registrar = resolver
                     .optional_resolve_async::<dyn AliasRegistrar>()
-                    .await
-                {
-                    Some(registrar) => Some(registrar),
-                    // ALLOW(ok): optional DI service — Loro registrar absent in SqlOnly
-                    None => resolver
-                        .try_resolve::<LoroBlockOperations>()
-                        .ok()
-                        .map(|ops| {
-                            Arc::new(LoroAliasRegistrar {
-                                doc_store: ops.shared_doc_store(),
-                            }) as Arc<dyn AliasRegistrar>
-                        }),
-                };
+                    .await;
 
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 

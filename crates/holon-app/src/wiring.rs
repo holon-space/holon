@@ -14,7 +14,9 @@ use fluxdi::{Injector, Module, ModuleLifecycleFuture, Provider, Shared};
 
 use holon::api::BackendEngine;
 use holon::di::DbHandleProvider;
-use holon::sync::{EventInfraModule, LoroConfig, LoroModule, PublishErrorTracker};
+use holon::sync::{
+    EventInfraModule, LoroBlockOperations, LoroConfig, LoroModule, PublishErrorTracker,
+};
 use holon_frontend::config::{HolonConfig, SessionConfig};
 use holon_frontend::preferences::{self, PrefKey};
 use holon_frontend::render_services::register_render_services;
@@ -128,6 +130,19 @@ impl FrontendInjectorExt for Injector {
             // additional registration needed here. Frontends resolve
             // `Arc<BlockCellRegistry>` from DI and assign it to
             // `ReactiveEngine.block_cell_registry` in their `on_start`.
+
+            // Loro-backed alias registrar (doc_id ↔ path). The file-sync
+            // controller resolves `dyn AliasRegistrar` from DI; in the Turso
+            // container the Loro module owns the doc store, so the registrar is
+            // derived from `LoroBlockOperations` here at the composition root
+            // (only the wiring crate may name a concrete backend) — holon-orgmode
+            // stays storage-agnostic.
+            self.provide::<dyn holon_filesystem::AliasRegistrar>(Provider::root(|resolver| {
+                let ops = resolver.resolve::<LoroBlockOperations>();
+                Arc::new(crate::loro_seams::LoroAliasRegistrar {
+                    doc_store: ops.shared_doc_store(),
+                }) as Arc<dyn holon_filesystem::AliasRegistrar>
+            }));
 
             Some(loro_dir)
         } else {

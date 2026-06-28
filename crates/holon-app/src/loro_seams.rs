@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ use async_trait::async_trait;
 use holon::api::loro_backend::LoroBackend;
 use holon::api::repository::CoreOperations;
 use holon::api::types::Traversal;
+use holon::sync::LoroDocumentStore;
 use holon_api::block::Block;
 use holon_api::capability::Consolidator;
 use holon_api::entity_uri::EntityUri;
@@ -38,8 +40,9 @@ use holon_api::types::{ContentType, Tags};
 use holon_api::{BlockContent, Value};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
+use tokio::sync::RwLock;
 
-use holon_filesystem::{BlockReader, DocumentManager};
+use holon_filesystem::{AliasRegistrar, BlockReader, DocumentManager};
 
 /// Box a Loro `ApiError` (or any error) into the `BlockOrdering` error type,
 /// preserving the full chain via `{e:#}` — mirrors `SqlBlockOperations`.
@@ -543,5 +546,25 @@ impl BlockOrdering for LoroBlockOrdering {
     /// Loro owns the order key; there is no SQL `sort_key` sink to project to.
     async fn project_sort_keys(&self, _: &[EntityUri]) -> BlockOrderingResult<()> {
         Ok(())
+    }
+}
+
+/// `AliasRegistrar` backed by `LoroDocumentStore` — registers and resolves the
+/// `doc_id ↔ path` aliases the file-sync controller needs. Must share the same
+/// `Arc<RwLock<LoroDocumentStore>>` as the other Loro seams / `LoroBlockOperations`.
+pub struct LoroAliasRegistrar {
+    pub doc_store: Arc<RwLock<LoroDocumentStore>>,
+}
+
+#[async_trait]
+impl AliasRegistrar for LoroAliasRegistrar {
+    async fn register_alias(&self, doc_id: &EntityUri, path: &Path) {
+        let store = self.doc_store.read().await;
+        store.register_alias(doc_id.as_str(), path).await;
+    }
+
+    async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
+        let store = self.doc_store.read().await;
+        store.resolve_alias_to_path(doc_id.as_str()).await
     }
 }

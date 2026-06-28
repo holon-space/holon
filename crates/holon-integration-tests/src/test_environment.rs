@@ -926,7 +926,7 @@ impl TestEnvironment {
             let org_root = self.org_root.clone();
             move |injector| {
                 use holon_app::loro_seams::{
-                    LoroBlockOrdering, LoroBlockReader, LoroDocumentManager,
+                    LoroAliasRegistrar, LoroBlockOrdering, LoroBlockReader, LoroDocumentManager,
                 };
                 register_loro_block_query_source(injector, backend.clone());
                 register_loro_operation_engine(injector, shared_store.clone());
@@ -973,7 +973,7 @@ impl TestEnvironment {
                     let store = shared_store.clone();
                     injector.provide::<dyn holon_filesystem::AliasRegistrar>(
                         fluxdi::Provider::root(move |_| {
-                            Arc::new(holon_orgmode::di::LoroAliasRegistrar {
+                            Arc::new(LoroAliasRegistrar {
                                 doc_store: store.clone(),
                             })
                                 as Arc<dyn holon_filesystem::AliasRegistrar>
