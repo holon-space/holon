@@ -30,10 +30,7 @@ use tracing::{debug, info, warn};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::DownstreamProjection;
 
-use crate::block_params::build_block_params;
 use crate::file_format::OrgFormatAdapter;
-use crate::models::{OrgBlockExt, OrgDocumentExt};
-use crate::parser::parse_doc_id;
 use crate::traits::{BlockReader, DocumentManager, ImageDataProvider};
 
 /// Bump when the org renderer changes in a way that alters the canonical
@@ -379,7 +376,7 @@ impl FileSyncController {
         // authoritative identity — it survives renames. When absent we fall
         // back to name-chain resolution and emit `#+ID:` on the next render
         // so subsequent loads pick up the stable identity from the file.
-        let bare_id_in_file = parse_doc_id(&disk_content);
+        let bare_id_in_file = self.format.doc_id_from_content(&disk_content);
         let segments = path_to_name_chain(rel_path);
         let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
         let document = match bare_id_in_file.as_deref() {
@@ -513,15 +510,16 @@ impl FileSyncController {
             self.format
                 .parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
 
-        // Sync #+TODO: keywords from the parsed file to the document block.
-        // The parser extracts these from the file header, but the document entity
-        // (created via DocumentManager) doesn't carry them. Without this, re-renders
-        // via render_document() omit the #+TODO: header.
-        let parsed_kws = new_parse.document.todo_keywords();
-        let existing_kws = document.todo_keywords();
-        if parsed_kws != existing_kws {
-            let mut doc = document;
-            doc.set_todo_keywords(parsed_kws);
+        // Sync format-specific document-header metadata (org `#+TODO:` keywords)
+        // from the parsed file onto the document block. The parser extracts these
+        // from the file header, but the document entity (created via
+        // DocumentManager) doesn't carry them. Without this, re-renders via
+        // render_document() omit the header.
+        let mut doc = document;
+        if self
+            .format
+            .sync_document_metadata(&new_parse.document, &mut doc)
+        {
             self.doc_manager.update_metadata(&doc).await?;
         }
 
@@ -681,7 +679,9 @@ impl FileSyncController {
                 } else {
                     &block.parent_id
                 };
-                let mut params = build_block_params(block, parent_id, &document_uri);
+                let mut params = self
+                    .format
+                    .build_block_params(block, parent_id, &document_uri);
                 if let Some(Some(prev)) = predecessors.get(&block.id) {
                     params.insert(
                         holon::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
@@ -758,13 +758,15 @@ impl FileSyncController {
         for new_block in &new_blocks_vec {
             let id = &new_block.id;
             if let Some(old_block) = old_blocks.get(id) {
-                if blocks_differ(old_block, new_block) {
+                if self.format.content_differs(old_block, new_block) {
                     let parent_id = if new_block.parent_id == new_parse.document.id {
                         &document_uri
                     } else {
                         &new_block.parent_id
                     };
-                    let mut params = build_block_params(new_block, parent_id, &document_uri);
+                    let mut params =
+                        self.format
+                            .build_block_params(new_block, parent_id, &document_uri);
                     if let Some(Some(prev)) = predecessors.get(id) {
                         params.insert(
                             holon::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
@@ -1838,22 +1840,4 @@ fn set_eq<T: Eq + std::hash::Hash>(a: &[T], b: &[T]) -> bool {
     let sa: HashSet<&T> = a.iter().collect();
     let sb: HashSet<&T> = b.iter().collect();
     sa == sb
-}
-
-fn blocks_differ(a: &Block, b: &Block) -> bool {
-    a.content != b.content
-        || a.parent_id != b.parent_id
-        || a.content_type != b.content_type
-        || a.source_language != b.source_language
-        || a.source_name != b.source_name
-        || a.task_state() != b.task_state()
-        || a.priority() != b.priority()
-        || a.tags() != b.tags()
-        || a.scheduled() != b.scheduled()
-        || a.deadline() != b.deadline()
-        || a.drawer_properties() != b.drawer_properties()
-        || a.sequence() != b.sequence()
-    // Sibling order is no longer a per-block field (ADR 0005): it is derived
-    // from document position and applied via `place_all`, so it is not part of
-    // this content-equivalence check.
 }
