@@ -58,8 +58,7 @@ use crate::pbt::composed::subsystem_seed::{build_started_ref, run_with_seeded_re
 // consume it: page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
 // boot_and_seed_wide/WIDE_REQUIRED_INVARIANTS/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
-    SETTLE, WIDE_REQUIRED_INVARIANTS, WIDE_TREE_ORG, boot_and_seed_wide, page_root, structural_ref,
-    wide_e2e_ref, wide_ref,
+    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, page_root, structural_ref, wide_e2e_ref, wide_ref,
 };
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
@@ -70,13 +69,12 @@ use crate::pbt::transitions::toggle_state::CycleTarget;
 use crate::pbt::transitions::{
     CreateDocument, DeleteBackward, E2ETransition, FocusEditableText, Indent, JoinBlock,
     NavigateBack, NavigateFocus, NavigateForward, NavigateHome, Nothing, Outdent, PinBlock,
-    SimulateRestart, SplitBlock, ToggleState, TypeChars, UnpinBlock,
+    SimulateRestart, SplitBlock, ToggleState, TypeChars,
 };
 use holon_pbt_core::capabilities::{
     SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::CapProvider;
-use proptest::prop_oneof;
 
 /// The structural slice's transition alphabet — `Split` (the id-minting transition
 /// that drives the reconcile loop, the point of C2.0) + `Join`, each binding only
@@ -284,27 +282,14 @@ prop_state_machine! {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// SWAP increment 1 — the WIDE `E2ETransition` enum drives a multi-step PBT over
-// the composed frontend `CapMap` (§5, "incremental by config").
+// WIDE alphabet generator (`wide_aggregate`) — retained for the `teeth` tests below.
 //
-// `FrontendStructural` above proves the per-tick reconcile + the *block* catalog
-// over a MINIMAL cap map (only `SutBackend` + the writer) using a bespoke
-// `StructTransition` enum. `WideFrontend` is the actual swap mechanism: it drives
-// the **production `E2ETransition` enum** (the exact `<E2ETransition as
-// TransitionImpl<_, CapMap>>::apply_to_sut` dispatch the eventual `general_e2e_pbt`
-// SUT swap will use — PCG-5b proved one step; this is a full random sequence) over
-// the **full** `HeadlessFrontendComponent` cap set (the same caps `compose_sut`'s
-// frontend arm assembles), checked by the **full** composed catalog (block + focus
-// + nav + viewmodel + org), against the live `ReferenceState` oracle.
-//
-// Why still only Split/Join (not the cap-gated wide alphabet): the same two filed
-// Turso smells the structural slice documents — `Indent`/`Outdent` (top-level
-// `NULL` parent_id; split-of-parent child-vs-sibling) — plus the doc-uri / focus /
-// peer reconcile generalizations still to land, bound the drivable subset. The
-// auto-narrowing of the alphabet to the cap set is already proven on the generation
-// side (PCG-5a). What's new here is DRIVING the production enum, multi-step, over
-// the full frontend cap set with the full catalog. Adding the cap-gated wider
-// alphabet + the remaining configs is the follow-on toward the general_e2e swap.
+// The standalone wide-frontend swap PBT (`WideFrontend`/`WideMachine`/
+// `frontend_wide_pbt`) that this generator once drove has been DELETED as a
+// redundant frontend variant of the ONE PBT `general_e2e_composed_pbt`
+// (`ComposedSut<WideE2E>`), whose subsystem-config draw already covers the full
+// frontend cap set + catalog. `wide_aggregate` survives only because the lockstep
+// `teeth` tests below still use it to build single-transition alphabets.
 // ═════════════════════════════════════════════════════════════════
 
 /// One arm per drivable wide transition, wrapped in the production `E2ETransition`
@@ -402,107 +387,6 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
         return Just(E2ETransition::Nothing(Nothing)).boxed();
     }
     Union::new_weighted(arms).boxed()
-}
-
-/// Reference machine over the production `E2ETransition`. Generation is restricted
-/// to the divergence-free covered subset (`wide_aggregate`); apply/preconditions
-/// delegate to the enum's production `TransitionRef` impl.
-struct WideMachine;
-
-impl ReferenceStateMachine for WideMachine {
-    type State = ReferenceState;
-    type Transition = E2ETransition;
-
-    fn init_state() -> BoxedStrategy<Self::State> {
-        Just(wide_ref()).boxed()
-    }
-
-    fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-        // Layer `UnpinBlock` in state-dependently (mirrors `navigation_pbt::NavMachine`):
-        // its `history_id` must be drawn from a RightSidebar pin the oracle currently holds,
-        // so the `close(history_id)` always targets an id the SUT assigned. When there are no
-        // sidebar pins, only the base alphabet generates.
-        let candidates: Vec<i64> = state
-            .ui
-            .user
-            .open_pins
-            .get(&Region::RightSidebar)
-            .map(|pins| pins.iter().map(|p| p.history_id).collect())
-            .unwrap_or_default();
-        if candidates.is_empty() {
-            wide_aggregate(state)
-        } else {
-            prop_oneof![
-                5 => wide_aggregate(state),
-                1 => proptest::sample::select(candidates)
-                    .prop_map(|history_id| E2ETransition::UnpinBlock(UnpinBlock { history_id })),
-            ]
-            .boxed()
-        }
-    }
-
-    fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        // Re-gate on production preconditions during shrink replay (same rationale as
-        // `StructMachine`): a reparenting transition valid when generated can become
-        // invalid after the shrinker drops an earlier one.
-        transition.preconditions(state).is_good()
-    }
-
-    fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
-        transition.apply_to_ref(&mut state);
-        // No blur workaround (#3 DONE): the composed `OpDispatchWriter` now drives
-        // `split_block`/`join_block` through the production `dispatch_intent_sync`
-        // (→ `apply_structural_focus`), so the SUT's `focused_block` lands on the
-        // new/merged block — exactly as `SplitBlock`/`JoinBlock::apply_to_ref` does via
-        // `set_focus` + `open_active_editor`. The SUT therefore leaves an editor open on
-        // both sides after a structural op, so a subsequent `TypeChars` types into the
-        // right block (true split-then-type) and the editor caret/text invariants check
-        // the new block in lockstep.
-        state.action.last_transition_kind = Some(transition.variant_name());
-        state
-    }
-}
-
-/// The frontend swap slice: drives the production `E2ETransition` enum over the full
-/// frontend cap map, checked by the full catalog. Everything generic (runtime,
-/// reconcile, scaffold-injection, catalog check) is the [`ComposedSut`] harness's.
-struct WideFrontend;
-
-impl ComposedSlice for WideFrontend {
-    type Transition = E2ETransition;
-    type Machine = WideMachine;
-    type Handle = ();
-    const REQUIRED_INVARIANTS: &'static [&'static str] = WIDE_REQUIRED_INVARIANTS;
-    const SETTLE: Duration = SETTLE;
-    const MULTI_THREAD: bool = true;
-
-    async fn build(
-        resolver: &IdResolver,
-        ref_state: &ReferenceState,
-    ) -> (CapMap, (), BTreeSet<EntityUri>) {
-        let (caps, scaffold) = boot_and_seed_wide(resolver, ref_state).await;
-        (caps, (), scaffold)
-    }
-
-    async fn apply_transition(
-        transition: &E2ETransition,
-        ref_state: &ReferenceState,
-        caps: &mut CapMap,
-    ) {
-        // The production whole-alphabet dispatch over `&mut CapMap` — the exact path
-        // the `general_e2e_pbt` SUT swap will use (`CapMap: SutHandle`, PCG-4).
-        TransitionImpl::apply_to_sut(transition, ref_state, caps).await;
-    }
-}
-
-prop_state_machine! {
-    #![proptest_config(proptest::test_runner::Config {
-        cases: 16,
-        max_shrink_iters: 200,
-        .. proptest::test_runner::Config::default()
-    })]
-    #[test]
-    fn frontend_wide_pbt(sequential 1..8 => ComposedSut<WideFrontend>);
 }
 
 /// SWAP DESIGN PROBE (run with `--nocapture`): print the alphabet `aggregate_transitions`

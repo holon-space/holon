@@ -26,8 +26,5 @@ pub mod components;
 #[cfg(test)]
 mod integration_tests;
 
-#[cfg(test)]
-mod structural_pbt;
-
 pub use builders::{memory_wide, memory_wide_with_editor};
 pub use components::{InMemEditorComponent, MemoryBackendComponent};

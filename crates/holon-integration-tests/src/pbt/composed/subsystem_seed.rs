@@ -27,11 +27,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use holon_api::Region;
-use holon_api::repository::CoreOperations;
 use holon_pbt_core::composition::RunReport;
 
 use crate::pbt::invariants::registry::Subsystem;
-use holon_api::{Block, BlockContent, EntityUri};
+use holon_api::{Block, EntityUri};
 use holon_pbt_core::composition::{CapMap, run_selected};
 
 use holon_orgmode::models::OrgBlockExt;
@@ -43,44 +42,14 @@ use crate::pbt::reference_state::{ReferenceState, Resolved};
 use crate::pbt::state_machine::{fresh_reference_state, started_reference_state};
 use crate::pbt::transitions::start_app::seed_booted_layout_into_ref;
 
-// Fixed-id seeding primitives (`PARENT`/`C1`/`C2`, `Ids`, `fixed_ids`,
-// `seed_ref_tree`) live in `super::seed_primitives` so the windowed slice can
-// share them in the `pbt` build.
-use super::seed_primitives::{C1, C2, Ids, PARENT, fixed_ids, seed_ref_tree};
+// Fixed-id seeding primitives (`C1`, `fixed_ids`, `seed_ref_tree`) live in
+// `super::seed_primitives` so the windowed slice can share them in the `pbt` build.
+use super::seed_primitives::{C1, fixed_ids, seed_ref_tree};
 
 // ─────────────────────────────────────────────────────────────────
 // Shared SUT/oracle construction — seeding primitives used by the
 // composed wide harness and the static slices.
 // ─────────────────────────────────────────────────────────────────
-
-/// Seed a `parent` block with two children into a real store (Loro or memory),
-/// using the **fixed shared ids** so the store's stable ids match the ref tree.
-pub(crate) async fn seed_store<B: CoreOperations>(backend: &B, ids: &Ids) {
-    backend
-        .create_block(
-            EntityUri::no_parent(),
-            BlockContent::text(PARENT),
-            Some(ids.parent.clone()),
-        )
-        .await
-        .expect("seed parent");
-    backend
-        .create_block(
-            ids.parent.clone(),
-            BlockContent::text(C1),
-            Some(ids.c1.clone()),
-        )
-        .await
-        .expect("seed c1");
-    backend
-        .create_block(
-            ids.parent.clone(),
-            BlockContent::text(C2),
-            Some(ids.c2.clone()),
-        )
-        .await
-        .expect("seed c2");
-}
 
 /// Map the generated active set onto a PBT [`Wiring`]: `Loro` ⇒ the Loro
 /// storage adapter, `EditorState` ⇒ the `UI` actor (the honest `has_editor_buffer`
