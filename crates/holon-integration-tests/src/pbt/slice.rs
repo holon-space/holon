@@ -333,64 +333,6 @@ macro_rules! declare_pbt_slice {
     };
 }
 
-/// The **faithful subsystem-convergence harness** (F2 / Plan 2). A thin arm over
-/// the same [`__declare_pbt_full_slice!`] expansion the blessed slices use — so
-/// it shares their capture/replay parity exactly — but it replaces the constant
-/// `init_state` (`Just(fresh_reference_state($wiring))`, immune to shrinking)
-/// with a **generated, shrinkable** [`Wiring`](holon_pbt_core::any_valid_wiring):
-/// proptest draws which subsystems are active, drives the real booted `E2ESut`
-/// through the full production alphabet, runs the wiring-gated invariant
-/// registry, and on failure **shrinks the active subsystem set toward the
-/// minimal combination that still reproduces**.
-///
-/// Unlike a blessed slice, there is no `wiring:` — the wiring *is* the generated
-/// input. `init_test` reads `ref_state.wiring` at runtime to select the backend
-/// (`storage_selector_for_wiring`), so a Loro-only draw boots the cheap
-/// `LoroMemory` SUT and a Turso draw boots the full `BackendEngine`. The `$boot_guard`
-/// (always `true` here) makes `teardown` fail loud if a non-trivial case never
-/// fired `StartApp` — guarding against vacuous pre-startup-only green.
-///
-/// This harness is **not `#[ignore]`d** — it runs under a default `cargo test`.
-/// Because it shares the blessed slices' expansion and the default `wiring_axes`
-/// generate over `{Loro, Org, Turso}` (Turso down-weighted), it **subsumes** the
-/// per-Wiring blessed slices — each pins one point in the generated powerset. The
-/// first retired this way was `loro_backend_pbt` (pinned `{Loro}`), now one draw of
-/// this harness. Scope/​widen a run with `HOLON_PBT_WIRING_AXES`.
-///
-/// ```ignore
-/// declare_pbt_convergence! {
-///     test_fn: subsystem_convergence_pbt,
-///     proptest_config: ::proptest::test_runner::Config {
-///         cases: 4, max_shrink_iters: 8, ..Default::default()
-///     },
-///     steps: 3..12,
-/// }
-/// ```
-#[macro_export]
-macro_rules! declare_pbt_convergence {
-    (
-        test_fn: $test_fn:ident,
-        proptest_config: $config:expr,
-        steps: $step_lo:tt .. $step_hi:tt
-        $(,)?
-    ) => {
-        $crate::__declare_pbt_full_slice!(
-            $test_fn,
-            ::proptest::strategy::Strategy::boxed(::proptest::strategy::Strategy::prop_map(
-                ::holon_pbt_core::any_valid_wiring(),
-                $crate::pbt::fresh_reference_state,
-            )),
-            true,
-            $config,
-            $step_lo,
-            $step_hi // No `test_attrs` ⇒ the harness runs under a default `cargo test`
-                     // (no longer `#[ignore]`d). It is fast enough with the default
-                     // `wiring_axes` (Turso down-weighted, most draws boot the cheap
-                     // `LoroMemory` SUT); scope a run further with `HOLON_PBT_WIRING_AXES`.
-        );
-    };
-}
-
 /// One-line, `ComponentSet`-driven slice (ADR 0009 Goal 1). A thin sugar over
 /// [`declare_pbt_slice!`]: it lowers a [`ComponentSet`](holon_pbt_core::ComponentSet)
 /// to its `wiring` and delegates. The point is that a slice is named by *what

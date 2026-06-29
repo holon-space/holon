@@ -291,11 +291,11 @@ impl RequiredWiring {
 
 // ── PBT generator (ADR 0007 item 5) ─────────────────────────────────
 //
-// Promoted out of `#[cfg(test)]` so the faithful convergence harness
-// (`subsystem_convergence_pbt`) can generate a shrinkable, validity-filtered
-// manifest as the `init_state` of a `prop_state_machine!`. The harness drives
-// the real booted `E2ESut` from whatever wiring this yields, and on failure
-// the manifest shrinks toward the minimal causal subsystem set.
+// Promoted out of `#[cfg(test)]` so the composed keystone
+// (`general_e2e_composed_pbt`) can generate a shrinkable, validity-filtered
+// manifest as the `init_state` of a `prop_state_machine!`. The keystone drives
+// the composed `CapMap` from whatever wiring this yields, and on failure the
+// manifest shrinks toward the minimal causal subsystem set.
 
 /// Probability that a query-capable (expensive) storage adapter — today only
 /// [`StorageAdapter::Turso`] — is included in a generated manifest. Turso boots

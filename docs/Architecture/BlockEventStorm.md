@@ -186,18 +186,21 @@ worse.
 later. Classic *validate-don't-parse* debt; the schemed/bare ambiguity is exactly
 the bug the bare-id convention was invented to avoid. *(`change_set.rs:79-90`.)*
 
-**H3 — Loro `properties` is a single-key JSON string inside the meta LoroMap, so
-it gets blob-level LWW instead of per-property merge.**
-The node's `meta` *is* a real CRDT `LoroMap`, and `content_raw`/`source_code` are
-genuine `LoroText` containers that character-merge. But `write_properties_to_meta`
-(`loro_backend.rs:528-537`) does `serde_json::to_string(properties)` and
-`meta.insert(PROPERTIES, LoroValue::from(json))` — the **entire** property map
-collapses into **one** `LoroMap` key holding **one** opaque string. A `LoroMap`
-resolves conflicts per key, so the merge granularity is the whole blob: **two peers
-concurrently setting different properties (e.g. `TODO` vs `PRIORITY`) do not merge —
-one peer's whole JSON string wins and silently drops the other's.** TaskState lives
-in `properties`, so this is a real convergence bug. Fix: store properties as a
-**nested `LoroMap`** (key-per-property) for free per-property LWW.
+**H3 — Loro `properties` blob-LWW convergence bug. ✅ FIXED (2026-06-29).**
+Previously `write_properties_to_meta` collapsed the whole property map into **one**
+`LoroMap` key holding **one** opaque JSON string, so the merge granularity was the
+whole blob: two peers concurrently setting different properties (e.g. `TODO` vs
+`PRIORITY`) did not merge — one peer's whole JSON string won and silently dropped
+the other's. TaskState lives in `properties`, so this was a real convergence bug.
+**Fix:** properties now live in a **nested `LoroMap`** under `PROPERTIES_MAP`
+(`loro_backend.rs`), one key per property, so per-key LWW merges concurrent edits
+to distinct properties. Crucially the *update* paths (`update_block_properties`,
+`update_block_fields`) write **only the changed keys** — a read-modify-write of the
+whole set would re-stamp untouched keys with stale values and reintroduce the
+clobber at per-key level. The legacy single-blob `PROPERTIES` key is read-migrated
+on the next write (untouched keys copied into the nested map, then the blob deleted
+— self-healing, no dual representation). Covered by `h3_property_convergence_tests`
+(concurrent-distinct-property merge, legacy migration, exact-set replace).
 
 **H4 — RichText marks are a Phase-1 stub in Loro.**
 Marks are written via the plain-text path and actually persisted only in the SQL
@@ -287,5 +290,6 @@ path can produce.
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
 transition and every 🔴 a candidate invariant: round-trip identity (H6), edge-field
-preservation across the serde seam (H1), concurrent-property convergence (H3),
-mark replication through Loro (H4).
+preservation across the serde seam (H1), concurrent-property convergence (H3 — now
+covered by `h3_property_convergence_tests`; a candidate to lift into the composed
+catalog), mark replication through Loro (H4).

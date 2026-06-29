@@ -639,11 +639,11 @@ fn native_self_invariants() -> Vec<SelfInvariant> {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const NATIVE_ONLY_EXCLUDED: &[&str] = &[
     // set-equality; subsumed natively by inv-live-children-match-ref +
-    // inv-blocks-match-ref/* — covered by subsystem_convergence_pbt (full registry).
+    // inv-blocks-match-ref/* — covered by general_e2e_composed_pbt (full catalog, generated wiring).
     "inv-block-ids-match-ref",
-    // covered by subsystem_convergence_pbt + task_state_coherence_pbt.
+    // covered by general_e2e_composed_pbt + task_state_coherence_pbt.
     "inv-task-state-storage-coherence",
-    // covered by cdc_delivery_pbt + subsystem_convergence_pbt (`storage` preset).
+    // covered by cdc_delivery_pbt + general_e2e_composed_pbt (generated wiring).
     "inv-block-tags-references-exist",
     // E3: `SutSqlProjection` deleted off `E2ESut` (the headless Turso SQL-projection
     // read surface). Its `inv-navigation-focus` (SQL `current_focus` read) and per-block

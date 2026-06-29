@@ -36,7 +36,16 @@ pub const SOURCE_LANGUAGE: &str = "source_language";
 pub const SOURCE_CODE: &str = "source_code";
 const SOURCE_NAME: &str = "source_name";
 const SOURCE_HEADER_ARGS: &str = "source_header_args";
+/// Legacy single-blob property storage: one `LoroMap` key holding the whole
+/// property map as one opaque JSON string. Read-only now (read when migrating a
+/// pre-H3 block) — blob-level LWW meant two peers setting *different* properties
+/// clobbered each other (H3). Superseded by [`PROPERTIES_MAP`].
 const PROPERTIES: &str = "properties";
+/// H3: properties stored as a nested `LoroMap`, one key per property. A `LoroMap`
+/// resolves conflicts per key, so concurrent edits to *different* properties
+/// (e.g. `TODO` vs `PRIORITY`) merge instead of one peer's blob winning. Each
+/// value is its `serde_json::Value` JSON-encoded into a string.
+const PROPERTIES_MAP: &str = "properties_map";
 /// Stable block identity — a UUID assigned at creation that travels with the
 /// CRDT node across peers. Used as the SQL primary key.
 pub const STABLE_ID: &str = "id";
@@ -348,12 +357,19 @@ fn read_content_from_meta(meta: &loro::LoroMap) -> BlockContent {
 }
 
 fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
-    let mut props: HashMap<String, Value> =
-        match meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string())) {
+    // Prefer the nested per-property map (H3). A pre-H3 block that hasn't been
+    // rewritten yet still carries the legacy single-blob string; read that until
+    // the next write migrates it (writes delete the legacy key — self-healing).
+    let mut props: HashMap<String, Value> = match meta.get(PROPERTIES_MAP) {
+        Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) => {
+            decode_properties_map(&map)
+        }
+        _ => match meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string())) {
             Some(json) => serde_json::from_str(&json)
                 .unwrap_or_else(|e| panic!("Corrupt properties JSON in Loro tree: {json:?}: {e}")),
             None => HashMap::new(),
-        };
+        },
+    };
     // Edge-typed fields (`tags`, `requires`) are stored in dedicated meta keys
     // and typed `Block` slots — never in the generic PROPERTIES blob. Strip any
     // that leaked in (legacy pollution from an older build that flattened
@@ -520,13 +536,125 @@ fn write_content_to_meta(
     Ok(())
 }
 
-fn write_properties_to_meta(
+/// Open (creating if absent) the nested per-property `LoroMap` (H3, [`PROPERTIES_MAP`]).
+fn properties_map_container(meta: &loro::LoroMap) -> anyhow::Result<loro::LoroMap> {
+    Ok(meta.get_or_create_container(PROPERTIES_MAP, loro::LoroMap::new())?)
+}
+
+/// Encode one property value as the JSON string stored under its key. Properties
+/// are arbitrary `serde_json::Value`; the per-key granularity (not per-field) is
+/// what H3 needs — concurrent edits to *different* properties are different keys.
+fn encode_property_value(value: &Value) -> anyhow::Result<loro::LoroValue> {
+    Ok(loro::LoroValue::from(
+        serde_json::to_string(value)?.as_str(),
+    ))
+}
+
+/// Decode the nested per-property `LoroMap` back into a property map. Each value
+/// must be the JSON string an H3 write produced — anything else is corruption,
+/// so panic rather than silently dropping it.
+fn decode_properties_map(map: &loro::LoroMap) -> HashMap<String, Value> {
+    let mut out = HashMap::new();
+    map.for_each(|key, value| {
+        let json = match value {
+            loro::ValueOrContainer::Value(v) => v
+                .as_string()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| panic!("Property {key:?} is not a JSON string: {v:?}")),
+            loro::ValueOrContainer::Container(_) => {
+                panic!("Property {key:?} unexpectedly holds a container, not a JSON string")
+            }
+        };
+        let parsed = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("Corrupt property JSON for {key:?}: {json:?}: {e}"));
+        out.insert(key.to_string(), parsed);
+    });
+    out
+}
+
+/// Drop the legacy single-blob `PROPERTIES` key. Authoritative full-set writers
+/// ([`replace_properties_in_meta`]) use this — they already define the entire set,
+/// so the blob's contents are intentionally discarded.
+fn drop_legacy_properties_blob(meta: &loro::LoroMap) -> anyhow::Result<()> {
+    if meta.get(PROPERTIES).is_some() {
+        meta.delete(PROPERTIES)?;
+    }
+    Ok(())
+}
+
+/// Copy any legacy single-blob properties into the nested map (only keys not
+/// already present) and drop the legacy key. Partial writers (merge / per-field)
+/// call this first so a pre-H3 block's *untouched* properties survive its first
+/// partial write instead of being dropped with the blob.
+fn migrate_legacy_blob_into_map(meta: &loro::LoroMap, map: &loro::LoroMap) -> anyhow::Result<()> {
+    let Some(json) = meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string()))
+    else {
+        return Ok(());
+    };
+    let legacy: HashMap<String, Value> = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("Corrupt properties JSON in Loro tree: {json:?}: {e}"));
+    for (key, value) in &legacy {
+        if map.get(key).is_none() {
+            map.insert(key, encode_property_value(value)?)?;
+        }
+    }
+    meta.delete(PROPERTIES)?;
+    Ok(())
+}
+
+/// Insert/overwrite only the given properties — other keys are left untouched
+/// (merge semantics). Writing only the keys that changed is what gives H3 its
+/// convergence: an update touching `TODO` leaves a concurrent peer's `PRIORITY`
+/// write intact, instead of a read-modify-write re-stamping it with a stale value.
+fn merge_properties_into_meta(
     meta: &loro::LoroMap,
     properties: &HashMap<String, Value>,
 ) -> anyhow::Result<()> {
-    if !properties.is_empty() {
-        let json = serde_json::to_string(properties)?;
-        meta.insert(PROPERTIES, loro::LoroValue::from(json.as_str()))?;
+    let map = properties_map_container(meta)?;
+    migrate_legacy_blob_into_map(meta, &map)?;
+    for (key, value) in properties {
+        map.insert(key, encode_property_value(value)?)?;
+    }
+    Ok(())
+}
+
+/// Replace the block's EXACT property set: keys absent from `properties` are
+/// deleted. Authoritative full-set writes (block creation, org re-parse) use this.
+fn replace_properties_in_meta(
+    meta: &loro::LoroMap,
+    properties: &HashMap<String, Value>,
+) -> anyhow::Result<()> {
+    let map = properties_map_container(meta)?;
+    let stale: Vec<String> = map
+        .keys()
+        .map(|k| k.to_string())
+        .filter(|k| !properties.contains_key(k))
+        .collect();
+    for key in stale {
+        map.delete(&key)?;
+    }
+    for (key, value) in properties {
+        map.insert(key, encode_property_value(value)?)?;
+    }
+    drop_legacy_properties_blob(meta)
+}
+
+/// Apply per-field changes: a `Null` new value deletes the key, anything else
+/// inserts it. Only the named fields are touched (per-key convergence, H3).
+fn apply_field_changes_to_meta(
+    meta: &loro::LoroMap,
+    fields: &[(String, Value, Value)],
+) -> anyhow::Result<()> {
+    let map = properties_map_container(meta)?;
+    migrate_legacy_blob_into_map(meta, &map)?;
+    for (name, _old_value, new_value) in fields {
+        if new_value == &Value::Null {
+            if map.get(name).is_some() {
+                map.delete(name)?;
+            }
+        } else {
+            map.insert(name, encode_property_value(new_value)?)?;
+        }
     }
     Ok(())
 }
@@ -1313,7 +1441,7 @@ impl LoroBackend {
                 let meta = tree.get_meta(node)?;
                 meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
                 write_content_to_meta(&meta, &content, None)?;
-                write_properties_to_meta(&meta, properties)?;
+                replace_properties_in_meta(&meta, properties)?;
                 // Tags are edge fields (block_tags), stored in Loro meta as a
                 // JSON list under "tags" (mirrors `set_block_tags`). Carrying
                 // them in the create commit is essential: the downstream
@@ -1383,9 +1511,10 @@ impl LoroBackend {
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                let mut existing_props = read_properties_from_meta(&meta);
-                existing_props.extend(properties.clone());
-                write_properties_to_meta(&meta, &existing_props)?;
+                // Merge: write only the provided keys so a concurrent peer's
+                // edit to a *different* property survives (H3). No read-modify-
+                // write of the whole set — that would re-stamp untouched keys.
+                merge_properties_into_meta(&meta, properties)?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -1422,10 +1551,9 @@ impl LoroBackend {
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                // Bypass `write_properties_to_meta` — its empty-map fast path
-                // would silently keep the old blob when the new set is empty.
-                let json = serde_json::to_string(properties)?;
-                meta.insert(PROPERTIES, loro::LoroValue::from(json.as_str()))?;
+                // Authoritative full set (org re-parse): keys absent from the new
+                // set are deleted, including down to the empty set.
+                replace_properties_in_meta(&meta, properties)?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -1457,15 +1585,9 @@ impl LoroBackend {
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                let mut properties = read_properties_from_meta(&meta);
-                for (field_name, _old_value, new_value) in fields {
-                    if new_value == &Value::Null {
-                        properties.remove(field_name);
-                    } else {
-                        properties.insert(field_name.clone(), new_value.clone());
-                    }
-                }
-                write_properties_to_meta(&meta, &properties)?;
+                // Touch only the named fields (per-key convergence, H3): a
+                // concurrent peer editing a different field is not clobbered.
+                apply_field_changes_to_meta(&meta, fields)?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -2620,5 +2742,136 @@ impl P2POperations for LoroBackend {
         Err(ApiError::NetworkError {
             message: "P2P sync requires IrohSyncAdapter (not wired to LoroBackend)".to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod h3_property_convergence_tests {
+    use super::*;
+    use loro::{ExportMode, LoroDoc};
+
+    /// Bidirectional delta exchange — the deterministic equivalent of two peers
+    /// reaching the same merged state.
+    fn sync_pair(a: &LoroDoc, b: &LoroDoc) {
+        let a_delta = a.export(ExportMode::updates(&b.oplog_vv())).unwrap();
+        if !a_delta.is_empty() {
+            b.import(&a_delta).unwrap();
+        }
+        let b_delta = b.export(ExportMode::updates(&a.oplog_vv())).unwrap();
+        if !b_delta.is_empty() {
+            a.import(&b_delta).unwrap();
+        }
+    }
+
+    fn seed_node(doc: &LoroDoc, props: &HashMap<String, Value>) -> loro::TreeID {
+        let tree = doc.get_tree(TREE_NAME);
+        let node = tree.create(None).unwrap();
+        let meta = tree.get_meta(node).unwrap();
+        replace_properties_in_meta(&meta, props).unwrap();
+        doc.commit();
+        node
+    }
+
+    fn read_props(doc: &LoroDoc, node: loro::TreeID) -> HashMap<String, Value> {
+        let tree = doc.get_tree(TREE_NAME);
+        let meta = tree.get_meta(node).unwrap();
+        read_properties_from_meta(&meta)
+    }
+
+    fn s(v: &str) -> Value {
+        Value::String(v.to_string())
+    }
+
+    /// H3 core: two peers concurrently set *different* properties. Per-property
+    /// LoroMap keys merge so both survive. The pre-H3 single-JSON-blob would have
+    /// dropped one peer's whole change to blob-level LWW.
+    #[test]
+    fn concurrent_distinct_properties_both_survive() {
+        let base = LoroDoc::new();
+        let node = seed_node(&base, &HashMap::from([("STATUS".to_string(), s("open"))]));
+
+        let peer_a = base.fork();
+        let peer_b = base.fork();
+
+        let meta_a = peer_a.get_tree(TREE_NAME).get_meta(node).unwrap();
+        apply_field_changes_to_meta(&meta_a, &[("TODO".to_string(), Value::Null, s("DONE"))])
+            .unwrap();
+        peer_a.commit();
+
+        let meta_b = peer_b.get_tree(TREE_NAME).get_meta(node).unwrap();
+        apply_field_changes_to_meta(&meta_b, &[("PRIORITY".to_string(), Value::Null, s("A"))])
+            .unwrap();
+        peer_b.commit();
+
+        sync_pair(&peer_a, &peer_b);
+
+        for doc in [&peer_a, &peer_b] {
+            let props = read_props(doc, node);
+            assert_eq!(props.get("STATUS"), Some(&s("open")), "untouched key kept");
+            assert_eq!(props.get("TODO"), Some(&s("DONE")), "peer A's change kept");
+            assert_eq!(props.get("PRIORITY"), Some(&s("A")), "peer B's change kept");
+        }
+    }
+
+    /// A pre-H3 block carries the legacy single-blob string. It reads back
+    /// correctly, and the first write migrates it to the nested map and drops the
+    /// legacy key (self-healing — no lingering dual representation).
+    #[test]
+    fn legacy_blob_is_read_then_migrated_on_write() {
+        let doc = LoroDoc::new();
+        let tree = doc.get_tree(TREE_NAME);
+        let node = tree.create(None).unwrap();
+        let meta = tree.get_meta(node).unwrap();
+        let json =
+            serde_json::to_string(&HashMap::from([("TODO".to_string(), s("TODO"))])).unwrap();
+        meta.insert(PROPERTIES, loro::LoroValue::from(json.as_str()))
+            .unwrap();
+        doc.commit();
+
+        assert_eq!(
+            read_properties_from_meta(&meta).get("TODO"),
+            Some(&s("TODO"))
+        );
+
+        merge_properties_into_meta(&meta, &HashMap::from([("PRIORITY".to_string(), s("B"))]))
+            .unwrap();
+        doc.commit();
+
+        assert!(
+            meta.get(PROPERTIES).is_none(),
+            "legacy blob deleted after migrating write"
+        );
+        let props = read_properties_from_meta(&meta);
+        assert_eq!(
+            props.get("TODO"),
+            Some(&s("TODO")),
+            "legacy value carried into nested map"
+        );
+        assert_eq!(props.get("PRIORITY"), Some(&s("B")));
+    }
+
+    /// `replace_properties_in_meta` is the EXACT-set writer: keys absent from the
+    /// new set are deleted, down to the empty set.
+    #[test]
+    fn replace_deletes_absent_keys() {
+        let doc = LoroDoc::new();
+        let node = seed_node(
+            &doc,
+            &HashMap::from([("A".to_string(), s("1")), ("B".to_string(), s("2"))]),
+        );
+        let meta = doc.get_tree(TREE_NAME).get_meta(node).unwrap();
+
+        replace_properties_in_meta(&meta, &HashMap::from([("A".to_string(), s("9"))])).unwrap();
+        doc.commit();
+        let props = read_properties_from_meta(&meta);
+        assert_eq!(props.get("A"), Some(&s("9")), "kept key updated");
+        assert_eq!(props.get("B"), None, "absent key deleted");
+
+        replace_properties_in_meta(&meta, &HashMap::new()).unwrap();
+        doc.commit();
+        assert!(
+            read_properties_from_meta(&meta).is_empty(),
+            "empty set clears all"
+        );
     }
 }

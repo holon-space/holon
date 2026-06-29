@@ -200,17 +200,61 @@ PASS 290s):
   adds `EditorState`), focus/Turso invariants are SUT-cap-gated out, and the editor is closed by the
   boot's `NavigateFocus(page)` blur. Only `wiring` + `cap_set` vary per draw.
 
-### ⛔ Step-1 remaining sub-step (read before flipping `init_state`)
+### Round 3c (2026-06-28) — sub-step 3 ✅ DONE + `init_state` FLIPPED (keystone parameterized)
 
-3. **`WIDE_REQUIRED_INVARIANTS` must become wiring-conditional** (per-draw intersection) or a
-   Loro-only draw false-REDs the non-vacuity floor on its SQL/ViewModel ids (`wide_e2e.rs:142`). The
-   floor is a `const &'static [&str]` on the `ComposedSlice` impl, so making it per-draw needs either a
-   harness change (intersect the floor with the draw's selectable set) or moving the floor check to
-   honor the cap_set. `init_state` is still fixed to `wide_e2e_ref()` (full_headless) pending this.
+3. **`required_invariants` is now per-draw (✅ DONE).** The non-vacuity floor moved from a static
+   `const REQUIRED_INVARIANTS` consult to a `ComposedSlice::required_invariants(&ReferenceState)`
+   trait method (default = the full static const, typed as `Vec<InvariantId>`). `WideE2E` overrides it
+   to intersect `WIDE_REQUIRED_INVARIANTS` with the invariants the draw's caps can actually select:
+   for each id it looks the invariant up in `composed_invariant_catalog()` and keeps it iff
+   `Needs::selected_against(sut_caps, ref_caps)` holds — the SAME selector the runner uses. The SUT
+   cap_set is the draw's EXPECTED set (`ref_state.cap_set`, carried by `wide_e2e_ref_for`), so the
+   floor keeps teeth: a wiring that claims a cap the boot fails to wire → required-but-deselected →
+   floor REDs. The returned ids are **parsed `InvariantId`s sourced from the catalog** (`inv.id()`),
+   not raw strings — the const string is just a selector validated against the live registry (the
+   `panic!`-on-miss is the parse). `check_invariants` compares against `report.ran` (typed), not
+   `ran_ids()` strings. (`harness.rs` ComposedSlice + check loop; `wide_e2e.rs` override.)
 
-Once 3 lands, `init_state` draws `any_valid_wiring()` → `wide_e2e_ref_for(w)`, and the §8.10
-scaffolding-DOWN payoff follows: delete `subsystem_convergence_pbt` + the native `general_e2e_pbt(_sql_only)`
-slices (subsumed), then the native runner core (see "Refined E5 plan").
+   **`init_state` FLIPPED** — draws `any_valid_wiring()` → `wide_e2e_ref_for(w)` (was fixed
+   `Just(wide_e2e_ref())`). The keystone now exercises the FULL valid-wiring space each run, shrinking
+   toward Loro-only.
+
+   **Validated:** `general_e2e_composed_pbt` PASS at 16 cases in **46.9s** (down from the ~290s
+   all-`full_headless` baseline — most draws are now cheap Loro-only), 6-case smoke PASS, and a forced
+   `HOLON_PBT_WIRING_AXES="Loro;;"` run (EVERY draw Loro-only `{Loro, EditorState}`, no SQL/ViewModel
+   caps) PASS 8/8 in 6.8s — the airtight proof the floor narrows (under the old static floor all 8
+   would hard-fail on `inv-block-content-matches-ref`). The pre-existing `block:journals` reds on the
+   non-frontend lib slices (`memory_slice::structural_pbt`) are UNCHANGED — they fire the oracle-
+   divergence assert (`harness.rs` `failures().is_empty()`), untouched by this floor work, and die
+   with the B5 `subsystem_seed` spike in E5.
+
+**§8.10 scaffolding-DOWN payoff — first deletion DONE (2026-06-28):** `subsystem_convergence_pbt`
+(the E2ESut-backed convergence harness) + its now-dead `declare_pbt_convergence!` macro (`slice.rs`)
+DELETED — the parameterized keystone subsumes it (both generate+shrink the wiring; the keystone over
+the `CapMap`, the north-star target SUT). Stale "covered by subsystem_convergence_pbt" comments
+repointed to `general_e2e_composed_pbt` (`invariant_runner.rs` NATIVE_ONLY_EXCLUDED, `registry.rs`,
+`block_ids_match_ref.rs`, `wiring.rs`, `invariant_dispatch_smoke.rs`). Gate `parity.rs`
+(`composed_catalog_covers_e1_relocated_caps`) + keystone both PASS post-delete. `run_invariant_registry`
+(native runner core) is STILL used by 7 src files → it stays until the headless slices die.
+
+  **`general_e2e_pbt` subsumption AUDIT (2026-06-28, live `swap_probe_full_headless_narrowed_alphabet`
+  probe at `builder.rs:959`):** the composed keystone narrows out only **7 of 53** `E2ETransition`
+  variants, across **two cap families**: `SutSeamMutate` (ApplyMutation, BulkExternalAdd) +
+  `SutFixtureFs` (WriteOrgFile, CreateDirectory, GitInit, JjGitInit, CreateStaleLoro). The keystone
+  header (`general_e2e_composed_pbt.rs:11-16`) is **STALE** — peer/E4-gesture/watches/ToggleState are
+  ALL already un-narrowed and driven by the composed keystone (peer: `builder.rs:572`; E4 via the
+  frontend `ReactiveEngineDriver` `builder.rs:240`; ToggleState=`SutMutate`, watches=`SutWatchRegister`
+  both feasible). `general_e2e_pbt_sql_only` adds nothing the keystone's Turso-only `any_valid_wiring`
+  draws don't already cover (DELETE it together with the full variant).
+
+  **Verdict: NOT cleanly deletable yet.** The unique residual coverage is PBT-style *interleaving* of
+  external-org writes (`SutSeamMutate`) with random editor/nav sequences (CDC echo-suppression /
+  file-sync races) — example-based `bidirectional_sync.rs` / `phantom_loro_exists_repro.rs` cover the
+  seam functionally but not interleaved. `GitInit`/`JjGitInit` (`SutFixtureFs`) is a real but negligible
+  gap (pre-startup, sets a ref flag, 0 SQL). **§8.10-clean path:** host `SutSeamMutate` (+ optionally
+  `SutFixtureFs`, dropping git/jj) on the composed CapMap → un-narrows those families → THEN delete
+  `general_e2e_pbt(_sql_only)`. (`local_caps.rs:30` already frames this convergence.) Then the native
+  runner core (see "Refined E5 plan").
 
 ## ★ Key finding (Round 2 / E5 research): windowed-shell deletion is DEFERRED, not a permanent fork
 

@@ -5,9 +5,8 @@
 //! bound is honoured at the call site — a SUT without `SutLoroLog`
 //! simply can't dispatch the invariant (compile-time slice opt-in).
 //!
-//! Runtime body verification happens in the wide PBT and in the
-//! convergence harness (`subsystem_convergence_pbt`). This file is
-//! compile-only.
+//! Runtime body verification happens in the wide PBT and in the composed
+//! keystone (`general_e2e_composed_pbt`). This file is compile-only.
 
 use holon_pbt_core::capabilities::SutLoroLog;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};

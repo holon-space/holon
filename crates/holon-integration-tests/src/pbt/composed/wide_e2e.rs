@@ -22,15 +22,15 @@ use std::time::Duration;
 use holon_api::repository::NewBlock;
 use holon_api::{Block, EntityUri, Region};
 use holon_orgmode::OrgBlockExt;
-use holon_pbt_core::composition::{CapMap, CapSet};
+use holon_pbt_core::composition::{CapMap, CapSet, InvariantId};
 use holon_pbt_core::{
     Actor, ComponentSet, Projection, StorageAdapter, TransitionImpl, TransitionRef, Wiring,
 };
-use proptest::prelude::Just;
 use proptest::strategy::{BoxedStrategy, Strategy};
 use proptest_state_machine::ReferenceStateMachine;
 
 use crate::pbt::composed::builder::{compose_sut, compose_sut_seeded};
+use crate::pbt::composed::composed_invariant_catalog;
 use crate::pbt::composed::harness::{ComposedSlice, sut_ids};
 use crate::pbt::composed::seed_primitives::{C1, C2, PARENT, fixed_ids};
 use crate::pbt::composed::subsystem_seed::build_started_ref;
@@ -405,7 +405,15 @@ impl ReferenceStateMachine for WideE2EMachine {
     type Transition = E2ETransition;
 
     fn init_state() -> BoxedStrategy<Self::State> {
-        Just(wide_e2e_ref()).boxed()
+        // Draw the FULL valid-wiring space (shrinking toward Loro-only — the cheap minimal
+        // backend) and build the per-wiring oracle. `wide_e2e_ref_for` does a `block_on` for
+        // cap-set extraction, valid here because proptest calls `init_state` in a sync
+        // context with no ambient runtime (see `loro_only_wide_seed_runs_block_invariants_green`).
+        // The per-draw non-vacuity floor (`required_invariants`) keeps a Loro-only draw from
+        // false-REDing on the SQL/ViewModel ids it has no caps for.
+        holon_pbt_core::any_valid_wiring()
+            .prop_map(|w| wide_e2e_ref_for(&w))
+            .boxed()
     }
 
     fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
@@ -456,6 +464,46 @@ impl ComposedSlice for WideE2E {
             m.note_transition_start(transition);
         }
         TransitionImpl::apply_to_sut(transition, ref_state, caps).await;
+    }
+
+    /// Per-draw non-vacuity floor: keep only the `WIDE_REQUIRED_INVARIANTS` that THIS
+    /// draw's caps can actually select. The SUT axis is the drawn wiring's cap_set (already
+    /// carried on the ref by [`wide_e2e_ref_for`]); the ref axis registers every ref cap
+    /// unconditionally (see `impl CapProvider for ReferenceState`). A Loro-only draw thus
+    /// drops the SQL/ViewModel/focus ids it has no caps for, while a `full_headless` draw
+    /// keeps all of them (the intersection is a no-op there — the keystone floor is
+    /// unchanged). Selection here uses the SAME `Needs::selected_against` the runner uses,
+    /// computed against the wiring's EXPECTED cap_set (not the actual booted caps), so the
+    /// floor still has teeth: if the wiring claims a cap the boot fails to wire, the
+    /// invariant is required-but-deselected and the floor REDs. The returned ids are
+    /// parsed FROM the catalog ([`CapInvariant::id`]), so each `WIDE_REQUIRED_INVARIANTS`
+    /// string is a selector validated against the live registry (the `panic!` is the parse).
+    fn required_invariants(ref_state: &ReferenceState) -> Vec<InvariantId> {
+        let sut_caps = ref_state
+            .cap_set
+            .clone()
+            .expect("composed wide draw must carry a cap_set (set by wide_e2e_ref_for)");
+        let mut ref_map = CapMap::new();
+        holon_pbt_core::composition::CapProvider::register(
+            Arc::new(ref_state.clone()),
+            &mut ref_map,
+        );
+        let ref_caps = ref_map.cap_set();
+        let catalog = composed_invariant_catalog();
+        WIDE_REQUIRED_INVARIANTS
+            .iter()
+            .copied()
+            .map(|id| {
+                catalog
+                    .iter()
+                    .find(|inv| inv.id().0 == id)
+                    .unwrap_or_else(|| {
+                        panic!("WIDE_REQUIRED invariant {id:?} is not in the composed catalog")
+                    })
+            })
+            .filter(|inv| inv.needs().selected_against(&sut_caps, &ref_caps))
+            .map(|inv| inv.id())
+            .collect()
     }
 }
 

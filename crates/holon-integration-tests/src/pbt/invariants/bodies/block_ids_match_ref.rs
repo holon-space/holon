@@ -10,8 +10,9 @@
 //!
 //! Set-equality catches the most common drift symptoms (block exists in ref
 //! but not SQL, or vice versa) without needing `assert_blocks_equivalent`
-//! plumbing. Runs in the convergence harness (subsystem_convergence_pbt) with
-//! no extra wiring.
+//! plumbing. Runs in the native registry (e.g. general_e2e_pbt) with no extra
+//! wiring; its composed equivalent inv-blocks-match-ref/* runs in
+//! general_e2e_composed_pbt over generated wirings.
 
 use std::collections::BTreeSet;
 

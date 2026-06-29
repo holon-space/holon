@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_pbt_core::capabilities::SutBackend;
-use holon_pbt_core::composition::{CapMap, RunReport};
+use holon_pbt_core::composition::{CapMap, InvariantId, RunReport};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
 use crate::pbt::composed::composed_invariant_catalog;
@@ -112,6 +112,21 @@ pub trait ComposedSlice {
     const SETTLE: Duration;
     /// Whether the SUT needs a multi-thread runtime (a booted session does).
     const MULTI_THREAD: bool = false;
+
+    /// The non-vacuity floor for THIS draw. Default: the full static
+    /// [`REQUIRED_INVARIANTS`](Self::REQUIRED_INVARIANTS) (correct for a fixed-wiring
+    /// slice). A wiring-parameterized slice (`WideE2E`) overrides this to intersect the
+    /// static floor with the invariants its drawn `ref_state.wiring` can actually select —
+    /// so a Loro-only draw is not required to run the SQL/ViewModel/focus invariants it has
+    /// no caps for (which would false-RED the floor). Returns parsed [`InvariantId`]s,
+    /// not raw strings, so the floor is compared against the report's typed ids directly.
+    fn required_invariants(_: &ReferenceState) -> Vec<InvariantId> {
+        Self::REQUIRED_INVARIANTS
+            .iter()
+            .copied()
+            .map(InvariantId)
+            .collect()
+    }
 
     /// Boot + seed the SUT, returning the cap map, the slice handle, and the booted
     /// scaffold ids to seed-inject into the oracle. `resolver` is shared with the
@@ -269,10 +284,11 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             "reconciled composed sequence diverged from the oracle: {:?}",
             report.failures()
         );
-        for id in S::REQUIRED_INVARIANTS {
+        for id in S::required_invariants(ref_state) {
             assert!(
-                report.ran_ids().contains(id),
-                "non-vacuity: {id} must run over real data (ran: {:?})",
+                report.ran.iter().any(|(ran_id, _)| *ran_id == id),
+                "non-vacuity: {} must run over real data (ran: {:?})",
+                id.0,
                 report.ran_ids()
             );
         }

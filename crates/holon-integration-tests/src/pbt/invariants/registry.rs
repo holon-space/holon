@@ -1055,8 +1055,8 @@ mod tests {
     ///     `inv-block-tags-references-exist`
     ///
     /// (`storage_consistency_pbt` was retired — its `storage` preset is now
-    /// covered by the convergence harness `subsystem_convergence_pbt`, which
-    /// runs the full registry over a generated Turso/Loro wiring.)
+    /// covered by the composed keystone `general_e2e_composed_pbt`, which runs
+    /// the full composed catalog over a generated Turso/Loro wiring.)
     ///
     /// Each id MUST also appear in the wide registry.
     #[test]
