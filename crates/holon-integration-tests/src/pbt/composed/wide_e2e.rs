@@ -246,14 +246,22 @@ pub async fn boot_and_seed_wide(
     }
 
     // Scaffold = everything the SUT booted OR the oracle models, EXCEPT the non-seed
-    // working tree (parent/c1/c2). The union is what makes the seed wiring-agnostic: a
-    // frontend SUT boots `block:journals` + the index.org layout (so they're in `booted`
-    // and filtered); a non-frontend SUT does NOT, but the oracle still models that layout
-    // (`build_started_ref`'s `seed_booted_layout_into_ref`), so its ids must come from the
-    // ref side to be seed-injected and filtered — otherwise they'd false-diverge
-    // (`block:journals present in ref but missing from the SUT`). `structural-page` (the
-    // page root) is in both and filtered either way.
+    // working tree (parent/c1/c2) — and, for a frontend config, EXCEPT `block:journals`.
+    //
+    // The union makes the seed wiring-agnostic: a frontend SUT boots `block:journals` +
+    // the index.org layout (in `booted`); a non-frontend SUT does NOT, but the oracle
+    // still models that layout, so those ids must come from the ref side to be
+    // seed-injected and filtered — otherwise they'd false-diverge.
+    //
+    // `block:journals` is the ONE first-boot page that is self-documenting
+    // (`block_documents[journals]=journals`, i.e. NON-seed) rather than seed-classified
+    // like `__default__`/index.org. For a frontend config it is present on BOTH sides
+    // (SUT boots it, oracle models it), so we keep it OUT of the seed-filter and let
+    // `inv-blocks-match-ref/block_raw` ASSERT it — the user-visible first-boot journals
+    // page is verified, not hidden. A non-frontend SUT never boots it, so there it stays
+    // in the scaffold (filtered) to match the oracle's modeled-but-not-booted copy.
     let ids = fixed_ids();
+    let journals = EntityUri::parse("block:journals").expect("journals id");
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .collect();
@@ -268,6 +276,7 @@ pub async fn boot_and_seed_wide(
     let scaffold: BTreeSet<EntityUri> = booted
         .union(&ref_ids)
         .filter(|id| !tree.contains(id))
+        .filter(|id| !(has_frontend && **id == journals))
         .cloned()
         .collect();
 
