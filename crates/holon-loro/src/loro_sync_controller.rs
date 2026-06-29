@@ -32,6 +32,7 @@ use loro::{Frontiers, LoroDoc};
 use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, warn};
 
+use holon_api::EdgeField;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
@@ -739,26 +740,14 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
     );
     params.insert("sort_key".into(), Value::String(snap.sort_key.clone()));
 
-    if !block.tags.is_empty() {
-        let arr: Vec<Value> = block
-            .tags
-            .iter()
-            .map(|t| Value::String(t.clone()))
-            .collect();
-        params.insert("tags".into(), Value::Array(arr));
-    }
-
-    // `requires` is an edge field (`block_requires` junction). Emit it as a
-    // typed Array — the SQL provider's edge partition routes it to the junction.
-    // Without this, an org-edna dependency created in Loro mode never reaches
-    // SQL (the projection's create dropped it). Mirrors `tags` above.
-    if !block.requires.is_empty() {
-        let arr: Vec<Value> = block
-            .requires
-            .iter()
-            .map(|r| Value::String(r.to_string()))
-            .collect();
-        params.insert("requires".into(), Value::Array(arr));
+    // Edge fields (`block_tags`/`block_requires` junctions). Emit each non-empty
+    // set as a typed Array — the SQL provider's edge partition routes it to the
+    // junction table. Iterating `EdgeField::ALL` (rather than hand-listing) is
+    // what keeps a newly added edge field from being silently dropped here.
+    for field in EdgeField::ALL {
+        if !field.is_empty(block) {
+            params.insert(field.column().into(), field.param_value(block));
+        }
     }
 
     if block.content_type == ContentType::Source {
@@ -782,12 +771,11 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
     // `known_columns` table. The Loro side never has to know which fields are
     // first-class columns.
     for (k, v) in &block.properties {
-        // Edge-typed fields (`tags`, `requires`) live in junction tables and
-        // are emitted via their dedicated params/paths — never as flattened
-        // properties. A stray edge key in `properties` (data pollution) would
-        // otherwise reach SqlOperationProvider's edge partition as a non-Array
-        // and panic. Skip them.
-        if k == "tags" || k == "requires" {
+        // Edge-typed fields live in junction tables and are emitted via their
+        // dedicated params/paths above — never as flattened properties. A stray
+        // edge key in `properties` (data pollution) would otherwise reach
+        // SqlOperationProvider's edge partition as a non-Array and panic.
+        if EdgeField::is_edge_column(k) {
             continue;
         }
         params.entry(k.as_str().into()).or_insert_with(|| v.clone());
@@ -832,17 +820,13 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
             Value::String(new.content_type.to_string()),
         );
     }
-    if old.tags != new.tags {
-        let arr: Vec<Value> = new.tags.iter().map(|t| Value::String(t.clone())).collect();
-        params.insert("tags".into(), Value::Array(arr));
-    }
-    if old.requires != new.requires {
-        let arr: Vec<Value> = new
-            .requires
-            .iter()
-            .map(|r| Value::String(r.to_string()))
-            .collect();
-        params.insert("requires".into(), Value::Array(arr));
+    // Edge fields: emit each that changed. Iterating `EdgeField::ALL` keeps this
+    // diff in lockstep with `blocks_differ` — omitting a field here (the H12
+    // bug: `requires` compared in one but not the other) is unrepresentable.
+    for field in EdgeField::ALL {
+        if field.differs(old, new) {
+            params.insert(field.column().into(), field.param_value(new));
+        }
     }
     if old.source_language != new.source_language
         && let Some(ref lang) = new.source_language
@@ -859,13 +843,12 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     }
     if old.properties_map() != new.properties_map() {
         for (k, v) in &new.properties {
-            // Edge-typed fields (`tags`, `requires`) live in junction tables and
-            // are emitted via their dedicated Array params above — never as a
-            // flattened property. A stray edge key in `properties` (legacy data
-            // pollution) would otherwise reach SqlOperationProvider's edge
-            // partition as a non-Array and panic. Skip them. Mirrors the same
-            // guard in `block_to_params`.
-            if k == "tags" || k == "requires" {
+            // Edge-typed fields live in junction tables and are emitted via
+            // their dedicated Array params above — never as a flattened
+            // property. A stray edge key in `properties` (legacy data pollution)
+            // would otherwise reach SqlOperationProvider's edge partition as a
+            // non-Array and panic. Mirrors the guard in `block_to_params`.
+            if EdgeField::is_edge_column(k) {
                 continue;
             }
             params.entry(k.as_str().into()).or_insert_with(|| v.clone());
@@ -907,8 +890,7 @@ fn blocks_differ(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
         || a.block.content_type != b.block.content_type
         || a.block.source_language != b.block.source_language
         || a.block.source_name != b.block.source_name
-        || a.block.tags != b.block.tags
-        || a.block.requires != b.block.requires
+        || EdgeField::ALL.iter().any(|f| f.differs(&a.block, &b.block))
         || a.block.properties_map() != b.block.properties_map()
         || a.block.marks != b.block.marks
 }

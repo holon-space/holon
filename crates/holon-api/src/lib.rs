@@ -91,7 +91,7 @@ pub use types::{
 pub use entity_uri::EntityUri;
 
 // Re-export the block edge-field category
-pub use edge_field::EdgeFieldUpdate;
+pub use edge_field::{EdgeField, EdgeFieldUpdate};
 
 // Re-export inline-mark types (rich text)
 pub use inline_mark::{
