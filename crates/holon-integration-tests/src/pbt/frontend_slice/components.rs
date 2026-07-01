@@ -519,6 +519,69 @@ impl HeadlessFrontendComponent {
         }
     }
 
+    /// Wait until the LeftSidebar has bound a clickable `navigation.focus` intent
+    /// for `id` before a sidebar-nav click is issued. The sidebar page list is a
+    /// nested `live_block` watch that streams its rows AND their bound `selectable`
+    /// intents in asynchronously after boot/seed; a click that outruns it makes the
+    /// production `click_entity` fall through to an in-memory `set_focus` (which
+    /// writes NO `navigation_history` row — see the doc on `ReactiveEngine::set_focus`)
+    /// so the `current_focus` matview stays on the boot-default `journals`. Poll the
+    /// resolved layout for the exact predicate `click_entity` dispatches on
+    /// (`find_click_intent_in_region`), and fail loud if the entry never binds rather
+    /// than let the click silently fake focus.
+    async fn await_sidebar_nav_intent(&self, id: &EntityUri) {
+        let root_uri = holon_api::root_layout_block_uri();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let resolved = self.reactive.snapshot_resolved(&root_uri);
+            if holon_frontend::focus_path::find_click_intent_in_region(
+                &resolved,
+                id,
+                "left_sidebar",
+            )
+            .is_some()
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[SutFocusWrite::apply_navigate_focus] LeftSidebar never bound a \
+                 navigation.focus click-intent for {id} within 5s — the sidebar page list \
+                 (nested live_block watch) did not stream the target's selectable, so a \
+                 click would fall through to an in-memory set_focus (no navigation_history \
+                 write) and leave current_focus on the boot default. Sidebar-render / \
+                 CDC-settle faithfulness gap, not a fake-focus escape."
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Loud postcondition for a sidebar-nav click: `current_focus(main)` must
+    /// reflect `id` once CDC settles. If it does not, the click dispatched no
+    /// `navigation.focus` SQL write (silent set_focus fallthrough) or the matview
+    /// lagged past `settle_focus_matviews` — either way, never fake focus: fail loud.
+    async fn assert_navigate_focus_landed(&self, id: &EntityUri) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let focus = self
+                .sql_query("SELECT block_id FROM current_focus WHERE region = 'main'")
+                .await
+                .first()
+                .and_then(|r| Self::cell(r, "block_id"));
+            if focus.as_deref() == Some(id.as_str()) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[SutFocusWrite::apply_navigate_focus] after clicking the LeftSidebar entry \
+                 for {id} and settling, current_focus(main) is {focus:?} — the navigation.focus \
+                 SQL write did not land (click fell through to an in-memory set_focus, or the \
+                 matview lagged). Never fake focus: failing loud."
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Settle `block_id`'s `block_raw.content` to a fixed point after a keystroke
     /// edit. A char insert mutates the editor's `MutableText` (Loro) cell; the
     /// per-keystroke pipeline then syncs that through to the `block_raw` projection
@@ -1067,6 +1130,11 @@ impl SutFocusWrite for HeadlessFrontendComponent {
         // the click always targets the `left_sidebar` entry (`_region` is the nav DESTINATION,
         // carried by the entry's bound action, not the click location).
         let id = self.resolve_id(id);
+        // Do not let the click outrun the async sidebar render: wait until the
+        // target's `navigation.focus` intent is actually bound, so `click_entity`
+        // dispatches the nav SQL write instead of silently falling through to an
+        // in-memory `set_focus`.
+        self.await_sidebar_nav_intent(&id).await;
         self.driver
             .click_entity(&id, "left_sidebar")
             .await
@@ -1077,6 +1145,7 @@ impl SutFocusWrite for HeadlessFrontendComponent {
                 )
             });
         self.settle_focus_matviews().await;
+        self.assert_navigate_focus_landed(&id).await;
     }
 
     /// Open an editor on `id` the production way: a main-panel `click_entity`
