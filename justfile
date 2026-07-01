@@ -115,6 +115,26 @@ pbt-all cases='32':
     just pbt orgmode {{cases}}
     just pbt loro {{cases}}
 
+# Extended-generator sweep — the ONE keystone under wide-codepoint / empty / whitespace /
+# org-special content arms (HOLON_PBT_EXTENDED_GEN gates them in the SHARED generators,
+# so the composed keystone exercises them). Replaces the retired standalone extended_gen_pbt
+# (§8.10: coverage lives in the ONE keystone, not a wiring-axis twin).
+pbt-extended-gen cases='64' *FLAGS:
+    PROPTEST_CASES={{cases}} HOLON_PBT_EXTENDED_GEN=1 cargo test \
+        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-extended-gen.log
+
+# Layout-override sweep — the ONE keystone with the index.org override arms (prql/gql/sql
+# layouts + profile file); HOLON_PBT_LAYOUT_OVERRIDE gates them in write_org_file.rs.
+# Replaces the retired standalone layout_override_pbt. KNOWN RED (pre-existing): the link-mark
+# [[label]] extraction divergence on UI-origin ApplyMutation Update on block:root-layout
+# (capture /tmp/layout_full_8case_finding.captured.json) still reproduces here — triage via
+# the keystone, then remove this note.
+pbt-layout-override cases='64' *FLAGS:
+    PROPTEST_CASES={{cases}} HOLON_PBT_LAYOUT_OVERRIDE=1 cargo test \
+        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-layout-override.log
+
 # --- Predefined slices (ADR 0009: declare_pbt_slice! / component_pbt!) --------
 # Slices are discovered from source — no hardcoded list. Each `test_fn:` in
 # crates/holon-integration-tests/tests/ is one runnable slice; the file stem may
