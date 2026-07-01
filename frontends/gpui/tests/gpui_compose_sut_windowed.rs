@@ -1,0 +1,174 @@
+//! ★ Round-5 windowed repoint — foundational milestone.
+//!
+//! ✅ VERIFIED GREEN (macOS, 2026-07-01): `cargo test -p holon-gpui --features pbt --test
+//! gpui_compose_sut_windowed` → 1 passed. The window rendered 68 elements (63 non-degenerate)
+//! over the `compose_sut_windowed_base` session; the base hosted `SutBackend` (13 booted
+//! blocks); the driver rung was correctly absent (deferred).
+//!
+//! Proves the claim the whole repoint rests on: a gpui window RENDERS a
+//! [`compose_sut_windowed_base`] session (the window is a *pure renderer* over a
+//! headless-booted `FrontendSession` + `ReactiveEngine`), and that deferred-driver
+//! base already hosts the backend caps reading the booted store. Together with the
+//! surfaced `session`/`reactive` handles, this shows the windowed CapMap can be
+//! assembled by booting the headless composition and attaching a window over its
+//! reactive engine — no separate booter, no new id-reconcile.
+//!
+//! What is DEFERRED to a later increment (increment 3): the faithful windowed
+//! gesture driver (`SimUserDriver`, which needs a live gpui `App` pointer +
+//! `interaction_tx`) and the full `overlay_windowed_caps` + `StateMachineTest`
+//! per-tick loop with a matched reference oracle. This milestone deliberately reads
+//! `SutLayout` (through `window_layout`) + `SutBackend` (through the base CapMap)
+//! directly, so it needs no reference matching.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use gpui::{AssetSource, PlatformTextSystem, TestApp};
+use holon_frontend::geometry::GeometryProvider;
+use holon_gpui::geometry::BoundsRegistry;
+use holon_gpui::launch_holon_window_rebindable;
+use holon_gpui::navigation_state::NavigationState;
+use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base;
+use holon_integration_tests::pbt::op_write_cap::IdResolver;
+use holon_integration_tests::pbt::window_slice::builders::window_layout;
+use holon_pbt_core::ComponentSet;
+// Caps must be in scope to read them through the `CapMap` (capmap_adapter forwards).
+use holon_pbt_core::capabilities::{SutBackend, SutDriver, SutLayout};
+
+fn real_text_system() -> Arc<dyn PlatformTextSystem> {
+    gpui_platform::current_platform(true).text_system()
+}
+
+/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern): pump
+/// until the element count is stable and no `"loading"` placeholders remain.
+fn settle_to_fixed_point(
+    app: &mut TestApp,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    let mut last_count = 0usize;
+    let mut stable_iters = 0u32;
+    while start.elapsed() < timeout {
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
+        app.run_until_parked();
+        app.advance_clock(Duration::from_secs(1));
+        app.run_until_parked();
+        bounds.flush();
+        let elements = bounds.all_elements();
+        let count = elements.len();
+        let still_loading = elements
+            .iter()
+            .any(|(_, info)| info.widget_type.as_ref() == "loading");
+        if count == last_count && count > 0 && !still_loading {
+            stable_iters += 1;
+            if stable_iters >= 5 {
+                return;
+            }
+        } else {
+            stable_iters = 0;
+        }
+        last_count = count;
+    }
+    panic!(
+        "window never reached a fixed point within {timeout:?}: {} elements",
+        bounds.all_elements().len()
+    );
+}
+
+#[test]
+fn window_renders_compose_sut_base_and_base_hosts_backend() {
+    let text_system = real_text_system();
+    let assets: Arc<dyn AssetSource> = Arc::new(());
+    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+
+    let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
+
+    // Boot the DEFERRED-driver headless base (`full_headless`): everything a wide
+    // headless SUT has (backend / storage / editor / ViewModel caps + IdResolver
+    // reconcile) EXCEPT the gesture-driver rung, which a window would supply.
+    let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let composed = runtime.block_on(async {
+        compose_sut_windowed_base(&ComponentSet::full_headless(), &resolver).await
+    });
+
+    let session = composed
+        .session
+        .clone()
+        .expect("full_headless has ViewModel → a booted FrontendSession");
+    let engine = composed
+        .reactive
+        .clone()
+        .expect("full_headless has ViewModel → a booted frontend ReactiveEngine");
+
+    // (1) Deferred-driver contract: the base carries NO driver rung, so a later
+    //     `overlay_windowed_caps` INSERTS the window's driver caps as sole providers.
+    assert!(
+        composed.caps.get::<dyn SutDriver>().is_none(),
+        "compose_sut_windowed_base must DEFER the driver rung (no SutDriver in the base)",
+    );
+
+    // (2) Backend caps present and reading the booted store (the boot seed doc).
+    let booted_blocks = runtime.block_on(async { composed.caps.block_raw_snapshot().await });
+    assert!(
+        !booted_blocks.is_empty(),
+        "the deferred base must host SutBackend reading the booted block_raw store",
+    );
+
+    // Attach a TestPlatform window over the SAME session + reactive engine — the
+    // window is a pure renderer; no session construction of its own.
+    let bounds = BoundsRegistry::new();
+    let nav = NavigationState::new();
+    let _rebind = app
+        .update(|cx| {
+            launch_holon_window_rebindable(
+                session.clone(),
+                engine.clone(),
+                runtime.handle().clone(),
+                nav,
+                bounds.clone(),
+                None,
+                "Holon-ComposeSut-Windowed",
+                cx,
+            )
+        })
+        .expect("window opened over compose_sut session");
+
+    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+
+    // (3) SutLayout over the window reads real, non-degenerate geometry — proving the
+    //     window RENDERS compose_sut's session (the foundational Hard-B claim).
+    let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
+    let capmap = window_layout(geometry);
+    let via_capmap = runtime.block_on(async { capmap.rendered_elements().await });
+    assert!(
+        !via_capmap.is_empty(),
+        "a window over the compose_sut session produced no geometry",
+    );
+    let non_degenerate = via_capmap
+        .iter()
+        .filter(|e| e.width > 1.0 && e.height > 1.0)
+        .count();
+    assert!(
+        non_degenerate >= 1,
+        "the compose_sut window produced only degenerate geometry",
+    );
+
+    eprintln!(
+        "[compose_sut-windowed] PASS — window rendered {} elements ({non_degenerate} non-degenerate) \
+         over a compose_sut_windowed_base session; base hosts SutBackend ({} booted blocks); driver deferred",
+        via_capmap.len(),
+        booted_blocks.len(),
+    );
+
+    // gpui teardown (mirror `gpui_window_slice.rs`): release the window entities, shut the
+    // app down, then leak the `!Send` TestApp + the booted composition so their Drops don't
+    // run the gpui leak detector / drop the session's tokio runtime in async context. The
+    // process exits right after the test, so the leak is inert.
+    drop(_rebind);
+    app.update(|cx| cx.shutdown());
+    app.run_until_parked();
+    std::mem::forget(app);
+    std::mem::forget(composed);
+}
