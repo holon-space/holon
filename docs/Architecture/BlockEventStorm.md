@@ -128,18 +128,18 @@ purple frame on the wall): `FileSyncStarted`, `BlocksProjectedToSql`,
 ## 3. The ubiquitous-language audit (the highest-value output)
 
 Event Storming earns its keep by exposing where one concept wears many names.
-Each row below is a candidate for a glossary entry — and several are latent bugs.
+
+**The canonical glossary lives in [CONTEXT.md](../../CONTEXT.md)** — its §2 (core
+vocabulary), §3 (per-context dialects), and §4 (synonym & deprecation registry)
+carry every stable term with its canonical form and cleanup action. This section
+keeps only the rows that are *hotspot evidence*: places where the naming drift IS
+(or was) a live bug tracked in §4 below. When a row's hotspot closes, the row
+graduates to CONTEXT.md §4 and is deleted here.
 
 | One concept | Names in the wild | Risk |
 |---|---|---|
 | **"this block is a page"** | `PAGE_TAG = "Page"` via `Block::is_page()` (canonical) · `doc:` URI scheme (deprecated, still in ~15 files) · `set_is_document` op name | 🔴 H7 — `is_document()` deleted ✅, but two legacy encodings remain |
 | **a block mutation** | `Operation` (descriptor) · op-name string · `OperationIntent` · `ChangeOp` (the only typed enum) · `BlockDiff` | parse-don't-validate gap (H2) |
-| **sibling order** | **ordered child list** (ADR 0005, canonical) · fractional index (Loro materialization) · `sort_key` column in `block_raw` (Turso materialization) · `SnapshotBlock.sort_key:String` · `sequence` (legacy) · `after_block_id` (positional intent) | index/`sort_key` are per-system representations of the ordered list, not the authority |
-| **the rendered unit** | domain **Block** · matview **row** (`DataRow`) · **ViewModel** · **widget** | one block → many rows (panels) |
-| **ViewModel** | `ReactiveViewModel` (live MVVM node) · `ViewModel` (frozen snapshot for tests/MCP) | 🔴 easy to conflate — same word, two types |
-| **widget** | `ViewKind` tag · `shadow_builders/*` · native `AnyElement` | overloaded ×3 |
-| **a change event** | `Change<T>` (neutral) · `RowChange` (Turso-tagged) · `ChangeData` · `UiEvent::Data` | tag stripped/added at seams |
-| **block identity** | `EntityUri` (`block:`) · bare id (disk) · `TreeID` (peer-local, Loro) · `STABLE_ID` (Loro meta) · `id` column · SQLite ROWID (must NOT use) | 🔴 5 id spaces, one is a trap |
 | **edge fields** | `tags`/`requires` as `Block` fields · `block_tags`/`block_requires` junction rows · Loro meta keys · `EdgeField` enum (closed, iterated at all projection sites) | H1/H12 fixed ✅; `Block`'s serde still skips them (see H1 residue) |
 
 ---
@@ -303,8 +303,8 @@ presentation state intentionally never enters the CRDT."** Keep new fields hones
 against that line — the failure mode is a field that is collaborative in intent
 but SQL-only in implementation, which is exactly what H4 was.
 
-**The cheap, high-value cleanups still open** (language, not architecture): write
-the glossary in §3 into `CONTEXT.md`; finish the `doc:`-scheme elimination and
+**The cheap, high-value cleanups still open** (language, not architecture):
+finish the `doc:`-scheme elimination and
 retire the `set_is_document` op name (H7); add a type-level marker for
 "intentionally not round-tripped" columns and make `TryFrom<StorageEntity>` fail
 loud on missing columns (H8); type the `ChangeOp` parent refs (H2); the

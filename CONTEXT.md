@@ -142,6 +142,7 @@ else should converge or die. These are the named hotspots from the Event Storm.
 | sibling order | **ordered child list** (ADR 0005) | fractional index (Loro materialization); `sort_key` column (Turso materialization); `SnapshotBlock.sort_key`; `sequence` (legacy) | treat index/`sort_key` as per-system materializations of the ordered list; retire `sequence` | — |
 | the rendered unit | **Block** + **row** (distinct) | conflating "block" and "row" | keep distinct: block = entity, row = projection | — |
 | live vs frozen VM | **`ReactiveViewModel`** vs **`ViewModel`** | using "ViewModel" unqualified | always qualify | — |
+| widget | **native element** (`AnyElement`) | `ViewKind` tag; `shadow_builders/*` — "widget" is overloaded ×3 | qualify which layer is meant | — |
 | change event | **`Change<T>`** | `RowChange` (Turso-tagged); `ChangeData`; `UiEvent::Data` | treat tagged forms as boundary-local | — |
 | block identity | **`EntityUri`** / `STABLE_ID` | bare id (disk); `TreeID` (peer-local); SQLite ROWID (trap) | never persist `TreeID`/ROWID as identity | — |
 
