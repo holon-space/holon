@@ -139,6 +139,26 @@ pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver
     .await
 }
 
+/// [`compose_sut_windowed_base`] with a caller-chosen boot seed: the wide windowed repoint
+/// boots its working tree AS org (`WIDE_TREE_ORG`, so the attached window RENDERS it) with the
+/// driver rung deferred for `overlay_windowed_caps`. Same body as [`compose_sut_seeded`] but
+/// `DriverPlacement::Deferred` — the driver-deferred dual of the seeded entry.
+pub async fn compose_sut_windowed_base_seeded(
+    set: &ComponentSet,
+    resolver: &IdResolver,
+    frontend_seed_org: &[(&str, &str)],
+    seed_tree: &[NewBlock],
+) -> ComposedSut {
+    compose_sut_seeded_impl(
+        set,
+        resolver,
+        frontend_seed_org,
+        seed_tree,
+        DriverPlacement::Deferred,
+    )
+    .await
+}
+
 /// The frontend arm's default boot org — a minimal one-heading doc. Callers that
 /// need the working tree to live IN the org (so `SutOrgRead`/`inv-blocks-match-ref/org`
 /// see it, rather than an engine-only seed that the org parse misses) pass their tree

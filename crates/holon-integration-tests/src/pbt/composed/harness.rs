@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use holon_api::EntityUri;
-use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::{SutBackend, SutLayout};
 use holon_pbt_core::composition::{CapMap, InvariantId, RunReport};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
@@ -177,6 +177,14 @@ pub trait ComposedSlice {
     }
 }
 
+/// A per-check window-settle hook. The §Round-5 windowed harness ([`ComposedSut::from_parts`])
+/// injects a closure that pumps the gpui window to a fixed point before invariants read its
+/// geometry; the headless proptest path ([`StateMachineTest::init_test`]) leaves it a no-op.
+/// `Send` (not `Sync`) — the windowed closure carries a `*const TestApp` behind a `Send`
+/// newtype (same single-thread contract as `SimUserDriver`); it is only ever called on the
+/// gpui thread that owns the window.
+pub type SettleHook = Box<dyn Fn() + Send>;
+
 /// The generic composed SUT: a `CapMap` driven through a slice's alphabet, with the
 /// per-tick `IdResolver` reconcile and the shared-catalog check.
 pub struct ComposedSut<S: ComposedSlice> {
@@ -185,7 +193,45 @@ pub struct ComposedSut<S: ComposedSlice> {
     resolver: IdResolver,
     scaffold_ids: BTreeSet<EntityUri>,
     rt: tokio::runtime::Runtime,
+    /// Pumps an attached gpui window to a fixed point before each `check_invariants`
+    /// read; a no-op for the headless path. See [`SettleHook`].
+    settle: SettleHook,
     _slice: PhantomData<S>,
+}
+
+impl<S: ComposedSlice> ComposedSut<S> {
+    /// Construct a `ComposedSut` around ALREADY-BOOTED caps instead of tokio-booting via
+    /// [`ComposedSlice::build`] (the §Round-5 windowed repoint: the gpui-thread harness
+    /// boots a `compose_sut` session, attaches a window as a pure renderer over its
+    /// `reactive`, and overlays the window's gesture caps — so the SUT is assembled
+    /// outside this crate). `rt` drives the apply/check futures (leaf-polls; the booted
+    /// backend runs on its own session runtime); `settle` pumps the attached window to a
+    /// fixed point before each `check_invariants` read (headless callers use
+    /// [`StateMachineTest::init_test`], whose `settle` is a no-op).
+    pub fn from_parts(
+        caps: CapMap,
+        handle: S::Handle,
+        resolver: IdResolver,
+        scaffold_ids: BTreeSet<EntityUri>,
+        rt: tokio::runtime::Runtime,
+        settle: SettleHook,
+    ) -> Self {
+        Self {
+            caps,
+            handle,
+            resolver,
+            scaffold_ids,
+            rt,
+            settle,
+            _slice: PhantomData,
+        }
+    }
+
+    /// The SUT's shared runtime — the windowed harness drives the initial focus-align on
+    /// it before the first check (mirrors `boot_and_seed_wide`'s headless focus drive).
+    pub fn runtime(&self) -> &tokio::runtime::Runtime {
+        &self.rt
+    }
 }
 
 impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
@@ -213,6 +259,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             resolver,
             scaffold_ids,
             rt,
+            settle: Box::new(|| {}),
             _slice: PhantomData,
         }
     }
@@ -281,6 +328,10 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     }
 
     fn check_invariants(sut: &Self, ref_state: &ReferenceState) {
+        // Pump an attached gpui window to a fixed point so the geometry/text/focus caps
+        // read the post-transition frame (no-op headlessly — see `SettleHook`). Mirrors
+        // the sim windowed per-tick hook's `settle_to_fixed_point` before its check.
+        (sut.settle)();
         let report = sut.rt.block_on(S::run_report(
             &sut.caps,
             &sut.resolver,
@@ -316,6 +367,21 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 "non-vacuity: {} must run over real data (ran: {:?})",
                 id.0,
                 report.ran_ids()
+            );
+        }
+        // Windowed non-vacuity floor: when this SUT hosts a window (a `SutLayout` cap is
+        // present — true only on the §Round-5 windowed path), the windowed geometry family
+        // MUST have selected + run. Keyed off the ACTUAL caps (not the ref cap_set, which
+        // stays headless), so a silent deselect that turns the windowed families into "ran
+        // nothing" fails HERE instead of passing vacuously — the same guard
+        // `run_windowed_composed_check` enforces, now inside the unified StateMachineTest.
+        if sut.caps.get::<dyn SutLayout>().is_some() {
+            assert!(
+                report.ran_ids().contains(&"inv-frontend-bounds-rendered"),
+                "windowed non-vacuity: inv-frontend-bounds-rendered must run when a window is \
+                 attached (ran: {:?}, deselected: {:?})",
+                report.ran_ids(),
+                report.deselected.iter().map(|d| d.0).collect::<Vec<_>>(),
             );
         }
     }

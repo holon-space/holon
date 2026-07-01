@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use holon_api::repository::NewBlock;
 use holon_api::{Block, EntityUri, Region};
+use holon_frontend::reactive::BuilderServices;
 use holon_orgmode::OrgBlockExt;
 use holon_pbt_core::composition::{CapMap, CapSet, InvariantId};
 use holon_pbt_core::{
@@ -29,7 +30,9 @@ use holon_pbt_core::{
 use proptest::strategy::{BoxedStrategy, Strategy};
 use proptest_state_machine::ReferenceStateMachine;
 
-use crate::pbt::composed::builder::{compose_sut, compose_sut_seeded};
+use crate::pbt::composed::builder::{
+    compose_sut, compose_sut_seeded, compose_sut_windowed_base_seeded,
+};
 use crate::pbt::composed::composed_invariant_catalog;
 use crate::pbt::composed::harness::{ComposedSlice, sut_ids};
 use crate::pbt::composed::seed_primitives::{C1, C2, PARENT, fixed_ids};
@@ -309,6 +312,116 @@ pub async fn boot_and_seed_wide(
     }
 
     (caps, scaffold)
+}
+
+/// The §Round-5 windowed dual of [`boot_and_seed_wide`]: boot the SAME wide working tree
+/// through the production builder, but with the driver rung **deferred**
+/// ([`compose_sut_windowed_base_seeded`]) so the gpui-thread harness can INSERT the window's
+/// `GpuiUserDriver`-backed gesture caps via `overlay_windowed_caps`. Returns the full builder
+/// bundle (its booted `session`/`reactive` are what the window binds as a pure renderer) plus
+/// the scaffold ids to seed-inject into the oracle — identical scaffold math to
+/// `boot_and_seed_wide`, so the SAME [`wide_e2e_ref`] oracle matches. The initial focus-align
+/// (page root) is driven LATER, through the overlaid caps (they carry the window driver), by
+/// [`windowed_composed_sut`]. A window needs a session, so the frontend arm is mandatory here.
+pub async fn boot_and_seed_wide_windowed_base(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+) -> (
+    crate::pbt::composed::builder::ComposedSut,
+    BTreeSet<EntityUri>,
+) {
+    let set = set_for_wiring(&ref_state.wiring);
+    assert!(
+        set.has_projection(Projection::ViewModel),
+        "the windowed wide base needs a frontend (ViewModel) session for the window to \
+         render; got {set:?}"
+    );
+    let mut bundle = compose_sut_windowed_base_seeded(
+        &set,
+        resolver,
+        &[("structural-page.org", WIDE_TREE_ORG)],
+        &wide_seed_tree(),
+    )
+    .await;
+
+    // Align the initial focus onto the oracle's page root through the ENGINE's production
+    // `dispatch_intent_sync(navigation.focus)` — NOT the headless `SutFocusWrite` (which
+    // calls `session.execute_operation` directly: it writes the SQL nav tables but bypasses
+    // `maybe_mirror_navigation_focus`, leaving `engine.focused_block()` empty — invisible
+    // headlessly because the headless `SutDriver` is withheld, but a DIVERGENCE once a window
+    // `SutDriver` reads focus). `dispatch_intent_sync` runs the SAME SQL write AND mirrors
+    // the focus into the engine's `UiState` — exactly what a production sidebar page-nav does
+    // — so BOTH the nav-history invariants AND `inv-focus-matches-ref` match the oracle. Done
+    // pre-window; window bring-up does not reset engine focus, so the first render paints the
+    // already-focused engine.
+    {
+        use holon_api::{EntityName, Value};
+        let engine = bundle
+            .reactive
+            .as_ref()
+            .expect("the windowed wide base's frontend arm has a booted ReactiveEngine");
+        let mut params = std::collections::HashMap::new();
+        params.insert("region".to_string(), Value::String("main".to_string()));
+        params.insert(
+            "block_id".to_string(),
+            Value::String(page_root().to_string()),
+        );
+        let intent = holon_frontend::operations::OperationIntent::new(
+            EntityName::new("navigation"),
+            "focus".to_string(),
+            params,
+        );
+        engine
+            .dispatch_intent_sync(intent)
+            .await
+            .expect("initial navigation.focus dispatch_intent_sync failed");
+    }
+    tokio::time::sleep(SETTLE).await;
+
+    // Scaffold = booted UNION ref_ids MINUS working tree (identical to `boot_and_seed_wide`).
+    let ids = fixed_ids();
+    let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
+        .into_iter()
+        .collect();
+    let booted = sut_ids(&bundle.caps).await;
+    let ref_ids: BTreeSet<EntityUri> = ref_state
+        .domain
+        .block_state
+        .blocks
+        .keys()
+        .cloned()
+        .collect();
+    let scaffold: BTreeSet<EntityUri> = booted
+        .union(&ref_ids)
+        .filter(|id| !tree.contains(id))
+        .cloned()
+        .collect();
+
+    (bundle, scaffold)
+}
+
+/// Assemble the windowed [`ComposedSut<WideE2E>`](crate::pbt::composed::harness::ComposedSut)
+/// around the OVERLAID windowed caps (the gpui-thread harness produced them by attaching a
+/// window over a [`boot_and_seed_wide_windowed_base`] session and calling
+/// `overlay_windowed_caps`). The initial page-root focus-align is already done on the base by
+/// [`boot_and_seed_wide_windowed_base`] (pre-window), so this just wraps the caps via
+/// [`ComposedSut::from_parts`]. `settle` pumps the window before each check; `rt` drives the
+/// apply/check futures (the booted backend runs on its own session runtime).
+pub fn windowed_composed_sut(
+    caps: CapMap,
+    resolver: IdResolver,
+    scaffold_ids: BTreeSet<EntityUri>,
+    rt: tokio::runtime::Runtime,
+    settle: crate::pbt::composed::harness::SettleHook,
+) -> crate::pbt::composed::harness::ComposedSut<WideE2E> {
+    crate::pbt::composed::harness::ComposedSut::<WideE2E>::from_parts(
+        caps,
+        (),
+        resolver,
+        scaffold_ids,
+        rt,
+        settle,
+    )
 }
 
 /// Normalize a (possibly drawn) `Wiring` into the composed **headless** `ComponentSet`
