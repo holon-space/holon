@@ -605,13 +605,16 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
             let doc_uri = if parent_id.is_no_parent() || parent_id.is_sentinel() {
                 parent_id.clone()
             } else {
-                state
-                    .domain
-                    .block_state
-                    .block_documents
-                    .get(parent_id)
-                    .cloned()
-                    .unwrap_or_else(|| parent_id.clone())
+                // The new block belongs to its parent's document. But when the
+                // parent is itself a top-level page (its own `block_documents`
+                // entry is `no_parent`/`sentinel`), the page IS the document —
+                // the child lives in the page's org file, not in the page's
+                // (sentinel) document. Inheriting the sentinel would misclassify
+                // the child as a seed block and drop it from the `/org` view.
+                match state.domain.block_state.block_documents.get(parent_id) {
+                    Some(doc) if !doc.is_no_parent() && !doc.is_sentinel() => doc.clone(),
+                    _ => parent_id.clone(),
+                }
             };
             state
                 .domain
