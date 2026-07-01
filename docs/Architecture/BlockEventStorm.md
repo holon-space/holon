@@ -2,7 +2,15 @@
 
 > A "Big Picture" Event Storm of everything that touches a `Block` as it crosses
 > Org, Markdown, Loro+Iroh, Turso, and the UI. Read the colour legend, then the
-> timeline, then the hotspots. Generated 2026-06-28 from a code/ADR sweep.
+> timeline, then the hotspots. Generated 2026-06-28 from a code/ADR sweep;
+> **hotspot statuses re-verified 2026-07-01** (four had already been fixed:
+> H1, H4, H11, H12 — three days of drift was enough to invalidate half the red
+> stickies).
+>
+> ⚠ **Staleness protocol**: hotspot statuses decay fast. Before acting on any
+> 🔴, grep for the anchor *symbol* (not the line number — several drifted within
+> days) and confirm the claim still holds. Each hotspot below carries a status
+> line and its verification anchor.
 
 **Legend** (Event Storming colours):
 🟠 Domain Event (past tense, a fact that happened) ·
@@ -124,7 +132,7 @@ Each row below is a candidate for a glossary entry — and several are latent bu
 
 | One concept | Names in the wild | Risk |
 |---|---|---|
-| **"this block is a page"** | `is_document()` (deprecated) · `doc:` URI scheme (deprecated, still in 6 crates) · `PAGE_TAG = "Page"` tag · `Block::is_page()` · `set_is_document` op | 🔴 H7 — **three live representations**, mid-migration |
+| **"this block is a page"** | `PAGE_TAG = "Page"` via `Block::is_page()` (canonical) · `doc:` URI scheme (deprecated, still in ~15 files) · `set_is_document` op name | 🔴 H7 — `is_document()` deleted ✅, but two legacy encodings remain |
 | **a block mutation** | `Operation` (descriptor) · op-name string · `OperationIntent` · `ChangeOp` (the only typed enum) · `BlockDiff` | parse-don't-validate gap (H2) |
 | **sibling order** | **ordered child list** (ADR 0005, canonical) · fractional index (Loro materialization) · `sort_key` column in `block_raw` (Turso materialization) · `SnapshotBlock.sort_key:String` · `sequence` (legacy) · `after_block_id` (positional intent) | index/`sort_key` are per-system representations of the ordered list, not the authority |
 | **the rendered unit** | domain **Block** · matview **row** (`DataRow`) · **ViewModel** · **widget** | one block → many rows (panels) |
@@ -132,59 +140,45 @@ Each row below is a candidate for a glossary entry — and several are latent bu
 | **widget** | `ViewKind` tag · `shadow_builders/*` · native `AnyElement` | overloaded ×3 |
 | **a change event** | `Change<T>` (neutral) · `RowChange` (Turso-tagged) · `ChangeData` · `UiEvent::Data` | tag stripped/added at seams |
 | **block identity** | `EntityUri` (`block:`) · bare id (disk) · `TreeID` (peer-local, Loro) · `STABLE_ID` (Loro meta) · `id` column · SQLite ROWID (must NOT use) | 🔴 5 id spaces, one is a trap |
-| **edge fields** | `tags`/`requires` as `Block` fields · `block_tags`/`block_requires` junction rows · Loro meta keys | shape differs read vs write (H1) |
+| **edge fields** | `tags`/`requires` as `Block` fields · `block_tags`/`block_requires` junction rows · Loro meta keys · `EdgeField` enum (closed, iterated at all projection sites) | H1/H12 fixed ✅; `Block`'s serde still skips them (see H1 residue) |
 
 ---
 
 ## 4. Hotspots (🔴 the red stickies)
 
-**H1 — Two Block deserializers; only one is complete — and the serde one is on a
-live path.**
-`#[derive(Serialize, Deserialize)]` marks `tags` and `requires` `#[serde(skip,
-default)]`, so the serde path (both directions) silently yields a block with **no
-page-ness and no dependencies**. Only `impl TryFrom<StorageEntity> for Block` hydrates
-edge fields from the matview's `json_group_array`. *(`holon-api/src/block.rs:261` vs
-`:698`.)* This is the textbook "make illegal states unrepresentable" violation — the
-type permits a half-built Block.
+**Status board (2026-07-01):** ✅ fixed: H1, H3, H4, H11, H12 · 🔴 open: H2, H5,
+H6, H7 (narrowed), H8, H10 · ⚪ by-design constraint: H9. Fixed entries are kept
+(condensed) because their *mechanisms* — lossy serde base, gate/emit mismatch,
+blob-LWW — are recurring failure shapes worth recognizing next time.
 
-It is **not** purely latent. `SnapshotBlock { block: Block, sort_key }`
-(`holon-loro/src/loro_backend.rs:434`) embeds a `Block` and is serde-serialized into
-the Loro projection sidecar (`sync_base_store.rs`). Because `#[serde(skip)]` drops
-`tags`/`requires` on serialize *and* deserialize, **the sidecar always round-trips
-blocks with empty edge fields.** The projection diff *does* compare them
-(`blocks_differ` `loro_sync_controller.rs:911`; `block_diff_params` `:836/:840`), so a
-cold boot that seeds `before` from the sidecar will diff a tagged block against an
-empty baseline and **re-emit a spurious tags/requires UPDATE** → junction
-DELETE+INSERT → spurious CDC/UI churn.
+**H1 — Lossy serde round-trip of edge fields through the projection sidecar.
+✅ FIXED (verified 2026-07-01).**
+`Block`'s `tags`/`requires` are still `#[serde(skip, default)]`
+(`holon-api/src/block.rs`, `struct Block`) — only `impl TryFrom<StorageEntity> for
+Block` hydrates edge fields from the matview. That used to mean `SnapshotBlock`
+(which embeds a `Block` and is serde-persisted into the projection sidecar,
+`holon-filesystem/src/sync_base_store.rs`) round-tripped blocks with **empty edge
+fields**, so on every cold boot the projection diffed a tagged block against an
+empty disk base and re-emitted a spurious tags/requires UPDATE → junction
+DELETE+INSERT → matview CDC → first-paint churn proportional to page count
+(every page carries the `"Page"` tag). Self-healing and non-corrupting, but real
+write-amplification; confirmed firing 2026-06-28.
 
-**Cold-boot trace — CONFIRMED, it fires (2026-06-28).** `SyncBaseStore::
-from_frontiers_sidecar` (the Loro→SQL projection's base store) calls `load_base()` at
-construction (`sync_base_store.rs:115`), so on the 2nd+ launch `is_base_seeded(global())`
-is true (`:190`) and `before = get_base()` = the **disk base**, which `put_base`
-persisted through serde (`:144`) with `tags`/`requires` dropped. Meanwhile `after =
-snapshot_blocks_from_doc_settled` reads full edge fields from Loro meta
-(`loro_backend.rs:415-421`). `blocks_differ` compares `tags` (`loro_sync_controller.rs:911`),
-so **every block carrying a tag — and every *page* carries the `"Page"` tag — triggers
-a spurious UPDATE on the first projection after boot**, re-writing the `block_tags`
-(and `block_requires`) junction → spurious matview CDC → first-paint churn (the exact
-cost the projection's startup-promptness logging at `:465` watches). It is
-**self-healing** (the first pass's `put_base(after)` restores the full in-memory base,
-so it's one pass per boot) and **non-corrupting** (re-writes correct values) — so the
-impact is cold-boot write-amplification + first-paint churn proportional to the page
-count, not data loss. The `was_seeded=false` → `read_sql_snapshot` re-seed path
-(`:379/:513`) only runs on the *first-ever* boot or when the sidecar fails to decode.
+**Fix shipped — option (b) as recommended:** `SnapshotBlock` (now in
+`holon-api/src/block.rs`, moved out of `loro_backend.rs`) serializes through an
+explicit `SnapshotBlockWire` DTO (`#[serde(into/from = "SnapshotBlockWire")]`)
+that carries `tags`/`requires` as sibling fields, making the sidecar round-trip
+lossless. Regression test: `snapshot_block_serde_round_trip_preserves_edge_fields`.
+The underlying type-level weakness — `Block: Deserialize` still silently yields a
+half-built block on any *other* serde path — remains; the `StoredBlock`-newtype
+idea (option (a)) is still open as hardening. Anchor: `SnapshotBlockWire`.
 
-**Fix is entangled with H12 — decide, don't patch piecemeal.** Removing `Deserialize`
-from `Block` is blocked (`SnapshotBlock: Deserialize` needs it). Options: (a) a
-`StoredBlock` newtype only the matview can mint; (b) give `SnapshotBlock` an explicit
-serde representation that carries edge fields (so the base round-trip is lossless).
-Prefer (b) for this specific bug; do it **before** touching H12, or the churn gets
-worse.
-
-**H2 — `ChangeOp` carries raw schemed-or-bare strings.**
-`parent`/`parent_id` stay `String` "until Phase 5"; the consolidator normalizes
-later. Classic *validate-don't-parse* debt; the schemed/bare ambiguity is exactly
-the bug the bare-id convention was invented to avoid. *(`change_set.rs:79-90`.)*
+**H2 — `ChangeOp` carries raw schemed-or-bare strings. 🔴 STILL OPEN (verified
+2026-07-01).**
+`parent`/`parent_id` stay `String` "in Phase 1 (they flip to typed refs later)";
+the consolidator normalizes later. Classic *validate-don't-parse* debt; the
+schemed/bare ambiguity is exactly the bug the bare-id convention was invented to
+avoid. Anchor: `ChangeOp` in `holon-api/src/change_set.rs` (~line 87).
 
 **H3 — Loro `properties` blob-LWW convergence bug. ✅ FIXED (2026-06-29).**
 Previously `write_properties_to_meta` collapsed the whole property map into **one**
@@ -202,36 +196,59 @@ on the next write (untouched keys copied into the nested map, then the blob dele
 — self-healing, no dual representation). Covered by `h3_property_convergence_tests`
 (concurrent-distinct-property merge, legacy migration, exact-set replace).
 
-**H4 — RichText marks are a Phase-1 stub in Loro.**
-Marks are written via the plain-text path and actually persisted only in the SQL
-`marks` column. So rich-text formatting is **not replicated by the CRDT of record** —
-it survives only because Turso is currently durable, contradicting "Loro is the
-write-of-record." *(`loro_backend.rs:501-507`.)*
+**H4 — RichText marks were a Phase-1 stub in Loro. ✅ FIXED (verified 2026-07-01).**
+Marks now live in Loro Peritext on the `CONTENT_RAW` `LoroText`: writes go through
+`text.mark`/`text.unmark` (wholesale replace in `update_block_text`'s re-apply, plus
+incremental `apply_inline_mark`/`remove_inline_mark`), reads through
+`read_marks_from_text`, and `blocks_differ` compares `marks` so changes project to
+SQL ("Phase 2 authority flip"; `_expected_marks` compare-and-set guards dropped —
+single SQL writer per field). Rich-text formatting **is** replicated by the CRDT of
+record; the SQL `marks` column is a projection. Covered by `marks_outbound_tests`
+and `loro_backend::tests::marks_round_trip_through_loro`. Anchor:
+`apply_inline_mark` in `holon-loro/src/loro_backend.rs`.
 
-**H5 — Sharing security is documented but unimplemented.**
+**H5 — Sharing security is documented but unimplemented. 🔴 OPEN (claims NOT
+re-verified 2026-07-01 — see validation task below).**
 ADR 0003 / BLOCK_LORODOC describe capability auth (write=secret key, read=public
-key), delegation, key rotation on unshare. Reality: `share_subtree` only picks
-`HistoryRetention`, no encryption, revocation is advisory ("can't un-send"), and
-shallow `None` retention **cannot merge back** (creates a fresh CRDT base). A reader
-of the ADRs will badly over-estimate what shipped.
+key), delegation, key rotation on unshare. Reality as of 2026-06-28:
+`share_subtree` only picks `HistoryRetention`, no encryption, revocation is
+advisory ("can't un-send"), and shallow `None` retention **cannot merge back**
+(creates a fresh CRDT base). A reader of the ADRs will badly over-estimate what
+shipped. The "cannot merge back" claim in particular has never been demonstrated
+by a test — validate before relying on it. Anchors: `share_subtree`,
+`HistoryRetention` in `holon-loro/src/loro_share_backend.rs` / `shared_tree.rs`.
 
-**H6 — Markdown identity drift.**
+**H6 — Markdown identity drift. 🔴 STILL OPEN (charset rule confirmed present
+2026-07-01; full round-trip behaviour not re-traced).**
 Block ids whose charset isn't Obsidian-friendly are dropped from rendered text, so a
 re-parse mints a fresh UUID → the block loses identity across a round-trip. Also,
 paragraph bodies are folded into the heading block — only headings/fences/images are
-addressable. *(`markdown/renderer.rs:182`, `parser.rs`.)*
+addressable. This is a textbook round-trip-identity PBT target. Anchor: the charset
+comment in `holon-markdown/src/renderer.rs` (~line 185) and `parser.rs`.
 
-**H7 — "Page" has three coexisting encodings** (see table). `doc:` scheme is
-`#[deprecated]` with note "being eliminated… now blocks with is_document=true" yet is
-still referenced in `holon-markdown`, `link_parser`, `backend_engine`,
-`prql_stdlib.prql`, and PBT components. Migration is half-done; new code can pick the
-wrong one. *(`entity_uri.rs:173`.)*
+**H7 — "Page" has multiple coexisting encodings. 🔴 STILL OPEN, but narrower
+(verified 2026-07-01).**
+Progress since 2026-06-28: `Block::is_document()` is **deleted** — the canonical
+representation is now `PAGE_TAG = "Page"` via `Block::is_page()`/`set_page()`.
+Still live: the `doc:` URI scheme (`#[deprecated]` in `entity_uri.rs` yet
+referenced in ~15 files: `link_parser`, `link_provider`, `focus_path`,
+`backend_engine`, `prql_stdlib.prql`, `holon-profiles`, PBT/test harnesses) and
+the `set_is_document` op name (`holon-core/src/traits.rs`). Migration is
+half-done; new code can still pick the wrong encoding. Anchors: `PAGE_TAG`,
+`set_is_document`, `deprecated` in `entity_uri.rs`.
 
-**H8 — `block_raw` columns silently dropped on read.**
+**H8 — `block_raw` columns silently dropped on read. 🔴 STILL OPEN — and worse
+than first written (verified 2026-07-01).**
 `depth`, `sort_key`, `collapsed`, `completed`, `block_type` exist in SQL but are not
 deserialized into `Block`. `collapsed` being UI-local is *correct and deliberate*
 (avoids collaborative churn) — but it's invisible at the type level; nothing marks
-these as "intentionally not round-tripped." *(`block.rs:698-809`.)*
+these as "intentionally not round-tripped."
+Additionally, `TryFrom<StorageEntity>` **silently defaults on missing/malformed
+data**: absent `content` → `""` (`unwrap_or("")`), absent `content_type` →
+`"text"`, and non-string `tags`/`requires` array elements are `filter_map`-swallowed.
+Per the fail-loud rule these should be hard errors at the boundary — a matview row
+missing `content` is a bug, not an empty block. Anchor:
+`impl TryFrom<crate::StorageEntity> for Block` (`holon-api/src/block.rs:698`).
 
 **H9 — CDC only fires from matviews, never base tables.**
 A hard Turso/IVM constraint that shapes the entire read path: writes go to
@@ -239,28 +256,30 @@ A hard Turso/IVM constraint that shapes the entire read path: writes go to
 **invisible coupling** — anyone who "optimizes" by reading the base table breaks
 reactivity silently. Characterized in `cdc_base_vs_matview_repro.rs`.
 
-**H10 — Two block query sources, DI-selected.**
-`loro_block_query_source.rs` and `turso_block_query_source.rs` both exist; "what
-reads a block" depends on the wired graph. The same logical read has two
-implementations that can drift.
+**H10 — Two block query sources, DI-selected. 🔴 STILL OPEN (verified 2026-07-01).**
+`crates/holon/src/sync/loro_block_query_source.rs` and
+`.../turso_block_query_source.rs` both exist; "what reads a block" depends on the
+wired graph. The same logical read has two implementations that can drift.
+Partial mitigation exists: `tests/turso_block_query_source_round_trip_pbt.rs`
+exercises the Turso side; an *equivalence* property (same query → both sources →
+same blocks) is the natural composed-catalog invariant here.
 
-**H11 — Stale ADR contradicts shipped architecture.**
-`docs/adr/BLOCK_LORODOC_ARCHITECTURE.md` is still **Status: Proposed** and describes
-the *two-layer* (LoroTree + per-block content LoroDocs) design that ADR 0003
-(all-in-one-LoroTree) **superseded and the code implemented**. A future agent reading
-ADRs front-to-back will build the wrong mental model.
+**H11 — Stale ADR contradicts shipped architecture. ✅ FIXED (verified 2026-07-01).**
+`docs/adr/BLOCK_LORODOC_ARCHITECTURE.md` now reads **Status: Superseded** with a
+pointer to ADR 0003 (all-in-one-LoroTree), which is what the code implements. A
+front-to-back ADR read now yields the right mental model.
 
-**H12 — `blocks_differ` omits `requires` from its change gate** *(found while
-tracing H1, 2026-06-28).*
-`blocks_differ` (`loro_sync_controller.rs:905-913`) compares `sort_key`, `content`,
-`parent_id`, `content_type`, `source_language`, `source_name`, `tags`,
-`properties_map`, `marks` — but **not `requires`**. Yet `block_diff_params` (`:840`)
-*does* emit `requires`. So a block whose only in-session change is `requires` never
-satisfies the gate → **the `requires` (depends-on / blocked-by) change is silently
-not projected to SQL.** Independent of H1, this is a real correctness bug.
-⚠ It is entangled with H1: simply adding `requires` to the gate would make every
-`requires`-bearing block also churn on cold boot (H1) until the lossy sidecar
-round-trip is fixed. Fix the H1 round-trip first, then close the gate.
+**H12 — `blocks_differ` omitted `requires` from its change gate. ✅ FIXED
+(verified 2026-07-01)** *(found while tracing H1, 2026-06-28).*
+A block whose only in-session change was `requires` never satisfied the projection
+gate, so depends-on/blocked-by edits were silently not projected to SQL. **Fix
+shipped, and type-driven:** the gate now iterates `EdgeField::ALL` (a closed enum
+covering `tags` + `requires`, the same enum all four projection sites iterate), so
+adding a future edge field cannot silently miss the gate again. Fixed in the right
+order (after the H1 sidecar round-trip), so closing the gate did not reintroduce
+cold-boot churn. Caught via the composed `SetEdgeField` PBT transition +
+`SutEdgeFieldWrite` cap. Anchor: `fn blocks_differ`
+(`holon-loro/src/loro_sync_controller.rs:886`).
 
 ---
 
@@ -274,22 +293,37 @@ real, working echo-suppression policy. The driver ladder is a principled write p
 This is an event-sourced reactive system that mostly already obeys DDD strategic
 design without having named it.
 
-**The one structural tension worth a decision.** "Loro is the write-of-record" is
-asserted but **leaks**: marks (H4) and arguably collapsed/UI-state live elsewhere,
-and `properties` isn't really CRDT-merged (H3). Either commit to Loro as the total
-source of truth (move marks + property-level merge into Loro) or rename the principle
-to "Loro is the structural source of truth, SQL owns presentation state." Right now
-the language over-promises.
+**The one structural tension worth a decision — largely RESOLVED (2026-07-01).**
+"Loro is the write-of-record" used to leak: marks lived only in SQL (H4) and
+`properties` wasn't really CRDT-merged (H3). Both are now in Loro (Peritext marks;
+nested per-key-LWW `PROPERTIES_MAP`). The remaining, *deliberate* exception is
+UI-local state (`collapsed`, scroll, cursor — Tier-1 LOCAL by design). The honest
+phrasing of the principle today: **"Loro owns everything collaborative; UI-local
+presentation state intentionally never enters the CRDT."** Keep new fields honest
+against that line — the failure mode is a field that is collaborative in intent
+but SQL-only in implementation, which is exactly what H4 was.
 
-**The cheap, high-value cleanups** (language, not architecture): write the glossary
-in §3 into `CONTEXT.md`; finish the `doc:`-scheme elimination (H7); mark
-BLOCK_LORODOC superseded (H11); add a type-level marker for "intentionally not
-round-tripped" columns (H8); make the serde-vs-matview Block deserialization
-impossible to get wrong (H1) — e.g. a `StoredBlock` newtype that *only* the matview
-path can produce.
+**The cheap, high-value cleanups still open** (language, not architecture): write
+the glossary in §3 into `CONTEXT.md`; finish the `doc:`-scheme elimination and
+retire the `set_is_document` op name (H7); add a type-level marker for
+"intentionally not round-tripped" columns and make `TryFrom<StorageEntity>` fail
+loud on missing columns (H8); type the `ChangeOp` parent refs (H2); the
+`StoredBlock` newtype so a serde-path `Block` can't impersonate a matview-hydrated
+one (H1 residue). Done since first writing: BLOCK_LORODOC marked superseded (H11).
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
-transition and every 🔴 a candidate invariant: round-trip identity (H6), edge-field
-preservation across the serde seam (H1), concurrent-property convergence (H3 — now
-covered by `h3_property_convergence_tests`; a candidate to lift into the composed
-catalog), mark replication through Loro (H4).
+transition and every 🔴 a candidate invariant. Open candidates: markdown round-trip
+identity (H6 — the highest-value untested one), Loro-vs-Turso query-source
+equivalence (H10), share/merge-back behaviour (H5). Already realized: edge-field
+projection (H12 was *caught* by the composed `SetEdgeField` transition — the
+pattern works), concurrent-property convergence (`h3_property_convergence_tests`;
+still a candidate to lift into the composed catalog), mark replication
+(`marks_round_trip_through_loro`).
+
+**What this storm still doesn't cover** (gaps found in the 2026-07-01 review):
+the **deletion lane** (BlockDeleted → junction cleanup → CDC coalesce → widget
+unmount — never traced end-to-end), **file rename/move on disk** (does block
+identity survive a path change, or is it a mass delete+create?), **failure lanes**
+(parse error, projection error, Iroh disconnect mid-import — an Event Storm
+normally has these as explicit events; this one has none), and **concurrent
+Lane A × Lane C** (disk edit racing a peer import over the same block).
