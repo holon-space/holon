@@ -139,14 +139,14 @@ graduates to CONTEXT.md §4 and is deleted here.
 | One concept | Names in the wild | Risk |
 |---|---|---|
 | **"this block is a page"** | `PAGE_TAG = "Page"` via `Block::is_page()` (canonical) · `doc:` URI scheme (deprecated, still in ~15 files) · `set_is_document` op name | 🔴 H7 — `is_document()` deleted ✅, but two legacy encodings remain |
-| **a block mutation** | `Operation` (descriptor) · op-name string · `OperationIntent` · `ChangeOp` (the only typed enum) · `BlockDiff` | parse-don't-validate gap (H2) |
+| **a block mutation** | `Operation` (descriptor) · op-name string · `OperationIntent` · `ChangeOp` (the only typed enum, parent refs now `EntityUri`) · `BlockDiff` | H2 fixed ✅; the non-`ChangeOp` forms remain boundary dialects |
 | **edge fields** | `tags`/`requires` as `Block` fields · `block_tags`/`block_requires` junction rows · Loro meta keys · `EdgeField` enum (closed, iterated at all projection sites) | H1/H12 fixed ✅; `Block`'s serde still skips them (see H1 residue) |
 
 ---
 
 ## 4. Hotspots (🔴 the red stickies)
 
-**Status board (2026-07-02):** ✅ fixed: H1, H3, H4, H8, H11, H12 · 🔴 open: H2,
+**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H8, H11, H12 · 🔴 open:
 H5, H6, H7 (narrowed), H10 · ⚪ by-design constraint: H9. Fixed entries are kept
 (condensed) because their *mechanisms* — lossy serde base, gate/emit mismatch,
 blob-LWW — are recurring failure shapes worth recognizing next time.
@@ -173,12 +173,18 @@ The underlying type-level weakness — `Block: Deserialize` still silently yield
 half-built block on any *other* serde path — remains; the `StoredBlock`-newtype
 idea (option (a)) is still open as hardening. Anchor: `SnapshotBlockWire`.
 
-**H2 — `ChangeOp` carries raw schemed-or-bare strings. 🔴 STILL OPEN (verified
-2026-07-01).**
-`parent`/`parent_id` stay `String` "in Phase 1 (they flip to typed refs later)";
-the consolidator normalizes later. Classic *validate-don't-parse* debt; the
-schemed/bare ambiguity is exactly the bug the bare-id convention was invented to
-avoid. Anchor: `ChangeOp` in `holon-api/src/change_set.rs` (~line 87).
+**H2 — `ChangeOp` carries raw schemed-or-bare strings. ✅ FIXED (2026-07-02).**
+`Create.parent_id` is now `EntityUri` and `Relocate.parent` is
+`Option<EntityUri>`, matching the `after_sibling: Option<EntityUri>` pattern —
+the schemed/bare ambiguity is resolved once at decode (`EntityUri::from_raw`)
+instead of deferred to every consumer. `decode_create`'s
+`unwrap_or_default()` swallow is gone: an absent `parent_id` key is an
+explicit root create → the `no_parent` sentinel; a present-but-non-string
+value fails loud naming the block id. The "flip to `EntityUri` in Phase 5"
+promise in the enum doc is fulfilled and deleted. The block `id` itself
+deliberately stays the raw string the op carried — normalization remains the
+consolidator's job, per the vocabulary's charter. Anchors: `ChangeOp`,
+`decode_create`, `decode_update` in `holon-api/src/change_set.rs`.
 
 **H3 — Loro `properties` blob-LWW convergence bug. ✅ FIXED (2026-06-29).**
 Previously `write_properties_to_meta` collapsed the whole property map into **one**
@@ -321,10 +327,10 @@ but SQL-only in implementation, which is exactly what H4 was.
 finish the `doc:`-scheme elimination and
 retire the `set_is_document` op name (H7); a type-level marker for
 "intentionally not round-tripped" columns (`depth`, `sort_key`, `collapsed`, …);
-type the `ChangeOp` parent refs (H2); the
-`StoredBlock` newtype so a serde-path `Block` can't impersonate a matview-hydrated
-one (H1 residue). Done since first writing: BLOCK_LORODOC marked superseded
-(H11); `TryFrom<StorageEntity>` fails loud on missing/malformed columns (H8).
+the `StoredBlock` newtype so a serde-path `Block` can't impersonate a
+matview-hydrated one (H1 residue). Done since first writing: BLOCK_LORODOC
+marked superseded (H11); `TryFrom<StorageEntity>` fails loud on
+missing/malformed columns (H8); `ChangeOp` parent refs typed `EntityUri` (H2).
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
 transition and every 🔴 a candidate invariant. Open candidates: markdown round-trip

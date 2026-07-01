@@ -84,17 +84,17 @@ pub struct Provenance {
 
 /// One typed intent. The block id is stored as the raw string the op carried
 /// (schemed or bare) — normalization is the consolidator's job, not the
-/// vocabulary's. `parent`/`parent_id` stay `String` in Phase 1 (they flip to
-/// `EntityUri` with the live path in Phase 5); `after_sibling` is already
-/// `EntityUri` so Phase 5 can dispatch directly.
+/// vocabulary's. `parent`/`parent_id` and `after_sibling` are typed
+/// `EntityUri` so dispatch never re-parses raw strings.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChangeOp {
-    /// Create a block under `parent_id`, positioned after `after_sibling`
-    /// (a predecessor block id, not a sort_key). `fields` is every other
-    /// create param (content, content_type, tags, properties, …).
+    /// Create a block under `parent_id` (the `no_parent` sentinel for root
+    /// blocks), positioned after `after_sibling` (a predecessor block id, not
+    /// a sort_key). `fields` is every other create param (content,
+    /// content_type, tags, properties, …).
     Create {
         id: String,
-        parent_id: String,
+        parent_id: EntityUri,
         after_sibling: Option<EntityUri>,
         fields: BTreeMap<String, Value>,
     },
@@ -110,7 +110,7 @@ pub enum ChangeOp {
     /// Phase 2 shadow decode it is populated from `after_block_id` params.
     Relocate {
         id: String,
-        parent: Option<String>,
+        parent: Option<EntityUri>,
         after_sibling: Option<EntityUri>,
     },
     /// Delete a block.
@@ -233,11 +233,17 @@ fn id_of(params: &StorageEntity) -> String {
 
 fn decode_create(params: &StorageEntity) -> ChangeOp {
     let id = id_of(params);
-    let parent_id = params
-        .get("parent_id")
-        .and_then(Value::as_string)
-        .unwrap_or_default()
-        .to_string();
+    // Absent parent_id is a legitimate root create → the no_parent sentinel.
+    // A present-but-non-string value is a malformed op — fail loud, never
+    // default it away.
+    let parent_id = match params.get("parent_id") {
+        None => EntityUri::no_parent(),
+        // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the StorageEntity operation-params map
+        Some(Value::String(s)) => EntityUri::from_raw(s),
+        Some(other) => {
+            panic!("create op for block {id}: parent_id must be a string, got {other:?}")
+        }
+    };
     // Positional intent: a predecessor block id, never a sort_key.
     let after_sibling = params
         .get(POSITION_AFTER_BLOCK_ID_PARAM)
@@ -274,10 +280,13 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
     if parent_changed || order_changed {
         out.push(ChangeOp::Relocate {
             id: id.clone(),
-            parent: params
-                .get("parent_id")
-                .and_then(Value::as_string)
-                .map(str::to_string),
+            parent: params.get("parent_id").map(|v| match v {
+                // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the StorageEntity operation-params map
+                Value::String(s) => EntityUri::from_raw(s),
+                other => {
+                    panic!("update op for block {id}: parent_id must be a string, got {other:?}")
+                }
+            }),
             after_sibling: params
                 .get(POSITION_AFTER_BLOCK_ID_PARAM)
                 .and_then(Value::as_string)
@@ -339,7 +348,7 @@ mod tests {
                 fields,
             } => {
                 assert_eq!(id, "block:a");
-                assert_eq!(parent_id, "block:root");
+                assert_eq!(parent_id.to_string(), "block:root");
                 assert_eq!(
                     after_sibling.as_ref().map(|u| u.to_string()),
                     Some("block:predecessor".into())
@@ -353,6 +362,43 @@ mod tests {
             other => panic!("expected Create, got {other:?}"),
         }
         assert!(agrees_with_ops(&cs, &ops).is_ok());
+    }
+
+    #[test]
+    fn create_without_parent_decodes_to_no_parent_sentinel() {
+        let ops = ops(vec![(
+            "create",
+            vec![("id", s("block:a")), ("content", s("root"))],
+        )]);
+        let cs = ChangeSet::from_ops(&ops, Provenance::default());
+        match &cs.ops[0] {
+            ChangeOp::Create { parent_id, .. } => {
+                assert_eq!(*parent_id, EntityUri::no_parent());
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relocate_parent_is_typed() {
+        let ops = ops(vec![(
+            "update",
+            vec![
+                ("id", s("block:a")),
+                ("parent_id", s("block:newparent")),
+                ("sort_key", s("A1")),
+            ],
+        )]);
+        let cs = ChangeSet::from_ops(&ops, Provenance::default());
+        match &cs.ops[0] {
+            ChangeOp::Relocate { parent, .. } => {
+                assert_eq!(
+                    parent.as_ref().map(|u| u.to_string()),
+                    Some("block:newparent".into())
+                );
+            }
+            other => panic!("expected Relocate, got {other:?}"),
+        }
     }
 
     #[test]
