@@ -298,7 +298,9 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             .into_iter()
             .filter(|(id, msg)| match invariant_mode_override(id) {
                 Some(ModeOverride::Warn | ModeOverride::Skip) => {
-                    eprintln!("[HOLON_PBT_INVARIANTS] softened (DISCLOSED degraded run) {id}: {msg}");
+                    eprintln!(
+                        "[HOLON_PBT_INVARIANTS] softened (DISCLOSED degraded run) {id}: {msg}"
+                    );
                     false
                 }
                 _ => true,

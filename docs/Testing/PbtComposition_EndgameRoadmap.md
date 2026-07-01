@@ -340,6 +340,34 @@ on `seam_present`. Keystone stays GREEN (default, Loro+Turso, and forced-full ax
   Lingering `general_e2e_pbt` *string* refs remain only as (a) the native `PbtSuiteSpec` name and
   (b) explanatory comments — both belong to the native-runner core that the NEXT §8.10 step deletes.
 
+## Round 4 (2026-07-01) — Partial-E5 HEADLESS dissolution landed; runner CORE is WINDOWED-BLOCKED
+
+Executed the headless half of "Partial E5" (jj worktree `pbt-substep3-perdraw-floor`, on top of the
+#1 fix+refactor: External/Bulk on the keystone + `general_e2e_pbt` deleted). Committed increments:
+
+- **2a** — deleted `tests/cross_frontend_pbt.rs` + `run_phased_pbt_sync` + orphan `gpui_ui_pbt*.regressions`.
+- **2c** — deleted `extended_gen_pbt.rs` + `layout_override_pbt.rs` (component_pbt! twins); env sweeps
+  survive via the SHARED generators + new justfile `pbt-extended-gen`/`pbt-layout-override` recipes
+  (keystone under `HOLON_PBT_EXTENDED_GEN`/`HOLON_PBT_LAYOUT_OVERRIDE`); layout_override KNOWN RED disclosed.
+- **2d** — repointed `BisectionStepper` onto `ComposedSut<WideE2E>` (+ bisect_driver: seed `ref0` via
+  `wide_e2e_ref_for`, divergence signature → the composed marker). Probe-verified.
+- **step 3** — threaded `HOLON_PBT_INVARIANTS` (disclosed warn/skip softening) into the composed
+  `ComposedSut::check_invariants` via a relocated `pbt/invariant_mode_override` module (survives the
+  native-registry deletion). Keystone green under the env.
+- **4a** — deleted the now-dead slice-macro machinery: `slice.rs` all `macro_rules!` (declare_pbt_slice!/
+  component_pbt!/…, 807 lines) + `stepper.rs` HeadlessTest/SmtStepper/run_via_state_machine_test/
+  GpuiReplayStepper.
+
+**⚠ HARD BLOCKER on the runner CORE (steps 4-core + 5).** `run_invariant_registry`, `phased.rs` windowed
+entry points, `impl StateMachineTest for E2ESut`, `Subsystem`/`min_sut`/`PbtSuiteSpec`, and `parity.rs`
+are STILL LIVE — driven by the WINDOWED gpui/tui replay harnesses in `frontends/gpui/tests/pbt_harness/*`
++ `frontends/tui/tests/common/pbt_main.rs` (`run_pbt_with_driver_sync_callback` /
+`replay_fixture_with_driver_sync_callback` / per-step `E2ESut` hooks). (An earlier pass wrongly called this
+"not windowed-blocked" by grepping only `crates/`, missing `frontends/`.) Deleting the runner core therefore
+requires FIRST repointing those windowed replay harnesses onto `compose_windowed_sut` — this IS the
+"windowed cap-impl deletion (AFTER PARTIAL E5)" / E4-step-7 below, a separate workstream. Partial-E5 (headless)
+is otherwise complete.
+
 ## ★ Key finding (Round 2 / E5 research): windowed-shell deletion is DEFERRED, not a permanent fork
 
 `SutLayout` + `SutDriver` are **not** mere read caps — they are load-bearing for E2ESut's
