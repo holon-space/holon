@@ -21,7 +21,6 @@ use std::time::Duration;
 
 use holon_api::repository::NewBlock;
 use holon_api::{Block, EntityUri, Region};
-use holon_frontend::reactive::BuilderServices;
 use holon_orgmode::OrgBlockExt;
 use holon_pbt_core::composition::{CapMap, CapSet, InvariantId};
 use holon_pbt_core::{
@@ -344,38 +343,21 @@ pub async fn boot_and_seed_wide_windowed_base(
     )
     .await;
 
-    // Align the initial focus onto the oracle's page root through the ENGINE's production
-    // `dispatch_intent_sync(navigation.focus)` — NOT the headless `SutFocusWrite` (which
-    // calls `session.execute_operation` directly: it writes the SQL nav tables but bypasses
-    // `maybe_mirror_navigation_focus`, leaving `engine.focused_block()` empty — invisible
-    // headlessly because the headless `SutDriver` is withheld, but a DIVERGENCE once a window
-    // `SutDriver` reads focus). `dispatch_intent_sync` runs the SAME SQL write AND mirrors
-    // the focus into the engine's `UiState` — exactly what a production sidebar page-nav does
-    // — so BOTH the nav-history invariants AND `inv-focus-matches-ref` match the oracle. Done
-    // pre-window; window bring-up does not reset engine focus, so the first render paints the
-    // already-focused engine.
-    {
-        use holon_api::{EntityName, Value};
-        let engine = bundle
-            .reactive
-            .as_ref()
-            .expect("the windowed wide base's frontend arm has a booted ReactiveEngine");
-        let mut params = std::collections::HashMap::new();
-        params.insert("region".to_string(), Value::String("main".to_string()));
-        params.insert(
-            "block_id".to_string(),
-            Value::String(page_root().to_string()),
-        );
-        let intent = holon_frontend::operations::OperationIntent::new(
-            EntityName::new("navigation"),
-            "focus".to_string(),
-            params,
-        );
-        engine
-            .dispatch_intent_sync(intent)
-            .await
-            .expect("initial navigation.focus dispatch_intent_sync failed");
-    }
+    // Align the initial focus onto the oracle's page root via the production `NavigateFocus`
+    // cap — `SutFocusWrite` now dispatches through the reactive engine's `dispatch_intent_sync`,
+    // which runs the `navigation.focus` SQL write AND mirrors focus into `engine.focused_block()`
+    // (`maybe_mirror_navigation_focus`), exactly as a production sidebar page-nav does. Done on
+    // the deferred base pre-window; window bring-up does not reset engine focus, so the first
+    // render paints the already-focused engine. Mirrors `boot_and_seed_wide`'s headless drive.
+    TransitionImpl::apply_to_sut(
+        &NavigateFocus {
+            region: Region::Main,
+            block_id: page_root(),
+        },
+        ref_state,
+        &mut bundle.caps,
+    )
+    .await;
     tokio::time::sleep(SETTLE).await;
 
     // Scaffold = booted UNION ref_ids MINUS working tree (identical to `boot_and_seed_wide`).

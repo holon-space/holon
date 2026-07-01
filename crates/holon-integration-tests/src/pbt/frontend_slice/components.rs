@@ -1055,6 +1055,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
 impl SutFocusWrite for HeadlessFrontendComponent {
     async fn apply_navigate_focus(&self, region: CapRegion, id: &EntityUri) {
         use holon_api::{EntityName, Value};
+        use holon_frontend::operations::OperationIntent;
         let region_str = match region {
             CapRegion::Main | CapRegion::Single => "main",
             CapRegion::Sidebar => "left_sidebar",
@@ -1063,13 +1064,23 @@ impl SutFocusWrite for HeadlessFrontendComponent {
         let mut params = std::collections::HashMap::new();
         params.insert("region".to_string(), Value::String(region_str.to_string()));
         params.insert("block_id".to_string(), Value::String(id.to_string()));
-        self.session
-            .execute_operation(&EntityName::new("navigation"), "focus", params)
+        // Dispatch `navigation.focus` through the PRODUCTION reactive engine — the SAME path the
+        // GPUI/CLI sidebar-nav takes — NOT a raw `session.execute_operation`. `dispatch_intent_sync`
+        // runs the IDENTICAL `navigation.focus` SQL write AND mirrors the focus into the engine's
+        // `UiState` via `maybe_mirror_navigation_focus` (a raw `navigation.focus` op has no CDC path
+        // back into `UiState`, so it would leave `engine.focused_block()` stale). Headlessly the
+        // mirror is inert — no `SutDriver` reads engine focus, so the headless keystone deselects
+        // `inv-focus-matches-ref` — but the WINDOWED SUT reads `engine.focused_block()` through this
+        // SAME engine via its window `SutDriver`, so the raw-session path diverged it. Fixing the cap
+        // (not withholding it) keeps `NavigateFocus` a faithful capability of BOTH SUTs.
+        let intent = OperationIntent::new(EntityName::new("navigation"), "focus".to_string(), params);
+        self.reactive
+            .dispatch_intent_sync(intent)
             .await
             .unwrap_or_else(|e| {
                 panic!(
                     "[SutFocusWrite::apply_navigate_focus] navigation.focus(region={region_str}, \
-                     block_id={id}) through the headless session failed: {e:#}"
+                     block_id={id}) through the reactive engine failed: {e:#}"
                 )
             });
         self.settle_focus_matviews().await;
