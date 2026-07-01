@@ -73,8 +73,8 @@ pub fn default_doc_block_uri() -> EntityUri {
 
 // Re-export block types
 pub use block::{
-    blocks_by_document, Block, BlockContent, BlockMetadata, BlockResult, BlockWithDepth,
-    ResultOutput, SnapshotBlock, SourceBlock, PAGE_TAG,
+    blocks_by_document, Block, BlockContent, BlockMetadata, BlockResult, BlockWire, ResultOutput,
+    SnapshotBlock, SourceBlock, PAGE_TAG,
 };
 
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)

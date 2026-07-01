@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BulkExternalAdd {
     pub doc_uri: EntityUri,
+    #[serde(with = "holon_api::block::block_wire_vec")]
     pub blocks: Vec<Block>,
 }
 

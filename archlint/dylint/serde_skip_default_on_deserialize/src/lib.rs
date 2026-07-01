@@ -10,6 +10,12 @@
 //! The hand-rolled `Block::try_from(HashMap<String, Value>)` was the
 //! correct path (and is now strict — it hard-errors when a projection omits
 //! `tags`/`requires`); the derived path silently dropped edge data.
+//!
+//! As of 2026-07-02 the motivating case is fully remediated the way this lint
+//! recommends: `Block` no longer derives `Serialize`/`Deserialize` at all (its
+//! edge fields are marked `#[edge_field]`, and all wire paths go through the
+//! `BlockWire` DTO). The lint stays as a standing guard so the `#[serde(skip)]`-
+//! on-a-`Deserialize`-type pattern can't be re-introduced elsewhere.
 
 #![feature(rustc_private)]
 #![warn(unused_extern_crates)]

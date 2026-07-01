@@ -1451,8 +1451,14 @@ impl HolonMcpServer {
 
         let json_blocks: Vec<serde_json::Value> = blocks
             .iter()
-            .map(|b| serde_json::to_value(b).unwrap_or_default())
-            .collect();
+            .map(|b| serde_json::to_value(holon_api::block::BlockWire::from(b)))
+            .collect::<Result<_, _>>()
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?;
 
         let result = serde_json::json!({
             "doc_id": params.doc_id,

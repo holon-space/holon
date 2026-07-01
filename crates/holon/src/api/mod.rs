@@ -49,8 +49,7 @@ pub use repository::{CoreOperations, DocumentRepository, Lifecycle, P2POperation
 // Re-export streaming types from holon-api (moved from streaming module)
 pub use holon_api::{
     ApiError, Batch, BatchMapChange, BatchMetadata, BatchTraceContext, BatchWithMetadata, Block,
-    BlockChange, BlockMetadata, BlockWithDepth, Change, ChangeOrigin, MapChange, StreamPosition,
-    WithMetadata,
+    BlockChange, BlockMetadata, Change, ChangeOrigin, MapChange, StreamPosition, WithMetadata,
 };
 
 // Re-export render engine types for FFI

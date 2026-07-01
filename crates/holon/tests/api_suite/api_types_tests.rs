@@ -4,10 +4,12 @@
 //! and implement the required traits.
 
 use holon::api::types::*;
+use holon_api::block::BlockWire;
 use holon_api::{ApiError, Block, BlockContent, BlockMetadata, Change, ChangeOrigin, EntityUri};
 
 #[test]
 fn test_block_serialization() {
+    // `Block` is serde-free (H1); the wire boundary is `BlockWire`.
     let mut block = Block::new_text(
         EntityUri::parse("local://test-123").unwrap(),
         EntityUri::block("test-parent"),
@@ -16,11 +18,10 @@ fn test_block_serialization() {
     block.created_at = 1000;
     block.updated_at = 2000;
 
-    // Serialize to JSON
-    let json = serde_json::to_string(&block).expect("Failed to serialize");
-
-    // Deserialize back
-    let deserialized: Block = serde_json::from_str(&json).expect("Failed to deserialize");
+    let json = serde_json::to_string(&BlockWire::from(&block)).expect("Failed to serialize");
+    let deserialized: Block = serde_json::from_str::<BlockWire>(&json)
+        .expect("Failed to deserialize")
+        .into();
 
     assert_eq!(block, deserialized);
 }
@@ -114,8 +115,10 @@ fn test_block_change_serialization() {
     ];
 
     for change in changes {
-        let json = serde_json::to_string(&change).expect("Failed to serialize change");
-        let _deserialized: Change<Block> =
+        // `Change<Block>` reaches the wire via `Change<BlockWire>` (Block is serde-free).
+        let wire = change.map(|b| BlockWire::from(&b));
+        let json = serde_json::to_string(&wire).expect("Failed to serialize change");
+        let _deserialized: Change<BlockWire> =
             serde_json::from_str(&json).expect("Failed to deserialize change");
         // Successfully round-tripped
     }

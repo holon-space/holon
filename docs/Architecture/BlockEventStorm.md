@@ -140,7 +140,7 @@ graduates to CONTEXT.md §4 and is deleted here.
 |---|---|---|
 | **"this block is a page"** | `PAGE_TAG = "Page"` via `Block::is_page()` (canonical) · `doc:` URI scheme (deprecated, still in ~15 files) · `set_is_document` op name | 🔴 H7 — `is_document()` deleted ✅, but two legacy encodings remain |
 | **a block mutation** | `Operation` (descriptor) · op-name string · `OperationIntent` · `ChangeOp` (the only typed enum, parent refs now `EntityUri`) · `BlockDiff` | H2 fixed ✅; the non-`ChangeOp` forms remain boundary dialects |
-| **edge fields** | `tags`/`requires` as `Block` fields · `block_tags`/`block_requires` junction rows · Loro meta keys · `EdgeField` enum (closed, iterated at all projection sites) | H1/H12 fixed ✅; `Block`'s serde still skips them (see H1 residue) |
+| **edge fields** | `tags`/`requires` as `Block` fields · `block_tags`/`block_requires` junction rows · Loro meta keys · `EdgeField` enum (closed, iterated at all projection sites) | H1/H12 fixed ✅; `Block` is now serde-free — edge fields carried explicitly by `BlockWire` on every wire path |
 
 ---
 
@@ -152,26 +152,37 @@ H5, H6, H7 (narrowed), H10 · ⚪ by-design constraint: H9. Fixed entries are ke
 blob-LWW — are recurring failure shapes worth recognizing next time.
 
 **H1 — Lossy serde round-trip of edge fields through the projection sidecar.
-✅ FIXED (verified 2026-07-01).**
-`Block`'s `tags`/`requires` are still `#[serde(skip, default)]`
-(`holon-api/src/block.rs`, `struct Block`) — only `impl TryFrom<StorageEntity> for
-Block` hydrates edge fields from the matview. That used to mean `SnapshotBlock`
-(which embeds a `Block` and is serde-persisted into the projection sidecar,
+✅ FIXED — residue closed 2026-07-02.**
+Original bug: `Block`'s `tags`/`requires` were `#[serde(skip, default)]`, so
+`SnapshotBlock` (serde-persisted into the projection sidecar,
 `holon-filesystem/src/sync_base_store.rs`) round-tripped blocks with **empty edge
-fields**, so on every cold boot the projection diffed a tagged block against an
-empty disk base and re-emitted a spurious tags/requires UPDATE → junction
-DELETE+INSERT → matview CDC → first-paint churn proportional to page count
-(every page carries the `"Page"` tag). Self-healing and non-corrupting, but real
-write-amplification; confirmed firing 2026-06-28.
+fields**. On every cold boot the projection diffed a tagged block against an empty
+disk base and re-emitted a spurious tags/requires UPDATE → junction DELETE+INSERT
+→ matview CDC → first-paint churn proportional to page count (every page carries
+the `"Page"` tag). Self-healing and non-corrupting, but real write-amplification;
+confirmed firing 2026-06-28.
 
-**Fix shipped — option (b) as recommended:** `SnapshotBlock` (now in
-`holon-api/src/block.rs`, moved out of `loro_backend.rs`) serializes through an
-explicit `SnapshotBlockWire` DTO (`#[serde(into/from = "SnapshotBlockWire")]`)
-that carries `tags`/`requires` as sibling fields, making the sidecar round-trip
-lossless. Regression test: `snapshot_block_serde_round_trip_preserves_edge_fields`.
-The underlying type-level weakness — `Block: Deserialize` still silently yields a
-half-built block on any *other* serde path — remains; the `StoredBlock`-newtype
-idea (option (a)) is still open as hardening. Anchor: `SnapshotBlockWire`.
+**First fix (pre-dated this milestone):** `SnapshotBlock` (in `block.rs`, moved
+out of `loro_backend.rs`) routed through an explicit `SnapshotBlockWire` DTO that
+carried the edge fields as siblings — lossless for that one path, but the
+type-level weakness stayed: `Block: Deserialize` still silently yielded a
+half-built block on *every other* serde path (PBT fixtures dropped edge fields on
+replay).
+
+**Residue closed:** `Block` is now **fully serde-free** — the `Serialize`/
+`Deserialize` derives are gone (junction-derived fields are marked `#[edge_field]`
+so the `Entity` derive still excludes them from the column schema). Every wire
+path goes through a `BlockWire` DTO that carries `tags`/`requires` as real fields
+(`#[serde(default)]`, disclosed legacy allowance so pre-milestone fixtures /
+sidecars parse). Consumers: `SnapshotBlockWire` embeds `BlockWire` (+ a read-only
+legacy-sibling fallback for existing sidecars); the PBT transitions serialize
+`Vec<Block>` through the `block_wire_vec` adapter; MCP `inspect_loro_blocks` emits
+`BlockWire` and fails loud on error. Byte-compat for real vault data is pinned by
+`legacy_sidecar_sample_recovers_edge_fields`
+(`holon-filesystem`, checked-in pre-M3 sidecar sample) and by
+`snapshot_block_serde_round_trip_preserves_edge_fields`. Illegal half-built
+serde blocks are now unrepresentable. Anchors: `BlockWire`, `SnapshotBlockWire`,
+`block_wire_vec`.
 
 **H2 — `ChangeOp` carries raw schemed-or-bare strings. ✅ FIXED (2026-07-02).**
 `Create.parent_id` is now `EntityUri` and `Relocate.parent` is

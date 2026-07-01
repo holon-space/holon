@@ -314,6 +314,37 @@ mod tests {
         assert!(!store.get_base(&a).contains_key("block:b1"));
     }
 
+    /// Wire-format compat for real on-disk vault data: a sidecar
+    /// (`.loro/holon_tree.sync_base.json`) written by pre-M3 code stored a block's
+    /// junction-derived `tags`/`requires` as **siblings** of `block` (which itself
+    /// omitted them). This is the exact shape every existing vault has on disk. It
+    /// must still deserialize into a `SnapshotBlock` whose `Block` carries the edge
+    /// fields — a format break would silently drop them on the next boot (BUG H1).
+    /// The sample is checked in at `tests/fixtures/sync_base_legacy_sample.json`
+    /// (regenerate via the `#[ignore]`d generator in git history if the block
+    /// column layout ever changes).
+    #[test]
+    fn legacy_sidecar_sample_recovers_edge_fields() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sync_base_legacy_sample.json"
+        ))
+        .expect("read checked-in legacy sidecar sample");
+
+        // Same type the production load path (`load_base`) deserializes into.
+        let decoded: HashMap<String, HashMap<String, SnapshotBlock>> =
+            serde_json::from_slice(&bytes).expect("legacy sidecar must still parse");
+
+        let snap = &decoded[&BaseKey::global().encode()]["block:a"];
+        let tags = snap.block.tags.to_vec();
+        assert!(tags.contains(&"Page".to_string()), "tags: {tags:?}");
+        assert!(tags.contains(&"Inbox".to_string()), "tags: {tags:?}");
+        assert_eq!(
+            snap.block.requires,
+            vec![EntityUri::block("dep1"), EntityUri::block("dep2")]
+        );
+    }
+
     #[test]
     fn base_key_encode_decode_round_trips() {
         let key = BaseKey::file("org", "/some/path with spaces.org");

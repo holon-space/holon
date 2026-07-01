@@ -17,7 +17,7 @@ mod widget_builder;
 
 #[proc_macro_derive(
     Entity,
-    attributes(entity, primary_key, indexed, reference, lens, jsonb)
+    attributes(entity, primary_key, indexed, reference, lens, jsonb, edge_field)
 )]
 pub fn derive_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

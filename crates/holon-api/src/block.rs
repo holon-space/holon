@@ -257,8 +257,13 @@ pub enum ResultOutput {
 /// // PRQL source block
 /// let query_block = Block::new_source(EntityUri::block("query-1"), EntityUri::no_parent(), "holon_prql", "from tasks");
 /// ```
+/// `Block` is deliberately **serde-free** (H1 residue closed): the domain type
+/// carries `tags`/`requires` as junction-derived edge fields that a naive derive
+/// would silently drop, so every on-disk/wire path goes through [`BlockWire`]
+/// instead (see [`block_wire_vec`] / [`SnapshotBlock`]). Do not add `Serialize`/
+/// `Deserialize` here — add a `BlockWire` boundary conversion.
 /// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Entity)]
+#[derive(Debug, Clone, PartialEq, Entity)]
 #[entity(
     name = "block",
     short_name = "block",
@@ -280,14 +285,14 @@ pub struct Block {
     /// as a page (formerly `is_document()`). Other tags are user-defined.
     /// Managed through the block_tags junction table (edge field), not a
     /// direct column. An unordered, duplicate-free set ([`Tags`]).
-    #[serde(skip, default)]
+    #[edge_field]
     pub tags: Tags,
 
     /// Block IDs this block requires (depends on / is blocked by) before it
     /// can be acted upon. Stored in the `block_requires` junction table
     /// (edge field), not as a direct column. Reads from the `block` matview's
     /// hydrated `requires` JSON array.
-    #[serde(skip, default)]
+    #[edge_field]
     pub requires: Vec<EntityUri>,
 
     // --- Content fields (flattened from BlockContent) ---
@@ -308,7 +313,6 @@ pub struct Block {
     /// Key-value properties (TODO, PRIORITY, TAGS, dates, etc.)
     /// Stored as JSON object for native JSON support in Turso.
     /// Tier 2: works fully in Org + Loro
-    #[serde(default)]
     #[jsonb]
     pub properties: HashMap<String, Value>,
 
@@ -317,7 +321,6 @@ pub struct Block {
     /// is reserved for "rich block with no active marks". The `marks IS NOT NULL`
     /// projection is the discriminator the renderer uses to decide rich vs plain.
     /// Source/Image blocks always carry `None`.
-    #[serde(default)]
     #[jsonb]
     pub marks: Option<Vec<MarkSpan>>,
 
@@ -857,19 +860,6 @@ impl TryFrom<crate::StorageEntity> for Block {
     }
 }
 
-/// A block with its tree depth/nesting level.
-///
-/// Used for tree-ordered iteration and diffing. The depth indicates
-/// how deeply nested the block is (0 = root, 1 = child of root, etc.).
-/// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BlockWithDepth {
-    /// The block data
-    pub block: Block,
-    /// Nesting depth (0 = root level)
-    pub depth: usize,
-}
-
 /// Metadata associated with a block.
 ///
 /// Note: UI state like `collapsed` is NOT stored here - it's kept locally
@@ -957,6 +947,93 @@ pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
     result
 }
 
+/// On-disk / wire representation of a [`Block`]. `Block` is serde-free because
+/// its `tags`/`requires` are junction-derived edge fields; a naive derive would
+/// silently drop them on every serialize path (BUG H1 — PBT fixtures lost edge
+/// fields on replay). `BlockWire` carries them as **real fields** so the round-
+/// trip is lossless. Field layout is byte-compatible with the pre-H1 `Block`
+/// serde output: `tags`/`requires` are `#[serde(default)]` (older fixtures /
+/// sidecars written before this milestone simply omit them) and empty sets are
+/// elided so an edge-field-free block serializes exactly as before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlockWire {
+    pub id: EntityUri,
+    pub parent_id: EntityUri,
+    pub content: String,
+    pub content_type: ContentType,
+    pub source_language: Option<SourceLanguage>,
+    pub source_name: Option<String>,
+    #[serde(default)]
+    pub properties: HashMap<String, Value>,
+    #[serde(default)]
+    pub marks: Option<Vec<MarkSpan>>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Junction-derived edge field, carried explicitly (disclosed legacy default
+    /// so pre-milestone files parse). See type-level doc.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Junction-derived edge field, carried explicitly. See `tags`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<EntityUri>,
+}
+
+impl From<&Block> for BlockWire {
+    fn from(b: &Block) -> Self {
+        BlockWire {
+            id: b.id.clone(),
+            parent_id: b.parent_id.clone(),
+            content: b.content.clone(),
+            content_type: b.content_type.clone(),
+            source_language: b.source_language.clone(),
+            source_name: b.source_name.clone(),
+            properties: b.properties.clone(),
+            marks: b.marks.clone(),
+            created_at: b.created_at,
+            updated_at: b.updated_at,
+            tags: b.tags.to_vec(),
+            requires: b.requires.clone(),
+        }
+    }
+}
+
+impl From<BlockWire> for Block {
+    fn from(w: BlockWire) -> Self {
+        Block {
+            id: w.id,
+            parent_id: w.parent_id,
+            tags: w.tags.into(),
+            requires: w.requires,
+            content: w.content,
+            content_type: w.content_type,
+            source_language: w.source_language,
+            source_name: w.source_name,
+            properties: w.properties,
+            marks: w.marks,
+            created_at: w.created_at,
+            updated_at: w.updated_at,
+        }
+    }
+}
+
+/// `#[serde(with = "...")]` adapter serializing a `Vec<Block>` through
+/// [`BlockWire`]. Lets a serde-deriving container (PBT transitions, fixtures)
+/// keep an in-memory `Vec<Block>` while persisting the lossless wire form.
+pub mod block_wire_vec {
+    use super::{Block, BlockWire};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(blocks: &[Block], s: S) -> Result<S::Ok, S::Error> {
+        let wires: Vec<BlockWire> = blocks.iter().map(BlockWire::from).collect();
+        wires.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Block>, D::Error> {
+        let wires = Vec::<BlockWire>::deserialize(d)?;
+        Ok(wires.into_iter().map(Block::from).collect())
+    }
+}
+
 /// A block paired with its **internal fractional index** `sort_key` — the
 /// ordering encoding a storage adapter keeps alongside the block (e.g. the
 /// Loro tree's `fractional_index`, hex-formatted). The domain `Block` no
@@ -969,28 +1046,32 @@ pub struct SnapshotBlock {
     pub sort_key: String,
 }
 
-/// On-disk serde representation for [`SnapshotBlock`]. `Block`'s `tags`/`requires`
-/// are `#[serde(skip)]` (they are junction-derived, not Block columns), so a plain
-/// derive would round-trip them as empty through the file-sync diff base / projection
-/// sidecar and make every cold boot re-emit a spurious edge-field write (BUG H1).
-/// Carrying them as explicit sibling fields here makes the round-trip lossless. Back-
+/// On-disk serde representation for [`SnapshotBlock`]. Embeds a [`BlockWire`],
+/// which carries the junction-derived `tags`/`requires` edge fields as real
+/// fields — a plain `Block` derive would round-trip them as empty and make every
+/// cold boot re-emit a spurious edge-field write (BUG H1).
+///
+/// `legacy_tags`/`legacy_requires` are a **read-only backward-compat allowance**:
+/// sidecars written before this milestone stored the edge fields as siblings of
+/// `block` (which then lacked them). They are never emitted (empty ones elide);
+/// on read they seed the block only when the wire itself carried none. Back-
 /// conversion is infallible, so `from` (not `try_from`).
 #[derive(Serialize, Deserialize)]
 struct SnapshotBlockWire {
-    block: Block,
-    tags: Vec<String>,
-    requires: Vec<EntityUri>,
+    block: BlockWire,
+    #[serde(rename = "tags", default, skip_serializing_if = "Vec::is_empty")]
+    legacy_tags: Vec<String>,
+    #[serde(rename = "requires", default, skip_serializing_if = "Vec::is_empty")]
+    legacy_requires: Vec<EntityUri>,
     sort_key: String,
 }
 
 impl From<SnapshotBlock> for SnapshotBlockWire {
     fn from(s: SnapshotBlock) -> Self {
-        let tags = s.block.tags.to_vec();
-        let requires = s.block.requires.clone();
         SnapshotBlockWire {
-            block: s.block,
-            tags,
-            requires,
+            block: BlockWire::from(&s.block),
+            legacy_tags: Vec::new(),
+            legacy_requires: Vec::new(),
             sort_key: s.sort_key,
         }
     }
@@ -998,9 +1079,13 @@ impl From<SnapshotBlock> for SnapshotBlockWire {
 
 impl From<SnapshotBlockWire> for SnapshotBlock {
     fn from(w: SnapshotBlockWire) -> Self {
-        let mut block = w.block;
-        block.tags = w.tags.into();
-        block.requires = w.requires;
+        let mut block = Block::from(w.block);
+        if block.tags.is_empty() && !w.legacy_tags.is_empty() {
+            block.tags = w.legacy_tags.into();
+        }
+        if block.requires.is_empty() && !w.legacy_requires.is_empty() {
+            block.requires = w.legacy_requires;
+        }
         SnapshotBlock {
             block,
             sort_key: w.sort_key,

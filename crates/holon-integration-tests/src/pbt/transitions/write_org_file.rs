@@ -41,6 +41,7 @@ use holon_orgmode::OrgRenderer;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WriteOrgFile {
     pub filename: String,
+    #[serde(with = "holon_api::block::block_wire_vec")]
     pub blocks: Vec<Block>,
     /// Custom `#+TODO:` keyword set for this file (extended-gen axis 5).
     /// `None` = no header, parser defaults apply. `#[serde(default)]` keeps

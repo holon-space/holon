@@ -77,12 +77,18 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
             false
         });
 
+        // A field is excluded from the schema and the row round-trip (defaulted
+        // on read) when it is a junction-derived edge field. Serde-free entities
+        // mark these `#[edge_field]`; serde entities that also drop a DB column
+        // may use `#[serde(skip)]` (both meanings coincide for such fields).
         let skip_serialization = field.attrs.iter().any(|attr| {
+            if attr.path().is_ident("edge_field") {
+                return true;
+            }
             if attr.path().is_ident("serde")
                 && let Meta::List(meta_list) = &attr.meta
             {
-                let tokens_str = meta_list.tokens.to_string();
-                return tokens_str.contains("skip");
+                return meta_list.tokens.to_string().contains("skip");
             }
             false
         });
