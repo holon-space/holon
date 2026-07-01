@@ -6,7 +6,7 @@ use std::sync::Arc;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
-use holon_pbt_core::composition::{CapMap, Config};
+use holon_pbt_core::composition::{CapMap, CapProvider, Config};
 use holon_pbt_core::{Actor, ComponentSet};
 
 use super::components::{GpuiFrontendEngineComponent, GpuiWindowComponent};
@@ -124,6 +124,44 @@ pub fn compose_windowed_sut(
         panic!("compose_windowed_sut: invalid windowed set {set:?}: {e}");
     });
     window_input_wide(geometry, engine, driver)
+}
+
+/// ★ Round-5 windowed repoint: overlay the windowed SHELL caps onto an already-composed
+/// HEADLESS CapMap (from `compose_sut(ComponentSet::full_headless())`). The window is a
+/// PURE RENDERER over the same `engine` the headless caps read, so this:
+/// - ADDS windowed [`SutLayout`] geometry ([`GpuiWindowComponent`] over the live window's
+///   `BoundsRegistry` clone) — the headless CapMap has none; and
+/// - REPLACES (by cap `TypeId`, via `CapMap::insert`) the headless driver-input caps
+///   (`SutDriver` / `SutBlockInteract` / `SutArrowNavigate`) with the live window's
+///   `GpuiUserDriver`-backed ones ([`DriverInputComponent::with_input`]), so gestures drive
+///   the HIGHEST-available rung (§8.11 faithfulness), not the headless `ReactiveEngineDriver`.
+///
+/// The result runs the FULL composed catalog: the block/storage/editor families — with the
+/// `compose_sut` `IdResolver` reconcile intact, so id-resolution comes FREE — PLUS the
+/// windowed families (bounds-rendered / displayed-text / window-focus). This is why the
+/// windowed repoint needs no separate booter or new reconcile: the headless boot IS the
+/// booter and the window merely renders it.
+///
+/// `geometry` is a `BoundsRegistry` clone from the launched window; `engine` is the SAME
+/// frontend [`ReactiveEngine`] the window paints and the headless caps were built over
+/// (surface it via `ComposedSut::reactive`); `driver` is the window's `GpuiUserDriver`.
+///
+/// [`SutLayout`]: holon_pbt_core::capabilities::SutLayout
+pub fn overlay_windowed_caps(
+    mut caps: CapMap,
+    geometry: Box<dyn GeometryProvider>,
+    engine: Arc<ReactiveEngine>,
+    driver: Arc<dyn UserDriver>,
+) -> CapMap {
+    let driver_geometry = geometry.clone_box();
+    Arc::new(GpuiWindowComponent::new(geometry)).register(&mut caps);
+    Arc::new(DriverInputComponent::with_input(
+        engine,
+        driver,
+        driver_geometry,
+    ))
+    .register(&mut caps);
+    caps
 }
 
 /// Like [`window_focus_wide`] but with the windowed `SutDriver`'s

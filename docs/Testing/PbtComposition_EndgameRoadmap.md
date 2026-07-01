@@ -588,11 +588,16 @@ not the headless `ReactiveEngineDriver`.
 1. ✅ **DONE (this commit):** `compose_sut`'s `ComposedSut` now surfaces the booted `session` + `reactive`
    (new `pub session`/`pub reactive` fields; new `HeadlessFrontendComponent::session()` accessor) so a
    windowed harness can bind a window to a `compose_sut`-booted session. Additive, build-green, no new warnings.
-2. **Window-over-compose_sut bind + driver-cap override:** on the gpui thread, `compose_sut(full_headless)`
-   → take `session`/`reactive` → `launch_holon_window_rebindable(session, reactive, …)` → overlay
-   `GpuiWindowComponent` (geometry) + `DriverInputComponent::with_input(window GpuiUserDriver)` onto the
-   ComposedSut's CapMap (replace the headless driver-input caps). Verify the full catalog (block/storage +
-   windowed families) runs via `run_selected` over the combined CapMap with the window attached.
+2. **Window-over-compose_sut bind + driver-cap override.** ✅ CAP-OVERLAY CORE DONE (this commit):
+   `window_slice::builders::overlay_windowed_caps(caps, geometry, engine, driver)` overlays
+   `GpuiWindowComponent` (adds `SutLayout`) + `DriverInputComponent::with_input` (REPLACES the headless
+   `SutDriver`/`SutBlockInteract`/`SutArrowNavigate` by cap `TypeId` via `CapMap::insert`) onto a
+   `compose_sut(full_headless)` CapMap. Compile-verified; end-to-end verification pending the window runner.
+   REMAINING: on the gpui thread, `compose_sut(full_headless)` → take `.session`/`.reactive` →
+   `launch_holon_window_rebindable(session, reactive, …)` (topology in `pbt_harness/mod.rs::run_in_gpui_window`)
+   → `overlay_windowed_caps(composed.caps, geometry, composed.reactive, gpui_driver)` → `run_selected` and
+   assert the full catalog (block/storage + windowed families) runs with the window attached. ⚠ target the
+   TestPlatform sim path (headless-verifiable), not xcap (needs a display).
 3. **Windowed StateMachineTest wrapper:** wrap the above as an `S: StateMachineTest + FixtureAssertable`
    whose `apply` reuses **WideE2E's `apply_transition`** (same headless dispatch through the shared
    session) BUT with gesture transitions routed through the window's driver caps; construct from injected
