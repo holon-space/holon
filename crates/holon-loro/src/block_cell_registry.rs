@@ -27,6 +27,7 @@ use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistr
 
 use crate::loro_backend::{CONTENT_RAW, LoroBackend, STABLE_ID, TREE_NAME};
 use crate::loro_document::LoroDocument;
+use crate::loro_meta_cell_backing::LoroMetaCellBacking;
 use crate::loro_text_cell_backing::LoroTextCellBacking;
 
 /// Registry of [`Cell<T>`](holon_core::cell::Cell)s for `block` entity
@@ -88,17 +89,24 @@ impl BlockCellRegistry {
         }
     }
 
-    fn resolve_loro_text_container(&self, block_id: &str) -> Result<(Arc<LoroDoc>, LoroText)> {
-        let doc = match &self.backing_source {
-            BackingSource::Loro { doc, .. } => doc.clone(),
-            BackingSource::SqlOnly => {
-                return Err(anyhow!(
-                    "BlockCellRegistry is in SqlOnly mode; no Loro backing is available \
-                     for ({block_id}, \"content\"). Phase 1 doesn't expect editor cells \
-                     in SqlOnly mode."
-                ));
-            }
-        };
+    fn loro_doc(&self) -> Result<Arc<LoroDoc>> {
+        match &self.backing_source {
+            BackingSource::Loro { doc, .. } => Ok(doc.clone()),
+            BackingSource::SqlOnly => Err(anyhow!(
+                "BlockCellRegistry is in SqlOnly mode; no Loro backing is available. \
+                 SqlOnly cells are not wired yet (they need the entity-cache read + CDC \
+                 signal injection; see LwwScalarBacking / LwwTextCellBacking)."
+            )),
+        }
+    }
+
+    /// Walk the Loro tree for the node whose stable id matches `block_id` and
+    /// return its `meta` map — the read/write root shared by the content
+    /// container and every scalar property. Errors loudly if the block isn't
+    /// in the tree (inbound consumer hasn't applied the create yet, or it was
+    /// never imported), never silently falling to SQL.
+    fn resolve_node_meta(&self, block_id: &str) -> Result<loro::LoroMap> {
+        let doc = self.loro_doc()?;
         let bare_id = block_id.strip_prefix("block:").unwrap_or(block_id);
         let tree = doc.get_tree(TREE_NAME);
         for node in tree.get_nodes(false) {
@@ -118,33 +126,36 @@ impl BlockCellRegistry {
                 _ => false,
             };
             if stable_id_matches {
-                // Source blocks keep their content in the SOURCE_CODE
-                // container (`write_content_to_meta`), text blocks in
-                // CONTENT_RAW. Binding CONTENT_RAW unconditionally silently
-                // forked source-block content: `set_field("content")` (org
-                // re-ingest of an index.org swap) wrote a container that
-                // `read_content_from_meta` never reads — the update was lost
-                // and Loro kept serving the stale source text.
-                let content_key = match meta.get(crate::loro_backend::CONTENT_TYPE) {
-                    Some(loro::ValueOrContainer::Value(v))
-                        if v.as_string().is_some_and(|s| s.as_str() == "source") =>
-                    {
-                        crate::loro_backend::SOURCE_CODE
-                    }
-                    _ => CONTENT_RAW,
-                };
-                let text = meta
-                    .get_or_create_container(content_key, LoroText::new())
-                    .map_err(|e| {
-                        anyhow!("get_or_create_container({content_key}) for {block_id}: {e:?}")
-                    })?;
-                return Ok((doc, text));
+                return Ok(meta);
             }
         }
         Err(anyhow!(
             "Block {block_id} not found in Loro tree (inbound consumer hasn't applied the \
              create event yet, or the block was never imported)"
         ))
+    }
+
+    fn resolve_loro_text_container(&self, block_id: &str) -> Result<(Arc<LoroDoc>, LoroText)> {
+        let doc = self.loro_doc()?;
+        let meta = self.resolve_node_meta(block_id)?;
+        // Source blocks keep their content in the SOURCE_CODE container
+        // (`write_content_to_meta`), text blocks in CONTENT_RAW. Binding
+        // CONTENT_RAW unconditionally silently forked source-block content:
+        // `set_field("content")` (org re-ingest of an index.org swap) wrote a
+        // container that `read_content_from_meta` never reads — the update was
+        // lost and Loro kept serving the stale source text.
+        let content_key = match meta.get(crate::loro_backend::CONTENT_TYPE) {
+            Some(loro::ValueOrContainer::Value(v))
+                if v.as_string().is_some_and(|s| s.as_str() == "source") =>
+            {
+                crate::loro_backend::SOURCE_CODE
+            }
+            _ => CONTENT_RAW,
+        };
+        let text = meta
+            .get_or_create_container(content_key, LoroText::new())
+            .map_err(|e| anyhow!("get_or_create_container({content_key}) for {block_id}: {e:?}"))?;
+        Ok((doc, text))
     }
 
     /// Write a single block field through the Loro authority. Returns
@@ -307,15 +318,15 @@ impl BlockCellRegistry {
                 Ok(true)
             }
             // Other scalars (completed, collapsed, block_type, properties,
-            // created_at, updated_at, …) round-trip through the meta
-            // `properties` map: written by `update_block_fields`, read back
-            // into `block.properties` HashMap by `read_block_from_tree`,
-            // and projected to SQL columns by `block_to_params`.
+            // created_at, updated_at, …) resolve a `LoroMetaCellBacking` cell
+            // and write through it (invariant 12). The cell's `apply_replace`
+            // still lands via `update_block_fields` — touching only this key
+            // (per-key LWW, H3) and bumping `updated_at` — so the projection is
+            // unchanged; the difference is the write now shares the exact
+            // backing a live reader observes, instead of a parallel dispatch.
             _ => {
-                backend
-                    .update_block_fields(&id, &[(field.to_string(), Value::Null, value)])
-                    .await
-                    .map_err(|e| anyhow!("update_block_fields({field}) for {id}: {e:#}"))?;
+                let cell = (self as &dyn EntityCellRegistry).live_field::<Value>(uri, field)?;
+                cell.set(value).await?;
                 Ok(true)
             }
         }
@@ -330,25 +341,89 @@ impl EntityCellRegistry for BlockCellRegistry {
         field: &str,
         type_id: TypeId,
     ) -> Result<Arc<dyn Any + Send + Sync>> {
-        if field != "content" {
-            return Err(anyhow!(
-                "BlockCellRegistry::live_field_any: field {field:?} not registered \
-                 (Phase 1 only handles \"content\"); other fields land in Phase 2"
-            ));
+        let block_id_owned = uri.id().to_string();
+
+        // `content` is rich text on its own LoroText container.
+        if field == "content" {
+            if type_id != TypeId::of::<String>() {
+                return Err(anyhow!(
+                    "BlockCellRegistry::live_field_any: field \"content\" requires T=String \
+                     (caller asked for a different type)"
+                ));
+            }
+            return self.cache.get_or_construct::<String, _>(uri, field, || {
+                let (doc, text) = self.resolve_loro_text_container(&block_id_owned)?;
+                let backing = LoroTextCellBacking::new(doc, text)?;
+                Ok(Arc::new(backing) as Arc<dyn CellBacking<String>>)
+            });
         }
-        if type_id != TypeId::of::<String>() {
-            return Err(anyhow!(
-                "BlockCellRegistry::live_field_any: field \"content\" requires T=String \
-                 (caller asked for a different type)"
-            ));
+
+        // Every other field is a scalar on the node meta map. SqlOnly has no
+        // Loro backing to resolve against; error loudly (its cells are not
+        // wired yet — see `loro_doc`).
+        let (doc, backend) = match &self.backing_source {
+            BackingSource::Loro { doc, backend } => (doc.clone(), backend.clone()),
+            BackingSource::SqlOnly => {
+                return Err(anyhow!(
+                    "BlockCellRegistry::live_field_any: SqlOnly mode has no scalar cell for \
+                     field {field:?}; SqlOnly cells (LwwScalarBacking) are not wired yet."
+                ));
+            }
+        };
+        let meta = self.resolve_node_meta(&block_id_owned)?;
+        let schemed_id = uri.to_string();
+        let make = |m: loro::LoroMap| (doc.clone(), backend.clone(), m, schemed_id.clone());
+
+        if type_id == TypeId::of::<bool>() {
+            let mk = make(meta);
+            self.cache.get_or_construct::<bool, _>(uri, field, || {
+                Ok(Arc::new(LoroMetaCellBacking::<bool>::new(
+                    mk.0,
+                    mk.1,
+                    mk.2,
+                    mk.3,
+                    field.to_string(),
+                )?) as Arc<dyn CellBacking<bool>>)
+            })
+        } else if type_id == TypeId::of::<i64>() {
+            let mk = make(meta);
+            self.cache.get_or_construct::<i64, _>(uri, field, || {
+                Ok(Arc::new(LoroMetaCellBacking::<i64>::new(
+                    mk.0,
+                    mk.1,
+                    mk.2,
+                    mk.3,
+                    field.to_string(),
+                )?) as Arc<dyn CellBacking<i64>>)
+            })
+        } else if type_id == TypeId::of::<String>() {
+            let mk = make(meta);
+            self.cache.get_or_construct::<String, _>(uri, field, || {
+                Ok(Arc::new(LoroMetaCellBacking::<String>::new(
+                    mk.0,
+                    mk.1,
+                    mk.2,
+                    mk.3,
+                    field.to_string(),
+                )?) as Arc<dyn CellBacking<String>>)
+            })
+        } else if type_id == TypeId::of::<Value>() {
+            let mk = make(meta);
+            self.cache.get_or_construct::<Value, _>(uri, field, || {
+                Ok(Arc::new(LoroMetaCellBacking::<Value>::new(
+                    mk.0,
+                    mk.1,
+                    mk.2,
+                    mk.3,
+                    field.to_string(),
+                )?) as Arc<dyn CellBacking<Value>>)
+            })
+        } else {
+            Err(anyhow!(
+                "BlockCellRegistry::live_field_any: scalar field {field:?} has no cell for the \
+                 requested type (supported: bool, i64, String, Value)"
+            ))
         }
-        let block_id = uri.id();
-        let block_id_owned = block_id.to_string();
-        self.cache.get_or_construct::<String, _>(uri, field, || {
-            let (doc, text) = self.resolve_loro_text_container(&block_id_owned)?;
-            let backing = LoroTextCellBacking::new(doc, text)?;
-            Ok(Arc::new(backing) as Arc<dyn CellBacking<String>>)
-        })
     }
 
     fn on_entity_deleted(&self, uri: &EntityUri) {
@@ -640,14 +715,46 @@ mod tests {
     }
 
     #[test]
-    fn loro_mode_unknown_field_errs() {
+    fn loro_mode_resolves_scalar_completed_cell() -> Result<()> {
+        // Phase 2 (invariant 12): scalar block fields now resolve a cell in
+        // Full mode. This inverts the old pin that asserted `completed` FAILED.
         let doc = make_loro_doc_with_block("abc");
         let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
         let uri = EntityUri::block("abc");
-        let res = registry.as_ref().live_field::<String>(&uri, "completed");
-        let err = res.err().expect("expected an error for unknown field");
+        let cell: Cell<bool> = registry.as_ref().live_field::<bool>(&uri, "completed")?;
+        assert!(!cell.current(), "absent property decodes to false");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_field_completed_round_trips_through_cell() -> Result<()> {
+        let doc = make_loro_doc_with_block("abc");
+        let registry = BlockCellRegistry::with_loro_doc(doc);
+        let uri = EntityUri::block("abc");
+        let routed = registry
+            .write_field(&uri, "completed", Value::Boolean(true))
+            .await?;
+        assert!(routed, "scalar write must route through the Loro cell");
+        let cell: Cell<bool> =
+            (&registry as &dyn EntityCellRegistry).live_field::<bool>(&uri, "completed")?;
+        assert!(cell.current(), "the write is visible through the cell");
+        Ok(())
+    }
+
+    #[test]
+    fn loro_mode_unsupported_scalar_type_errs() {
+        let doc = make_loro_doc_with_block("abc");
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let uri = EntityUri::block("abc");
+        let res = registry.as_ref().live_field::<f64>(&uri, "completed");
+        let err = res
+            .err()
+            .expect("expected an error for an unsupported scalar type");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("not registered"), "msg = {msg}");
+        assert!(
+            msg.contains("no cell for the requested type"),
+            "msg = {msg}"
+        );
     }
 
     #[test]

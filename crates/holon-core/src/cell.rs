@@ -285,6 +285,53 @@ impl CellBacking<String> for LwwTextCellBacking {
     }
 }
 
+// ── LwwScalarBacking ────────────────────────────────────────────────────
+
+/// LWW scalar cell backing for SqlOnly mode and synthetic test stores — the
+/// storage-agnostic twin of [`LoroMetaCellBacking`] so both modes present the
+/// same `Cell<T>` surface a caller can't tell apart.
+///
+/// Reads from the `read` callback (the entity cache / projection); writes via
+/// the `write` callback (the registry wires it to the typed
+/// `CrudOperations::set_field` path — NOT the `OperationDispatcher`, so no
+/// double-logging); the signal factory streams from CDC. Deliberately NO
+/// debounce/batching: UI→local-authority scalar writes are immediate (batching
+/// is a connector concern). `LwwTextCellBacking`'s debounce is a text-specific
+/// exception and is not copied here.
+pub struct LwwScalarBacking<T: 'static + Send + Sync + Clone> {
+    read: Arc<dyn Fn() -> T + Send + Sync>,
+    write: Arc<dyn Fn(T) -> BoxFuture<'static, Result<()>> + Send + Sync>,
+    signal_factory: Arc<dyn Fn() -> BoxStream<'static, T> + Send + Sync>,
+}
+
+impl<T: 'static + Send + Sync + Clone> LwwScalarBacking<T> {
+    pub fn new(
+        read: Arc<dyn Fn() -> T + Send + Sync>,
+        write: Arc<dyn Fn(T) -> BoxFuture<'static, Result<()>> + Send + Sync>,
+        signal_factory: Arc<dyn Fn() -> BoxStream<'static, T> + Send + Sync>,
+    ) -> Self {
+        Self {
+            read,
+            write,
+            signal_factory,
+        }
+    }
+}
+
+impl<T: 'static + Send + Sync + Clone> CellBacking<T> for LwwScalarBacking<T> {
+    fn current(&self) -> T {
+        (self.read)()
+    }
+
+    fn signal(&self) -> BoxStream<'static, T> {
+        (self.signal_factory)()
+    }
+
+    fn apply_replace(&self, v: T) -> BoxFuture<'static, Result<()>> {
+        (self.write)(v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +358,41 @@ mod tests {
         assert_eq!(cell.current(), "hello");
         cell.set("world".to_string()).await.unwrap();
         assert_eq!(cell.current(), "world");
+    }
+
+    #[tokio::test]
+    async fn lww_scalar_backing_replace_and_signal_round_trip() {
+        // Bool scalar through the same `Cell<T>` surface — caller can't tell it
+        // apart from a Loro-backed scalar cell. The signal factory stands in for
+        // CDC: writes push the new value onto the stream.
+        let value = Arc::new(Mutex::new(false));
+        let value_for_read = value.clone();
+        let value_for_write = value.clone();
+        let (tx, rx) = futures::channel::mpsc::unbounded::<bool>();
+        let rx = Arc::new(Mutex::new(Some(rx)));
+        let backing = Arc::new(LwwScalarBacking::<bool>::new(
+            Arc::new(move || *value_for_read.lock().unwrap()),
+            Arc::new(move |new_v: bool| {
+                let v = value_for_write.clone();
+                let tx = tx.clone();
+                Box::pin(async move {
+                    *v.lock().unwrap() = new_v;
+                    tx.unbounded_send(new_v)
+                        .map_err(|e| anyhow::anyhow!("signal send: {e}"))?;
+                    Ok(())
+                })
+            }),
+            Arc::new(move || {
+                let taken = rx.lock().unwrap().take().expect("signal taken once");
+                Box::pin(taken)
+            }),
+        ));
+        let cell = Cell::from_backing(backing as Arc<dyn CellBacking<bool>>);
+        assert!(!cell.current());
+        let mut sig = cell.signal();
+        cell.set(true).await.unwrap();
+        assert!(cell.current());
+        assert_eq!(sig.next().await, Some(true), "CDC signal carried the write");
     }
 
     #[tokio::test]

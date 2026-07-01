@@ -62,10 +62,14 @@ guards raw writes.
 Land the missing backings, each deleting a carve-out in
 `crates/holon-loro/src/block_cell_registry.rs`:
 
-- **2.1** `LoroMetaCellBacking<T>` (scalar fields on the tree-node meta map) —
-  unblocks the `completed`-style cell call sites Operations.md documents.
-- **2.2** `LwwScalarBacking<T>` (SqlOnly twin), so both modes present the same
-  cell surface.
+- **2.1** ✅ `LoroMetaCellBacking<T>` (scalar fields on the tree-node meta map,
+  T ∈ {bool, i64, String, Value}) — unblocks the `completed`-style cell call
+  sites Operations.md documents; `write_field`'s generic scalar arm now routes
+  through the cell. `crates/holon-loro/src/loro_meta_cell_backing.rs`.
+- **2.2** ✅ `LwwScalarBacking<T>` (SqlOnly twin), so both modes present the same
+  cell surface. Landed as the backing type + unit tests
+  (`crates/holon-core/src/cell.rs`); SqlOnly registry wiring (entity-cache read
+  + CDC signal) is deferred, exactly as SqlOnly `content` cells are.
 - **2.3** `LoroTreeParentCellBacking` / `LoroTreePositionCellBacking` last —
   they overlap the spec-0007 intent-vocabulary work; sequence after its
   Phase 5 flip to avoid building on the `sort_key` fallback.

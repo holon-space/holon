@@ -537,8 +537,39 @@ fn write_content_to_meta(
 }
 
 /// Open (creating if absent) the nested per-property `LoroMap` (H3, [`PROPERTIES_MAP`]).
-fn properties_map_container(meta: &loro::LoroMap) -> anyhow::Result<loro::LoroMap> {
+pub(crate) fn properties_map_container(meta: &loro::LoroMap) -> anyhow::Result<loro::LoroMap> {
     Ok(meta.get_or_create_container(PROPERTIES_MAP, loro::LoroMap::new())?)
+}
+
+/// Read one scalar block field's [`Value`] straight from a tree node's `meta`
+/// map, mirroring the decode `read_properties_from_meta` performs at the whole-
+/// block level: prefer the nested per-property map (H3), fall back to the legacy
+/// single-blob until a write migrates it. `None` when the key is absent. This is
+/// the per-field read the `LoroMetaCellBacking<T>` scalar cell projects — it must
+/// agree with the whole-block projection so a cell read and a `get_block` read of
+/// the same field never diverge.
+pub(crate) fn read_scalar_field_from_meta(meta: &loro::LoroMap, key: &str) -> Option<Value> {
+    if let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+        meta.get(PROPERTIES_MAP)
+    {
+        if let Some(loro::ValueOrContainer::Value(v)) = map.get(key) {
+            let json = v
+                .as_string()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| panic!("Property {key:?} is not a JSON string: {v:?}"));
+            let parsed = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("Corrupt property JSON for {key:?}: {json:?}: {e}"));
+            return Some(parsed);
+        }
+        if let Some(loro::ValueOrContainer::Container(_)) = map.get(key) {
+            panic!("Property {key:?} unexpectedly holds a container, not a JSON string");
+        }
+    }
+    // Legacy pre-H3 single-blob path (self-heals on the next write, which migrates).
+    let json = meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string()))?;
+    let legacy: HashMap<String, Value> = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("Corrupt properties JSON in Loro tree: {json:?}: {e}"));
+    legacy.get(key).cloned()
 }
 
 /// Encode one property value as the JSON string stored under its key. Properties

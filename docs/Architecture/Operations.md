@@ -16,7 +16,7 @@ Holon has two complementary write surfaces. The cut between them is principled, 
 - Cell call site: `self.cells().live_field::<String>(&block_uri, "content")?.set(new_text).await?` (`live_field` lives on `EntityCellRegistryExt`, `crates/holon-core/src/cell_registry.rs`)
 - Reflective call site: `dispatcher.execute_operation(&EntityName::new("block"), "set_field", params).await`
 
-> **Status caveat:** today only `block.content` is cell-ified — `BlockCellRegistry::live_field_any` errors for every other field, so the `completed`-toggle cell call sites this table describes only become possible once the Cells-plan Phase 2 scalar backings (`LoroMetaCellBacking<T>`, `LwwScalarBacking<T>`) land. Until then scalar chord-op writes go through `BlockCellRegistry::write_field`'s non-cell dispatch. See [Storage](Storage.md).
+> **Status caveat:** in Full (Loro) mode `block.content` and every scalar field are cell-ified — `BlockCellRegistry::live_field_any` resolves a `LoroMetaCellBacking<T>` for scalars (T ∈ {bool, i64, String, Value}), so the `completed`-toggle cell call sites this table describes work now (Cells-plan Phase 2.1/2.2 landed). Still non-cell: the tree-position fields (`parent_id`, `sort_key`, Phase 2.3) and SqlOnly-mode scalars (the `LwwScalarBacking<T>` twin exists but its entity-cache/CDC registry wiring is deferred). See [Storage](Storage.md).
 
 **Cells bypass the dispatcher.** Inside a chord op (which is itself a dispatched operation), nesting another `OperationDispatcher::execute_operation` would double-log to `OperationLog`, duplicate the trace span, and fork the undo stack. Cells call typed methods directly — same `event_bus.emit` / origin tagging, no re-entry.
 

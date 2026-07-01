@@ -45,6 +45,7 @@ pub mod loro_block_operations;
 pub mod loro_blocks_datasource;
 pub mod loro_document;
 pub mod loro_document_store;
+pub mod loro_meta_cell_backing;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

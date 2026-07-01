@@ -96,10 +96,13 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     device re-ingests the other's projections as fresh intent: duplicated ops
     with wrong attribution, order oscillation, and `.sync-conflict` files
     ingested as duplicate-ID documents.
-12. **Every field write goes through a cell backing** — the `write_field`
-    carve-outs (scalars, `id`/`depth`/`content_type`/`source_name`, unseeded
-    fallback) are disclosed debt, not design; the target is a backing per
-    field even when the backing is "SQL LWW".
+12. **Every field write goes through a cell backing** — scalars now resolve a
+    `LoroMetaCellBacking<T>` in Full mode (Phase 2.1/2.2 landed). The remaining
+    `write_field` carve-outs (`id`/`depth`/`content_type`/`source_name` +
+    `_expected_*` watermarks routed to SQL; the tree-position fields
+    `parent_id`/`sort_key`, Phase 2.3; the disclosed unseeded-vault content
+    case) are disclosed debt, not design; the target is a backing per field
+    even when the backing is "SQL LWW".
 
 ## Cell vs Mutable (the UI state cut)
 
