@@ -232,6 +232,14 @@ impl<S: ComposedSlice> ComposedSut<S> {
     pub fn runtime(&self) -> &tokio::runtime::Runtime {
         &self.rt
     }
+
+    /// The live cap set this SUT's `CapMap` actually provides. The windowed harness
+    /// feeds this into the oracle (`wide_e2e_windowed_ref`) so `aggregate_transitions`
+    /// narrows the generated alphabet to exactly what THIS SUT can drive — the overlaid
+    /// window caps (`SutLayout`/`SutDriver`/…) included, with no hand-maintained list.
+    pub fn cap_set(&self) -> holon_pbt_core::composition::CapSet {
+        self.caps.cap_set()
+    }
 }
 
 impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {

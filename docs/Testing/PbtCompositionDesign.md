@@ -82,6 +82,15 @@ impl Config { fn with<P: CapProvider>(self, c: P) -> Self; fn build(self) -> Cap
 
 A configuration is just a component list. `build` also runs the **validity check** (`req ⊆ P`) and fails loud on an impossible wiring.
 
+> **Reality check (2026-07-01 audit): the validity check is PROMISED, NOT BUILT.** `Config::build`
+> is literally `self.caps` — `CapProvider` has no `req()` at all, so `req ⊆ P` cannot be evaluated.
+> Validity today is enforced ad hoc: `ComponentSet`'s wiring-validity rules (e.g. `Actor::UI ⟹
+> ViewModel`) plus fail-loud asserts inside individual builders (`compose_sut`'s `!has_actor(UI)`,
+> `overlay_windowed_caps`' no-prior-`SutDriver`). That has been *sufficient* so far because the
+> builders are few and hand-audited, but §2's "the current system has no such check; this design
+> adds one" is still unmet. Either implement `req()` + the build-time check, or amend §2/§4.2 to
+> bless the builder-assert pattern as the mechanism. Tracked in §11 (C-1).
+
 ### 4.3 Single-sourced invariants (`cap_invariant!`)
 
 One declaration drives **both** the selection metadata (`needs()`) **and** the in-body cap lookups, so the declared need-set and the actual reads cannot drift:
@@ -754,6 +763,47 @@ highest-available rule, the existing bisector yields layer-localization with no 
 
 ---
 
+## 8.12 The windowed `ComposedSut` realization — and the mixed-rung interim state (2026-07-01)
+
+§8.10's "NO branch" text describes the windowed check as `compose_windowed_sut` (wrapping
+`window_input_wide`) run per-tick beside a live `E2ESut`. That mechanism still exists (the E4
+per-tick hook), but it is **superseded as the target** by the landed windowed `ComposedSut`
+(roadmap "Round 5 UPDATE"), which this section promotes into the architecture doc:
+
+- **Deferred-driver base:** `compose_sut_windowed_base[_seeded]` = the full headless
+  `compose_sut` boot with the driver rung **deferred** (`DriverPlacement::Deferred`) — backend,
+  storage, editor caps and the `IdResolver` reconcile all come from the one production booter;
+  the window is a **pure renderer** over the same booted `session`/`reactive`.
+- **Pure-insert overlay:** on the gpui thread, `overlay_windowed_caps(caps, geometry, engine,
+  driver)` INSERTS `GpuiWindowComponent` (`SutLayout`) + the window-driver `DriverInputComponent`
+  (`SutDriver`/`SutBlockInteract`/…). No cap is registered-then-overridden; fail-loud if the base
+  wasn't deferred.
+- **Injected-handle harness:** `ComposedSut::from_parts` (skips `init_test`'s tokio boot — the
+  window has thread affinity, §8.10) + a `SettleHook` that pumps the window to a fixed point
+  before each `check_invariants`; a windowed non-vacuity floor keyed off the ACTUAL `SutLayout`
+  cap.
+- **Cap-set-honest oracle:** the windowed oracle carries the LIVE SUT's cap set
+  (`ComposedSut::cap_set()` → `wide_e2e_windowed_ref(cap_set)`), so `aggregate_transitions`
+  narrows the alphabet to what the window genuinely drives — never `CapSet::without()` fakery
+  (a faithful cap is present or the impl is fixed; withholding is an invalid intermediate state).
+
+**⚠ The open divergence this creates — mixed driver rungs in one SUT (violates §8.11 as an end
+state; tolerated only as a disclosed interim).** The deferred base still registers the headless
+frontend component's write caps: `SutFocusWrite` (clicks via its internal `ReactiveEngineDriver`),
+`SutEditorMirrorWrite` (headless editor pipeline), and `SutBlockTreeWrite`
+(`KeystrokeBlockTreeWriter` over the headless driver, with a disclosed `OpDispatchWriter` fallback
+for join/indent/outdent/move). After the overlay, gestures split across rungs: `ClickBlock` rides
+the window's `SimUserDriver`/`GpuiUserDriver` (correct, highest rung) while `NavigateFocus`,
+editor keystrokes, and structural ops ride the **headless VM rung — a lower rung while a window
+exists**, which §8.11 names an unfaithful layer combination. Resolution rule for the harness
+repoint (increment 4+): before the windowed proptest loop generates a transition class, its write
+cap must be re-backed by the *window's* driver (the same one-driver-per-run construction §8.11
+mandates) — or the class must be explicitly excluded from the windowed alphabet with the exclusion
+disclosed, never silently driven cross-rung. The dispatch-fallback structural ops carry the same
+obligation. Tracked in §11 (C-3).
+
+---
+
 ## 9. Risks, gotchas, open questions
 
 - **Step 1 parity is the real risk.** Everything else is mechanical. Land it behind the existing `E2ESut` entry point and diff selection against the blessed slices before deleting the old path.
@@ -761,6 +811,7 @@ highest-available rule, the existing bisector yields layer-localization with no 
 - **Ref coupling.** The omnipotent core is monolithic *by necessity* — do not try to "union" *shared* Ref state from parts. Sub-Refs are projections, not parts. The subtlety (§5.4): "don't union parts" forbids two owners of one shared datum, *not* composing the Ref from disjoint subsystem-private extensions over a shared core. And when a shared datum's value is a genuine merge, the core computes it via a not-under-test merge engine fed from intent (or a convergence relation for the overlapping residue) — never by reading the SUT back, and never by re-implementing Loro. **"Monolithic by necessity" is about *shared data*, not the struct: the Ref may be an *open registry* of per-module private extensions over the coupled core (§5.5) — that is the seam for new-subsystem / git-submodule contribution, and the only thing it forbids is a module silently owning a second copy of a shared datum.**
 - **Degraded twins must be routed through the `CapSet`** on both SUT and Ref, or false divergence (§5.2 soundness rule).
 - **Caching adapter union impl** lives once on `CapMap`; do not let it regress into per-SUT panicking impls (that's the rejected Move B).
+- **`CapMap::insert` silently overwrites (2026-07-01 audit).** One-provider-per-cap is enforced by *nothing*: a second `insert` for the same cap silently shadows the first. Two call sites already defend by hand (`sql_loro_wide` registers Loro for only one cap to dodge the `SutBackend` shadow; `overlay_windowed_caps` asserts no prior `SutDriver`). That is the fail-loud rule inverted — the *default* is silent, the *loudness* is opt-in. Fix direction: `insert` panics on duplicate cap registration (message = both provider names), with an explicit `insert_replacing` if a legitimate override ever appears. Needs a full-suite parity run before flipping (an intentional-override site may exist). Tracked in §11 (C-2).
 - **Open → resolving:** exact split of `Subsystem` (coarse, ~9) vs `Sut*` caps (fine, ~23). Recommendation stands: unify on the capability as the single unit for both `prov` and `need`. **The §8.5 audit gives the first concrete instance:** `min_sut` today encodes *realization* (the structural block invariants carry `TursoProjection` because `E2ESut::SutBackend` reads Turso) rather than the *capability* their bodies actually call (`SutBackend`). **But §8.6 shows this is not a free re-label:** there is only one `SutBackend` realization and it *needs* Turso, so the `TursoProjection` in `min_sut` is currently load-bearing — it gates these invariants out of the non-Turso `loro_backend_pbt` slice, where the SQL would fail. The reclassification (realization→capability) must wait until a non-Turso `SutBackend` realization exists; only then does the parity gate hold. The broader `Subsystem`-vs-cap unification follows from there.
 
 ---
@@ -811,3 +862,77 @@ anti-patterns that fail review — now lives in the **`pbt-composition` skill**
 - `crates/holon-integration-tests/src/pbt/reference_state.rs` — the omnipotent Ref core.
 - `crates/holon-integration-tests/tests/editor_pure_pbt.rs` — narrow hand-written slice (mini-Ref reference).
 - `crates/holon/src/api/memory_backend.rs` — Step 2 SUT backing.
+
+## 11. Concept census & concept debt (2026-07-01 audit)
+
+Answer to "do all the concepts have their justification?" — every noun in the system, with a
+verdict. Three verdict classes: **KEEP** (load-bearing in the end state), **DIES** (scaffolding
+with a named deletion step — justified *only* by that schedule), **DEBT** (no justification in the
+end state; needs a unification/deletion decision).
+
+**KEEP — the γ spine.**
+- `Sut*`/`Ref*` capability traits, `CapId`, `CapSet` — the unit of provision, need, and selection.
+- `CapMap` + `CapProvider` (a.k.a. "component" — one concept, two names; prefer "component" in
+  prose, `CapProvider` is just its Rust spelling).
+- `#[capmap_adapter]`, `cap_invariant!`/`Needs`/`run_selected`, `cap_transition!`.
+- `ReferenceState` (omnipotent core) + `Resolved<_>` witness + `reference_state_ref_caps`.
+- `E2ETransition` + `aggregate_transitions` (closed dispatch behind the reversible §8.9 seam).
+- `Wiring` (+ `Actor`/`StorageAdapter`, `RequiredWiring`) — the coarse subsystem axis proptest
+  draws and shrinks; also the DI boot input.
+- The driver ladder (§8.11): `UserDriver`; `DirectUserDriver`/`ReactiveEngineDriver`/
+  `GpuiUserDriver`+`SimUserDriver`; `DriverInputComponent`; `DriverPlacement`.
+- Captures / `FixtureStep` / `replay_steps` (ADR 0009 "captures, not seeds").
+- The ONE PBT: `WideE2E`/`WideE2EMachine`, `wide_e2e_ref*`, `cap_set_for_wiring`,
+  `WIDE_REQUIRED_INVARIANTS`; `ComposedSut` harness internals (`from_parts`, `SettleHook`,
+  `IdResolver` + scaffold-seed reconcile — the last is load-bearing but documented only in
+  `composed/harness.rs`; it deserves a § here eventually).
+
+**DIES — scheduled, with the step that kills it.**
+- `Subsystem`/`min_sut`/`PbtSuiteSpec`/native registry + `run_invariant_registry` — E5 increment 5.
+- `E2ESut`/`SutHandle`/`sut_capabilities.rs`/`phased.rs`/stepper machinery — E5 increments 4–5.
+- The five composed `*_slice`s + `window_slice` builders — §8.10 North Star (each dies as its
+  caps live in the ONE PBT).
+- `parity.rs` — retired LAST (the deletion gate).
+- Fixture doubles (`Fixture*`) — post the no-tests-of-tests directive (2026-06-25) their triad
+  duty is retired; they survive only where a slice still references them and die with it.
+- `compose_windowed_sut`/`window_input_wide` per-tick E4 hook — folds into the §8.12 windowed
+  `ComposedSut` when the harness repoint completes.
+- `BridgedInvariant` — an adapter between the statically-typed bodies and `CapInvariant`;
+  candidate to fold into `cap_invariant!` once the native registry (the other consumer of the
+  static shape) is gone.
+- Thin `ReferenceStateMachine` wrappers (17 impls tree-wide; `WindowedRefMachine` is literally
+  duplicated in `random_pbt.rs` and `random_pbt_sim.rs`) — they die with the harness repoint;
+  the end state has `WideE2EMachine` + genuinely-independent oracles (editor-pure, loro-sync).
+
+**DEBT — no end-state justification; decide, don't drift.**
+- **C-1 `Config`'s missing validity check** (§4.2 reality-check box): implement `req()` + build-time
+  `req ⊆ P`, or bless builder asserts as the mechanism and amend §2. Today `Config` adds nothing
+  over a `Vec<Arc<dyn CapProvider>>`.
+- **C-2 `CapMap::insert` silent overwrite** (§9): flip to fail-loud; run the parity gate.
+- **C-3 Mixed driver rungs in the windowed SUT** (§8.12): re-back the headless-rung write caps
+  (`SutFocusWrite`, `SutEditorMirrorWrite`, structural) with the window driver during the harness
+  repoint, or disclose per-class exclusions. Includes finishing the `KeystrokeBlockTreeWriter`
+  rebind (join/indent/outdent/move still on the dispatch fallback) — and note `SutBlockTreeWrite`
+  as a *standing cap* contradicts §8.11's "the floor is a `DirectUserDriver`, not a standing cap";
+  it should dissolve into the driver-selection model when the rebind completes.
+- **C-4 Four vocabularies for "what is active":** `Subsystem` (dies, E5), `Wiring`, `ComponentSet`
+  (= `Wiring` + `projections`, where the composed path *derives* projections via `set_for_wiring`
+  — i.e. mostly a function of `Wiring`), `CapSet` (ground truth read off the built `CapMap`).
+  Plus the **dual transition gate** (`required_wiring().satisfied_by(wiring) &&
+  caps_available(declared_caps)`) and the ref's three-valued `cap_set: Option<CapSet>`
+  ("necessary-not-sufficient", `None` = ungated legacy). §9's unify-on-the-capability
+  recommendation stands; after E5 kills `Subsystem`, the target is: `Wiring` = the *drawn/shrunk
+  input axis*, `CapSet` = the *derived selection truth*, and `ComponentSet` reduced to (or
+  replaced by) the `Wiring → components` builder function. Do not add a fifth vocabulary.
+- **C-5 Two conventions for capability absence:** (a) don't register the cap → invariant
+  deselects (the model §5.1 implies), vs (b) register it "honest-empty" (`sql_slice` nav/focus/
+  watch family, `frontend_slice` honest-`None` methods). (b) risks *vacuous green* when a
+  selected invariant compares empty-vs-empty — the exact anti-pattern the skill bans. Rule to
+  adopt: honest-empty is legitimate only for *individual methods* of a cap whose other methods
+  carry the slice's real data AND where no invariant's verdict rests solely on the empty family;
+  otherwise split the cap and don't register the absent half. Needs a one-pass audit of existing
+  honest-empty methods against the invariants that read them.
+- **C-6 Write caps are structurally indistinguishable from read caps** — hence the 14×
+  "selection-neutral (no invariant `Needs` it)" comment boilerplate in one `register()` fn.
+  Cheap fix candidates: a `WriteCap` marker trait or a `register_write_caps` section convention;
+  low priority, documentation-level debt.

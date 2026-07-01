@@ -633,23 +633,29 @@ not the headless `ReactiveEngineDriver`.
    - ✅ **Sub-step 3b-iii DONE (rev `444465f2`):** the capture/gherkin BRIDGE — drive a fixture through
      `replay_steps` over the windowed `ComposedSut<WideE2E>` (already `FixtureAssertable`); GREEN. Fixture is
      post-boot only (no `StartApp`; the harness pre-boots), matching composed-keystone captures.
-   - ✅ **`SutFocusWrite` made FAITHFUL (rev `c0095344`) — supersedes the earlier "withhold it" plan (that
-     was WRONG):** the windowed SUT SHOULD carry `SutFocusWrite` (`NavigateFocus`/`FocusEditableText` are real
+   - ✅ **`SutFocusWrite` made FAITHFUL — supersedes the earlier "withhold it" plan (that was WRONG):**
+     the windowed SUT SHOULD carry `SutFocusWrite` (`NavigateFocus`/`FocusEditableText` are real
      windowed capabilities). The bug was the IMPL — `HeadlessFrontendComponent::apply_navigate_focus` called
      `session.execute_operation` DIRECTLY (a headless shortcut) which writes the SQL nav tables but bypasses
-     `dispatch_intent_sync` → `maybe_mirror_navigation_focus`, so `engine.focused_block()` stayed stale. Fixed
-     the cap to dispatch through `self.reactive.dispatch_intent_sync` (production's sidebar-nav path: same SQL
-     write + the engine-focus mirror). Correct by construction — NO cap-withholding, NO `cap_set` subtraction.
-     Headless keystone regression-free (the mirror is inert headlessly — `SutDriver` withheld). The 3b-i boot
-     workaround (manual engine dispatch) reverted to driving `NavigateFocus` through the now-faithful cap.
+     `dispatch_intent_sync` → `maybe_mirror_navigation_focus`, so `engine.focused_block()` stayed stale.
+     Fixed in two steps: rev `c0095344` dispatched through `self.reactive.dispatch_intent_sync` (same SQL +
+     mirror), then rev `77387a04` superseded that with the fully faithful form — the cap CLICKS the
+     LeftSidebar entry through the production `ReactiveEngineDriver` (`click_entity(id, "left_sidebar")` →
+     `find_click_intent` → `apply_intent` → `dispatch_intent(navigation.focus)`), exactly how E2ESut's
+     `apply_navigate_focus` and the sibling `apply_focus_editable_text` drive it — the user-gesture path,
+     not a synthesized dispatch (§8.11). Correct by construction — NO cap-withholding, NO `cap_set`
+     subtraction. Headless keystone regression-free (the mirror is inert headlessly — `SutDriver` withheld).
+     The 3b-i boot workaround (manual engine dispatch) reverted to driving `NavigateFocus` through the
+     now-faithful cap.
    - ⚠ **REMAINING (3b-iv, folds into increment 4) — the proptest loop:** needs PER-CASE window setup (can't
      use `init_test` — thread affinity) + a windowed oracle carrying the ACTUAL windowed `cap_set`
      (`ComposedSut::cap_set()` — SutLayout/SutDriver present, honest, no subtraction) so
      `aggregate_transitions` narrows + the `required_invariants` floor matches the window. That IS the
      increment-4 work of repointing `sim_windowed_replay`/`random_pbt_sim` onto the windowed `ComposedSut`, so
      3b-iv and increment 4 merge.
-4. Repoint harnesses (thinnest first; carries the 3b-iv withhold-`SutFocusWrite` + `full_gpui` oracle
-   cap_set + per-case window proptest) → 5. delete native core → retire `parity.rs` LAST. (Unchanged.)
+4. Repoint harnesses (thinnest first; carries the 3b-iv live windowed oracle cap_set —
+   `ComposedSut::cap_set()`, `SutFocusWrite` faithfully present, no withholding — + per-case window
+   proptest) → 5. delete native core → retire `parity.rs` LAST. (Unchanged.)
 
 ⚠ Runtime must stay multi-thread and alive on the background thread while the window runs on main
 (CDC/matview/org-sync tasks). `wait_for_ready = true` avoids the `without_wait()` sync-handle race.
