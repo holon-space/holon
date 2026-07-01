@@ -1,9 +1,13 @@
 //! ★ Round-5 windowed repoint — foundational milestone.
 //!
-//! ✅ VERIFIED GREEN (macOS, 2026-07-01): `cargo test -p holon-gpui --features pbt --test
-//! gpui_compose_sut_windowed` → 1 passed. The window rendered 68 elements (63 non-degenerate)
-//! over the `compose_sut_windowed_base` session; the base hosted `SutBackend` (13 booted
-//! blocks); the driver rung was correctly absent (deferred).
+//! ✅ VERIFIED GREEN (macOS, 2026-07-01) — 2 passed:
+//!   `cargo test -p holon-gpui --features pbt --test gpui_compose_sut_windowed -- --test-threads=1`
+//!   1. window rendered 68 elements (63 non-degenerate) over the `compose_sut_windowed_base`
+//!      session; base hosts `SutBackend` (13 blocks); driver rung deferred.
+//!   2. `overlay_windowed_caps` (runtime-exercised) built a CapMap with `SutLayout` (68 elems) +
+//!      `SutBackend` (13 blocks) + the window's `SutDriver`/`SutBlockInteract` over a live window.
+//! ⚠ MUST run with `--test-threads=1`: gpui `TestApp` is not parallel-safe (thread-local platform
+//! state); two windowed tests in one binary SIGABRT if run concurrently.
 //!
 //! Proves the claim the whole repoint rests on: a gpui window RENDERS a
 //! [`compose_sut_windowed_base`] session (the window is a *pure renderer* over a
@@ -25,15 +29,20 @@ use std::time::{Duration, Instant};
 
 use gpui::{AssetSource, PlatformTextSystem, TestApp};
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
-use holon_integration_tests::pbt::window_slice::builders::window_layout;
+use holon_integration_tests::pbt::window_slice::builders::{overlay_windowed_caps, window_layout};
 use holon_pbt_core::ComponentSet;
 // Caps must be in scope to read them through the `CapMap` (capmap_adapter forwards).
-use holon_pbt_core::capabilities::{SutBackend, SutDriver, SutLayout};
+use holon_pbt_core::capabilities::{SutBackend, SutBlockInteract, SutDriver, SutLayout};
+
+#[path = "pbt_harness/mod.rs"]
+mod pbt_harness;
+use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_platform(true).text_system()
@@ -171,4 +180,113 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
     app.run_until_parked();
     std::mem::forget(app);
     std::mem::forget(composed);
+}
+
+#[test]
+fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window() {
+    // Increment-3 sub-step 3a: runtime-exercise `overlay_windowed_caps` (until now only
+    // compile-verified). Onto the DEFERRED-driver `compose_sut_windowed_base` CapMap it must
+    // INSERT the window's `SutLayout` geometry + the live `SimUserDriver`-backed gesture caps
+    // while the base's `SutBackend` survives — the full windowed CapMap the StateMachineTest
+    // runner (3b) will drive. Also de-risks the intricate `SimUserDriver` construction over a
+    // compose_sut window.
+    let text_system = real_text_system();
+    let assets: Arc<dyn AssetSource> = Arc::new(());
+    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+
+    let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
+    let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let composed = runtime.block_on(async {
+        compose_sut_windowed_base(&ComponentSet::full_headless(), &resolver).await
+    });
+
+    let session = composed
+        .session
+        .clone()
+        .expect("full_headless → booted FrontendSession");
+    let engine = composed
+        .reactive
+        .clone()
+        .expect("full_headless → booted frontend ReactiveEngine");
+
+    // The window populates this `DebugServices`' `interaction_tx` once up; the
+    // `SimUserDriver` drives real platform input through it.
+    let debug = Arc::new(holon_mcp::server::DebugServices::default());
+
+    let bounds = BoundsRegistry::new();
+    let nav = NavigationState::new();
+    let rebind = app
+        .update(|cx| {
+            launch_holon_window_rebindable(
+                session.clone(),
+                engine.clone(),
+                runtime.handle().clone(),
+                nav,
+                bounds.clone(),
+                Some(debug.clone()),
+                "Holon-ComposeSut-Overlay",
+                cx,
+            )
+        })
+        .expect("window opened over compose_sut session");
+
+    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+
+    // The same real windowed driver the windowed PBT loop uses.
+    let interaction_tx = debug
+        .interaction_tx
+        .get()
+        .expect("interaction_tx set by the window interaction pump")
+        .clone();
+    let app_ptr: *const TestApp = &app;
+    let driver: Arc<dyn UserDriver> = Arc::new(SimUserDriver::new(
+        app_ptr,
+        rebind.window(),
+        bounds.clone(),
+        engine.clone(),
+        runtime.handle().clone(),
+        interaction_tx,
+    ));
+
+    // ★ Exercise the pure-insert overlay at runtime. Its internal fail-loud assert also
+    // confirms the base DEFERRED its driver (no SutDriver present) before inserting.
+    let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
+    let overlaid = overlay_windowed_caps(composed.caps, geometry, engine.clone(), driver);
+
+    // (1) The overlay INSERTED the window driver rung (absent in the deferred base).
+    assert!(
+        overlaid.get::<dyn SutDriver>().is_some(),
+        "overlay_windowed_caps must INSERT the window SutDriver",
+    );
+    assert!(
+        overlaid.get::<dyn SutBlockInteract>().is_some(),
+        "overlay_windowed_caps must INSERT the window SutBlockInteract gesture cap",
+    );
+    // (2) SutLayout reads real geometry through the overlaid CapMap (window renders it).
+    let elems = runtime.block_on(async { overlaid.rendered_elements().await });
+    assert!(
+        !elems.is_empty(),
+        "overlaid CapMap's SutLayout returned no geometry",
+    );
+    // (3) The base's SutBackend survived the overlay (still reads the booted store).
+    let blocks = runtime.block_on(async { overlaid.block_raw_snapshot().await });
+    assert!(
+        !blocks.is_empty(),
+        "overlaid CapMap lost the base SutBackend",
+    );
+
+    eprintln!(
+        "[compose_sut-overlay] PASS — overlay_windowed_caps built a CapMap with SutLayout ({} elems),          SutBackend ({} blocks), and the window's SutDriver + SutBlockInteract over a live window",
+        elems.len(),
+        blocks.len(),
+    );
+
+    // gpui teardown (see the foundational test): release window entities, shut down, then
+    // leak the `!Send` app + the overlaid caps (which transitively hold the session) so no
+    // Drop runs the leak detector or drops the session's runtime in async context.
+    drop(rebind);
+    app.update(|cx| cx.shutdown());
+    app.run_until_parked();
+    std::mem::forget(app);
+    std::mem::forget(overlaid);
 }
