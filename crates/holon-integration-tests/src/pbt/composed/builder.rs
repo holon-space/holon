@@ -72,6 +72,15 @@ pub struct ComposedSut {
     /// caller seeds the working tree through it (production create op) and it backs
     /// the resolver-sharing block-tree writer. `None` for Loro-only configs.
     pub engine: Option<Arc<BackendEngine>>,
+    /// The booted windowless `FrontendSession` (frontend arm only; `None` otherwise) —
+    /// so the windowed repoint can hand it to a gpui window that RENDERS this same
+    /// reactive tree while the composed backend/storage caps read it (§ Round 5,
+    /// "reuse compose_sut's boot"). The window binds `session` + `reactive`; `engine`
+    /// is for MCP only.
+    pub session: Option<Arc<holon_frontend::FrontendSession>>,
+    /// The booted frontend `ReactiveEngine` (frontend arm only; `None` otherwise) — the
+    /// render tree a gpui window paints. Pairs with `session` for the windowed bind.
+    pub reactive: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
     /// Whether the harness must use a multi-thread runtime (a booted
     /// `FrontendSession` needs it). False for the synchronous storage backends.
     pub multi_thread: bool,
@@ -152,6 +161,10 @@ pub async fn compose_sut_seeded(
     let mut caps = CapMap::new();
     let mut shadowed = Vec::new();
     let mut engine = None;
+    // Frontend-arm handles surfaced for the windowed repoint (window renders this
+    // session/reactive; §Round 5). `None` for the non-frontend arms.
+    let mut session: Option<Arc<holon_frontend::FrontendSession>> = None;
+    let mut reactive: Option<Arc<holon_frontend::reactive::ReactiveEngine>> = None;
     let mut multi_thread = false;
     let mut settle = Duration::ZERO;
     let mut scaffold_ids = BTreeSet::new();
@@ -289,6 +302,10 @@ pub async fn compose_sut_seeded(
         }
         scaffold_ids = booted_scaffold_ids(&caps).await;
         engine = Some(eng);
+        // Surface the booted session + reactive so a windowed harness can attach a gpui
+        // window as a renderer over this same reactive tree (§Round 5 windowed repoint).
+        session = Some(comp.session());
+        reactive = Some(comp.reactive());
         multi_thread = true; // the booted FrontendSession needs a multi-thread runtime
         settle = Duration::from_millis(150);
     } else if has_turso {
@@ -427,6 +444,8 @@ pub async fn compose_sut_seeded(
     ComposedSut {
         caps,
         engine,
+        session,
+        reactive,
         multi_thread,
         settle,
         scaffold_ids,

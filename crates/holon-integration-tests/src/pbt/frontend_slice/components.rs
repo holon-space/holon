@@ -276,6 +276,14 @@ impl HeadlessFrontendComponent {
         self.engine.clone()
     }
 
+    /// The production windowless `FrontendSession` this component booted. Handed to a
+    /// gpui window (`launch_holon_window_rebindable`) so the window RENDERS the same
+    /// reactive tree the composed backend/storage caps read — the windowed repoint
+    /// reuses this headless boot and attaches the window as a pure renderer (§ Round 5).
+    pub(crate) fn session(&self) -> Arc<FrontendSession> {
+        self.session.clone()
+    }
+
     /// The production `ReactiveEngine` (the `BuilderServices` host). The wide PBT's
     /// resolver-sharing [`OpDispatchWriter`] uses it as a focus sink so `split_block`/
     /// `join_block` dispatch through the frontend's `dispatch_intent_sync` and the new/

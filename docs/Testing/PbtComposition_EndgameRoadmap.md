@@ -559,3 +559,45 @@ WARNING **Tooling:** `ast-outline` reads a stale index of the MAIN checkout — 
 the worktree. Read worktree paths directly. Use worktree-absolute paths for ALL file ops. Build via
 `bash -c '... > log 2>&1'` (nu `out+err>` redirects false-green).
 
+
+### Round 5 UPDATE (boot-seam verified) — ★ REFRAME: reuse `compose_sut`'s boot, window = renderer
+
+A boot-seam map (agent-verified, worktree) shows the repoint is **simpler than "two new machinery
+pieces"** implied. Findings:
+- The boot is already factored into the production DI booter `holon_app::new_from_config_with_di`
+  (`crates/holon-app/src/session.rs`). BOTH `TestContext::start_app` (E2ESut) and
+  `HeadlessFrontendComponent::new_with_loro` call it. `HeadlessFrontendComponent` is **already a
+  standalone windowless booter** producing `(session, engine, reactive)`.
+- `launch_holon_window_rebindable` (`frontends/gpui/src/lib.rs`) binds to **`session` + the frontend
+  `ReactiveEngine` only** (`BackendEngine` is MCP-only). The window needs NO session-construction path —
+  it is a **pure renderer** over a pre-booted reactive engine, on the gpui main thread. Boot is
+  thread-agnostic (`Send` Arcs); topology already exists in `pbt_harness/mod.rs::run_in_gpui_window`
+  (boot on runtime thread → ship Arcs over a channel → bind on main thread).
+
+**⇒ REFRAMED architecture (supersedes "standalone booter + windowed ComposedSlice with new reconcile"):**
+Reuse `compose_sut(full_headless, resolver)`'s full headless CapMap (backend/storage/editor caps **+
+the `IdResolver` reconcile**), hand its booted `session`+`reactive` to a gpui window as a renderer over
+the SAME reactive engine, and **override only the driver caps** (`DriverInputComponent`) with the
+window's `GpuiUserDriver`. Everything else — `SutBackend`, storage invariants, id-resolution — comes
+FREE from `compose_sut`. This **dissolves the Hard-D/increment-2 id-resolution blocker** (no new
+reconcile; the window is a view onto the headless session, exactly as E2ESut renders its own session).
+The §8.11 faithfulness rule is satisfied: gesture caps bind the window's `GpuiUserDriver` (highest rung),
+not the headless `ReactiveEngineDriver`.
+
+**Revised increment plan:**
+1. ✅ **DONE (this commit):** `compose_sut`'s `ComposedSut` now surfaces the booted `session` + `reactive`
+   (new `pub session`/`pub reactive` fields; new `HeadlessFrontendComponent::session()` accessor) so a
+   windowed harness can bind a window to a `compose_sut`-booted session. Additive, build-green, no new warnings.
+2. **Window-over-compose_sut bind + driver-cap override:** on the gpui thread, `compose_sut(full_headless)`
+   → take `session`/`reactive` → `launch_holon_window_rebindable(session, reactive, …)` → overlay
+   `GpuiWindowComponent` (geometry) + `DriverInputComponent::with_input(window GpuiUserDriver)` onto the
+   ComposedSut's CapMap (replace the headless driver-input caps). Verify the full catalog (block/storage +
+   windowed families) runs via `run_selected` over the combined CapMap with the window attached.
+3. **Windowed StateMachineTest wrapper:** wrap the above as an `S: StateMachineTest + FixtureAssertable`
+   whose `apply` reuses **WideE2E's `apply_transition`** (same headless dispatch through the shared
+   session) BUT with gesture transitions routed through the window's driver caps; construct from injected
+   window handles (not `init_test`). Drive via `replay_steps`.
+4. Repoint harnesses (thinnest first) → 5. delete native core → retire `parity.rs` LAST. (Unchanged.)
+
+⚠ Runtime must stay multi-thread and alive on the background thread while the window runs on main
+(CDC/matview/org-sync tasks). `wait_for_ready = true` avoids the `without_wait()` sync-handle race.
