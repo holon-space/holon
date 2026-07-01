@@ -28,17 +28,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{AssetSource, PlatformTextSystem, TestApp};
+use holon_api::{EntityUri, Region};
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base;
-use holon_api::{EntityUri, Region};
 use holon_integration_tests::pbt::composed::harness::{ComposedSut, SettleHook};
 use holon_integration_tests::pbt::composed::wide_e2e::{
     boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E, WideE2EMachine,
 };
+use holon_integration_tests::pbt::fixtures::{replay_steps, FixtureStep};
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::transitions::{ClickBlock, E2ETransition};
 use holon_integration_tests::pbt::window_slice::builders::{overlay_windowed_caps, window_layout};
@@ -500,6 +501,44 @@ fn windowed_composed_sut_drives_a_click_gesture_sequence_green() {
         eprintln!(
             "[compose_sut-windowed-3b-ii] PASS - drove a 2-gesture ClickBlock sequence through \
              the windowed ComposedSut<WideE2E>; unified catalog GREEN each tick"
+        );
+        sut
+    });
+}
+
+#[test]
+fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
+    // ★ Increment 3b (sub-step iii): the capture/gherkin BRIDGE over the windowed SUT. Drive a
+    // fixture through `replay_steps` (the shared capture/.feature replay driver) — the windowed
+    // `ComposedSut<WideE2E>` already impls `FixtureAssertable`, so the SAME driver the headless
+    // composed keystone uses for deterministic regression/gherkin replays now runs over a live
+    // window. This is how captured windowed regressions + `.feature` files will steer the ONE
+    // PBT windowed. The fixture is post-boot only (no `StartApp` — the composed alphabet has
+    // none; the SUT is already booted by the harness), matching composed-keystone captures.
+    with_windowed_wide_sut(|sut, oracle| {
+        let steps = vec![
+            FixtureStep::Action(E2ETransition::ClickBlock(ClickBlock {
+                region: Region::Main,
+                block_id: EntityUri::block("c1"),
+            })),
+            FixtureStep::Action(E2ETransition::ClickBlock(ClickBlock {
+                region: Region::Main,
+                block_id: EntityUri::block("c2"),
+            })),
+        ];
+        let sut = replay_steps::<WideE2EMachine, ComposedSut<WideE2E>>(
+            "windowed-3b-iii",
+            &steps,
+            oracle.clone(),
+            sut,
+            |_| {},
+            |_, _| {},
+            None,
+        );
+        eprintln!(
+            "[compose_sut-windowed-3b-iii] PASS - replay_steps drove a {}-step fixture through \
+             the windowed ComposedSut<WideE2E> (FixtureAssertable bridge); catalog GREEN each tick",
+            steps.len()
         );
         sut
     });
