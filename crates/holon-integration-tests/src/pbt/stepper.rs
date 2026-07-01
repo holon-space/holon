@@ -468,7 +468,11 @@ impl Stepper for BisectionStepper {
 
     fn apply(&mut self, ref_state: &ReferenceState, transition: &E2ETransition) {
         let sut = self.sut.take().expect("init() runs before apply()");
-        self.sut = Some(ComposedSut::<WideE2E>::apply(sut, ref_state, transition.clone()));
+        self.sut = Some(ComposedSut::<WideE2E>::apply(
+            sut,
+            ref_state,
+            transition.clone(),
+        ));
     }
 
     fn check_invariants(&mut self, ref_state: &ReferenceState) {

@@ -287,10 +287,26 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             &sut.scaffold_ids,
             ref_state,
         ));
+        // `HOLON_PBT_INVARIANTS` disclosed softening: a matched `warn`/`skip` failure is
+        // logged loudly and made non-fatal (a DISCLOSED degraded run, not a clean pass);
+        // unmatched failures stay fatal. The composed home of the knob relocated from the
+        // deleted native runner core. The panic prefix is unchanged so `bisect_driver`'s
+        // `reproduction_signature()` still recognizes a composed divergence.
+        use crate::pbt::invariant_mode_override::{ModeOverride, invariant_mode_override};
+        let hard: Vec<(&str, &str)> = report
+            .failures()
+            .into_iter()
+            .filter(|(id, msg)| match invariant_mode_override(id) {
+                Some(ModeOverride::Warn | ModeOverride::Skip) => {
+                    eprintln!("[HOLON_PBT_INVARIANTS] softened (DISCLOSED degraded run) {id}: {msg}");
+                    false
+                }
+                _ => true,
+            })
+            .collect();
         assert!(
-            report.failures().is_empty(),
-            "reconciled composed sequence diverged from the oracle: {:?}",
-            report.failures()
+            hard.is_empty(),
+            "reconciled composed sequence diverged from the oracle: {hard:?}"
         );
         for id in S::required_invariants(ref_state) {
             assert!(
