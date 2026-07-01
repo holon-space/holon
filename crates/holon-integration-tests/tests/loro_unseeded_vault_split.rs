@@ -39,7 +39,7 @@ fn split_block_on_sql_only_block_succeeds_without_poisoning_loro_tree() {
 }
 
 async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
-    let mut env = TestEnvironment::new(runtime).expect("TestEnvironment::new");
+    let env = TestEnvironment::new(runtime).expect("TestEnvironment::new");
     assert!(env.loro_enabled(), "this slice needs the Loro wiring");
     env.write_org_file("vault.org", "* vault\n- first block\n- second block\n")
         .await

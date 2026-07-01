@@ -4,7 +4,6 @@
 
 use std::cell::RefCell;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use gpui::{AssetSource, PlatformTextSystem, TestApp};
 use holon_gpui::geometry::BoundsRegistry;
@@ -104,7 +103,7 @@ pub fn run(wiring: holon_pbt_core::Wiring, slice_name: &'static str) {
 
     // Open the window using the existing TestEnvironment pattern.
     let start_rt = Arc::new(tokio::runtime::Runtime::new().expect("start tokio runtime"));
-    let mut env = start_rt.block_on(async { TestEnvironment::new(start_rt.clone()).unwrap() });
+    let env = start_rt.block_on(async { TestEnvironment::new(start_rt.clone()).unwrap() });
     start_rt.block_on(async { env.start_app(true).await.expect("start_app") });
 
     let session = env.session_arc();
@@ -234,7 +233,7 @@ pub fn replay_capture(default_capture: &str) {
     let window_rt = tokio::runtime::Runtime::new().expect("window-lifetime tokio runtime");
     let _window_rt_guard = window_rt.enter();
     let start_rt = Arc::new(tokio::runtime::Runtime::new().expect("start tokio runtime"));
-    let mut env = start_rt.block_on(async { TestEnvironment::new(start_rt.clone()).unwrap() });
+    let env = start_rt.block_on(async { TestEnvironment::new(start_rt.clone()).unwrap() });
     start_rt.block_on(async { env.start_app(true).await.expect("start_app") });
     let session = env.session_arc();
     let engine = env.reactive_engine.get().cloned().expect("reactive engine");

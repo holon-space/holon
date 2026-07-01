@@ -15,7 +15,6 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 
 use super::reference_state::{ReferenceState, ShadowInterpreter};
-use super::types::*;
 
 use loro::{ExportMode, LoroDoc};
 

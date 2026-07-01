@@ -142,6 +142,16 @@ cargo run -p holon-mcp
 cargo run -p holon-engine -- --help
 ```
 
+### Vault directory & third-party file sync (important)
+
+Do **not** place a Holon vault (`HOLON_VAULT_ROOT`) under Syncthing, iCloud
+Drive, Dropbox, or any byte-level file syncer while Loro CRDT sync is enabled.
+Holon converges devices through Loro/P2P; a second, block-unaware syncer
+writing the same files makes foreign echoes indistinguishable from user edits
+(duplicated edits, sibling-order churn, conflict-copy files ingested as
+duplicate documents). One vault, one syncer: Holon. See
+[docs/Architecture/Model.md](docs/Architecture/Model.md), invariant 11.
+
 ## Vision Documents
 
 | Document | Contents |

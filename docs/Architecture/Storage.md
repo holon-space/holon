@@ -83,15 +83,15 @@ pub trait TextCellBacking: CellBacking<String> {
 
 **Cell backings (one per protocol)**:
 
-Today only `block.content` is cell-ified in Full (Loro) mode; scalar and tree fields go through `BlockCellRegistry::write_field`'s non-cell dispatch paths.
+In Full (Loro) mode `block.content` (rich text) and every scalar field are now cell-ified; only the tree-position fields (`parent_id`, `sort_key`) still go through `BlockCellRegistry::write_field`'s non-cell dispatch (Cells plan Phase 2.3, sequenced behind spec 0007's intent-vocabulary flip). SqlOnly cells are not wired yet (they need the entity-cache read + CDC signal injection); `LwwScalarBacking<T>` is the ready backing for that wiring.
 
 | Backing | Status | Authority for | Read | Write |
 |---------|--------|---------------|------|-------|
-| `LoroTextCellBacking` | Implemented | block.content (rich text) | `LoroText::to_string()` | `LoroText::insert/delete/update` + commit |
-| `LwwTextCellBacking` | Implemented | tests / SqlOnly text fields | entity cache | `CrudOperations::set_field` (debounced) |
-| `LoroMetaCellBacking<T>` | Planned (Cells plan Phase 2) | block scalar fields (completed, collapsed, …) | `meta.get(field)` on tree node | `meta.insert(field, v)` + commit |
-| `LoroTreeParent/PositionCellBacking` | Planned (Cells plan Phase 2) | block.parent_id, block.sort_key | tree-node parent / position | `tree.move_to` / `tree.move_after` |
-| `LwwScalarBacking<T>` | Planned (Cells plan Phase 2) | tests / SqlOnly scalar fields | entity cache | `CrudOperations::set_field` |
+| `LoroTextCellBacking` (`crates/holon-loro/src/loro_text_cell_backing.rs`) | Implemented | block.content (rich text) | `LoroText::to_string()` | `LoroText::insert/delete/update` + commit |
+| `LwwTextCellBacking` (`crates/holon-core/src/cell.rs`) | Implemented | tests / SqlOnly text fields | entity cache | `CrudOperations::set_field` (debounced) |
+| `LoroMetaCellBacking<T>` (`crates/holon-loro/src/loro_meta_cell_backing.rs`) | Implemented (Phase 2.1) | block scalar fields (completed, collapsed, block_type, …); T ∈ {bool, i64, String, Value} | typed decode of `meta` per-property map (H3) | per-key `update_block_fields` (only the changed key + `updated_at`) + commit |
+| `LwwScalarBacking<T>` (`crates/holon-core/src/cell.rs`) | Implemented (Phase 2.2); registry wiring deferred | tests / SqlOnly scalar fields | entity cache | `CrudOperations::set_field` (immediate, no debounce) |
+| `LoroTreeParent/PositionCellBacking` | Planned (Cells plan Phase 2.3) | block.parent_id, block.sort_key | tree-node parent / position | `tree.move_to` / `tree.move_after` |
 
 **Cell lifetime**: cells are `Weak`-keyed in the registry. They live while at least one consumer holds an `Arc<Cell<T>>`; when the last `Arc` drops, the registry's `Weak` upgrade fails on next lookup and a fresh cell is constructed. Chord-op `delete` paths invoke `EntityCellRegistry::on_entity_deleted(uri)` proactively so a same-id re-create can't observe a stale cell wrapping an orphaned Loro container.
 
@@ -180,7 +180,7 @@ SyncProvider                    QueryableCache                    UI
 let (tx, rx) = broadcast::channel(1024);
 
 // QueryableCache subscribes to changes
-let cache: QueryableCache<TodoistDataSource, TodoistTask> = /* ... */;
+let cache: QueryableCache<TodoistTask> = /* ... */;
 cache.ingest_stream(rx);
 
 // Later, SyncProvider sends changes
@@ -200,7 +200,7 @@ tx.send(changes)?;
 
 The storage layer uses Turso Database (a Rust rewrite of SQLite with async support) for local caching. TursoBackend uses an actor-based `DbHandle` pattern for serialized database access and CDC broadcasting.
 
-**Location**: `crates/holon/src/storage/turso.rs`
+**Location**: `crates/holon-turso/src/turso.rs`
 
 #### Architecture
 
@@ -209,6 +209,7 @@ pub struct TursoBackend {
     db: Arc<Database>,
     cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
     tx: mpsc::Sender<DbCommand>,
+    cdc_seq: Arc<AtomicU64>,
 }
 ```
 
@@ -227,6 +228,7 @@ All database access goes through `DbHandle`, which sends `DbCommand` messages to
 ```rust
 pub struct DbHandle {
     tx: mpsc::Sender<DbCommand>,
+    // + cdc_broadcast, cdc_seq (so CDC subscription works from a handle)
 }
 
 // Usage: callers send commands via DbHandle
@@ -236,8 +238,8 @@ let _ = db_handle.execute_ddl("CREATE TABLE IF NOT EXISTS ...").await?;
 
 **Platform Support:**
 - **Unix-like systems** (macOS, Linux, BSD, iOS, Android): Full file-based storage via `UnixIO`
-- **WASM**: In-memory storage (no OPFS yet)
-- **Windows**: In-memory storage (no `UnixIO` equivalent in turso-core)
+- **WASM**: In-memory storage via `MemoryIO` (no OPFS yet)
+- **Windows**: unsupported — `open_database` returns an error (even for `:memory:`; no `UnixIO` equivalent in turso-core)
 
 #### SQL Execution
 
@@ -254,9 +256,9 @@ let results = db_handle.query(
 The `StorageBackend` trait implementation provides standard operations:
 - `create_entity(schema)` - Creates table with indexes from `TypeDefinition`
 - `get(entity, id)` - Retrieves single row by primary key
-- `query(entity, filter)` - Queries with `Filter` predicates (`Eq`, `In`, `And`, `Or`, `IsNull`)
+- `query(entity, filter)` - Queries with `Filter` predicates (`Eq`, `In`, `And`, `Or`, `IsNull`, `IsNotNull`)
 - `insert/update/delete` - Standard DML operations
-- `get_version/set_version` - Optimistic locking support via `_version` column
+- `get_version/set_version` - Optimistic locking support via `_version` column (implemented; currently exercised only by the storage PBTs, not wired into any production write path)
 
 ### Change Data Capture (CDC)
 
@@ -266,7 +268,7 @@ Changes propagate from storage to UI via CDC streams:
 Database Write → Turso CDC Callback → coalesce_row_changes() → BatchWithMetadata<RowChange> → UI Stream
 ```
 
-**Location**: `crates/holon/src/storage/turso.rs` (row_changes method and coalesce_row_changes)
+**Location**: `crates/holon-turso/src/turso.rs` (row_changes method and coalesce_row_changes)
 
 #### CDC Setup
 
@@ -316,6 +318,7 @@ pub enum Change<T> {
     Created { data: T, origin: ChangeOrigin },
     Updated { id: String, data: T, origin: ChangeOrigin },
     Deleted { id: String, origin: ChangeOrigin },
+    FieldsChanged { entity_id: String, fields: Vec<(String, Value, Value)>, /* … */ },
 }
 ```
 
@@ -326,7 +329,7 @@ Each change carries `ChangeOrigin` for tracing and UI attribution:
 ```rust
 pub enum ChangeOrigin {
     Remote { operation_id: Option<String>, trace_id: Option<String> },
-    Local { operation_id: String, trace_id: Option<String> },
+    Local { operation_id: Option<String>, trace_id: Option<String> },
 }
 ```
 
@@ -334,23 +337,9 @@ Origin is propagated via the `_change_origin` column in the database, solving cr
 
 #### UI Keying Requirements
 
-**IMPORTANT**: The CDC `id` field is the SQLite ROWID, which can be reused after DELETE operations.
+**UI widgets MUST key by entity ID, never by SQLite ROWID** — ROWIDs can be reused after DELETE.
 
-**UI widgets MUST key by entity ID from `data.get("id")`, NOT by ROWID.**
-
-```rust
-match change.change {
-    ChangeData::Created { data, .. } => {
-        let entity_id = data.get("id").unwrap(); // Use this for widget key
-    }
-    ChangeData::Updated { id: rowid, data, .. } => {
-        let entity_id = data.get("id").unwrap(); // Use this, not rowid
-    }
-    ChangeData::Deleted { id: entity_id, .. } => {
-        // entity_id is already extracted from deleted row data
-    }
-}
-```
+The CDC path already enforces this: `Updated.id` is populated from the row's `id` column (the entity ID), with the ROWID only as a fallback for rows that lack one; the ROWID itself is carried separately as `data["_rowid"]`. `coalesce_row_changes` likewise pairs changes by entity ID. So consume `change.id` / `data.get("id")` as the widget key and treat `_rowid` as diagnostic only.
 
 #### Stream Subscription
 
@@ -363,77 +352,13 @@ pub trait ChangeNotifications<T>: Send + Sync {
 }
 ```
 
-### Command Sourcing Infrastructure
+### Command Sourcing (offline, future)
 
-The command sourcing module provides the foundation for offline-first operations with background sync to external systems.
-
-**Location**: `crates/holon/src/storage/command_sourcing.rs`
-
-#### Commands Table
-
-An append-only log of all operations for durability and sync tracking:
-
-```sql
-CREATE TABLE commands (
-    id TEXT PRIMARY KEY,           -- Client-generated UUID (idempotency key)
-    entity_id TEXT NOT NULL,       -- Block/document ID for ordering
-    command_type TEXT NOT NULL,    -- Operation type (e.g., 'indent', 'update_content')
-    payload TEXT NOT NULL,         -- Command parameters as JSON
-    status TEXT DEFAULT 'pending', -- 'pending', 'syncing', 'synced', 'failed'
-    target_system TEXT NOT NULL,   -- 'loro', 'todoist', 'local'
-    created_at INTEGER NOT NULL,
-    synced_at INTEGER,
-    error_details TEXT             -- API rejection reason for user feedback
-)
-```
-
-**Indexes:**
-- `idx_commands_pending` - Finds pending commands for sync (filtered on `status = 'pending'`)
-- `idx_commands_entity` - Finds commands by entity for ordering
-
-#### ID Mappings Table
-
-Shadow ID mapping for optimistic updates when external IDs aren't yet known:
-
-```sql
-CREATE TABLE id_mappings (
-    internal_id TEXT PRIMARY KEY,  -- Locally generated ID
-    external_id TEXT,              -- ID from external system (filled after sync)
-    source TEXT NOT NULL,          -- System that will provide external ID
-    command_id TEXT NOT NULL,      -- Originating command
-    state TEXT DEFAULT 'pending',  -- 'pending', 'mapped', 'failed'
-    created_at INTEGER NOT NULL,
-    synced_at INTEGER,
-    FOREIGN KEY (command_id) REFERENCES commands(id)
-)
-```
-
-This allows operations to proceed with internal IDs before external systems confirm the mapping.
-
-#### InMemoryStateAccess
-
-Pre-fetches entities from storage for synchronous contract evaluation:
-
-```rust
-pub struct InMemoryStateAccess {
-    entities: HashMap<String, StorageEntity>,
-}
-
-impl InMemoryStateAccess {
-    /// Pre-fetch entities from backend for contract evaluation
-    pub async fn from_backend(backend: &TursoBackend, entity_ids: &[&str]) -> Result<Self>;
-}
-```
-
-This solves async-in-sync issues when evaluating operation preconditions by loading all required state before synchronous evaluation.
-
-#### Design Notes
-
-The command sourcing system is designed to enable:
-1. **Offline-first operation**: Commands persist locally before external sync
-2. **Idempotency**: Client-generated UUIDs prevent duplicate processing
-3. **Entity-level ordering**: Commands grouped by entity for consistent sync
-4. **Rollback via refetch**: On sync failure, canonical state is fetched from the external system
-
-> **Note**: The full `CommandType` enum and `CommandExecutor` are planned but not yet implemented. See `crates/holon/src/storage/command_sourcing_todo.md` for the complete design.
-
+Nothing here is implemented yet, by design. The durable command log for
+offline-first operation is one component: the persisted form of the upstream
+intent channel. Its canonical design — log shape, `id_mappings` as the
+`OwnForeign(map)` ID capability, the stop-on-first-failure batch policy, and
+the invariants kept warm today — lives in
+[Replication §7, "The durable form of this channel"](Replication.md#the-durable-form-of-this-channel-offline-future).
+The `OperationLog`'s `PendingSync`/`Synced` statuses ([Sync](Sync.md)) are its
+already-implemented today-side.

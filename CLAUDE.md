@@ -42,6 +42,7 @@ Use it whenever you have a running application and you want to look under the ho
 See [docs/Reference/ORG_SYNTAX.md](docs/Reference/ORG_SYNTAX.md) — org files store **bare IDs** without `block:`/`doc:` scheme prefixes. The parser adds schemes at the boundary, the renderer strips them.
 
 # Architecture
+Mental model (load first): [docs/Architecture/Model.md](docs/Architecture/Model.md) — five layers, mode axes, invariants 1–12.
 See [docs/Architecture.md](docs/Architecture.md) (details in docs/Architecture/)
 
 # Development

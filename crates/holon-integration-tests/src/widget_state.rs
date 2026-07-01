@@ -3,10 +3,7 @@
 //! Provides a model to track UI state by applying CDC events to initial data rows.
 //! Enables text-based assertions for realistic end-to-end testing.
 
-use std::collections::HashMap;
-
 use holon::api::{ChangeData, RowChange};
-use holon_api::Value;
 use indexmap::IndexMap;
 
 /// Apply a CDC event to a Vec-based row collection.

@@ -23,7 +23,6 @@ use futures::StreamExt;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
-use crate::{assign_reference_sequences, wait_for_file_condition};
 use holon_api::reactive::CdcAccumulator;
 
 use holon::api::{BackendEngine, RowChangeStream};

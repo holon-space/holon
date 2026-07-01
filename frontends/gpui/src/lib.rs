@@ -29,7 +29,7 @@ use holon_api::EntityName;
 use holon_frontend::input::{InputAction, WidgetInput};
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_frontend::theme::ThemeRegistry;
-use holon_frontend::view_model::{DrawerMode, ViewModel};
+use holon_frontend::view_model::ViewModel;
 use holon_frontend::{FrontendSession, ReactiveViewModel, RenderContext};
 
 use entity_view_registry::LocalEntityScope;
