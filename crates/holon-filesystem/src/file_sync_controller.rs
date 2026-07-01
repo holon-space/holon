@@ -179,6 +179,27 @@ impl FileSyncController {
     /// Must be called at startup BEFORE scanning files, so that we have a
     /// diff base for detecting external edits.
     pub async fn initialize(&mut self) -> Result<()> {
+        // Model.md invariant 11: the vault must not be under a byte-level file
+        // syncer. Scan for conflict artifacts (Syncthing/iCloud/Dropbox) and
+        // fail loud if any exist — they get re-ingested as duplicate-ID docs.
+        let scanned = self
+            .fs
+            .scan_directory(&self.root_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "[FileSyncController] scan vault {} for sync-conflict artifacts",
+                    self.root_dir.display()
+                )
+            })?;
+        let conflicts = crate::sync_conflict::find_sync_conflict_artifacts(&scanned.files);
+        if !conflicts.is_empty() {
+            return Err(crate::sync_conflict::conflict_artifacts_error(
+                &self.root_dir,
+                &conflicts,
+            ));
+        }
+
         // Phase 1 fast-path: load persisted `(file_id, content_hash)` pairs
         // from the `file` table BEFORE the in-process cache has replayed file
         // events. If an on-disk file's `hash(RENDERER_VERSION || disk_bytes)`
@@ -263,6 +284,19 @@ impl FileSyncController {
     /// Otherwise, diff against last_projection to compute create/update/delete ops.
     #[tracing::instrument(skip(self), name = "org.on_file_changed", fields(path = %path.display()))]
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
+        // Model.md invariant 11: skip (only) a byte-syncer conflict artifact that
+        // appears at runtime — ingesting it would create a duplicate-ID document.
+        // Disclosed, never silent; normal files are unaffected.
+        if crate::sync_conflict::is_sync_conflict_artifact(path) {
+            tracing::error!(
+                path = %path.display(),
+                "[FileSyncController] Model.md invariant 11: byte-syncer conflict artifact detected \
+                 at runtime — SKIPPING ingestion of this file. A byte-level file syncer \
+                 (Syncthing/iCloud/Dropbox) on the vault is out of contract; cross-device \
+                 convergence must go through Loro/P2P."
+            );
+            return Ok(());
+        }
         let canonical = CanonicalPath::new(path);
         let disk_content = match self.fs.read_to_string(path).await {
             Ok(c) => c,

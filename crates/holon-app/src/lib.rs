@@ -22,6 +22,7 @@
 //! mcp, integration tests) — never the storage-agnostic layers, and never
 //! the wasm frontends (which bring their own wiring).
 
+pub mod consolidator_epoch;
 pub mod headless_builder_services;
 pub mod loro_seams;
 pub mod mcp_integrations;

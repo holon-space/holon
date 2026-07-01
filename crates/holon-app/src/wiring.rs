@@ -103,6 +103,16 @@ impl FrontendInjectorExt for Injector {
         let orgmode_root = holon_config.vault.root.clone();
         let loro_enabled = holon_config.crdt_enabled();
         let loro_storage_dir = holon_config.crdt.storage_dir.clone();
+
+        // Model.md invariant 10: consolidator handover is an epoch, not a runtime
+        // lookup. Fail loud if a durable vault was consolidated by a different
+        // mode than the one configured now (escape hatch: HOLON_CONSOLIDATOR_MIGRATE=1).
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::consolidator_epoch::guard_consolidator_epoch(
+            &db_path,
+            &holon_config.resolve_crdt_storage_dir(&config_dir),
+            loro_enabled,
+        )?;
         #[cfg(not(target_arch = "wasm32"))]
         let mcp_integrations_dir = holon_config.resolve_mcp_integrations_dir(&config_dir);
 

@@ -24,3 +24,6 @@ fluxdi.workspace = true
 futures-signals.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
