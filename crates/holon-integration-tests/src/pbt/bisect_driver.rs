@@ -23,7 +23,7 @@ use holon_pbt_core::bisect::{Localization, bisect};
 use holon_pbt_core::component_set::ComponentSet;
 use holon_pbt_core::fixture::Fixture;
 
-use crate::pbt::fresh_reference_state;
+use crate::pbt::composed::wide_e2e::wide_e2e_ref_for;
 use crate::pbt::stepper::{BisectionStepper, ReplayMode, run_sequence};
 use crate::pbt::transitions::E2ETransition;
 
@@ -83,7 +83,11 @@ pub fn reproduces_under(set: &ComponentSet, transitions: &[E2ETransition]) -> bo
         std::panic::set_hook(Box::new(|_| {}));
     }
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let ref0 = fresh_reference_state(set.wiring.clone());
+        // Seed the reference to match the composed `ComposedSut<WideE2E>` the
+        // `BisectionStepper` builds (`wide_e2e_ref_for` == the keystone's seeded init for
+        // this wiring), so reference and SUT start in lockstep — an empty
+        // `fresh_reference_state` would make every capture spuriously diverge on the seed.
+        let ref0 = wide_e2e_ref_for(&set.wiring);
         let mut stepper = BisectionStepper::default();
         run_sequence(
             &mut stepper,
@@ -120,7 +124,8 @@ pub fn reproduces_under(set: &ComponentSet, transitions: &[E2ETransition]) -> bo
 /// the `HOLON_BISECT_SIGNATURE` override. A caught panic counts as a reproduction
 /// iff its message contains this; anything else is a replay-infidelity abort.
 pub fn reproduction_signature() -> String {
-    std::env::var("HOLON_BISECT_SIGNATURE").unwrap_or_else(|_| "trouble begins at:".to_string())
+    std::env::var("HOLON_BISECT_SIGNATURE")
+        .unwrap_or_else(|_| "reconciled composed sequence diverged from the oracle".to_string())
 }
 
 /// Extract the panic message from a caught payload (`panic!`/`format!` produce a

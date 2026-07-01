@@ -30,6 +30,9 @@ use crate::pbt::state_machine::ReferenceMachine;
 use crate::pbt::sut::E2ESut;
 use crate::pbt::transitions::E2ETransition;
 
+use crate::pbt::composed::harness::ComposedSut;
+use crate::pbt::composed::wide_e2e::WideE2E;
+
 /// Whether a replayed transition that the current wiring gates out is a hard
 /// error (the existing `replay_steps` behaviour) or a deterministic skip
 /// (required for cross-`ComponentSet` bisection, ADR 0009 §4).
@@ -442,52 +445,38 @@ impl Stepper for NullStepper {
 //
 // `SmtStepper<E2ESut>` cannot serve a lattice node: `E2ESut::init_test` is
 // hard-wired to `StorageSelector::Turso` (it calls `E2ESut::new`), so it ignores
-// the node's wiring. `BisectionStepper` instead builds the SUT with the storage
-// substrate the node's wiring implies (`storage_selector_for_wiring`, exactly as
-// the `declare_pbt_slice!` macro does), and runs the wiring-selected invariant
-// registry. The same captured `Vec<E2ETransition>` can then replay against every
-// node via `run_sequence(.., SkipGated)`: transitions the node gates out become
-// `SkippedByGating` no-ops; everything else applies and is checked.
+// the node's wiring. `BisectionStepper` wraps the SAME composed `ComposedSut<WideE2E>`
+// the keystone `general_e2e_composed_pbt` drives: it builds a per-node composed `CapMap`
+// from the node's wiring and runs the full composed catalog via `run_selected`. The same
+// captured `Vec<E2ETransition>` can then replay against every node via
+// `run_sequence(.., SkipGated)`: transitions the node gates out become `SkippedByGating`
+// no-ops; everything else applies through the composed dispatch and is checked.
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 pub struct BisectionStepper {
-    runtime: Arc<tokio::runtime::Runtime>,
-    sut: Option<E2ESut>,
-}
-
-impl Default for BisectionStepper {
-    fn default() -> Self {
-        // One process-wide runtime shared across every lattice node, mirroring
-        // `E2ESut::init_test`'s `SHARED_RUNTIME`. Per-node isolation comes from
-        // the SUT's own state (TempDir, DB, session) dropping at `init`.
-        static SHARED_RUNTIME: std::sync::OnceLock<Arc<tokio::runtime::Runtime>> =
-            std::sync::OnceLock::new();
-        let runtime = SHARED_RUNTIME
-            .get_or_init(|| Arc::new(tokio::runtime::Runtime::new().unwrap()))
-            .clone();
-        Self { runtime, sut: None }
-    }
+    sut: Option<ComposedSut<WideE2E>>,
 }
 
 impl Stepper for BisectionStepper {
     fn init(&mut self, ref_state: &ReferenceState) {
-        // Build the SUT for *this node's* wiring — the whole point of bisection.
-        // Dropping any previous SUT here releases its DB/session Arcs.
-        let storage = crate::pbt::storage_selector_for_wiring(&ref_state.wiring);
-        self.sut = Some(
-            E2ESut::new_with_backend(self.runtime.clone(), storage)
-                .expect("BisectionStepper: SUT construction failed"),
-        );
+        // Build the composed `CapMap` for *this node's* wiring — the whole point of
+        // bisection. `ComposedSut::init_test` runs `compose_sut` for `ref_state.wiring`,
+        // and dropping any previous SUT here releases its DB/session Arcs.
+        self.sut = Some(ComposedSut::<WideE2E>::init_test(ref_state));
     }
 
     fn apply(&mut self, ref_state: &ReferenceState, transition: &E2ETransition) {
-        let sut = self.sut.as_mut().expect("init() runs before apply()");
-        sut.drive_transition(ref_state, transition);
+        let sut = self.sut.take().expect("init() runs before apply()");
+        self.sut = Some(ComposedSut::<WideE2E>::apply(sut, ref_state, transition.clone()));
     }
 
     fn check_invariants(&mut self, ref_state: &ReferenceState) {
+        // Divergence surfaces as the composed panic
+        // ("reconciled composed sequence diverged from the oracle"), which is
+        // `bisect_driver::reproduction_signature()`'s default marker.
         let sut = self.sut.as_ref().expect("init() runs before check()");
-        self.runtime.block_on(sut.run_invariant_registry(ref_state));
+        ComposedSut::<WideE2E>::check_invariants(sut, ref_state);
     }
 }
 
