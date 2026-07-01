@@ -611,6 +611,27 @@ not the headless `ReactiveEngineDriver`.
    whose `apply` reuses **WideE2E's `apply_transition`** (same headless dispatch through the shared
    session) BUT with gesture transitions routed through the window's driver caps; construct from injected
    window handles (not `init_test`). Drive via `replay_steps`.
+   - ✅ **Sub-step 3b-i DONE (rev `4ad2b594`):** `ComposedSut::from_parts` + a `SettleHook` seam
+     (`composed/harness.rs`) wrap already-booted caps and pump the window before each
+     `check_invariants`; a windowed non-vacuity floor (keyed off an ACTUAL `SutLayout` cap) fails loud
+     on a silent windowed deselect. `compose_sut_windowed_base_seeded` (builder) + `boot_and_seed_wide_windowed_base`
+     + `windowed_composed_sut` (wide_e2e) assemble the SUT. Test `windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame`
+     (`gpui_compose_sut_windowed.rs`) is GREEN: the UNIFIED catalog (block/storage + windowed geometry +
+     focus) runs over ONE `wide_e2e_ref()` oracle in ONE SUT. Threading: a dedicated multi-thread rt drives
+     apply/check leaf futures while the session backend runs on its own runtime; the settle hook self-pumps
+     the window via `app_ptr` (no `block_on`).
+   - **Faithful focus (landed 3b-i):** initial page-root focus is established via the ENGINE
+     (`dispatch_intent_sync(navigation.focus)` = same SQL write + `maybe_mirror_navigation_focus` into
+     `engine.focused_block()`), NOT the raw `SutFocusWrite` (which bypasses the mirror — invisible
+     headlessly since the headless `SutDriver` is withheld, but a divergence once a window `SutDriver`
+     reads focus).
+   - ⚠ **NEXT (3b-ii) — the `SutFocusWrite`/alphabet finding:** the unified SUT carries `SutFocusWrite`
+     (from the base ViewModel), so the `NavigateFocus` *transition* is cap-admitted — but it routes through
+     the raw-session write that bypasses the mirror, so any `NavigateFocus` in a sequence RE-BREAKS
+     `inv-focus-matches-ref`. Faithful fix (matches the existing windowed path, whose `window_input_wide`
+     has no `SutFocusWrite`): **withhold `SutFocusWrite` on the windowed overlay** so `NavigateFocus`
+     deselects and focus moves only via `ClickBlock` gestures (which call `set_focus` → mirror). Then a
+     hand-built gesture sequence → `replay_steps` → the proptest loop.
 4. Repoint harnesses (thinnest first) → 5. delete native core → retire `parity.rs` LAST. (Unchanged.)
 
 ⚠ Runtime must stay multi-thread and alive on the background thread while the window runs on main
