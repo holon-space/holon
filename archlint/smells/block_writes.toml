@@ -14,8 +14,8 @@ exclude = [
     # The two sanctioned writers (Loro projection sink + SqlOnly provider):
     "crates/holon/src/core/sql_block_operations.rs",
     "crates/holon/src/core/sql_operation_provider.rs",
-    "crates/holon/src/sync/consolidator.rs",
-    "crates/holon/src/sync/loro_sync_controller.rs",
+    "crates/holon-loro/src/consolidator.rs",
+    "crates/holon-loro/src/loro_sync_controller.rs",
     # Turso IVM bug repros / examples / tests exercise raw SQL on purpose:
     "crates/holon/examples/**",
     "crates/holon/src/storage/*repro*.rs",

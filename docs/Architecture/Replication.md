@@ -21,7 +21,10 @@ component holds all of it, and the components are wildly heterogeneous:
   band* (the user or an AI agent edits the file directly — we cannot funnel
   those writes).
 - **Loro** (when enabled) holds a CRDT replica of the tree; optional.
-- **Todoist** holds tasks in *its own* id-space; external; partial.
+- **Todoist** holds tasks in *its own* id-space; external; partial. *(No Todoist
+  integration is currently wired — the `holon-todoist` crate was deleted; the
+  future path is MCP. Todoist stands in here for any external, partial,
+  server-authoritative component.)*
 - **Turso** holds a queryable SQL cache of everything; ephemeral (deleted on
   most app starts).
 - **The UI** holds the rendered subset and originates user edits.
@@ -126,20 +129,29 @@ resurrection/scramble bug class. This answers, in one move:
   writes we cannot funnel (files edited out of band), `diff(base, theirs)` *is*
   the intent extraction; §4 converts it into explicit intent ops.
 
-> **Current state:** `FileSyncController` already has this idea as
-> `last_projection` (`file_sync_controller.rs:8`, `:242`). The work is to (a)
-> formalize it behind a `SyncBaseStore` trait, (b) make it the **sole** diff
-> base, and (c) stop entangling it with cache reads (`block_reader.get_blocks`
-> via `QueryableCache<Block>` at `:380`/`:430`). **Diff against the base, never
-> against Turso** — Turso is the consolidated *current* state, the wrong
-> ancestor.
+> **Current state (2026-07):** (a) and (b) are done — the base is formalized
+> behind the `BaseStore` trait seam (`crates/holon-filesystem/src/sync_base_store.rs`)
+> and both the org diff and `LoroProjection::project` read their "before" through
+> it. (c) is partial: `FileSyncController` no longer diffs against the cache, but
+> still reads it (`block_reader.get_blocks`) for cold-boot base re-seeding and
+> count/render checks. **Diff against the base, never against Turso** — Turso is
+> the consolidated *current* state, the wrong ancestor.
 
-### `SyncBaseStore` is a KV interface, Loro is one impl
+### The base store is a KV interface, Loro is one impl
+
+Target shape — per `(component, entity)`: get/put the base snapshot. The landed
+version (`crates/holon-filesystem/src/sync_base_store.rs`) is narrower: the trait
+is `BaseStore` (sync, not async), keyed by `BaseKey { peer, file }` rather than a
+`ComponentId` type (which doesn't exist yet), and it stores whole-document
+snapshots (`HashMap<block-id, SnapshotBlock>`) rather than per-entity bases —
+`SyncBaseStore` is the concrete in-memory impl, which today ignores the key
+("one global doc"):
 
 ```rust
-trait SyncBaseStore {           // per (component, entity): get/put the base snapshot
-    async fn base(&self, component: ComponentId, entity: &EntityUri) -> Option<Base>;
-    async fn set_base(&self, component: ComponentId, entity: &EntityUri, base: Base);
+pub trait BaseStore: Send + Sync {
+    fn get_base(&self, key: &BaseKey) -> Arc<HashMap<String, SnapshotBlock>>;
+    fn put_base(&self, key: &BaseKey, snapshot: HashMap<String, SnapshotBlock>);
+    fn is_base_seeded(&self, key: &BaseKey) -> bool;
 }
 ```
 
@@ -193,6 +205,13 @@ sequence number (see §5). This is "parse, don't validate" applied to the wire:
 the bus type literally cannot carry an order key, so the disjoint-keyspace bug
 (gen_n_keys vs Loro-fi) becomes unrepresentable.
 
+> **Landed:** `ChangeOp::Relocate { id, parent, after_sibling }` in
+> `crates/holon-api/src/change_set.rs` has exactly this shape — no order-key
+> field. Caveat: the decode path still accepts `sort_key` params as an
+> explicitly-marked fallback until the Phase 5 flip (spec 0007), so the
+> "cannot carry an order key" guarantee is the wire *type*, not yet the whole
+> pipeline.
+
 ### Loro: store vs. merge-function are two things
 
 `LoroStore` (a durable replica: the tree, persistence, P2P) and `TextMerge`
@@ -209,7 +228,9 @@ storing in Loro.
   conflict.
 - So a `TextMergeProvider` returns the *same* target per `(uri, field)` (shared,
   when backed by a store), and components remain individual through their
-  *bases*, not through separate mergers.
+  *bases*, not through separate mergers. *(Landed:
+  `crates/holon-loro/src/text_merge_provider.rs` with `LoroTextMergeProvider`
+  and `TransientTextMergeProvider`.)*
 
 ---
 
@@ -240,19 +261,34 @@ Consequences (all desirable, all free once the rule holds):
   mode) and *that* component generates fi locally (existing `gen_key_between`).
   Still one owner → still one keyspace. Keep `new_child_anchor`-returns-`String`
   reachable **only** in the mode where that component owns order (mode-specific
-  impl), so the Loro path cannot call it.
+  impl), so the Loro path cannot call it. *(Not yet the case: `split_block`
+  calls `new_child_anchor` in both modes; the Loro-mode impl
+  (`loro_seams.rs`) returns a placeholder that `apply_create` overwrites from
+  the tree position. Works, but the type system doesn't yet make the Loro path
+  unable to mint keys.)*
 
 **Partial-replica rows** Loro doesn't have (e.g. Todoist tasks in Turso's union
 domain) get their order from *their* owner (Todoist's sequence), converted to fi
 by the Todoist→Turso projector. No conflict because each sibling-set has exactly
-one owner. *(Edge case, deferred: a parent whose children come from two
-different source components would need a single nominated order-owner.)*
+one owner. **Mixed-origin sibling sets (decided 2026-07):** when a parent's
+children come from two different source components (an external task embedded
+under a note), order ownership follows the **parent's home component** — that
+owner mints the fi for every child, foreign ones included; the foreign
+component's native sequence is input to the owner, never a second keyspace.
+Implementation waits for the first integration that embeds under a note.
 
 The live "sort_key stays `A0`" bug **is** a violation of this section: the
 projection failed to carry every Loro block's fi (non-total projection) while a
 second writer inserted NULL rows. "Single owner + verbatim *total* projection"
 makes the column always equal Loro's fi — the fix and the architecture are the
 same change.
+
+> **Status (2026-07):** the projection is verbatim-from-Loro-fi with a
+> totality guard (R-1 `debug_assert` in `loro_sync_controller.rs` + a PBT
+> invariant counting `sort_key IS NULL` rows), but not yet strictly total: the
+> snapshot loop falls back to `default_sort_key()` (`"A0"`) when Loro returns
+> no fi for a node. Spec 0007 Phase 1 still lists "total, verbatim fi
+> projection" as open.
 
 ---
 
@@ -309,6 +345,10 @@ exactly right for the *downstream* side, which has nearly all the consumers
 (hence "simplifies consumers a lot"). But it is **insufficient as the inter-peer
 merge bus**:
 
+> *(The per-parent `SignalVec` shape is aspirational — today's block downstream
+> is `BlockFeed`/`LiveData<Block>`; `SignalVec` is only used in the
+> command-palette popup.)*
+
 1. **It ships whole values.** `UpdateAt{value}` carries the entire `Block`; if
    `Block` includes `sort_key`, order keys cross the wire via the value —
    violating §5. Avoid by omitting `sort_key` from the on-wire `Block` and
@@ -319,10 +359,44 @@ merge bus**:
    for merge inputs.
 3. **No provenance/base** for 3-way merge.
 
-So: `LiveData<Block>` downstream (the existing `run_block_mirror` is this); a
+So: `LiveData<Block>` downstream (the existing `BlockFeed` wiring in
+`event_infra_module.rs` is this; the older `run_block_mirror` was deleted); a
 thin, lossless, provenance-carrying intent channel upstream of the consolidator.
 Turso writes its `sort_key` column locally from the vec index/owner fi and never
 echoes a key back upstream.
+
+### The durable form of this channel (offline, future)
+
+When offline support lands, the upstream intent channel **becomes a durable
+command log** — the same channel, persisted. This absorbs the earlier
+"command sourcing" design (started deliberately early so the architecture would
+account for offline; previously a standalone sketch in
+`command_sourcing_todo.md`, now folded here). What carries over:
+
+- **Log shape**: an append-only `commands` table — client-generated UUID as
+  the idempotency key, `entity_id` for per-entity ordering, the serialized
+  intent op as payload, a `pending → syncing → synced | failed` status, and
+  `error_details` for user-facing rejection feedback. The payload vocabulary
+  is §4's intent ops (`ChangeOp`) — **not** a separate command enum; the
+  earlier `CommandType` sketch is superseded by the intent vocabulary.
+- **ID mapping**: an `id_mappings` table (internal id → external id, filled
+  after sync) — this is precisely the `OwnForeign(map)` ID capability of §2
+  made concrete, for optimistic creates against systems that mint their own
+  ids.
+- **Partial-batch failure policy** (decided): stop on first failure per
+  entity, mark it, refetch the entity's canonical state, leave the remaining
+  commands pending. Rollback is **refetch, not inverse computation**.
+- **Principles kept warm today** (the hard-to-retrofit invariants, all already
+  present): client-minted operation IDs, ops serializable with provenance,
+  inverse ops (`OperationResult::undo`), anchored — never offset — positions.
+- Deferred mechanics for when it's built: background sync worker with
+  per-entity serial replay, command compaction for long offline periods,
+  batch sync under one idempotency key.
+
+The `OperationLog`'s `PendingSync`/`Synced`/`Cancelled` statuses
+([Sync](Sync.md)) are the implemented today-side of this: undo bookkeeping now,
+sync bookkeeping later. There is deliberately **one** future offline design —
+this section — not three.
 
 ---
 
@@ -373,8 +447,9 @@ echoes a key back upstream.
 - Per-parent vs. global `SignalVec` for the downstream projection.
 - First `SyncBaseStore` impl: shadow-copy vs. jj (lean shadow-copy first, behind
   the trait, upgrade where history/merge earns its keep).
-- A parent whose children originate in two different source components (who owns
-  that sibling-set's order). Rare; defer.
+- ~~A parent whose children originate in two different source components (who
+  owns that sibling-set's order).~~ **Decided (2026-07):** the parent's home
+  component owns the sibling-set's order — see §5.
 
 ---
 
@@ -392,14 +467,20 @@ every variant of this model — so it doubles as the foundation's first step:
 
 See [Sync.md](Sync.md) for the current implementation surface this evolves.
 
-> **Implementation status (2026-06-11).** Steps 1–2 have **landed**:
-> `SyncBaseStore` exists and `LoroProjection::project` diffs against the base;
-> children read the Loro tree for single-owner order.
-> Phase 1 (sole Turso writer, authority-first delete, intent vocabulary) is in
-> progress per `codev/specs/0007-architecture-improvement-plan.md`.
-> Cell backing types (`LoroMetaCellBacking<T>`, `LoroTreeParentCellBacking`,
-> `LoroTreePositionCellBacking`, `LwwScalarBacking<T>`, `LwwTextCellBacking`)
-> are documented but deferred past Phase 1; only `LoroTextCellBacking` is
-> implemented. The `write_field` carve-outs in `block_cell_registry.rs` handle
-> routing correctly without them.
+> **Implementation status (verified 2026-07-01).** Steps 1–2 have **landed**:
+> the `BaseStore` trait + `SyncBaseStore` impl exist
+> (`crates/holon-filesystem/src/sync_base_store.rs`, see §3 for how the landed
+> shape differs from the sketch) and `LoroProjection::project` diffs against the
+> base; children read the Loro tree for single-owner order
+> (`loro_block_operations.rs::children_ordered`). Step 3 is partial: the
+> `sole_block_writer` archlint gate exists, but it sanctions two mode-dependent
+> writers (Loro projection in Full mode, `SqlBlockOperations` in SqlOnly), and
+> `codev/specs/0007-architecture-improvement-plan.md` — the tracking spec for
+> the sole-writer / authority-first-delete / intent-vocabulary work — still has
+> those Phase 1 items open (spec header: Phase 0 in progress).
+> Cell backing types `LoroMetaCellBacking<T>`, `LoroTreeParentCellBacking`,
+> `LoroTreePositionCellBacking`, and `LwwScalarBacking<T>` are documented but
+> not implemented; `LoroTextCellBacking` **and** `LwwTextCellBacking` are. The
+> `write_field` carve-outs in `block_cell_registry.rs` handle routing correctly
+> without them.
 > See `devlog/2026-05-22-blocksync-p3-basediff-handoff.md`.

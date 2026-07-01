@@ -161,7 +161,7 @@ pub trait TaskEntity: MaybeSendSync {
 }
 ```
 
-These compile-time traits define built-in entity types. User-defined types (Person, Book, Organization) will be defined at runtime via YAML type definitions with a `FieldLifetime` enum governing storage and reconstruction. See [Entity Type System](docs/Architecture/Schema.md#entity-type-system-partially-implemented).
+These compile-time traits define built-in entity types. User-defined types (Person, Book, Organization) will be defined at runtime via YAML type definitions with a `FieldLifetime` enum governing storage and reconstruction. See [Entity Type System](Architecture/Schema.md#entity-type-system-partially-implemented).
 
 ### Domain Operations
 
@@ -208,15 +208,16 @@ Detailed documentation lives in `docs/Architecture/`:
 
 | File | Covers |
 |------|--------|
-| [storage.md](docs/Architecture/Storage.md) | QueryableCache, TursoBackend, CDC, DbHandle, Command Sourcing |
-| [render-pipeline.md](docs/Architecture/RenderPipeline.md) | Query compilation (PRQL/GQL/SQL), EntityProfile, ReactiveViewModel, Three-Tier Events |
-| [operations.md](docs/Architecture/Operations.md) | Operation System, Action Watcher, Undo/Redo, Procedural Macros |
-| [integrations.md](docs/Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
-| [schema.md](docs/Architecture/Schema.md) | SchemaModule System, Entity Type System, FieldLifetime, Value Types |
-| [engine.md](docs/Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
-| [sync.md](docs/Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
-| [replication.md](docs/Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
-| [archlint.md](docs/Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
+| [Model.md](Architecture/Model.md) | ★ **Read first** — the one-page mental model: five layers, mode axes, Loro's three capabilities, invariants 1–12 |
+| [storage.md](Architecture/Storage.md) | QueryableCache, TursoBackend, CDC, DbHandle, Command Sourcing |
+| [render-pipeline.md](Architecture/RenderPipeline.md) | Query compilation (PRQL/GQL/SQL), EntityProfile, ReactiveViewModel, Three-Tier Events |
+| [operations.md](Architecture/Operations.md) | Operation System, Action Watcher, Undo/Redo, Procedural Macros |
+| [integrations.md](Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
+| [schema.md](Architecture/Schema.md) | SchemaModule System, Entity Type System, FieldLifetime, Value Types |
+| [engine.md](Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
+| [sync.md](Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
+| [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
+| [archlint.md](Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
 
 See also [wiki/overview.md](wiki/overview.md) for the navigational layer and [wiki/index.md](wiki/index.md) for per-crate / per-concept pages.
 

@@ -10,7 +10,7 @@ The core architectural pattern is **Authority + Projection**: each entity type h
 
 Reads flow `authority → event log → Turso projection → Cell → UI`. Writes flow `chord op / UI → Cell → typed CrudOperations method → authority → event emission → LoroProjection/BlockConsolidator → Turso`. The UI never queries an authority directly; it reads cells, which read the projection.
 
-When Loro is disabled (SqlOnly mode), `LwwScalarBacking` / `LwwTextCellBacking` substitute Loro-backed cells with last-write-wins semantics — same cell interface, different protocol.
+When Loro is disabled (SqlOnly mode), `LwwTextCellBacking` (implemented, `crates/holon-core/src/cell.rs`) substitutes the Loro-backed text cell with last-write-wins semantics — same cell interface, different protocol. `LwwScalarBacking` (scalar fields) is planned but not yet implemented; SqlOnly scalar writes go through `BlockCellRegistry::write_field`'s non-cell dispatch.
 
 ### Loro CRDT Integration Overview
 
@@ -77,7 +77,7 @@ Holon uses a **hybrid data model** where different storage technologies are used
 
 **Key Distinctions**:
 
-- **Loro = the authoritative block adapter under the default wiring** (post-2026-05 authority-flip; the block *domain* remains canonical per [ADR 0004](../adr/0004-domain-adapter-actor-split.md) — authority is a DI choice, not a permanent property of Loro). The vast majority of block writes — from chord ops, MCP, OrgMode runtime updates — flows through `LoroBlockOperations`, lands in the LoroDoc, fires `on_loro_changed`, gets projected to Turso by `LoroProjection` / `BlockConsolidator`. **Exceptions handled in `BlockCellRegistry::write_field`** (`crates/holon/src/sync/block_cell_registry.rs`): the fields `id`, `depth`, `content_type`, and `source_name` are routed to the SQL path (no clean Loro encoding today); `_expected_*` watermark control fields pass through to SQL; and any block whose tree node is absent in the LoroDoc (unseeded vault) falls back to SQL with a disclosed `tracing::warn!`. These carve-outs are documented and visible — Turso may hold these fields' values without a Loro write.
+- **Loro = the authoritative block adapter under the default wiring** (post-2026-05 authority-flip; the block *domain* remains canonical per [ADR 0004](../adr/0004-domain-adapter-actor-split.md) — authority is a DI choice, not a permanent property of Loro). The vast majority of block writes — from chord ops, MCP, OrgMode runtime updates — flows through `LoroBlockOperations`, lands in the LoroDoc, fires `on_loro_changed`, gets projected to Turso by `LoroProjection` / `BlockConsolidator`. **Exceptions handled in `BlockCellRegistry::write_field`** (`crates/holon-loro/src/block_cell_registry.rs`): the fields `id`, `depth`, `content_type`, and `source_name` are routed to the SQL path (no clean Loro encoding today); `_expected_*` watermark control fields pass through to SQL; and a `content` write for a block whose tree node is absent in the LoroDoc (unseeded vault) falls back to SQL with a disclosed `tracing::warn!`. These carve-outs are documented and visible — Turso may hold these fields' values without a Loro write.
 - **Turso = projection only** for blocks (with above carve-outs). The `block` table is downstream of Loro; matviews built on top of `block` (focus_roots, blocks_with_paths, etc.) project from there. Direct SQL writes to the `block` table outside `BlockConsolidator` and the startup-seed path are forbidden (archlint-enforced via the `sole_block_writer` smell — see [Archlint.md](Archlint.md)).
 - **Sync Adapters (Iroh, local file persist)**: Transport-only. Iroh syncs Loro CRDT documents between devices via P2P. Local persistence serializes Loro state to disk. These are independently optional.
 - **OrgMode runtime updates** go through the cell layer, not direct SQL writes — same path as UI. The org-startup-seeding code path (parse files at boot, populate Loro) is the only OrgMode-to-storage write that bypasses cells.
@@ -92,6 +92,12 @@ Loro, OrgMode, and Iroh are independently toggleable via environment variables:
 | OrgMode | `HOLON_VAULT_ROOT` (path) | OFF |
 | Loro | `HOLON_CRDT_ENABLED` (truthy) | OFF |
 | Iroh | (bundled with Loro, future: separate) | OFF |
+
+> **Vault contract (Model.md invariant 11):** the `HOLON_VAULT_ROOT` directory
+> must not be under a byte-level file syncer (Syncthing/iCloud/Dropbox) while
+> Loro P2P is active — a file replica belongs to exactly one consolidator;
+> cross-device convergence travels through Loro. See
+> [Replication](Replication.md) §6/§9 and the README warning.
 
 All 4 combinations of OrgMode × Loro are valid:
 
@@ -111,11 +117,11 @@ When Loro is enabled (the production configuration), all writes — from OrgMode
 3. By routing through Loro, the CRDT diffs the incoming content against known state and applies character-level operations (RGA), preserving concurrent remote edits
 4. The `BlockCellRegistry` returns `LoroTextCellBacking` for `content`, ensuring chord-op text writes (split, join, embed) preserve op-level merge fidelity
 
-When Loro is disabled (SqlOnly mode), `LwwScalarBacking` / `LwwTextCellBacking` substitute the Loro-backed cells with last-write-wins semantics. There is no P2P sync in this mode; conflicts can only arise from OrgMode file changes racing with UI operations — local-only scenario where LWW is reasonable.
+When Loro is disabled (SqlOnly mode), `LwwTextCellBacking` substitutes the Loro-backed text cell with last-write-wins semantics (scalar-field LWW backings are planned; scalar writes dispatch through `write_field` today). There is no P2P sync in this mode; conflicts can only arise from OrgMode file changes racing with UI operations — local-only scenario where LWW is reasonable.
 
 **Loro Data Model in Holon**
 
-Loro stores hierarchical block data using a single `LoroTree` named `"blocks"` (constant `TREE_NAME` in `loro_backend.rs`). Each tree node carries a meta map for block fields. The old adjacency-list model (`blocks_by_id` / `children_by_parent` maps) was replaced with the tree structure.
+Loro stores hierarchical block data using a single `LoroTree` named `"blocks"` (constant `TREE_NAME` in `crates/holon-loro/src/loro_backend.rs`). Each tree node carries a meta map for block fields. The old adjacency-list model (`blocks_by_id` / `children_by_parent` maps) was replaced with the tree structure.
 
 | Container | Type | Purpose |
 |-----------|------|---------|
@@ -133,12 +139,12 @@ Each block contains:
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | `LoroModule` | `crates/holon/src/sync/loro_module.rs` | Standalone DI module for Loro services (registers `LoroBlockOperations`, cell backings) |
-| `LoroBlockOperations` | `crates/holon/src/sync/loro_block_operations.rs` | `OperationProvider` for `entity_name="block"` — primary writer; translates set_field/create/delete to Loro mutations |
-| `BlockCellRegistry` | `crates/holon/src/sync/block_cell_registry.rs` | Per-entity cell registry; picks `LoroTextCellBacking` (Full mode, `content` field) or `Lww*Backing` (SqlOnly) per field |
-| `LoroTextCellBacking` | `crates/holon/src/sync/loro_text_cell_backing.rs` | Wraps `LoroText` for `content`; produces TextOps + commit |
-| `LoroSyncController` / `LoroProjection` | `crates/holon/src/sync/loro_sync_controller.rs` | Observes Loro doc commits; diffs vs a persisted base and projects the delta into SQL |
-| `BlockConsolidator` | `crates/holon/src/sync/consolidator.rs` | The single writer that applies projected ops to Turso `block_raw` (raw INSERT/UPDATE/DELETE) |
-| `LoroDocumentStore` | `crates/holon/src/sync/loro_document_store.rs` | Manages Loro CRDT documents on disk |
+| `LoroBlockOperations` | `crates/holon-loro/src/loro_block_operations.rs` | `OperationProvider` for `entity_name="block"` — primary writer; translates set_field/create/delete to Loro mutations |
+| `BlockCellRegistry` | `crates/holon-loro/src/block_cell_registry.rs` | Per-entity cell registry; picks `LoroTextCellBacking` (Full mode, `content` field) or `LwwTextCellBacking` (SqlOnly) per field |
+| `LoroTextCellBacking` | `crates/holon-loro/src/loro_text_cell_backing.rs` | Wraps `LoroText` for `content`; produces TextOps + commit |
+| `LoroSyncController` / `LoroProjection` | `crates/holon-loro/src/loro_sync_controller.rs` | Observes Loro doc commits; diffs vs a persisted base and projects the delta into SQL |
+| `BlockConsolidator` | `crates/holon-loro/src/consolidator.rs` | The single writer that applies projected ops to Turso `block_raw` (raw INSERT/UPDATE/DELETE) |
+| `LoroDocumentStore` | `crates/holon-loro/src/loro_document_store.rs` | Manages Loro CRDT documents on disk |
 | `SqlOperationProvider` | `crates/holon/src/core/sql_operation_provider.rs` | Used for non-block entities; SqlOnly mode fallback for blocks |
 
 **Data Flow: Authority + Projection (Loro enabled)**
@@ -169,9 +175,11 @@ Each block contains:
 **Data Flow: SqlOnly mode (degraded, tests / no-Loro builds)**
 
 ```
-  Chord op / UI ──→ Cell<T>.set
+  Chord op / UI ──→ Cell<String>.set (content: LwwTextCellBacking)
+                    scalar fields: BlockCellRegistry::write_field (non-cell dispatch;
+                                   LwwScalarBacking planned)
                         ↓
-                   LwwScalarBacking → CrudOperations::set_field
+                   CrudOperations::set_field
                         ↓
                    SqlOperationProvider → Turso (LWW) → CDC → UI
 ```
@@ -195,7 +203,7 @@ Device A (offline edit)              Device B
 Loro CRDTs converge → materialize to Turso → CDC → UI
 ```
 
-See [ADR 0001: Hybrid Sync Architecture](docs/adr/0001-hybrid-sync-architecture.md) for the complete architectural rationale.
+See [ADR 0001: Hybrid Sync Architecture](../adr/0001-hybrid-sync-architecture.md) for the complete architectural rationale.
 
 ### P2P Transport (Iroh)
 
@@ -203,9 +211,9 @@ See [ADR 0001: Hybrid Sync Architecture](docs/adr/0001-hybrid-sync-architecture.
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `IrohSyncAdapter` | `crates/holon/src/sync/iroh_sync_adapter.rs` | Transport-only Iroh adapter: exports snapshots, applies updates, manages `iroh::Endpoint` |
-| `LoroShareBackend` | `crates/holon/src/sync/loro_share_backend.rs` | Coordinates document sharing over P2P; produces / consumes Loro export bytes |
-| `MultiPeer` | `crates/holon/src/sync/multi_peer.rs` | Multi-peer session management |
+| `IrohSyncAdapter` | `crates/holon-loro/src/iroh_sync_adapter.rs` | Transport-only Iroh adapter: exports snapshots, applies updates, manages `iroh::Endpoint` |
+| `LoroShareBackend` | `crates/holon-loro/src/loro_share_backend.rs` | Coordinates document sharing over P2P; produces / consumes Loro export bytes |
+| `multi_peer` (module) | `crates/holon-loro/src/multi_peer.rs` | Multi-peer session management (`DirectSync`, `PeerState`, `GroupState`) |
 
 Iroh P2P is independently optional (bundled with Loro; future: separate env var). On WASM, Iroh is unavailable and documents operate in local-only mode.
 
@@ -213,7 +221,7 @@ Iroh P2P is independently optional (bundled with Loro; future: separate env var)
 
 The high-level repository implementation that provides the primary API for block document operations. `LoroBackend` wraps `LoroDocument` (an internal thin wrapper around `loro::LoroDoc`) and implements the repository trait hierarchy.
 
-**Location**: `crates/holon/src/api/loro_backend.rs`
+**Location**: `crates/holon-loro/src/loro_backend.rs`
 
 ```rust
 pub struct LoroBackend {
@@ -322,8 +330,10 @@ LoroBackend uses internal helper traits for cleaner Loro container access:
 Block content supports two variants via `BlockContent` enum:
 
 ```rust
+// crates/holon-api/src/block.rs
 pub enum BlockContent {
     Text { raw: String },
+    RichText { text: String, marks: ... },
     Source(SourceBlock),
 }
 
@@ -340,10 +350,11 @@ Helper functions serialize content to/from Loro maps:
 
 | Function | Purpose |
 |----------|---------|
-| `read_content_from_map(block_map)` | Deserializes `BlockContent` from Loro fields (handles backward compatibility with old string format) |
-| `write_content_to_map(block_map, content)` | Serializes `BlockContent` fields (`content_type`, `content_raw`, or `source_*` fields) |
-| `read_properties_from_map(block_map)` | Deserializes custom `properties` from JSON string |
-| `write_properties_from_map(block_map, properties)` | Serializes custom `properties` to JSON string |
+| `read_content_from_meta(meta)` | Deserializes `BlockContent` from Loro fields (handles backward compatibility with old string format) |
+| `write_content_to_meta(meta, content)` | Serializes `BlockContent` fields (`content_type`, `content_raw`, or `source_*` fields) |
+| `read_properties_from_meta(meta)` | Deserializes custom `properties` from the nested properties map |
+
+Property writes have no symmetric helper — they go through `update_block_fields` into the per-property nested `LoroMap` (per-key LWW; see BlockEventStorm H3).
 
 **Block Storage Fields:**
 
@@ -364,23 +375,17 @@ Helper functions serialize content to/from Loro maps:
 
 **Cycle Detection in `move_block`:**
 
-When moving a block, LoroBackend prevents creating cycles in the tree hierarchy:
+Moving a block must not create a cycle in the tree hierarchy. The check lives in the backend-agnostic mutation layer, not in LoroBackend:
 
 ```rust
-/// Check if `ancestor_id` is an ancestor of `descendant_id`
-fn is_ancestor(ancestor_id: &str, descendant_id: &str, doc: &LoroDoc) -> Result<bool> {
-    // Walk from descendant up to root, checking if we hit ancestor_id
-    let mut current_id = Some(descendant_id.to_string());
-    while let Some(id) = current_id {
-        if id == ancestor_id { return Ok(true); }
-        current_id = get_parent_id(&id, doc);
-    }
-    Ok(false)
+// crates/holon-api/src/block_mutation.rs
+fn is_ancestor_or_self(ancestor: &EntityUri, start: &EntityUri, tree: &impl BlockTreeView) -> bool {
+    // Walk from `start` up via tree.parent_of, with a seen-set against parent loops
 }
 ```
 
 Before moving block `A` under new parent `B`, the algorithm checks:
-1. Walk from `B` up to root via `parent_id` links
+1. Walk from `B` up to root via parent links
 2. If `A` is found during the walk → cycle detected → reject with error
 3. Otherwise → move is safe → proceed
 
@@ -388,7 +393,7 @@ Before moving block `A` under new parent `B`, the algorithm checks:
 
 The repository pattern splits responsibilities across focused traits that backends can implement selectively:
 
-**Location**: `crates/holon/src/api/repository.rs`
+**Location**: `crates/holon-api/src/repository.rs` (`ChangeNotifications<T>` in `crates/holon-api/src/streaming.rs`; `crates/holon/src/api/repository.rs` is a re-export shim)
 
 ```rust
 // Core trait hierarchy
@@ -478,9 +483,10 @@ once each source was wired to its sink directly. The authority (Loro for blocks)
 projects into Turso through a single writer, and reactive consumers read the
 projection back through a CDC-driven mirror.
 
-**Location**: `crates/holon/src/sync/{loro_sync_controller,consolidator,live_data}.rs`. The
-residual `event_bus.rs` keeps only shared vocabulary (`EventOrigin`,
-`PublishErrorTracker`) — no bus.
+**Location**: `crates/holon-loro/src/{loro_sync_controller,consolidator}.rs`,
+`crates/holon-api/src/live_data.rs`. The residual `crates/holon-loro/src/event_bus.rs`
+keeps only shared vocabulary (re-exports of `EventOrigin`, `PublishErrorTracker`, and the
+`POSITION_AFTER_BLOCK_ID_PARAM` / `ROUTING_DOC_URI_KEY` param keys) — no bus.
 
 **Block Flow (Authority → Projection → Reactive read):**
 
@@ -512,18 +518,19 @@ residual `event_bus.rs` keeps only shared vocabulary (`EventOrigin`,
             ▼              ▼                   ▼
    LiveData<Block>   OrgMode re-render    Cell.signal()
    (BlockFeed)       (FileSyncController,  fires for active
-        │             skips _change_origin consumers
-        ▼             = "loro" echoes)        │
+        │             base-diff suppresses consumers
+        ▼             its own echoes)         │
    block_link indexer ◄───────────────────────┘
    (LinkEventSubscriber::start_from_live_data)
 ```
 
-**Loop Prevention via `_change_origin`:** every write is tagged with an
-`EventOrigin` (`Loro`, `Org`, `Todoist`, `Ui`, …) carried on the `_change_origin`
-CDC column. The inbound direction inspects that column and echo-suppresses changes
-carrying its own origin (e.g. the OrgMode re-render skips `_change_origin = "loro"`
-rows that are just its own projection echoing back). The chain also terminates
-because CRDT convergence makes re-applied writes no-ops.
+**Loop Prevention:** every write is tagged with an `EventOrigin` (`Loro`, `Org`,
+`Ui`, …) carried on the `_change_origin` CDC column, so provenance is available to
+any consumer. The actual echo suppression in `FileSyncController` is **base-diff
+based**, not origin-column based: it diffs incoming state against its
+`last_projection` base, and a change that matches what it last wrote is a no-op
+(see [Replication](Replication.md) §3). The chain also terminates because CRDT
+convergence makes re-applied writes no-ops.
 
 **External caches (directory/file, Todoist)** bypass blocks entirely: their sync
 providers expose a `tokio::broadcast` and the target `QueryableCache` ingests it
@@ -557,7 +564,7 @@ The Operation Log provides persistent undo/redo functionality by storing execute
 
 ```rust
 pub struct OperationLogStore {
-    backend: Arc<RwLock<TursoBackend>>,
+    db_handle: DbHandle,
     max_log_size: usize,  // Default 100, auto-trims oldest
 }
 ```
@@ -649,24 +656,19 @@ pub enum UndoAction {
 }
 ```
 
-Operations return `UndoAction` to indicate whether they can be undone:
+Operations carry their `UndoAction` inside the `OperationResult` they return (see [Operations](Operations.md)):
 
 ```rust
-// Example: set_completion is reversible
-async fn set_completion(&self, id: &str, completed: bool) -> Result<UndoAction> {
+// Example: a reversible field write
+async fn set_field(&self, ...) -> Result<OperationResult> {
     // ... execute operation ...
-    Ok(UndoAction::Undo(Operation::new(
-        entity_name,
-        "set_completion",
-        "Undo completion",
-        params_with_opposite_value,
-    )))
+    Ok(OperationResult::new(changes, inverse_set_field_op))
 }
 
-// Example: split_block is irreversible
-async fn split_block(&self, id: &str, position: i64) -> Result<UndoAction> {
+// Example: split_block is irreversible (crates/holon-core/src/traits.rs)
+async fn split_block(&self, ...) -> Result<OperationResult> {
     // ... execute operation ...
-    Ok(UndoAction::Irreversible)
+    Ok(OperationResult::irreversible(changes).with_response(focus_response(...)))
 }
 ```
 

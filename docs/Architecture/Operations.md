@@ -13,8 +13,10 @@ Holon has two complementary write surfaces. The cut between them is principled, 
 
 **Both paths share the same underlying typed methods on the entity's `CrudOperations` trait.** Cells are sugar at the chord-op layer, not a parallel write path. They emit the same events with the same origin/trace tagging. The difference is only at the call site:
 
-- Cell call site: `services.cells().live_field::<bool>(&block_uri, "completed")?.set(true).await?`
-- Reflective call site: `dispatcher.execute_operation(EntityName::new("block"), "set_field", params)`
+- Cell call site: `self.cells().live_field::<String>(&block_uri, "content")?.set(new_text).await?` (`live_field` lives on `EntityCellRegistryExt`, `crates/holon-core/src/cell_registry.rs`)
+- Reflective call site: `dispatcher.execute_operation(&EntityName::new("block"), "set_field", params).await`
+
+> **Status caveat:** today only `block.content` is cell-ified — `BlockCellRegistry::live_field_any` errors for every other field, so the `completed`-toggle cell call sites this table describes only become possible once the Cells-plan Phase 2 scalar backings (`LoroMetaCellBacking<T>`, `LwwScalarBacking<T>`) land. Until then scalar chord-op writes go through `BlockCellRegistry::write_field`'s non-cell dispatch. See [Storage](Storage.md).
 
 **Cells bypass the dispatcher.** Inside a chord op (which is itself a dispatched operation), nesting another `OperationDispatcher::execute_operation` would double-log to `OperationLog`, duplicate the trace span, and fork the undo stack. Cells call typed methods directly — same `event_bus.emit` / origin tagging, no re-entry.
 
@@ -28,24 +30,29 @@ See [Storage](Storage.md) for the cell registry / backing details and [Sync](Syn
 
 ```rust
 // Operation execution doesn't wait for confirmation
-dispatcher.execute_operation("todoist-task", "set_completion", params)?;
-// Returns immediately with inverse operation for undo
+dispatcher.execute_operation(&EntityName::new("todoist-task"), "set_completion", params).await?;
+// Returns an OperationResult (field deltas + UndoAction) immediately
 
 // Confirmation comes via CDC stream
 watch_changes().await  // UI updates when change arrives
 ```
 
+`EntityName` (`crates/holon-api/src/types.rs`) is an enum (`Named(String)` / `Wildcard`), constructed via `EntityName::new(...)`.
+
 ### Composite Dispatcher
 
 ```rust
+// crates/holon/src/api/operation_dispatcher.rs
 pub struct OperationDispatcher {
     providers: Vec<Arc<dyn OperationProvider>>,
+    observers: Vec<Arc<dyn OperationObserver>>,  // e.g. OperationLogObserver
+    // + sync_token_store, matview_manager
 }
 
 // Routes by entity_name to appropriate provider:
-// "block"          → LoroOperationProvider  (authority for blocks; SqlOperationProvider in SqlOnly mode)
-// "todoist-tasks"  → McpOperationProvider   (via RegistryOperationProxy for the todoist integration)
-// "org-headline"   → OrgModeOperationProvider
+// "block"          → LoroBlockOperations   (authority for blocks; SqlOperationProvider in SqlOnly mode)
+// "todoist-tasks"  → McpOperationProvider  (via RegistryOperationProxy for MCP integrations)
+// "org-headline"   → OrgModeSyncProvider   (implements OperationProvider)
 ```
 
 ### Operation Metadata via Macros
@@ -54,7 +61,7 @@ pub struct OperationDispatcher {
 #[operations_trait]
 pub trait TaskOperations<T>: CrudOperations<T> {
     #[affects("completed")]
-    async fn set_completion(&self, id: &str, completed: bool) -> Result<Option<Operation>>;
+    async fn set_completion(&self, id: &str, completed: bool) -> Result<OperationResult>;
 }
 ```
 
@@ -65,13 +72,22 @@ Generates `OperationDescriptor` with:
 
 ### Undo/Redo System
 
-The operation system supports undo/redo through inverse operations. When an operation is executed, it returns an inverse operation that can undo its effects.
+The operation system supports undo/redo through inverse operations. Every operation returns an `OperationResult` whose `undo` field carries the inverse (or declares the operation irreversible):
 
-**Location**: `crates/holon-core/src/undo.rs`, `crates/holon/src/core/operation_log.rs`
+```rust
+// crates/holon-core/src/traits.rs
+pub struct OperationResult {
+    pub changes: Vec<FieldDelta>,  // what changed — drives UI reactivity / projection
+    pub undo: UndoAction,
+    // + response (e.g. focus_response after split), follow_ups
+}
+```
+
+**Location**: `UndoAction` in `crates/holon-core/src/traits.rs`; `UndoStack` in `crates/holon-core/src/undo.rs`; persistent log in `crates/holon/src/core/operation_log.rs`
 
 #### UndoAction
 
-Operations return an `UndoAction` indicating whether they can be undone:
+Operations return an `UndoAction` (inside `OperationResult::undo`) indicating whether they can be undone:
 
 ```rust
 pub enum UndoAction {
@@ -84,7 +100,7 @@ pub enum UndoAction {
 
 #### UndoStack (In-Memory)
 
-The `BackendEngine` maintains an in-memory `UndoStack` for session-level undo/redo:
+`DispatchingOperationEngine` (`crates/holon/src/api/operation_engine.rs`, owned by `BackendEngine` as `op_engine`) holds an in-memory `Arc<RwLock<UndoStack>>` for session-level undo/redo. The struct lives in `crates/holon-core/src/undo.rs`:
 
 ```rust
 pub struct UndoStack {
@@ -112,7 +128,7 @@ For persistent undo/redo that survives app restarts, `OperationLogStore` stores 
 
 ```rust
 pub struct OperationLogStore {
-    backend: Arc<RwLock<TursoBackend>>,
+    db_handle: DbHandle,
     max_log_size: usize,  // Default: 100
 }
 ```
@@ -285,6 +301,8 @@ INNER JOIN block query_src ON query_src.parent_id = action_src.parent_id
 WHERE action_src.source_language = 'action'
 ```
 
+(The shipped SQL, `assets/queries/action_discovery.sql`, spells the language filter as an `OR` chain — Turso IVM doesn't support `IN`.)
+
 As OrgMode parses files and inserts blocks, the discovery matview CDC fires. The discovery loop maintains a `HashMap<action_id, JoinHandle>`:
 - `Change::Created` → spawn a new per-pair watcher
 - `Change::Deleted` → abort the watcher
@@ -323,7 +341,7 @@ V1 only supports Local scope. The execution gate belongs in the `execute_operati
 | Path | Description |
 |------|-------------|
 | `crates/holon/src/api/action_watcher.rs` | Discovery loop, per-pair watchers, action DSL parser |
-| `crates/holon/src/render_dsl.rs` | `create_render_engine()`, `dynamic_to_render_expr()` — reused by action DSL |
+| `crates/holon-api/src/render_dsl.rs` | `create_render_engine()`, `dynamic_to_render_expr()` — reused by action DSL |
 | `crates/holon-api/src/render_eval.rs` | `resolve_args()` — resolves `col()` against row data (pure, no UI context) |
 
 ## Procedural Macros (holon-macros)
@@ -359,16 +377,13 @@ pub struct TodoistTask {
 
 ```rust
 impl TodoistTask {
-    // Schema metadata for table creation
-    pub fn entity_schema() -> EntitySchema { ... }
-
     // Short name for parameter naming ("task" → "task_id")
     pub fn short_name() -> Option<&'static str> { Some("task") }
 }
 
 impl IntoEntity for TodoistTask {
     fn to_entity(&self) -> DynamicEntity { ... }
-    fn type_definition() -> TypeDefinition { ... }
+    fn type_definition() -> TypeDefinition { ... }  // schema metadata for table creation
 }
 
 impl TryFromEntity for TodoistTask {
@@ -382,7 +397,7 @@ impl TryFromEntity for TodoistTask {
 |-----------|--------|
 | `#[primary_key]` | Marks field as PRIMARY KEY |
 | `#[indexed]` | Creates index on this column |
-| `#[reference(entity)]` | Foreign key reference |
+| `#[reference(EntityName)]` | Foreign key reference (positional; optional `edge = "..."`) |
 | `#[lens(skip)]` | Exclude from lens generation |
 
 ### Operations Trait Macro
@@ -398,7 +413,7 @@ where
 {
     /// Move block under a new parent
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
-    async fn indent(&self, id: &str, parent_id: &str) -> Result<Option<Operation>>;
+    async fn indent(&self, id: &str, parent_id: &str) -> Result<OperationResult>;
 
     /// Move block to different position
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
@@ -408,7 +423,7 @@ where
         id: &str,
         parent_id: &str,
         after_block_id: Option<&str>,
-    ) -> Result<Option<Operation>>;
+    ) -> Result<OperationResult>;
 }
 ```
 
@@ -436,7 +451,7 @@ pub async fn dispatch_operation<DS, E>(
     target: &DS,
     op_name: &str,
     params: &StorageEntity
-) -> Result<Option<Operation>>
+) -> Result<OperationResult>
 where
     DS: BlockOperations<E> + Send + Sync,
     E: BlockEntity + Send + Sync + 'static,
@@ -454,7 +469,7 @@ Declares which database fields an operation modifies. Used for:
 
 ```rust
 #[holon_macros::affects("parent_id", "depth", "sort_key")]
-async fn indent(&self, id: &str, parent_id: &str) -> Result<Option<Operation>>;
+async fn indent(&self, id: &str, parent_id: &str) -> Result<OperationResult>;
 ```
 
 **`#[triggered_by(availability_of = "...", providing = [...])]`**
@@ -469,11 +484,11 @@ Declares operation availability based on contextual parameters:
     providing = ["parent_id", "after_block_id"]
 )]
 async fn move_block(&self, id: &str, parent_id: &str, after_block_id: Option<&str>)
-    -> Result<Option<Operation>>;
+    -> Result<OperationResult>;
 
 // Simple case: operation triggered when "completed" param available
 #[holon_macros::triggered_by(availability_of = "completed")]
-async fn set_completion(&self, id: &str, completed: bool) -> Result<Option<Operation>>;
+async fn set_completion(&self, id: &str, completed: bool) -> Result<OperationResult>;
 ```
 
 **`#[require(expr)]`**
@@ -483,7 +498,7 @@ Compile-time precondition that generates runtime validation:
 ```rust
 #[require(priority >= 1)]
 #[require(priority <= 5)]
-async fn set_priority(&self, id: &str, priority: i64) -> Result<Option<Operation>>;
+async fn set_priority(&self, id: &str, priority: i64) -> Result<OperationResult>;
 ```
 
 ### Type Inference
@@ -497,9 +512,11 @@ The macro automatically infers parameter types for `OperationDescriptor`:
 | `i64`, `i32` | `TypeHint::Number` |
 | `*_id` (naming convention) | `TypeHint::EntityId { entity_name }` |
 
-Parameters ending in `_id` are automatically detected as entity references:
+Parameters ending in `_id` are automatically detected as entity references (the entity name is the bare `_id`-stripped prefix — no semantic mapping):
 - `project_id` → `TypeHint::EntityId { entity_name: "project" }`
 - `parent_id` → `TypeHint::EntityId { entity_name: "parent" }`
+
+Override the derived entity name with `#[entity_ref("block")]` on the parameter, or suppress the inference with `#[not_entity]`.
 
 ### Generated OperationDescriptor
 
@@ -533,7 +550,7 @@ pub async fn dispatch_operation<DS, E>(
     target: &DS,
     op_name: &str,
     params: &StorageEntity
-) -> Result<Option<Operation>> {
+) -> Result<OperationResult> {
     match op_name {
         "indent" => {
             let id: String = params.get("id")?.as_string()?.to_string();
@@ -557,7 +574,7 @@ pub async fn dispatch_operation<DS, E>(
 ```rust
 // Example: hand-written OperationProvider using macro-generated dispatch helpers.
 // (MCP integrations use McpOperationProvider instead — no macros needed there.)
-impl OperationProvider for OrgModeOperationProvider {
+impl OperationProvider for OrgModeSyncProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
         let mut ops = vec![];
         // Aggregate from all applicable traits
@@ -568,7 +585,7 @@ impl OperationProvider for OrgModeOperationProvider {
         ops
     }
 
-    async fn execute_operation(&self, op: &Operation) -> Result<Option<Operation>> {
+    async fn execute_operation(&self, op: &Operation) -> Result<OperationResult> {
         let params = op.to_storage_entity();
 
         // Try each trait's dispatch function

@@ -44,7 +44,7 @@ Text-editing widgets (`editable_text` builder, `EditorView`, etc.) consume `Cell
 - `anchor_cursor` / `resolve_cursor` — cursor anchors that survive remote edits (Loro-backed); byte offsets (LWW)
 - `remote_deltas() -> Stream<TextDelta>` — reactive stream of remote-origin changes for incremental editor updates
 
-Chord ops (split, join, embed) read from the cell (`current()`) and write through the cell (`set(new_string)`); they never read the SQL projection directly for content. This dissolves the `BlockContentResolver` hatch from Phase 0+1 — cells ARE the live text source by construction.
+Chord ops (split, join, embed) read from the cell (`read_content_via_cells` → `cell.current()`) and write through the single `set_field` content-write seam, which routes through `BlockCellRegistry::write_field` (cell-registry-routed, though not a literal `cell.set` call today); they never read the SQL projection directly for content. This dissolved the `BlockContentResolver` hatch from Phase 0+1 — cells ARE the live text source by construction (`BlockContentResolver` no longer exists; archlint bans its return).
 
 See [Storage](Storage.md) for cell internals and [Operations](Operations.md) for the cells-vs-reflective-ops cut.
 

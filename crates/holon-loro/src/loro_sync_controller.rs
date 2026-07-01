@@ -339,11 +339,13 @@ impl LoroProjection {
 
     /// Project the Loro doc (the authority) onto the SQL sink, writing only
     /// genuinely-changed rows. The ONLY writer of the `block_raw` rows in Loro
-    /// mode, and a *convergent* feed: the diff "before" is the sink's own
-    /// current state (`block_raw`), not a watermark-fork of Loro. Comparing
-    /// against the sink itself means re-projecting an unchanged snapshot emits
-    /// zero ops regardless of any frontier position — so there is no bootstrap
-    /// cycle to police and no race between the seed and concurrent creates.
+    /// mode. The diff "before" is the last projected Loro snapshot read through
+    /// the `BaseStore` seam (the 3-way base), NOT the sink's own current state;
+    /// the SQL sink is consulted only as a cold-boot seed when the base is
+    /// unseeded. Diffing against a stable base means re-projecting an unchanged
+    /// snapshot emits zero ops regardless of any frontier position — no
+    /// bootstrap cycle to police, no race between the seed and concurrent
+    /// creates.
     pub async fn project(&self) -> Result<()> {
         let _guard = self.project_lock.lock().await;
         let t0 = std::time::Instant::now();
