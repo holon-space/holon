@@ -625,14 +625,27 @@ not the headless `ReactiveEngineDriver`.
      `engine.focused_block()`), NOT the raw `SutFocusWrite` (which bypasses the mirror — invisible
      headlessly since the headless `SutDriver` is withheld, but a divergence once a window `SutDriver`
      reads focus).
-   - ⚠ **NEXT (3b-ii) — the `SutFocusWrite`/alphabet finding:** the unified SUT carries `SutFocusWrite`
-     (from the base ViewModel), so the `NavigateFocus` *transition* is cap-admitted — but it routes through
-     the raw-session write that bypasses the mirror, so any `NavigateFocus` in a sequence RE-BREAKS
-     `inv-focus-matches-ref`. Faithful fix (matches the existing windowed path, whose `window_input_wide`
-     has no `SutFocusWrite`): **withhold `SutFocusWrite` on the windowed overlay** so `NavigateFocus`
-     deselects and focus moves only via `ClickBlock` gestures (which call `set_focus` → mirror). Then a
-     hand-built gesture sequence → `replay_steps` → the proptest loop.
-4. Repoint harnesses (thinnest first) → 5. delete native core → retire `parity.rs` LAST. (Unchanged.)
+   - ✅ **Sub-step 3b-ii DONE (rev `09d29192`):** drive a hand-built `ClickBlock` gesture SEQUENCE through
+     the real `StateMachineTest::apply` path over the window (each click focuses a text child via the
+     window `SimUserDriver` → `set_focus` → engine mirror, opening its editor); the unified catalog stays
+     GREEN each tick, INCLUDING the editor/displayed-text families that engage once an editor opens. The
+     window boot/overlay/settle/teardown is now a shared `with_windowed_wide_sut(run)` test helper.
+   - ✅ **Sub-step 3b-iii DONE (rev `444465f2`):** the capture/gherkin BRIDGE — drive a fixture through
+     `replay_steps` over the windowed `ComposedSut<WideE2E>` (already `FixtureAssertable`); GREEN. Fixture is
+     post-boot only (no `StartApp`; the harness pre-boots), matching composed-keystone captures.
+   - ⚠ **REMAINING (3b-iv, folds into increment 4) — the `SutFocusWrite`/alphabet finding + proptest loop:**
+     the unified SUT carries `SutFocusWrite` (from the base ViewModel), so the `NavigateFocus` *transition* is
+     cap-admitted — but it routes through the raw-session write that bypasses the mirror, so any
+     `NavigateFocus` a GENERATOR emits RE-BREAKS `inv-focus-matches-ref`. Faithful fix (matches the existing
+     windowed path, whose `window_input_wide` has no `SutFocusWrite`): **withhold `SutFocusWrite` on the
+     windowed overlay** so `NavigateFocus` deselects and focus moves only via `ClickBlock` gestures (which
+     call `set_focus` → mirror); give the windowed oracle a `full_gpui` cap_set (not `full_headless`) so
+     `aggregate_transitions` narrows + the `required_invariants` floor matches the window. The proptest loop
+     itself needs PER-CASE window setup (can't use `init_test` — thread affinity), which IS the increment-4
+     work of repointing `sim_windowed_replay`/`random_pbt_sim` onto the windowed `ComposedSut`. So 3b-iv and
+     increment 4 merge.
+4. Repoint harnesses (thinnest first; carries the 3b-iv withhold-`SutFocusWrite` + `full_gpui` oracle
+   cap_set + per-case window proptest) → 5. delete native core → retire `parity.rs` LAST. (Unchanged.)
 
 ⚠ Runtime must stay multi-thread and alive on the background thread while the window runs on main
 (CDC/matview/org-sync tasks). `wait_for_ready = true` avoids the `without_wait()` sync-handle race.
