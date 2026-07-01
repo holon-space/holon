@@ -34,14 +34,17 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base;
+use holon_api::{EntityUri, Region};
 use holon_integration_tests::pbt::composed::harness::{ComposedSut, SettleHook};
 use holon_integration_tests::pbt::composed::wide_e2e::{
-    boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E,
+    boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E, WideE2EMachine,
 };
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
+use holon_integration_tests::pbt::transitions::{ClickBlock, E2ETransition};
 use holon_integration_tests::pbt::window_slice::builders::{overlay_windowed_caps, window_layout};
+use holon_integration_tests::pbt::ReferenceState;
 use holon_pbt_core::ComponentSet;
-use proptest_state_machine::StateMachineTest;
+use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 // Caps must be in scope to read them through the `CapMap` (capmap_adapter forwards).
 use holon_pbt_core::capabilities::{SutBackend, SutBlockInteract, SutDriver, SutLayout};
 
@@ -296,24 +299,37 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
     std::mem::forget(overlaid);
 }
 
-#[test]
-fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
-    // ★ Increment 3b (sub-step i): the windowed StateMachineTest runner's foundational
-    // check. Assemble a `ComposedSut<WideE2E>` around the OVERLAID windowed caps (window +
-    // wide-seeded backend), then run the UNIFIED composed catalog through the real
-    // `StateMachineTest::check_invariants` over the initial rendered frame. This is what
-    // `replay_steps`/proptest will call per tick — proving the block/storage families AND
-    // the windowed geometry family run GREEN against ONE `wide_e2e_ref()` oracle in a
-    // single SUT (the repoint's whole point: one SUT, not E2ESut + a parallel windowed
-    // check).
+/// `*const TestApp` behind a `Send` newtype so the window-settle closure (a
+/// `SettleHook = Box<dyn Fn() + Send>`) can hold it. SAFETY: the closure is only ever
+/// called on the gpui thread that owns the window, and `app` is pinned for the driver's
+/// lifetime — the same single-thread contract `SimUserDriver` relies on.
+struct SendApp(*const TestApp);
+unsafe impl Send for SendApp {}
+impl SendApp {
+    // A `&self` accessor so a `move` closure captures the whole `SendApp` (Send) rather than
+    // disjoint-capturing the raw-pointer field (2021 edition), which would be !Send.
+    fn app(&self) -> &TestApp {
+        unsafe { &*self.0 }
+    }
+}
+
+/// Boot the wide-seeded windowed `ComposedSut<WideE2E>` (a gpui window renderer over a
+/// `compose_sut` session + the wide-seeded backend caps + the window's `SimUserDriver`
+/// gesture caps, assembled by `overlay_windowed_caps`), hand it to `run` to drive/check
+/// against the `wide_e2e_ref()` oracle, then tear the window down. `app` stays pinned on
+/// this frame for the whole call, so the `*const TestApp` the settle hook / `SimUserDriver`
+/// hold stays valid. `run` takes the SUT by value and returns it (so it can call the
+/// by-value `StateMachineTest::apply`). ⚠ `--test-threads=1` mandatory (gpui not
+/// parallel-safe).
+fn with_windowed_wide_sut(
+    run: impl FnOnce(ComposedSut<WideE2E>, &ReferenceState) -> ComposedSut<WideE2E>,
+) {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
     let mut app = TestApp::with_text_system_and_assets(text_system, assets);
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
-
-    // The oracle the SUT is measured against — the wide working tree focused on the page.
     let oracle = wide_e2e_ref();
 
     // Boot the WIDE-seeded, driver-DEFERRED base (session/reactive surfaced for the window).
@@ -372,18 +388,6 @@ fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
     // `pump_cycle`: real wall-clock time for backend watchers on their own worker threads,
     // drain gpui, fire fake timers, promote staged bounds — no block_on, driver methods may
     // already be inside a tokio context).
-    struct SendApp(*const TestApp);
-    // SAFETY: the closure is only ever called on this gpui thread (inside `check_invariants`),
-    // and `app` is pinned (never moved after `app_ptr` is taken; leaked at teardown) — the
-    // same single-thread contract `SimUserDriver` relies on.
-    unsafe impl Send for SendApp {}
-    impl SendApp {
-        // A `&self` accessor so the `move` closure captures the whole `SendApp` (Send) rather
-        // than disjoint-capturing the raw-pointer field (2021 edition), which would be !Send.
-        fn app(&self) -> &TestApp {
-            unsafe { &*self.0 }
-        }
-    }
     let settle_app = SendApp(app_ptr);
     let settle_bounds = bounds.clone();
     let settle: SettleHook = Box::new(move || {
@@ -413,34 +417,90 @@ fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
     });
 
     // A dedicated runtime drives the apply/check leaf futures; the booted backend keeps
-    // running on `runtime`'s worker threads (kept alive by the test's Arc). The gpui thread
+    // running on `runtime`'s worker threads (kept alive by the outer Arc). The gpui thread
     // is NOT runtime-entered, so `rt.block_on` inside the harness is legal here.
     let composed_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("composed runtime");
 
-    // Assemble the windowed SUT (drives the initial page-root focus-align through the
-    // overlaid caps, then wraps them via `from_parts`).
+    // Assemble the windowed SUT (the initial page-root focus is already established on the
+    // base by `boot_and_seed_wide_windowed_base` via the engine's `dispatch_intent_sync`).
     let sut = windowed_composed_sut(overlaid, resolver, scaffold, composed_rt, settle);
 
-    // ★ THE MILESTONE: the real StateMachineTest check runs the UNIFIED catalog green over
-    // the initial rendered frame. Its internal windowed non-vacuity floor asserts
-    // inv-frontend-bounds-rendered actually ran (a window is attached).
-    ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
+    // Hand the live SUT to the caller to drive + check, then take it back for teardown.
+    let sut = run(sut, &oracle);
 
-    eprintln!(
-        "[compose_sut-windowed-3b] PASS - ComposedSut<WideE2E>::check_invariants ran the \
-         unified composed catalog GREEN over the initial windowed frame (block/storage + \
-         windowed families, one oracle, one SUT)"
-    );
-
-    // Teardown (see the other tests): release window entities, shut down, leak the !Send
-    // app + the SUT (which transitively holds the session + the composed runtime) so no
-    // Drop runs the gpui leak detector or shuts a runtime down in an async context.
+    // Teardown (see the other tests): release window entities, shut down, leak the !Send app
+    // + the SUT (which transitively holds the session + the composed runtime) so no Drop runs
+    // the gpui leak detector or shuts a runtime down in an async context.
     drop(rebind);
     app.update(|cx| cx.shutdown());
     app.run_until_parked();
     std::mem::forget(app);
     std::mem::forget(sut);
+}
+
+#[test]
+fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
+    // ★ Increment 3b (sub-step i): the windowed StateMachineTest runner's foundational check.
+    // Run the UNIFIED composed catalog through the real `StateMachineTest::check_invariants`
+    // over the initial rendered frame — block/storage families AND the windowed geometry/focus
+    // families, GREEN against ONE `wide_e2e_ref()` oracle in a single SUT (the repoint's whole
+    // point: one SUT, not E2ESut + a parallel windowed check).
+    with_windowed_wide_sut(|sut, oracle| {
+        ComposedSut::<WideE2E>::check_invariants(&sut, oracle);
+        eprintln!(
+            "[compose_sut-windowed-3b] PASS - ComposedSut<WideE2E>::check_invariants ran the \
+             unified composed catalog GREEN over the initial windowed frame (block/storage + \
+             windowed families, one oracle, one SUT)"
+        );
+        sut
+    });
+}
+
+#[test]
+fn windowed_composed_sut_drives_a_click_gesture_sequence_green() {
+    // ★ Increment 3b (sub-step ii): drive a short HAND-BUILT gesture sequence through the REAL
+    // `StateMachineTest::apply` path over the window. Each `ClickBlock` focuses a text child via
+    // the window's `SimUserDriver` (`SutBlockInteract` -> click -> `set_focus`, which mirrors
+    // engine focus — the faithful windowed focus path, unlike the raw `SutFocusWrite` write).
+    // Every tick re-checks the unified catalog. `ClickBlock` is non-minting, so the per-tick
+    // id-reconcile is a no-op. Proves the apply -> window-gesture -> settle -> check loop.
+    with_windowed_wide_sut(|mut sut, oracle0| {
+        // The initial frame must be green before we drive anything.
+        ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
+
+        // c1 / c2 are the wide working-tree text leaves (`block:c1` / `block:c2`, under the
+        // seed page). Clicking a text child focuses it and opens its editor.
+        let steps = [
+            E2ETransition::ClickBlock(ClickBlock {
+                region: Region::Main,
+                block_id: EntityUri::block("c1"),
+            }),
+            E2ETransition::ClickBlock(ClickBlock {
+                region: Region::Main,
+                block_id: EntityUri::block("c2"),
+            }),
+        ];
+
+        let mut oracle = oracle0.clone();
+        for (i, t) in steps.into_iter().enumerate() {
+            assert!(
+                <WideE2EMachine as ReferenceStateMachine>::preconditions(&oracle, &t),
+                "step {i}: preconditions failed for {t:?} — the hand-built sequence encodes a \
+                 stale assumption about the wide tree"
+            );
+            oracle = <WideE2EMachine as ReferenceStateMachine>::apply(oracle, &t);
+            sut = ComposedSut::<WideE2E>::apply(sut, &oracle, t.clone());
+            ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
+            eprintln!("[compose_sut-windowed-3b-ii] step {i} ({t:?}) GREEN");
+        }
+
+        eprintln!(
+            "[compose_sut-windowed-3b-ii] PASS - drove a 2-gesture ClickBlock sequence through \
+             the windowed ComposedSut<WideE2E>; unified catalog GREEN each tick"
+        );
+        sut
+    });
 }
