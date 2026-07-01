@@ -95,6 +95,9 @@ list(#{item_template: render_block()})
 
 Org files are bidirectionally synced: edit in Emacs/Vim/any editor, changes appear in Holon; edit in Holon, changes are written back to disk. The `OrgSyncController` handles echo suppression to prevent sync loops.
 
+> **⚠️ Do not put a Holon vault under a byte-level file syncer (Syncthing, iCloud Drive, Dropbox) while Loro P2P is in use.**
+> Cross-device convergence goes through Loro, not through the file bytes. A foreign file write (another device's projection landing on disk) is indistinguishable from a genuine user edit, so each device re-ingests the other's writes as fresh intent — producing duplicate ingestion, order oscillation, and, when the syncer writes a conflict copy (`*.sync-conflict-*`, `* (conflicted copy)*`), a duplicate-ID document. Keep the vault on local disk and let Loro/P2P handle multi-device sync. See [docs/Architecture/Model.md](docs/Architecture/Model.md) invariant 11.
+
 ### Petri-Net Engine & WSJF Ranking
 
 Tasks are materialized into a Petri Net model with typed tokens (Person, Organization, Document, Monetary, Knowledge, Resource). The engine computes WSJF (Weighted Shortest Job First) rankings using prototype blocks with Rhai-evaluated scoring expressions. See [VISION_PETRI_NET.md](VISION_PETRI_NET.md).

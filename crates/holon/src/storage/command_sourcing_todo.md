@@ -1,5 +1,16 @@
 # TODO: Command Sourcing Architecture (Offline-First)
 
+> **Architectural home:** the durable command log is now understood as the
+> persisted form of the upstream intent channel. Its principles and invariants
+> live in [docs/Architecture/Replication.md §7, "The durable form of this
+> channel (offline, future)"](../../../../docs/Architecture/Replication.md).
+> This file retains the detailed original sketch (schemas, sync worker,
+> compaction, batch-failure options) for reference; where the two differ,
+> Replication §7 is authoritative — notably the payload vocabulary is §4's
+> intent ops (`ChangeOp`), not the standalone `CommandType` enum sketched below,
+> and `id_mappings` is the `OwnForeign(map)` ID capability of Replication §2.
+> Design only — not implemented.
+
 ## Overview
 Implement event sourcing pattern to enable offline-first operation with external system sync.
 
