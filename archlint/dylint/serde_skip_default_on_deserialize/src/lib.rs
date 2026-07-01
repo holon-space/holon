@@ -8,7 +8,8 @@
 //! derived `TryFromEntity::from_entity` set `tags = []` on every SQL row →
 //! Block conversion because the `tags` field had `#[serde(skip, default)]`.
 //! The hand-rolled `Block::try_from(HashMap<String, Value>)` was the
-//! correct path; the derived path silently dropped edge data.
+//! correct path (and is now strict — it hard-errors when a projection omits
+//! `tags`/`requires`); the derived path silently dropped edge data.
 
 #![feature(rustc_private)]
 #![warn(unused_extern_crates)]
@@ -36,7 +37,8 @@ dylint_linting::declare_late_lint! {
     /// `#[serde(skip, default)]`; the derived `TryFromEntity::from_entity`
     /// always returned `tags = []`, dropping edge data on every SQL → Block
     /// conversion. The hand-rolled `Block::try_from(HashMap<…>)` path was
-    /// the correct one, but the silent default made the bug invisible.
+    /// the correct one (it now hard-errors on a projection missing
+    /// `tags`/`requires`), but the silent default made the bug invisible.
     ///
     /// ### Example
     ///

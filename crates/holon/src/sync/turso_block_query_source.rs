@@ -43,7 +43,9 @@ struct OrderedBlock {
 }
 
 /// A row→`Block` parser, injected by the caller (PBT vs production).
-pub type BlockRowParser = Arc<dyn Fn(&StorageEntity) -> Option<Block> + Send + Sync>;
+/// Fail-loud: a parse failure carries the offending column + block id and is
+/// propagated by the mirror, never dropped.
+pub type BlockRowParser = Arc<dyn Fn(&StorageEntity) -> anyhow::Result<Block> + Send + Sync>;
 
 /// Reads the Turso `block` + `focus_roots` matview mirrors and captures them
 /// into a [`BlockSnapshot`].
@@ -73,9 +75,7 @@ impl TursoBlockQuerySource {
     /// Build the source using the canonical [`Block::try_from`] row parser —
     /// the same one `CacheBlockReader` uses. This is the production default.
     pub async fn watch_default(engine: &BackendEngine) -> BlockQueryResult<Self> {
-        // None is re-raised loudly by the mirror's parse_fn ("block parser
-        // returned None for row {row:?}", full row included), so it is surfaced.
-        let parser: BlockRowParser = Arc::new(|row| Block::try_from(row.clone()).ok()); // ALLOW(ok): None re-raised by mirror parse_fn with full row
+        let parser: BlockRowParser = Arc::new(|row| Block::try_from(row.clone()));
         Self::watch(engine, parser).await
     }
 
@@ -119,7 +119,7 @@ impl TursoBlockQuerySource {
             },
             move |row| {
                 let block = (parse_for_mirror)(row)
-                    .ok_or_else(|| anyhow::anyhow!("block parser returned None for row {row:?}"))?;
+                    .map_err(|e| anyhow::anyhow!("block parser failed for row {row:?}: {e}"))?;
                 let sort_key = row
                     .get("sort_key")
                     .and_then(value_as_string)

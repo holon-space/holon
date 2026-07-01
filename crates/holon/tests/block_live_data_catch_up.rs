@@ -56,6 +56,13 @@ fn block_row(id: &str, content: &str) -> holon_api::StorageEntity {
         Value::String(EntityUri::no_parent().as_str().to_string()),
     );
     row.insert("content".into(), Value::String(content.to_string()));
+    // The `block` matview always projects these; Block's strict row parser
+    // requires them.
+    row.insert("content_type".into(), Value::String("text".to_string()));
+    row.insert("created_at".into(), Value::Integer(0));
+    row.insert("updated_at".into(), Value::Integer(0));
+    row.insert("tags".into(), Value::Json("[]".to_string()));
+    row.insert("requires".into(), Value::Json("[]".to_string()));
     row
 }
 

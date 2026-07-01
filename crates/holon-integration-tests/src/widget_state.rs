@@ -181,6 +181,16 @@ impl WidgetStateModel {
         self.rows.len()
     }
 
+    // TODO: render spec was removed; column/view filtering is no longer available
+    // ALLOW(unused_param): locator argument kept so WidgetLocator dispatch stays shaped for the render-spec return
+    fn extract_column_text(&self, _column: usize) -> String {
+        self.rows_to_text(self.rows.values().collect())
+    }
+
+    // ALLOW(unused_param): locator argument kept so WidgetLocator dispatch stays shaped for the render-spec return
+    fn extract_view_text(&self, _view_id: &str) -> String {
+        self.rows_to_text(self.rows.values().collect())
+    }
     fn rows_to_text(&self, rows: Vec<&holon_api::StorageEntity>) -> String {
         rows.iter()
             .flat_map(|row| {

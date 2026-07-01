@@ -146,8 +146,8 @@ graduates to CONTEXT.md §4 and is deleted here.
 
 ## 4. Hotspots (🔴 the red stickies)
 
-**Status board (2026-07-01):** ✅ fixed: H1, H3, H4, H11, H12 · 🔴 open: H2, H5,
-H6, H7 (narrowed), H8, H10 · ⚪ by-design constraint: H9. Fixed entries are kept
+**Status board (2026-07-02):** ✅ fixed: H1, H3, H4, H8, H11, H12 · 🔴 open: H2,
+H5, H6, H7 (narrowed), H10 · ⚪ by-design constraint: H9. Fixed entries are kept
 (condensed) because their *mechanisms* — lossy serde base, gate/emit mismatch,
 blob-LWW — are recurring failure shapes worth recognizing next time.
 
@@ -237,18 +237,32 @@ the `set_is_document` op name (`holon-core/src/traits.rs`). Migration is
 half-done; new code can still pick the wrong encoding. Anchors: `PAGE_TAG`,
 `set_is_document`, `deprecated` in `entity_uri.rs`.
 
-**H8 — `block_raw` columns silently dropped on read. 🔴 STILL OPEN — and worse
-than first written (verified 2026-07-01).**
-`depth`, `sort_key`, `collapsed`, `completed`, `block_type` exist in SQL but are not
-deserialized into `Block`. `collapsed` being UI-local is *correct and deliberate*
-(avoids collaborative churn) — but it's invisible at the type level; nothing marks
-these as "intentionally not round-tripped."
-Additionally, `TryFrom<StorageEntity>` **silently defaults on missing/malformed
-data**: absent `content` → `""` (`unwrap_or("")`), absent `content_type` →
-`"text"`, and non-string `tags`/`requires` array elements are `filter_map`-swallowed.
-Per the fail-loud rule these should be hard errors at the boundary — a matview row
-missing `content` is a bug, not an empty block. Anchor:
-`impl TryFrom<crate::StorageEntity> for Block` (`holon-api/src/block.rs:698`).
+**H8 — `block_raw` columns silently dropped on read. ✅ FIXED (2026-07-02).**
+`impl TryFrom<crate::StorageEntity> for Block` is now strict, three ways per
+column (absent-key / present-Null / wrong-type): all 8 `.expect()/.unwrap()`
+panics became `Err`s naming the column + block id; the silent defaults
+(`unwrap_or("")` content, `unwrap_or("text")` content_type, `unwrap_or(0)`
+timestamps, `filter_map`-swallowed array elements, `_ =>` catch-alls) are gone.
+`tags`/`requires` are **required columns** — every reader must COALESCE them to
+`'[]'`; Null or an absent key now hard-errors instead of hydrating an empty vec.
+Nullable-by-schema columns (`marks`, `properties`, `source_language`,
+`source_name`) map Null→None; a Null `parent_id` maps to the `no_parent`
+sentinel, but an *absent* `parent_id` key is a reader bug and errors.
+Closing the strictness gap surfaced a **latent prod bug**: two readers omitted
+`requires` from their SELECTs, so blocks hydrated with empty `requires` —
+`CacheBlockReader::load_all_blocks_with_hydration` (`holon-orgmode/src/di.rs`)
+and `TursoSinkReader::read_blocks` (`holon/src/storage/turso_sink_reader.rs`).
+The latter even *documented* the omission as deliberate ("requires is not part
+of `blocks_differ`") — that rationale went stale the day H12's fix made
+`blocks_differ` iterate `EdgeField::ALL`; both SELECTs now hydrate the
+junction, and the stale comment is deleted. `task_blocks_for_petri.sql` widened
+its projection to include the matview's COALESCE'd `tags`/`requires`.
+Still open as H1-residue hardening (not H8): `depth`, `sort_key`, `collapsed`,
+`completed`, `block_type` remain intentionally not round-tripped into `Block`
+with no type-level marker. Anchors:
+`impl TryFrom<crate::StorageEntity> for Block`, `require_string_array`
+(`holon-api/src/block.rs`); `TursoSinkReader::read_blocks`;
+`load_all_blocks_with_hydration`.
 
 **H9 — CDC only fires from matviews, never base tables.**
 A hard Turso/IVM constraint that shapes the entire read path: writes go to
@@ -305,11 +319,12 @@ but SQL-only in implementation, which is exactly what H4 was.
 
 **The cheap, high-value cleanups still open** (language, not architecture):
 finish the `doc:`-scheme elimination and
-retire the `set_is_document` op name (H7); add a type-level marker for
-"intentionally not round-tripped" columns and make `TryFrom<StorageEntity>` fail
-loud on missing columns (H8); type the `ChangeOp` parent refs (H2); the
+retire the `set_is_document` op name (H7); a type-level marker for
+"intentionally not round-tripped" columns (`depth`, `sort_key`, `collapsed`, …);
+type the `ChangeOp` parent refs (H2); the
 `StoredBlock` newtype so a serde-path `Block` can't impersonate a matview-hydrated
-one (H1 residue). Done since first writing: BLOCK_LORODOC marked superseded (H11).
+one (H1 residue). Done since first writing: BLOCK_LORODOC marked superseded
+(H11); `TryFrom<StorageEntity>` fails loud on missing/malformed columns (H8).
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
 transition and every 🔴 a candidate invariant. Open candidates: markdown round-trip

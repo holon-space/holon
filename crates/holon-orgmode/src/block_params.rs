@@ -49,19 +49,18 @@ pub fn build_block_params(
     params.insert("created_at".into(), Value::Integer(created));
     params.insert("updated_at".into(), Value::Integer(now));
 
-    if !block.tags.is_empty() {
-        let arr: Vec<Value> = block
-            .tags
-            .iter()
-            .map(|t| Value::String(t.clone()))
-            .collect();
-        params.insert("tags".into(), Value::Array(arr));
-    }
+    // Edge-typed fields — `SqlOperationProvider`'s edge partition routes these
+    // to the `block_tags`/`block_requires` junctions (see
+    // schema_modules.rs::edge_fields). Always emit (even when empty) so an
+    // empty Vec correctly clears stale junction rows on update, and so strict
+    // row parsing downstream always sees both columns.
+    let arr: Vec<Value> = block
+        .tags
+        .iter()
+        .map(|t| Value::String(t.clone()))
+        .collect();
+    params.insert("tags".into(), Value::Array(arr));
 
-    // Edge-typed field — `SqlOperationProvider`'s edge partition routes this
-    // to the `block_requires` junction (see schema_modules.rs::edge_fields).
-    // Always emit (even when empty) so an empty Vec correctly clears stale
-    // junction rows on update.
     let arr: Vec<Value> = block
         .requires
         .iter()

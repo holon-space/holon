@@ -695,102 +695,151 @@ impl Block {
     }
 }
 
+fn require_value<'a>(
+    row: &'a crate::StorageEntity,
+    col: &str,
+    id: &EntityUri,
+) -> anyhow::Result<&'a Value> {
+    row.get(col)
+        .ok_or_else(|| anyhow::anyhow!("block {id}: required column '{col}' absent from row"))
+}
+
+fn require_string<'a>(
+    row: &'a crate::StorageEntity,
+    col: &str,
+    id: &EntityUri,
+) -> anyhow::Result<&'a str> {
+    let v = require_value(row, col, id)?;
+    v.as_string()
+        .ok_or_else(|| anyhow::anyhow!("block {id}: column '{col}' must be a string, got {v:?}"))
+}
+
+fn require_i64(row: &crate::StorageEntity, col: &str, id: &EntityUri) -> anyhow::Result<i64> {
+    let v = require_value(row, col, id)?;
+    v.as_i64()
+        .ok_or_else(|| anyhow::anyhow!("block {id}: column '{col}' must be an integer, got {v:?}"))
+}
+
+/// Strict decode of a projection-guaranteed string-array column
+/// (`tags`/`requires`): every reader COALESCEs these to `'[]'` (matview) or
+/// synthesizes them from the junction tables (block_raw readers), so an
+/// absent key, a Null, an empty string, or a non-string element all mean a
+/// broken projection — never "no tags".
+fn require_string_array(
+    row: &crate::StorageEntity,
+    col: &str,
+    id: &EntityUri,
+) -> anyhow::Result<Vec<String>> {
+    match require_value(row, col, id)? {
+        Value::Array(arr) => arr
+            .iter()
+            .map(|elem| {
+                elem.as_string().map(str::to_string).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "block {id}: column '{col}' has a non-string array element: {elem:?}"
+                    )
+                })
+            })
+            .collect(),
+        Value::Json(s) | Value::String(s) => serde_json::from_str::<Vec<String>>(s).map_err(|e| {
+            anyhow::anyhow!("block {id}: column '{col}' holds invalid JSON {s:?}: {e}")
+        }),
+        other => anyhow::bail!(
+            "block {id}: column '{col}' must be a JSON string array, got {other:?} \
+             (the reader's projection must COALESCE it to '[]')"
+        ),
+    }
+}
+
 impl TryFrom<crate::StorageEntity> for Block {
     type Error = anyhow::Error;
     fn try_from(row: crate::StorageEntity) -> Result<Self, Self::Error> {
-        let id = row_id(&row).expect("No id found");
-        let parent_id = uri_from_row(&row, "parent_id").expect("No parent_id found");
-        let content = row
-            .get("content")
-            .and_then(|v| v.as_string())
-            .unwrap_or("")
-            .to_string();
-        let content_type: ContentType = row
-            .get("content_type")
-            .and_then(|v| v.as_string())
-            .unwrap_or("text")
+        let id = row_id(&row)?;
+        // parent_id must be projected (absent key = reader bug), but NULL is
+        // a legal value (root blocks) → the no_parent sentinel.
+        let parent_id = match row.get("parent_id") {
+            None => anyhow::bail!("block {id}: required column 'parent_id' absent from row"),
+            Some(Value::Null) => EntityUri::no_parent(),
+            Some(_) => uri_from_row(&row, "parent_id")?,
+        };
+        let content = require_string(&row, "content", &id)?.to_string();
+        let content_type: ContentType = require_string(&row, "content_type", &id)?
             .parse()
-            .expect("Invalid content_type in database");
-        let source_language: Option<SourceLanguage> = row
-            .get("source_language")
-            .and_then(|v| v.as_string().map(|s| s.parse().unwrap()));
-        let source_name = row
-            .get("source_name")
-            .and_then(|v| v.as_string().map(|s| s.to_string()));
-        let properties = row
-            .get("properties")
-            .cloned()
-            .map(|v| match v {
-                Value::Json(s) | Value::String(s) => {
-                    if s.is_empty() {
-                        HashMap::new()
-                    } else {
-                        serde_json::from_str::<HashMap<String, Value>>(&s)
-                            .expect("stored properties JSON must be valid")
-                    }
-                }
-                Value::Object(m) => m,
-                _ => HashMap::new(),
-            })
-            .unwrap_or_default();
-        let created_at = row.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
-        let updated_at = row.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
-
-        let tags: Tags = row
-            .get("tags")
-            .cloned()
-            .map(|v| match v {
-                Value::Array(arr) => arr
-                    .into_iter()
-                    .filter_map(|elem| elem.as_string().map(|s| s.to_string()))
-                    .collect(),
-                Value::Json(s) | Value::String(s) => {
-                    if s.is_empty() {
-                        Vec::new()
-                    } else {
-                        serde_json::from_str::<Vec<String>>(&s)
-                            .expect("stored tags JSON must be valid")
-                    }
-                }
-                Value::Null => Vec::new(),
-                _ => Vec::new(),
-            })
-            .map(Tags::from)
-            .unwrap_or_default();
-        let requires = row
-            .get("requires")
-            .cloned()
-            .map(|v| {
-                let raw: Vec<String> = match v {
-                    Value::Array(arr) => arr
-                        .into_iter()
-                        .filter_map(|elem| elem.as_string().map(|s| s.to_string()))
-                        .collect(),
-                    Value::Json(s) | Value::String(s) => {
-                        if s.is_empty() {
-                            Vec::new()
-                        } else {
-                            serde_json::from_str::<Vec<String>>(&s)
-                                .expect("stored requires JSON must be valid")
-                        }
-                    }
-                    Value::Null => Vec::new(),
-                    _ => Vec::new(),
-                };
-                raw.into_iter()
-                    .map(|s| {
-                        EntityUri::parse_owned(s).expect("stored requires must be a valid URI")
-                    })
-                    .collect::<Vec<EntityUri>>()
-            })
-            .unwrap_or_default();
-        let marks = row.get("marks").cloned().and_then(|v| match v {
-            Value::Json(s) => {
-                Some(crate::marks_from_json(&s).expect("stored marks JSON must be valid"))
+            .map_err(|e: anyhow::Error| {
+                anyhow::anyhow!("block {id}: invalid 'content_type': {e}")
+            })?;
+        let source_language: Option<SourceLanguage> = match row.get("source_language") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let s = v.as_string().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "block {id}: column 'source_language' must be a string, got {v:?}"
+                    )
+                })?;
+                Some(s.parse().map_err(|e: anyhow::Error| {
+                    anyhow::anyhow!("block {id}: invalid 'source_language' {s:?}: {e}")
+                })?)
             }
-            Value::Null => None,
-            _ => None,
-        });
+        };
+        let source_name = match row.get("source_name") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_string()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "block {id}: column 'source_name' must be a string, got {v:?}"
+                        )
+                    })?
+                    .to_string(),
+            ),
+        };
+        // properties is a nullable column with no schema default: absent/Null
+        // → empty map. An empty string is a written-empty value, not missing
+        // data. Anything unparseable is a hard error.
+        let properties: HashMap<String, Value> = match row.get("properties") {
+            None | Some(Value::Null) => HashMap::new(),
+            Some(Value::Json(s)) | Some(Value::String(s)) => {
+                if s.is_empty() {
+                    HashMap::new()
+                } else {
+                    serde_json::from_str::<HashMap<String, Value>>(s).map_err(|e| {
+                        anyhow::anyhow!(
+                            "block {id}: column 'properties' holds invalid JSON {s:?}: {e}"
+                        )
+                    })?
+                }
+            }
+            Some(Value::Object(m)) => m.clone(),
+            Some(other) => anyhow::bail!(
+                "block {id}: column 'properties' must be a JSON object, got {other:?}"
+            ),
+        };
+        let created_at = require_i64(&row, "created_at", &id)?;
+        let updated_at = require_i64(&row, "updated_at", &id)?;
+        let tags = Tags::from(require_string_array(&row, "tags", &id)?);
+        let requires = require_string_array(&row, "requires", &id)?
+            .into_iter()
+            .map(|s| {
+                EntityUri::parse_owned(s.clone()).map_err(|e| {
+                    anyhow::anyhow!("block {id}: 'requires' entry {s:?} is not a valid URI: {e}")
+                })
+            })
+            .collect::<anyhow::Result<Vec<EntityUri>>>()?;
+        let marks = match row.get("marks") {
+            None | Some(Value::Null) => None,
+            Some(Value::Json(s)) | Some(Value::String(s)) => {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(crate::marks_from_json(s).map_err(|e| {
+                        anyhow::anyhow!("block {id}: column 'marks' holds invalid JSON {s:?}: {e}")
+                    })?)
+                }
+            }
+            Some(other) => {
+                anyhow::bail!("block {id}: column 'marks' must be a JSON string, got {other:?}")
+            }
+        };
         Ok(Block {
             id,
             parent_id,
