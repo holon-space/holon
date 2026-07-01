@@ -471,3 +471,91 @@ precheck) is **DONE** (jj working copy). Next: wire a `ReactiveEngineDriver` int
 this component (admits UI-gesture transitions headless, driven UI-adjacently), then transitions prefer
 the driver caps over `SutBlockTreeWrite`, then the `DirectUserDriver` dispatch floor + bisector
 signature-pin. Tracked as **LL-1..5** in the Backlog.
+
+## Round 5 (2026-07-01) — VERIFIED terrain map for the windowed repoint (task #7)
+
+Re-mapped the windowed harness ⇄ `E2ESut`/`phased.rs` coupling against the *worktree* code (an
+exploration agent read all six harness files + `phased.rs` + `harness.rs`/`builder.rs`; cross-checked).
+This makes the prior "separate large workstream" bullet concrete and ordered. **No code landed this
+round — this is the de-risking map that governs the increments below.**
+
+**The one-sentence shape.** Today `compose_windowed_sut` is only ever a **per-step, check-only add-on
+layered on a running `E2ESut`** (`invariant_runner.rs` hook + `sim_windowed_replay.rs` `per_tick`,
+opt-in via `HOLON_PBT_WINDOWED_CATALOG`). `E2ESut` still owns the three things that make a windowed run
+go: it **boots** the backend/session/engine, **applies** each transition, and **runs** the native
+registry. `compose_windowed_sut` produces a **`CapMap`, not a `ComposedSut`** — it *wraps* handles
+`E2ESut` produced and *reads* invariants. Repointing = moving boot + apply + check off `E2ESut`.
+
+**Two NEW pieces of shared machinery the repoint needs (neither exists yet):**
+1. **A standalone windowed backend/session booter** — replaces `E2ESut::new` + the StartApp transition.
+   Today `PbtReadyContext` (`engine: BackendEngine`, `session: FrontendSession`,
+   `reactive_engine: ReactiveEngine`) is sourced **from `sut.ctx`** (`phased.rs`), i.e. from the booted
+   `E2ESut`. A standalone booter must produce those for a given `Wiring` so the window
+   (`launch_holon_window_rebindable`) can bind to them **without** `E2ESut`. WARNING: `ComposedSut::init_test`
+   boots caps **on tokio** (`harness.rs`) — thread-affinity forbids reusing it for the window; the
+   booter is a distinct construction path.
+2. **A windowed `ComposedSlice`/`ComposedSut` constructed from INJECTED window handles** — not
+   `init_test`'s tokio boot. Its `apply_transition` routes the full alphabet (`PressKey`/`ArrowNavigate`/
+   `ClickBlock`/`DragDropBlock` + the backend-write transitions) through the windowed CapMap's caps
+   (`SutBlockInteract`/`SutArrowNavigate` via the live `GpuiUserDriver`/`SimUserDriver`; the
+   backend-write caps once the CapMap composes `SutBackend` — see Hard-B below). Template to copy:
+   `composed/harness.rs` (`ComposedSut<S: ComposedSlice>`, `apply` -> `S::apply_transition`,
+   `FixtureAssertable` impl). `replay_steps` / capture / gherkin already produce `Vec<FixtureStep>` and
+   are medium-agnostic — they only need `S = <windowed ComposedSut>` instead of `E2ESut`.
+
+**Hard parts (from the map):**
+- **A — nothing applies transitions through the windowed CapMap.** `run_windowed_composed_check` only
+  `run_selected`s (checks). Need the windowed `ComposedSlice::apply_transition`.
+- **B — nothing boots the backend the window binds to; the windowed CapMap has no `SutBackend`.**
+  `window_input_wide` composes only the 3 window components (geometry + frontend-engine + driver-input).
+  To apply the full alphabet AND check storage invariants, `compose_windowed_sut` must ALSO compose the
+  backend/storage/editor read+write caps **over the window's LIVE `FrontendSession`** (the analogue of
+  `compose_sut`'s frontend arm, but wrapping the live session rather than booting `HeadlessFrontendComponent`).
+- **C — `replay_steps`/capture/gherkin are hard-wired to `S = E2ESut`.** `ComposedSut<S>` already impls
+  `StateMachineTest + FixtureAssertable`, so the bridge is real — but it must be *constructed from the
+  injected window handles*, not `init_test`.
+- **D — coverage delta (the deletion gate). ✅ AUDITED 2026-07-01 — GO, no relocation needed.** The
+  native windowed path's UNIQUE surface is just THREE invariants (not the 4+budget an earlier draft
+  claimed): `inv-displayed-text/widget` (proxy), `inv-focus-matches-ref`, `inv-window-focus-matches-engine-focus`
+  (self). `inv-sql-budget` is ALREADY relocated (`NATIVE_ONLY_EXCLUDED` + `E1_RELOCATED_CAP_COVERAGE` +
+  `WIDE_REQUIRED_INVARIANTS`). All three unique ids ALREADY have composed catalog wires
+  (`catalog.rs:43,47,55`) that select under `full_gpui` and run the **identical body structs** via
+  `run_windowed_composed_check`. So native (a) `run_proxy_registry` + (b) `native_self_invariants` are
+  pure per-tick DUPLICATION of what the windowed composed check already runs on the same live
+  geometry/engine/driver. ⇒ deleting native (a)+(b) loses ZERO coverage **iff the windowed composed
+  driver `composed/windowed.rs` stays live** (it must — it's the repoint target). ⚠ These three are
+  INHERENTLY windowed (need `SutLayout`/`SutDriver`, deselect headless) — NEVER collapse to the headless
+  keystone alone or they vanish.
+- **E — the tui `pbt_main.rs` is the heaviest.** It uses the **random** path
+  (`run_pbt_with_driver_sync_callback`, 50 steps), never the composed path, and feeds a
+  `frontend_visual_state` backstop the composed `GpuiWindowComponent` reports as honest `None`. Needs a
+  windowed composed **random** runner (generate + apply through caps) or a prior convert-to-replay.
+
+**Increment order (thinnest -> heaviest; each its own commit; section 8.10 NO-branch justifies the new windowed
+machinery — thread affinity means `WideE2E` genuinely cannot drive it):**
+0. **Coverage-delta audit (Hard-D)** — ✅ DONE 2026-07-01: GO, no relocation needed (see Hard-D above).
+   The 3 native-windowed-only invariants are already composed-wired and run by `run_windowed_composed_check`.
+1. **Windowed booter (Hard-B boot half)** — standalone `(BackendEngine, FrontendSession, ReactiveEngine)`
+   for a `Wiring`, additive; smoke-test a window binds to it with no `E2ESut`.
+2. **Windowed full CapMap (Hard-B caps half)** — extend `compose_windowed_sut` to compose the live
+   session's `SutBackend`/storage/editor/read caps, so `run_selected` runs the FULL catalog on the
+   window path. De-risk additively by promoting `run_windowed_composed_check` to run the full catalog.
+3. **Windowed `ComposedSlice`/`ComposedSut` from injected handles (Hard-A/C)** — `apply_transition` over
+   the full CapMap; construct from step-1/2 handles; drive via `replay_steps`.
+4. **Repoint harnesses (thinnest first):** `gpui_capture_replay` + `gpui_gherkin_replay` -> `windowed_replay`
+   -> `sim_windowed_replay` (promote its per_tick composed check to primary; drop the env gate) ->
+   `pbt_main` (tui, needs the random runner). Each drops its `E2ESut` use.
+5. **Then unblocks:** delete the native runner core (`run_invariant_registry`, `phased.rs` windowed
+   cluster, `impl StateMachineTest for E2ESut`, `Subsystem`/`min_sut`/`PbtSuiteSpec`) -> retire `parity.rs`
+   LAST (deletion gate).
+
+**Key files (worktree):** `phased.rs` (`PbtReadyContext`/`PbtReadyResult`, `replay_fixture_with_driver_sync_callback`,
+`run_pbt_with_driver_sync_callback`), `fixtures/mod.rs` (`replay_steps`), `invariant_runner.rs`
+(`has_window` selection + `run_windowed_composed_check` hook), `composed/windowed.rs` +
+`window_slice/builders.rs` + `window_slice/components.rs`, `composed/harness.rs` (the `ComposedSut`/
+`ComposedSlice` template), and the six harness files under `frontends/gpui/tests/` + `frontends/tui/tests/common/pbt_main.rs`.
+
+WARNING **Tooling:** `ast-outline` reads a stale index of the MAIN checkout — its line numbers are wrong for
+the worktree. Read worktree paths directly. Use worktree-absolute paths for ALL file ops. Build via
+`bash -c '... > log 2>&1'` (nu `out+err>` redirects false-green).
+
