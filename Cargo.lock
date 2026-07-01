@@ -4790,6 +4790,7 @@ dependencies = [
  "holon-loro",
  "holon-mcp-client",
  "holon-orgmode",
+ "holon-turso",
  "tempfile",
  "tokio",
  "tracing",

@@ -25,7 +25,9 @@ pub fn is_sync_conflict_artifact(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    name.contains(".sync-conflict-") || name.contains("conflicted copy") || name.ends_with(".icloud")
+    name.contains(".sync-conflict-")
+        || name.contains("conflicted copy")
+        || name.ends_with(".icloud")
 }
 
 /// All conflict artifacts among `files`, preserving input order.
@@ -95,7 +97,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let fs = RealFileSystem;
-        fs.write(&dir.path().join("notes.org"), b"* Hi").await.unwrap();
+        fs.write(&dir.path().join("notes.org"), b"* Hi")
+            .await
+            .unwrap();
 
         // Clean vault → no offenders.
         let scanned = fs.scan_directory(dir.path()).await.unwrap();

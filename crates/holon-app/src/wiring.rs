@@ -103,16 +103,37 @@ impl FrontendInjectorExt for Injector {
         let orgmode_root = holon_config.vault.root.clone();
         let loro_enabled = holon_config.crdt_enabled();
         let loro_storage_dir = holon_config.crdt.storage_dir.clone();
+        // Derived ONCE and reused for both LoroConfig and the epoch guard's
+        // durable-state descriptor, so the guard always protects/wipes the dir
+        // Loro actually writes.
+        let loro_dir = loro_storage_dir
+            .clone()
+            .or_else(|| orgmode_root.as_ref().map(|r| r.join(".loro")))
+            .unwrap_or_else(|| db_path.parent().unwrap_or(&db_path).join(".loro"));
 
         // Model.md invariant 10: consolidator handover is an epoch, not a runtime
         // lookup. Fail loud if a durable vault was consolidated by a different
         // mode than the one configured now (escape hatch: HOLON_CONSOLIDATOR_MIGRATE=1).
+        // The identity comes from the same SessionCapabilities pin the rest of the
+        // session uses; each component describes its own durable footprint.
         #[cfg(not(target_arch = "wasm32"))]
-        crate::consolidator_epoch::guard_consolidator_epoch(
-            &db_path,
-            &holon_config.resolve_crdt_storage_dir(&config_dir),
-            loro_enabled,
-        )?;
+        {
+            let configured =
+                holon_api::capability::SessionCapabilities::detect_and_pin(loro_enabled)
+                    .consolidator_id();
+            let turso_state = holon_turso::durable_state::TursoDurableState::new(&db_path);
+            let loro_state =
+                holon_loro::durable_state::LoroDurableState::new(&loro_dir, loro_enabled);
+            // Marker home: next to the durable db, or (ephemeral db + durable
+            // CRDT) next to the CRDT dir — it must survive the migrate wipe.
+            let marker_dir = holon_turso::durable_state::instance_state_root(&db_path)
+                .or_else(|| loro_dir.parent().map(|p| p.join(".holon")));
+            crate::consolidator_epoch::guard_consolidator_epoch(
+                marker_dir.as_deref(),
+                &configured,
+                &[&turso_state, &loro_state],
+            )?;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let mcp_integrations_dir = holon_config.resolve_mcp_integrations_dir(&config_dir);
 
@@ -125,10 +146,7 @@ impl FrontendInjectorExt for Injector {
 
         // Loro CRDT (must be before OrgMode so OrgMode can detect it)
         if loro_enabled {
-            let loro_dir = loro_storage_dir
-                .clone()
-                .or_else(|| orgmode_root.as_ref().map(|r| r.join(".loro")))
-                .unwrap_or_else(|| db_path.parent().unwrap_or(&db_path).join(".loro"));
+            let loro_dir = loro_dir.clone();
             self.provide::<LoroConfig>(Provider::root(move |_| {
                 Shared::new(LoroConfig::new(loro_dir.clone()))
             }));

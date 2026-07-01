@@ -16,6 +16,7 @@
 //! storage adapters).
 
 pub mod block_table_names;
+pub mod durable_state;
 pub mod dynamic_schema_module;
 pub mod graph_schema;
 pub mod matview_manager;

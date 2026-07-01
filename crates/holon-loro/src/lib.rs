@@ -8,6 +8,7 @@
 pub mod block_cell_registry;
 pub mod capability;
 pub mod consolidator;
+pub mod durable_state;
 
 #[cfg(all(
     feature = "iroh-sync",

@@ -99,6 +99,33 @@ pub enum Consolidator {
     Store,
 }
 
+/// Opaque, persistable identity of a consolidator configuration — what the
+/// epoch marker records across sessions (Model.md invariant 10). The guard that
+/// consumes this never interprets the value; it only writes it, compares it for
+/// equality, and prints it. Today the id names the *mechanism*
+/// ([`CapabilityProfile`] variant), not a concrete adapter — consistent with
+/// this module's rule that adapter names appear only at the `detect` boundary.
+/// When D slice 2 opens the capability lattice, the derivation extends; the
+/// opaque consumers don't change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsolidatorId(String);
+
+impl ConsolidatorId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ConsolidatorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The session's capability profile and its consolidator, pinned once at
 /// startup. Immutable: changing the consolidator requires a full re-sync, not a
 /// live handoff (Risk #4).
@@ -128,6 +155,17 @@ impl SessionCapabilities {
 
     pub fn consolidator(self) -> Consolidator {
         self.consolidator
+    }
+
+    /// The identity the consolidator-epoch marker persists across sessions
+    /// (Model.md invariant 10). Derived from the pinned profile so there is
+    /// exactly one derivation of "who consolidates" — the same pin the rest of
+    /// the session uses.
+    pub fn consolidator_id(self) -> ConsolidatorId {
+        ConsolidatorId::new(match self.profile {
+            CapabilityProfile::Projected => "projected",
+            CapabilityProfile::Direct => "direct",
+        })
     }
 }
 

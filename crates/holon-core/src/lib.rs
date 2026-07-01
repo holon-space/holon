@@ -21,6 +21,7 @@ pub mod file_format;
 pub mod fractional_index;
 pub mod operation_log;
 pub mod publish_errors;
+pub mod replica_state;
 pub mod storage;
 pub mod traits;
 pub mod undo;
