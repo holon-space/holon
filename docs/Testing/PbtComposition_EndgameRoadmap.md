@@ -596,7 +596,12 @@ not the headless `ReactiveEngineDriver`.
    INSERTS `GpuiWindowComponent` (`SutLayout`) + `DriverInputComponent::with_input` (the gesture caps) —
    both NEW, since the base deferred its driver, so NO cap is ever registered-then-overridden. Fail-loud:
    `overlay_windowed_caps` panics if the base already has a `SutDriver` (i.e. wasn't built deferred).
-   Compile-verified; end-to-end verification pending the window runner.
+   Compile-verified. ✅ FOUNDATIONAL CLAIM VERIFIED GREEN (macOS) by the new test
+   `frontends/gpui/tests/gpui_compose_sut_windowed.rs`: a TestPlatform window RENDERS a
+   `compose_sut_windowed_base` session (68 elements, 63 non-degenerate), the deferred base hosts
+   `SutBackend` (13 booted blocks), and the driver rung is correctly absent — i.e. the window-as-pure-
+   renderer-over-compose_sut architecture works. REMAINING for full step 2: exercise `overlay_windowed_caps`
+   itself with a live window driver (folds into the increment-3 StateMachineTest runner).
    REMAINING: on the gpui thread, `compose_sut(full_headless)` → take `.session`/`.reactive` →
    `launch_holon_window_rebindable(session, reactive, …)` (topology in `pbt_harness/mod.rs::run_in_gpui_window`)
    → `overlay_windowed_caps(composed.caps, geometry, composed.reactive, gpui_driver)` → `run_selected` and
