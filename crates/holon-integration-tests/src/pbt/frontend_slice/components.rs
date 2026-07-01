@@ -1073,7 +1073,8 @@ impl SutFocusWrite for HeadlessFrontendComponent {
         // `inv-focus-matches-ref` — but the WINDOWED SUT reads `engine.focused_block()` through this
         // SAME engine via its window `SutDriver`, so the raw-session path diverged it. Fixing the cap
         // (not withholding it) keeps `NavigateFocus` a faithful capability of BOTH SUTs.
-        let intent = OperationIntent::new(EntityName::new("navigation"), "focus".to_string(), params);
+        let intent =
+            OperationIntent::new(EntityName::new("navigation"), "focus".to_string(), params);
         self.reactive
             .dispatch_intent_sync(intent)
             .await

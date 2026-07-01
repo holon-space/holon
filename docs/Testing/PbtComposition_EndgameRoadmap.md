@@ -633,17 +633,21 @@ not the headless `ReactiveEngineDriver`.
    - ✅ **Sub-step 3b-iii DONE (rev `444465f2`):** the capture/gherkin BRIDGE — drive a fixture through
      `replay_steps` over the windowed `ComposedSut<WideE2E>` (already `FixtureAssertable`); GREEN. Fixture is
      post-boot only (no `StartApp`; the harness pre-boots), matching composed-keystone captures.
-   - ⚠ **REMAINING (3b-iv, folds into increment 4) — the `SutFocusWrite`/alphabet finding + proptest loop:**
-     the unified SUT carries `SutFocusWrite` (from the base ViewModel), so the `NavigateFocus` *transition* is
-     cap-admitted — but it routes through the raw-session write that bypasses the mirror, so any
-     `NavigateFocus` a GENERATOR emits RE-BREAKS `inv-focus-matches-ref`. Faithful fix (matches the existing
-     windowed path, whose `window_input_wide` has no `SutFocusWrite`): **withhold `SutFocusWrite` on the
-     windowed overlay** so `NavigateFocus` deselects and focus moves only via `ClickBlock` gestures (which
-     call `set_focus` → mirror); give the windowed oracle a `full_gpui` cap_set (not `full_headless`) so
-     `aggregate_transitions` narrows + the `required_invariants` floor matches the window. The proptest loop
-     itself needs PER-CASE window setup (can't use `init_test` — thread affinity), which IS the increment-4
-     work of repointing `sim_windowed_replay`/`random_pbt_sim` onto the windowed `ComposedSut`. So 3b-iv and
-     increment 4 merge.
+   - ✅ **`SutFocusWrite` made FAITHFUL (rev `c0095344`) — supersedes the earlier "withhold it" plan (that
+     was WRONG):** the windowed SUT SHOULD carry `SutFocusWrite` (`NavigateFocus`/`FocusEditableText` are real
+     windowed capabilities). The bug was the IMPL — `HeadlessFrontendComponent::apply_navigate_focus` called
+     `session.execute_operation` DIRECTLY (a headless shortcut) which writes the SQL nav tables but bypasses
+     `dispatch_intent_sync` → `maybe_mirror_navigation_focus`, so `engine.focused_block()` stayed stale. Fixed
+     the cap to dispatch through `self.reactive.dispatch_intent_sync` (production's sidebar-nav path: same SQL
+     write + the engine-focus mirror). Correct by construction — NO cap-withholding, NO `cap_set` subtraction.
+     Headless keystone regression-free (the mirror is inert headlessly — `SutDriver` withheld). The 3b-i boot
+     workaround (manual engine dispatch) reverted to driving `NavigateFocus` through the now-faithful cap.
+   - ⚠ **REMAINING (3b-iv, folds into increment 4) — the proptest loop:** needs PER-CASE window setup (can't
+     use `init_test` — thread affinity) + a windowed oracle carrying the ACTUAL windowed `cap_set`
+     (`ComposedSut::cap_set()` — SutLayout/SutDriver present, honest, no subtraction) so
+     `aggregate_transitions` narrows + the `required_invariants` floor matches the window. That IS the
+     increment-4 work of repointing `sim_windowed_replay`/`random_pbt_sim` onto the windowed `ComposedSut`, so
+     3b-iv and increment 4 merge.
 4. Repoint harnesses (thinnest first; carries the 3b-iv withhold-`SutFocusWrite` + `full_gpui` oracle
    cap_set + per-case window proptest) → 5. delete native core → retire `parity.rs` LAST. (Unchanged.)
 
