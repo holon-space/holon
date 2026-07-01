@@ -126,25 +126,31 @@ pub fn compose_windowed_sut(
     window_input_wide(geometry, engine, driver)
 }
 
-/// ★ Round-5 windowed repoint: overlay the windowed SHELL caps onto an already-composed
-/// HEADLESS CapMap (from `compose_sut(ComponentSet::full_headless())`). The window is a
-/// PURE RENDERER over the same `engine` the headless caps read, so this:
+/// ★ Round-5 windowed repoint: overlay the windowed SHELL caps onto the headless BASE CapMap
+/// built by [`compose_sut_windowed_base`](crate::pbt::composed::builder::compose_sut_windowed_base)
+/// (a full `compose_sut` with the driver rung DEFERRED). The window is a PURE RENDERER over the
+/// same `engine` the headless caps read, so this **only ever INSERTS** — no cap is registered
+/// then overridden:
 /// - ADDS windowed [`SutLayout`] geometry ([`GpuiWindowComponent`] over the live window's
-///   `BoundsRegistry` clone) — the headless CapMap has none; and
-/// - REPLACES (by cap `TypeId`, via `CapMap::insert`) the headless driver-input caps
-///   (`SutDriver` / `SutBlockInteract` / `SutArrowNavigate`) with the live window's
-///   `GpuiUserDriver`-backed ones ([`DriverInputComponent::with_input`]), so gestures drive
-///   the HIGHEST-available rung (§8.11 faithfulness), not the headless `ReactiveEngineDriver`.
+///   `BoundsRegistry` clone) — the base has none; and
+/// - INSERTS the live window's `GpuiUserDriver`-backed gesture caps (`SutDriver` /
+///   `SutBlockInteract` / `SutArrowNavigate`) via [`DriverInputComponent::with_input`]. Because
+///   the base deferred its driver, these are the SOLE providers — gestures drive the
+///   HIGHEST-available rung (§8.11 faithfulness), the window's real input, not a headless
+///   `ReactiveEngineDriver`.
+///
+/// Fail-loud (parse-don't-validate): panics if the base already carries a driver rung — i.e.
+/// it was built with the default `HeadlessReactive` placement instead of `compose_sut_windowed_base`
+/// — because inserting over it would silently override a cap. Build the base deferred.
 ///
 /// The result runs the FULL composed catalog: the block/storage/editor families — with the
-/// `compose_sut` `IdResolver` reconcile intact, so id-resolution comes FREE — PLUS the
-/// windowed families (bounds-rendered / displayed-text / window-focus). This is why the
-/// windowed repoint needs no separate booter or new reconcile: the headless boot IS the
-/// booter and the window merely renders it.
+/// `compose_sut` `IdResolver` reconcile intact, so id-resolution comes FREE — PLUS the windowed
+/// families (bounds-rendered / displayed-text / window-focus). This is why the windowed repoint
+/// needs no separate booter or new reconcile: the headless boot IS the booter, the window renders it.
 ///
-/// `geometry` is a `BoundsRegistry` clone from the launched window; `engine` is the SAME
-/// frontend [`ReactiveEngine`] the window paints and the headless caps were built over
-/// (surface it via `ComposedSut::reactive`); `driver` is the window's `GpuiUserDriver`.
+/// `geometry` is a `BoundsRegistry` clone from the launched window; `engine` is the SAME frontend
+/// [`ReactiveEngine`] the window paints and the base caps were built over (surface it via
+/// `ComposedSut::reactive`); `driver` is the window's `GpuiUserDriver`.
 ///
 /// [`SutLayout`]: holon_pbt_core::capabilities::SutLayout
 pub fn overlay_windowed_caps(
@@ -153,6 +159,11 @@ pub fn overlay_windowed_caps(
     engine: Arc<ReactiveEngine>,
     driver: Arc<dyn UserDriver>,
 ) -> CapMap {
+    assert!(
+        caps.get::<dyn holon_pbt_core::capabilities::SutDriver>()
+            .is_none(),
+        "overlay_windowed_caps: base CapMap already carries a driver rung (SutDriver) — build the          base with `compose_sut_windowed_base` (DriverPlacement::Deferred) so the window's gesture          caps are INSERTED once, never overriding a headless driver."
+    );
     let driver_geometry = geometry.clone_box();
     Arc::new(GpuiWindowComponent::new(geometry)).register(&mut caps);
     Arc::new(DriverInputComponent::with_input(

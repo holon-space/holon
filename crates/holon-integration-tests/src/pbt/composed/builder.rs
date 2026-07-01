@@ -105,6 +105,40 @@ pub async fn compose_sut(set: &ComponentSet, resolver: &IdResolver) -> ComposedS
     compose_sut_seeded(set, resolver, DEFAULT_FRONTEND_SEED_ORG, &[]).await
 }
 
+/// Which driver backs the composed gesture caps (`SutDriver` / `SutBlockInteract` /
+/// `SutArrowNavigate`) — §8.11 layer-localization. Making this an explicit choice (not a
+/// registration-order accident) lets the windowed repoint build a base with NO driver caps
+/// and then INSERT the window's `GpuiUserDriver`-backed ones exactly once, instead of
+/// registering the headless driver and silently overriding it.
+pub enum DriverPlacement {
+    /// Install the frontend's own headless `ReactiveEngineDriver` as the VM-rung driver
+    /// (the default for every headless config — the gesture alphabet drives UI-adjacently
+    /// over the same live `HeadlessEditorMirror` the editor-write caps share).
+    HeadlessReactive,
+    /// Do NOT install any driver — leave the gesture caps ABSENT so a higher rung (the
+    /// windowed `GpuiUserDriver`, via [`crate::pbt::window_slice::builders::overlay_windowed_caps`])
+    /// supplies them. Used only by [`compose_sut_windowed_base`].
+    Deferred,
+}
+
+/// The headless BASE for the §Round-5 windowed repoint: a full `compose_sut` CapMap with the
+/// driver rung **deferred** (`DriverPlacement::Deferred`) — everything (backend / storage /
+/// editor / ViewModel caps + the `IdResolver` reconcile) EXCEPT the gesture-driver caps. A
+/// windowed harness boots this headless, attaches a gpui window as a pure renderer over the
+/// same `reactive`, and inserts the window's `GpuiUserDriver`-backed gesture caps via
+/// `overlay_windowed_caps`. Because the base never registered a driver, those inserts are the
+/// SOLE providers — no cap is registered-then-overridden.
+pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver) -> ComposedSut {
+    compose_sut_seeded_impl(
+        set,
+        resolver,
+        DEFAULT_FRONTEND_SEED_ORG,
+        &[],
+        DriverPlacement::Deferred,
+    )
+    .await
+}
+
 /// The frontend arm's default boot org — a minimal one-heading doc. Callers that
 /// need the working tree to live IN the org (so `SutOrgRead`/`inv-blocks-match-ref/org`
 /// see it, rather than an engine-only seed that the org parse misses) pass their tree
@@ -130,6 +164,25 @@ pub async fn compose_sut_seeded(
     resolver: &IdResolver,
     frontend_seed_org: &[(&str, &str)],
     seed_tree: &[NewBlock],
+) -> ComposedSut {
+    compose_sut_seeded_impl(
+        set,
+        resolver,
+        frontend_seed_org,
+        seed_tree,
+        DriverPlacement::HeadlessReactive,
+    )
+    .await
+}
+
+/// The workhorse behind [`compose_sut_seeded`] / [`compose_sut_windowed_base`]. Identical for
+/// every config except the driver rung, chosen by `driver_placement` (see [`DriverPlacement`]).
+async fn compose_sut_seeded_impl(
+    set: &ComponentSet,
+    resolver: &IdResolver,
+    frontend_seed_org: &[(&str, &str)],
+    seed_tree: &[NewBlock],
+    driver_placement: DriverPlacement,
 ) -> ComposedSut {
     let has_turso = set.has_storage(StorageAdapter::Turso);
     let has_loro = set.has_storage(StorageAdapter::Loro);
@@ -269,12 +322,19 @@ pub async fn compose_sut_seeded(
         // driver (not a fresh one) so the single live `HeadlessEditorMirror` stays shared
         // with the editor-write caps. No geometry → its `require_bounds` precheck is a
         // no-op (the driver resolves targets itself).
-        Arc::new(DriverInputComponent::with_input_headless(
-            comp.reactive(),
-            comp.driver(),
-            resolver.clone(),
-        ))
-        .register(&mut caps);
+        // Driver rung placement (§8.11): install the headless VM-rung driver ONLY when the
+        // caller asked for it. The windowed repoint passes `Deferred` and later inserts the
+        // live window's `GpuiUserDriver`-backed gesture caps via `overlay_windowed_caps`, so
+        // `SutDriver`/`SutBlockInteract`/`SutArrowNavigate` are inserted ONCE by whoever owns
+        // the rung — never registered here and then overridden.
+        if matches!(driver_placement, DriverPlacement::HeadlessReactive) {
+            Arc::new(DriverInputComponent::with_input_headless(
+                comp.reactive(),
+                comp.driver(),
+                resolver.clone(),
+            ))
+            .register(&mut caps);
+        }
         // Capture the frontend's Loro authority store (present iff Loro is on for this
         // build = an editor config) so the Loro arm below reads its caps over the SAME
         // doc the frontend op pipeline writes (task #4 read-doc unification).

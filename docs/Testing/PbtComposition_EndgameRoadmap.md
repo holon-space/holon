@@ -588,11 +588,15 @@ not the headless `ReactiveEngineDriver`.
 1. ✅ **DONE (this commit):** `compose_sut`'s `ComposedSut` now surfaces the booted `session` + `reactive`
    (new `pub session`/`pub reactive` fields; new `HeadlessFrontendComponent::session()` accessor) so a
    windowed harness can bind a window to a `compose_sut`-booted session. Additive, build-green, no new warnings.
-2. **Window-over-compose_sut bind + driver-cap override.** ✅ CAP-OVERLAY CORE DONE (this commit):
-   `window_slice::builders::overlay_windowed_caps(caps, geometry, engine, driver)` overlays
-   `GpuiWindowComponent` (adds `SutLayout`) + `DriverInputComponent::with_input` (REPLACES the headless
-   `SutDriver`/`SutBlockInteract`/`SutArrowNavigate` by cap `TypeId` via `CapMap::insert`) onto a
-   `compose_sut(full_headless)` CapMap. Compile-verified; end-to-end verification pending the window runner.
+2. **Window-over-compose_sut bind + driver-cap insert.** ✅ CAP-OVERLAY CORE DONE (pure-insert design):
+   the base is built by `compose_sut_windowed_base(set, resolver)` = a full `compose_sut` with the driver
+   rung DEFERRED (`DriverPlacement::Deferred` — a new explicit choice threaded through
+   `compose_sut_seeded_impl`; all existing `compose_sut`/`compose_sut_seeded` callers unchanged, default
+   `HeadlessReactive`). Then `window_slice::builders::overlay_windowed_caps(caps, geometry, engine, driver)`
+   INSERTS `GpuiWindowComponent` (`SutLayout`) + `DriverInputComponent::with_input` (the gesture caps) —
+   both NEW, since the base deferred its driver, so NO cap is ever registered-then-overridden. Fail-loud:
+   `overlay_windowed_caps` panics if the base already has a `SutDriver` (i.e. wasn't built deferred).
+   Compile-verified; end-to-end verification pending the window runner.
    REMAINING: on the gpui thread, `compose_sut(full_headless)` → take `.session`/`.reactive` →
    `launch_holon_window_rebindable(session, reactive, …)` (topology in `pbt_harness/mod.rs::run_in_gpui_window`)
    → `overlay_windowed_caps(composed.caps, geometry, composed.reactive, gpui_driver)` → `run_selected` and
