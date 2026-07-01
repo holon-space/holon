@@ -9,8 +9,7 @@ use crate::Value;
 /// Newtype around `fluent_uri::Uri<String>` — every entity ID is a valid RFC 3986 URI.
 ///
 /// Common schemes:
-/// - `doc:uuid` — documents
-/// - `block:uuid` — blocks
+/// - `block:uuid` — blocks (pages are blocks tagged `Page`)
 /// - `sentinel:no_parent` — root parent sentinel
 /// - `https://jira.example.com/ISSUE-123` — external entities
 ///
@@ -44,7 +43,7 @@ impl EntityUri {
         // and `block:{peer}:{counter}` paths don't false-positive. For an
         // already-schemed string use [`EntityUri::from_raw`] / [`EntityUri::parse`].
         debug_assert!(
-            !["block:", "doc:", "file:", "sentinel:"]
+            !["block:", "file:", "sentinel:"]
                 .iter()
                 .any(|p| path.starts_with(p)),
             "EntityUri::new({scheme:?}, {path:?}): path already begins with a scheme \
@@ -96,7 +95,7 @@ impl EntityUri {
 
     // -- File constructors --
     // File URIs represent on-disk org files (e.g. `file:index.org`, `file:projects/todo.org`).
-    // They are transient identifiers used during parsing and resolved to `doc:<uuid>` at startup.
+    // They are transient identifiers used during parsing and resolved to the page's `block:<uuid>` at startup.
 
     pub fn file(path: &str) -> Self {
         use fluent_uri::encoding::{
@@ -121,13 +120,13 @@ impl EntityUri {
 
     // -- Accessors --
 
-    /// The URI scheme (e.g. "doc", "block", "https").
+    /// The URI scheme (e.g. "block", "file", "https").
     pub fn scheme(&self) -> &str {
         self.0.scheme().as_str()
     }
 
     /// The path component (the entity-specific identifier).
-    /// For `doc:my-uuid` this returns `my-uuid`.
+    /// For `block:my-uuid` this returns `my-uuid`.
     /// For `https://jira.example.com/ISSUE-1` this returns `/ISSUE-1`.
     pub fn id(&self) -> &str {
         self.0.path().as_str()
@@ -167,19 +166,6 @@ impl EntityUri {
         self.as_str()
     }
 
-    /// Extract the document ID (path component) if this is a file URI.
-    /// flutter_rust_bridge:ignore
-    #[deprecated(
-        note = "doc:/file: URI schemes are being eliminated. Documents are now blocks with is_document=true."
-    )]
-    pub fn as_document_id(&self) -> Option<&str> {
-        if self.is_file() {
-            Some(self.id())
-        } else {
-            None
-        }
-    }
-
     /// Extract the block ID (path component) if this is a block URI.
     /// flutter_rust_bridge:ignore
     pub fn as_block_id(&self) -> Option<&str> {
@@ -191,7 +177,7 @@ impl EntityUri {
     }
 
     /// Parse a raw parent_id string into an EntityUri.
-    /// Handles `doc:x`, `block:x`, `sentinel:no_parent`, and bare strings (→ `block:x`).
+    /// Handles `block:x`, `sentinel:no_parent`, and bare strings (→ `block:x`).
     ///
     /// **Boundary-only (parse, don't validate).** Call this *once*, at the edge
     /// where a string first enters the system from something we don't control —
@@ -213,13 +199,13 @@ impl EntityUri {
             // field writes forked to the SQL path (layout-swap Loro divergence,
             // 2026-06-11).
             //
-            // EXCEPTION: the entity schemes `block`/`doc` DO legitimately carry a
+            // EXCEPTION: the entity scheme `block` DOES legitimately carry a
             // colon-leading id — the reference model's synthetic split ids are
             // `block::split-N` (scheme `block`, id `:split-N`). Those must
             // round-trip (e.g. `MemoryBackend::children_of` re-parses stored
-            // child ids), so accept a known entity scheme even with a `:`-leading
+            // child ids), so accept the block scheme even with a `:`-leading
             // id. Bare layout ids keep their non-entity scheme and stay bare.
-            if !uri.id().starts_with(':') || matches!(uri.scheme(), "block" | "doc") {
+            if !uri.id().starts_with(':') || uri.scheme() == "block" {
                 return uri;
             }
         }
@@ -308,7 +294,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(deprecated)]
     fn parse_valid_opaque() {
         let uri = EntityUri::parse("block:abc-123").unwrap();
         assert_eq!(uri.scheme(), "block");
@@ -317,7 +302,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn parse_valid_hierarchical() {
         let uri = EntityUri::parse("https://jira.example.com/ISSUE-1").unwrap();
         assert_eq!(uri.scheme(), "https");
