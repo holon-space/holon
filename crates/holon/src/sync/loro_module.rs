@@ -374,6 +374,15 @@ fn register_subtree_share(injector: &Injector) {
             "block".to_string(),
         ));
 
+        // The global Loro→SQL projection (same instance `LoroSyncController`
+        // drives). `share_subtree` flushes it after pruning so the global
+        // prune-delete is applied to SQL before the sharer re-projects the
+        // shared subtree under the mount — otherwise the delete races and
+        // re-removes the just-re-created rows.
+        let downstream_projection = resolver
+            .resolve_async::<dyn holon_core::DownstreamProjection>()
+            .await;
+
         // `LoroShareBackend::new_with_sql` returns `Arc<Self>` because its
         // internal `self_weak` is populated via `Arc::new_cyclic` — the
         // Arc has to exist to carry the Weak. Callers store the Arc as-is.
@@ -385,6 +394,7 @@ fn register_subtree_share(injector: &Injector) {
             (*bus).clone(),
             (**key).clone(),
             Some(sql_ops),
+            Some(downstream_projection),
         ))
     }));
 

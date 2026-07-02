@@ -25,6 +25,12 @@ pub enum ShareDegradedReason {
     /// commonly an advertiser-start failure on a non-idempotent code
     /// path. String carries the underlying error.
     RehydrationFailed(String),
+    /// Projecting a shared doc's change into the SQL `block` table failed.
+    /// Loro holds the change but SQL (which the UI reads) does not, so the
+    /// two diverge until the next successful projection. The projection
+    /// watermark is deliberately NOT advanced on failure, so the next
+    /// commit retries the same diff. String carries the underlying error.
+    SqlProjectionFailed(String),
 }
 
 #[derive(Clone, Debug)]
