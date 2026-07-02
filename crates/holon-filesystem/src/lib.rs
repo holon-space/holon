@@ -9,24 +9,38 @@
 //!
 //! This crate provides the filesystem port traits and their adapters used by other Holon crates.
 
+// Native-only half: filesystem/watcher adapters and the file-sync controller
+// (tokio::fs / tokio::process / notify are rejected on wasm targets). The wasm
+// surface is the port traits + sync base store consumed by holon-loro.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod change_source;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod directory;
 pub mod error;
 pub mod file;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod file_sync_controller;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod fs_port;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod in_memory;
 pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use change_source::{FileChange, FileChangeKind, FileChangeSource, NotifyWatcher};
+#[cfg(not(target_arch = "wasm32"))]
 pub use directory::{ChangesWithMetadata, DirectoryChangeProvider, DirectoryDataSource};
+#[cfg(not(target_arch = "wasm32"))]
 pub use directory::{Directory, ROOT_ID};
 pub use error::FilesystemError;
 pub use file::File;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::{FileSyncController, RENDERER_VERSION};
+#[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::{FileMeta, FileSystem, RealFileSystem, ScannedEntries};
+#[cfg(not(target_arch = "wasm32"))]
 pub use in_memory::InMemoryFileSystem;
 pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
 pub use sync_conflict::{

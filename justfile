@@ -233,6 +233,19 @@ clippy:
 test:
     cargo nextest run --workspace 2>&1 | tee /tmp/holon-test.log
 
+# Check the wasi worker frontend compiles (mirrors the CI rust-checks step).
+# EMNAPI_LINK_DIR: napi-build's wasi shim demands it, but `cargo check` never
+# links, so an empty stub dir is safe — the real dir comes from `napi build`
+# (frontends/holon-worker/scripts/build.sh).
+check-worker-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup target add wasm32-wasip1-threads
+    EMNAPI_LINK_DIR="$(mktemp -d)" cargo check \
+        --manifest-path frontends/holon-worker/Cargo.toml \
+        --target wasm32-wasip1-threads --features browser \
+        2>&1 | tee /tmp/holon-worker-wasm-check.log
+
 # --- Code Quality -----------------------------------------------------------
 
 # Check formatting

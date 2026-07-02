@@ -3149,7 +3149,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "walkdir",
  "workspace-hack 0.1.0",
 ]
 

@@ -6,8 +6,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-tokio = { workspace = true, features = ["fs", "sync"] }
-walkdir.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 async-trait.workspace = true
 sha2.workspace = true
@@ -20,9 +19,16 @@ serde_json.workspace = true
 holon-core.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+# Native-only adapters: RealFileSystem (tokio::fs + gitignore-aware scan),
+# NotifyWatcher (notify), FileSyncController's post-write hook (tokio::process).
+# tokio refuses fs/process on wasm targets; the wasm surface of this crate is
+# the port traits + sync base store only (see lib.rs cfg gates).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["fs", "process", "sync"] }
 ignore.workspace = true
 notify = "8.0"
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 tempfile.workspace = true
