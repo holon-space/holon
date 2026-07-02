@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, info, warn};
 
-use holon::storage::DbHandle;
+use holon_turso::turso::DbHandle;
 use holon_core::{CacheFactory, EntityCache};
 use holon_api::DynamicEntity;
 use holon_core::SyncTokenStore;

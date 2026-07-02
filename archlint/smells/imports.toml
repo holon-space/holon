@@ -59,6 +59,36 @@ engine crate (crate-decoupling Rev 3.5a). \
 To suppress: # ALLOW(orgmode-holon-dep-manifest): <reason>
 """
 
+# mcp-client left the fat-holon critical path in crate-decoupling Rev 3.5b:
+# it consumes holon-core seams (EntityCache/CacheFactory/MatviewHook) and,
+# being a Turso FDW bridge BY DESIGN (implements turso_core::ForeignDataWrapper),
+# names holon-turso explicitly. Only the `holon` engine crate is banned.
+
+[[smell]]
+id = "mcp-client-holon-dep"
+pattern = '\bholon::'
+files = "crates/holon-mcp-client/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-mcp-client must not import the `holon` engine crate (crate-decoupling \
+Rev 3.5b). Use holon-core seams (EntityCache / CacheFactory / MatviewHook); \
+Turso-vtable specifics (DbHandle, register_foreign_table) come from \
+holon-turso, the disclosed backend coupling of this FDW bridge. \
+To suppress: // ALLOW(mcp-client-holon-dep): <reason>
+"""
+
+[[smell]]
+id = "mcp-client-holon-dep-manifest"
+pattern = '^holon(\.workspace| *=)'
+files = "crates/holon-mcp-client/Cargo.toml"
+case_sensitive = true
+message = """
+holon-mcp-client's Cargo.toml must not declare a dependency on the `holon` \
+engine crate (crate-decoupling Rev 3.5b); holon-core / holon-api / \
+holon-turso are the sanctioned deps. \
+To suppress: # ALLOW(mcp-client-holon-dep-manifest): <reason>
+"""
+
 # frontend_crate_no_platform_imports — only crates/holon-frontend/src.
 
 [[smell]]
