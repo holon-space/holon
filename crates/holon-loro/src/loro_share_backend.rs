@@ -1938,6 +1938,119 @@ mod tests {
         backend_b.advertiser.close_all().await;
     }
 
+    /// Read the `content_raw` text of the node with `stable_id` from a specific
+    /// shared doc (by `shared_tree_id`), via the backend's manager registry.
+    fn shared_text(
+        backend: &LoroShareBackend,
+        shared_tree_id: &str,
+        stable_id: &str,
+    ) -> Option<String> {
+        let doc = backend.manager.get_doc(shared_tree_id)?;
+        let tid = find_tree_id_by_stable_id(&doc, &EntityUri::block(stable_id))?;
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+        let meta = tree.get_meta(tid).ok()?; // ALLOW(ok): Option chain — missing meta means no stable id
+        match meta.get("content_raw") {
+            Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
+                Some(t.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// B3 (mount-aware write routing): a write to a block INSIDE a shared subtree
+    /// must land in the shared doc — not silently no-op on the global doc, from
+    /// which the subtree was pruned at share time — and then sync to the peer.
+    ///
+    /// Drives the REAL wired write path: a `LoroBackend` over A's global doc with
+    /// `with_shared_trees` pointed at the same `SharedTreeSyncManager` the share
+    /// machinery uses (the exact wiring `LoroBlockOperations` receives in DI).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn shared_block_write_routes_to_shared_doc_and_syncs() {
+        use crate::loro_backend::LoroBackend;
+        use crate::shared_tree::SharedTreeStore;
+
+        let (backend_a, _dir_a) = make_backend();
+        let (backend_b, _dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(
+            &backend_a,
+            "shared-parent",
+            Some("root-a"),
+            "Shared heading",
+        )
+        .await;
+        seed_block(
+            &backend_a,
+            "shared-child",
+            Some("shared-parent"),
+            "original child",
+        )
+        .await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let share_response = backend_a
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .unwrap();
+        let ticket_json: serde_json::Value = match share_response.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            other => panic!("unexpected response type: {other:?}"),
+        };
+        let ticket = ticket_json["ticket"].as_str().unwrap().to_string();
+        let shared_tree_id = ticket_json["shared_tree_id"].as_str().unwrap().to_string();
+
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+
+        // Precondition: shared-child was pruned from A's GLOBAL doc — a write
+        // through the unrouted global path would resolve nothing.
+        let a_global = backend_a.global_doc().await.unwrap();
+        assert!(
+            find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
+            "shared-child should be absent from A's global tree after the prune"
+        );
+
+        // Build the wired write backend exactly as DI does: global doc +
+        // the share manager as the SharedTreeStore.
+        let manager = backend_a.manager.clone();
+        let write_backend = LoroBackend::from_document(a_global.clone())
+            .with_shared_trees(manager as Arc<dyn SharedTreeStore>);
+
+        // Route a write to a block that lives only in the shared subtree.
+        write_backend
+            .update_block_text("block:shared-child", "ROUTED EDIT")
+            .await
+            .expect("routed shared write must succeed");
+
+        // The edit landed in A's shared doc, not the global doc.
+        assert_eq!(
+            shared_text(&backend_a, &shared_tree_id, "shared-child").as_deref(),
+            Some("ROUTED EDIT"),
+            "write must land in A's shared doc"
+        );
+        // Global doc still holds no shared-child node (nothing was created there).
+        assert!(
+            find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
+            "the routed write must NOT resurrect shared-child in the global tree"
+        );
+
+        // Peer B pulls from A and sees the routed edit in its shared doc.
+        let synced = backend_b.sync_with_peers(&shared_tree_id).await.unwrap();
+        assert_eq!(synced, 1, "B should have synced with 1 peer (A)");
+        assert_eq!(
+            shared_text(&backend_b, &shared_tree_id, "shared-child").as_deref(),
+            Some("ROUTED EDIT"),
+            "B must see A's routed edit after pull"
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
     /// Drive many commits in rapid succession and assert the save
     /// worker coalesces them into a handful of disk writes. Validates
     /// the `SAVE_DEBOUNCE` window (currently 150 ms).

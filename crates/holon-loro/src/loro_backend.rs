@@ -890,6 +890,28 @@ fn is_node_alive(tree: &loro::LoroTree, node: loro::TreeID) -> bool {
     }
 }
 
+/// Scan a raw `LoroDoc`'s block tree for the alive node whose `STABLE_ID`
+/// equals `needle`. Used to resolve a shared block's business id inside a
+/// shared subtree doc, where the id is absent from the global tree.
+fn find_stable_id_in_doc(doc: &loro::LoroDoc, needle: &str) -> Option<loro::TreeID> {
+    let tree = doc.get_tree(TREE_NAME);
+    for node in tree.get_nodes(false) {
+        if matches!(
+            node.parent,
+            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+        ) {
+            continue;
+        }
+        if let Ok(meta) = tree.get_meta(node.id)
+            && let Some(sid) = meta.get_typed(STABLE_ID, |v| v.as_string().map(|s| s.to_string()))
+            && sid == needle
+        {
+            return Some(node.id);
+        }
+    }
+    None
+}
+
 /// Compute the depth of a node from its parent chain.
 /// Depth 1 = tree root (implicit depth 0 = virtual document root).
 fn compute_depth(tree: &loro::LoroTree, parent: loro::TreeParentId) -> usize {
@@ -943,6 +965,19 @@ fn collect_shared_tree_blocks(
 // ============================================================
 // LoroBackend
 // ============================================================
+
+/// Where a resolved write must land. A block that was pruned into a shared
+/// subtree doc no longer lives in the global tree, so writing to it through
+/// the global doc silently no-ops (or fails `BlockNotFound`). `resolve_write_target`
+/// routes each write to the doc that actually holds the live node.
+enum WriteTarget {
+    Global(loro::TreeID),
+    Shared {
+        shared_tree_id: String,
+        doc: Arc<loro::LoroDoc>,
+        tree_id: loro::TreeID,
+    },
+}
 
 pub struct LoroBackend {
     collab_doc: Arc<LoroDocument>,
@@ -1065,10 +1100,103 @@ impl LoroBackend {
             })
     }
 
-    pub async fn update_block_text(&self, id: &str, new_text: &str) -> Result<(), ApiError> {
-        let tree_id = self.require_tree_id(id).await?;
+    /// Route a write for block `id` to the doc that holds its live node.
+    ///
+    /// Global tree first (the common case), then — on a global miss or a stale
+    /// tombstoned candidate — the shared subtree docs. A shared block's stable
+    /// id is absent from the global tree (its subtree was pruned at share time),
+    /// so the global resolver returns `None`; TreeIDs are globally unique
+    /// (peer+counter), so a stale global TreeID is still a valid key to probe
+    /// the shared docs with.
+    async fn resolve_write_target(&self, id: &str) -> Result<WriteTarget, ApiError> {
+        if let Some(tree_id) = self.resolve_to_tree_id(id).await {
+            let alive_global = self
+                .collab_doc
+                .with_read(|doc| Ok(is_node_alive(&doc.get_tree(TREE_NAME), tree_id)))
+                .map_err(|e| ApiError::InternalError {
+                    message: format!("resolve_write_target: read global tree failed: {}", e),
+                })?;
+            if alive_global {
+                return Ok(WriteTarget::Global(tree_id));
+            }
+            if let Some(target) = self.scan_shared_for_tree_id(tree_id) {
+                return Ok(target);
+            }
+        }
 
-        self.collab_doc
+        if let Some(target) = self.scan_shared_for_stable_id(id) {
+            return Ok(target);
+        }
+
+        Err(ApiError::BlockNotFound { id: id.to_string() })
+    }
+
+    /// Find the shared doc whose tree holds `tree_id` as a live node.
+    fn scan_shared_for_tree_id(&self, tree_id: loro::TreeID) -> Option<WriteTarget> {
+        let store = self.shared_trees.as_ref()?;
+        for shared_tree_id in store.shared_tree_ids() {
+            if let Some(doc) = store.get_shared_doc(&shared_tree_id)
+                && is_node_alive(&doc.get_tree(TREE_NAME), tree_id)
+            {
+                return Some(WriteTarget::Shared {
+                    shared_tree_id,
+                    doc,
+                    tree_id,
+                });
+            }
+        }
+        None
+    }
+
+    /// Find the shared doc whose tree holds a live node with stable id `id`.
+    fn scan_shared_for_stable_id(&self, id: &str) -> Option<WriteTarget> {
+        let store = self.shared_trees.as_ref()?;
+        // ALLOW(entity_uri_from_raw): backend string-id resolve surface (accepts both id formats)
+        let uri = EntityUri::from_raw(id);
+        let needle = uri.id();
+        for shared_tree_id in store.shared_tree_ids() {
+            if let Some(doc) = store.get_shared_doc(&shared_tree_id)
+                && let Some(tree_id) = find_stable_id_in_doc(&doc, needle)
+                && is_node_alive(&doc.get_tree(TREE_NAME), tree_id)
+            {
+                return Some(WriteTarget::Shared {
+                    shared_tree_id,
+                    doc,
+                    tree_id,
+                });
+            }
+        }
+        None
+    }
+
+    /// Wrap the resolved target's doc in a `LoroDocument` for writing. Both arms
+    /// use `from_existing` to reuse the already-configured inner `Arc<LoroDoc>`
+    /// (the shared doc's text styles were latched at accept; re-`configure` via
+    /// `LoroDocument::new` would corrupt them). A bare `doc.commit()` inside
+    /// `with_write` fires the shared doc's already-attached save/sync/projection
+    /// workers, so routed writes need no extra outbound plumbing.
+    fn write_doc(&self, target: &WriteTarget) -> (LoroDocument, loro::TreeID) {
+        match target {
+            WriteTarget::Global(tree_id) => (
+                LoroDocument::from_existing(self.collab_doc.doc(), self.collab_doc.doc_id()),
+                *tree_id,
+            ),
+            WriteTarget::Shared {
+                shared_tree_id,
+                doc,
+                tree_id,
+            } => (
+                LoroDocument::from_existing(doc.clone(), shared_tree_id.clone()),
+                *tree_id,
+            ),
+        }
+    }
+
+    pub async fn update_block_text(&self, id: &str, new_text: &str) -> Result<(), ApiError> {
+        let target = self.resolve_write_target(id).await?;
+        let (write_doc, tree_id) = self.write_doc(&target);
+
+        write_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
@@ -1093,7 +1221,18 @@ impl LoroBackend {
                 message: format!("Failed to update block text: {}", e),
             })?;
 
-        let block = self.get_block(id).await?;
+        // Re-read from the doc we just wrote. `get_block` resolves stable ids
+        // through the global-only `require_tree_id`, which returns `BlockNotFound`
+        // for a shared block whose subtree was pruned from the global tree — so
+        // read the shared node directly from its resolved doc instead.
+        let block = match &target {
+            WriteTarget::Global(_) => self.get_block(id).await?,
+            WriteTarget::Shared { doc, tree_id, .. } => {
+                let tree = doc.get_tree(TREE_NAME);
+                let parent_tid = get_node_parent(&tree, *tree_id);
+                read_block_from_tree(&tree, *tree_id, parent_tid)
+            }
+        };
         self.emit_change(Change::Updated {
             id: id.to_string(),
             data: block,
