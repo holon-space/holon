@@ -220,6 +220,7 @@ mod tests {
     use holon_api::Value;
 
     fn make_row(id: &str, content: &str) -> holon_api::StorageEntity {
+        use holon_api::Value;
         let mut row = holon_api::StorageEntity::new();
         row.insert("id".into(), Value::String(id.to_string()));
         row.insert("content".into(), Value::String(content.to_string()));
