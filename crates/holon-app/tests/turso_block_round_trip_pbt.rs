@@ -25,17 +25,17 @@
 //!      go green once Task #5 (CacheBlockReader hydration) ships, after
 //!      which Task #1 (drop the SUT join) becomes safe.
 
-use holon::core::SqlOperationProvider;
 use holon::core::queryable_cache::QueryableCache;
-use holon::storage::BLOCK_WRITE_TABLE;
+use holon::core::SqlOperationProvider;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::turso::TursoBackend;
+use holon::storage::BLOCK_WRITE_TABLE;
 use holon::sync::block_to_params;
-use holon_api::{EntityName, block::Block};
+use holon_api::{block::Block, EntityName};
 use holon_app::turso_seams::CacheBlockReader;
 use holon_block_roundtrip_testing::{
-    NormalizedDocument, assert_normalized_docs_equal, build_blocks, root_headlines_strategy,
+    assert_normalized_docs_equal, build_blocks, root_headlines_strategy, NormalizedDocument,
 };
 use holon_core::OperationProvider;
 use holon_filesystem::BlockReader;

@@ -6,8 +6,8 @@ use tracing::info;
 
 use std::sync::Arc;
 
-use holon_api::entity::{IntoEntity, TryFromEntity};
 use holon_api::DynamicEntity;
+use holon_api::entity::{IntoEntity, TryFromEntity};
 use holon_core::{CacheFactory, DataSource, EntityCache};
 
 /// Entity for the mcp_oauth_credentials table.
@@ -37,10 +37,7 @@ impl TursoCredentialStore {
     /// Create a credential store for a specific server.
     ///
     /// The backing table is created by the [`CacheFactory`].
-    pub async fn new(
-        cache_factory: &dyn CacheFactory,
-        server_uri: String,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(cache_factory: &dyn CacheFactory, server_uri: String) -> anyhow::Result<Self> {
         let cache = cache_factory
             .create_dynamic_cache(OAuthCredential::type_definition())
             .await

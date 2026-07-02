@@ -6,10 +6,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, info, warn};
 
-use holon_turso::turso::DbHandle;
-use holon_core::{CacheFactory, EntityCache};
 use holon_api::DynamicEntity;
 use holon_core::SyncTokenStore;
+use holon_core::{CacheFactory, EntityCache};
+use holon_turso::turso::DbHandle;
 
 use crate::credential_store::TursoCredentialStore;
 use crate::mcp_notification_handler::{NotifyingClientHandler, ResourceUpdateReceiver};

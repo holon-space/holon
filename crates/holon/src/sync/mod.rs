@@ -14,9 +14,7 @@ pub mod turso_block_query_source;
 
 pub use holon_loro::*;
 pub use holon_turso::matview_manager;
-pub use holon_turso::matview_manager::{
-    MatviewManager, WatchResult, reconcile_named_view,
-};
+pub use holon_turso::matview_manager::{MatviewManager, WatchResult, reconcile_named_view};
 
 // Re-export live_data module and the LiveData type (moved to holon-api earlier)
 pub use holon_api::live_data;

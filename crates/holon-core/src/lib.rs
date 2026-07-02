@@ -43,11 +43,11 @@ pub use operation_wrapper::OperationWrapper;
 pub use traits::{
     generate_sync_operation, BlockDataSourceHelpers, BlockEntity, BlockMaintenanceHelpers,
     BlockOperations, BlockQueryHelpers, CompletionStateInfo, CrudAuthority, CrudOperations,
-    DataSource, EventOrigin, FieldDelta, MarkOperations, MaybeSendSync, MoveOperations,
-    MatviewHook, OperationLogOperations, OperationObserver, OperationProvider, OperationRegistry,
-    OperationResult, OriginTaggedWrites, RenameOperations, Result, StreamProvider, SyncTokenStore,
-    SyncableProvider, TaskEntity, TaskOperations, TextOperations, UndoAction,
-    UnknownOperationError,
+    DataSource, EventOrigin, FieldDelta, MarkOperations, MatviewHook, MaybeSendSync,
+    MoveOperations, OperationLogOperations, OperationObserver, OperationProvider,
+    OperationRegistry, OperationResult, OriginTaggedWrites, RenameOperations, Result,
+    StreamProvider, SyncTokenStore, SyncableProvider, TaskEntity, TaskOperations, TextOperations,
+    UndoAction, UnknownOperationError,
 };
 pub use undo::UndoStack;
 
