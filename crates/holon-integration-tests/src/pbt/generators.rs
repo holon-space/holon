@@ -280,30 +280,46 @@ pub fn generate_org_file_content_with_keywords(
             // Sibling ids in document order, so a heading can depend on its
             // predecessor by id. Collected up front because the dependency
             // target (`ids[i-1]`) must be known while building block `i`.
-            let ids: Vec<String> = headings.iter().map(|(_, id, _, _, _)| id.clone()).collect();
+            //
+            // Uniquified: org files require unique `:ID:`s, so duplicate random
+            // ids are an illegal input state — made unrepresentable by suffixing
+            // a repeat with its heading index until fresh (still `[a-z0-9-]+`).
+            // Without this, two blocks share an id and every by-id consumer
+            // (ref model, the round-trip test's find-by-id) resolves the wrong
+            // block — the keyword_set round-trip red of 2026-07-02.
+            let mut seen = std::collections::HashSet::new();
+            let ids: Vec<String> = headings
+                .iter()
+                .enumerate()
+                .map(|(i, (_, id, _, _, _))| {
+                    let mut unique = id.clone();
+                    while !seen.insert(unique.clone()) {
+                        unique = format!("{unique}-{i}");
+                    }
+                    unique
+                })
+                .collect();
             // First pass: resolve each heading's parent. Flat (doc root) by
             // default; under extended gen, heading `i` parents to
             // `sel % (i + 1)` (0 = root, k = heading k-1) — well-founded by
             // construction since only earlier headings are eligible.
-            // Duplicate random ids skip nesting rather than self-parent.
             let parents: Vec<EntityUri> = headings
                 .iter()
                 .enumerate()
                 .map(
-                    |(i, (_, id, _, _, parent_sel))| match *parent_sel as usize % (i + 1) {
+                    |(i, (_, _, _, _, parent_sel))| match *parent_sel as usize % (i + 1) {
                         0 => doc_uri.clone(),
-                        k if ids[k - 1] != *id => EntityUri::block(&ids[k - 1]),
-                        _ => doc_uri.clone(),
+                        k => EntityUri::block(&ids[k - 1]),
                     },
                 )
                 .collect();
             let blocks: Vec<Block> = headings
                 .into_iter()
                 .enumerate()
-                .map(|(i, (headline, id, make_task, make_requires, _))| {
+                .map(|(i, (headline, _, make_task, make_requires, _))| {
                     let mut b =
-                        Block::new_text(EntityUri::block(&id), parents[i].clone(), &headline);
-                    b.set_property("ID", Value::String(id.clone()));
+                        Block::new_text(EntityUri::block(&ids[i]), parents[i].clone(), &headline);
+                    b.set_property("ID", Value::String(ids[i].clone()));
                     // Assign a task keyword to ~50% of headlines when keywords exist.
                     // Cycle through keywords using the index for variety.
                     if make_task && !all_keywords.is_empty() {
@@ -314,9 +330,9 @@ pub fn generate_org_file_content_with_keywords(
                     // sibling — same parent, so nesting stays orthogonal to
                     // the requires axis) — kept to one entry so the
                     // order-insensitive junction read can't false-diff against
-                    // the parsed order. Skip self-refs from duplicate ids.
+                    // the parsed order.
                     // Stored as a `block:` URI to match the parser boundary.
-                    if make_requires && i > 0 && ids[i - 1] != id && parents[i] == parents[i - 1] {
+                    if make_requires && i > 0 && parents[i] == parents[i - 1] {
                         b.requires = vec![EntityUri::block(&ids[i - 1])];
                     }
                     b
