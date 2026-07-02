@@ -10,21 +10,17 @@
 use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use holon_api::{EntityUri, Region};
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::wide_e2e::{
-    wide_e2e_windowed_ref, WideE2E, WideE2EMachine,
+    disclose_excluded, narrow_to_windowed_alphabet, set_windowed_cap_set, wide_e2e_windowed_ref,
+    WideE2E, WideE2EMachine, WideE2EWindowedMachine,
 };
 use holon_integration_tests::pbt::transitions::{ClickBlock, E2ETransition};
 use holon_integration_tests::pbt::ReferenceState;
-use holon_pbt_core::capabilities::{
-    SutHistoryWrite, SutNavHistoryDrive, SutNavHistoryWrite, SutViewControl,
-};
-use holon_pbt_core::composition::{CapId, CapSet};
-use proptest::strategy::{BoxedStrategy, Just, Strategy};
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
@@ -32,62 +28,6 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 mod pbt_harness;
 use pbt_harness::panic_message;
 use pbt_harness::windowed_wide::with_windowed_wide_sut;
-
-/// The narrowed live windowed cap set, captured once (by a throwaway window boot at the top
-/// of the loop test) before the strategy is built. `init_state` reads it so the generated
-/// alphabet + the non-vacuity floor narrow to exactly what the WINDOW can drive.
-static WINDOWED_CAP_SET: OnceLock<CapSet> = OnceLock::new();
-
-/// Narrow a live windowed cap set to the windowed GENERATED alphabet.
-///
-/// The deferred windowed base is `full_headless` (a `HeadlessFrontendComponent`), which
-/// still hosts the 6 EXCLUDED-row nav/history/view caps at the Direct-dispatch rung — but
-/// no window-driver mechanism drives them yet (C-3 Rung Audit rows 19–24, tracked Phase 3
-/// blockers). Driving them through the leftover dispatch impl while a window exists would be
-/// an unfaithful cross-rung combination (Design §8.11), so they must NOT enter the windowed
-/// generated alphabet. `CapSet::without` is the sanctioned, DISCLOSED narrowing: the caps
-/// stay in the `CapMap` (their read invariants keep selecting), only the generation gate
-/// drops their transitions. This is NOT the fix-the-cap-not-withhold anti-pattern (that
-/// forbids faking a DIVERGENCE green) — it is the audit-prescribed exclusion of a
-/// genuinely-undriveable transition class, disclosed here and in the audit table.
-///
-/// Cap → EXCLUDED transition rows:
-/// - `SutNavHistoryWrite`  → NavigateHome (row 19)
-/// - `SutNavHistoryDrive`  → NavigateBack/Forward, PinBlock, UnpinBlock (rows 20–22)
-/// - `SutViewControl`      → SwitchView (row 23)
-/// - `SutHistoryWrite`     → UndoLastMutation/Redo (row 24)
-fn narrow_to_windowed_alphabet(cap_set: CapSet) -> CapSet {
-    cap_set
-        .without(&CapId::of::<dyn SutNavHistoryWrite>())
-        .without(&CapId::of::<dyn SutNavHistoryDrive>())
-        .without(&CapId::of::<dyn SutViewControl>())
-        .without(&CapId::of::<dyn SutHistoryWrite>())
-}
-
-/// Report which of the 6 EXCLUDED-row caps the LIVE windowed base actually carries, so the
-/// narrowing is disclosed against reality (not assumed).
-fn disclose_excluded(cap_set: &CapSet) {
-    for (name, present) in [
-        (
-            "SutNavHistoryWrite (NavigateHome)",
-            cap_set.contains(&CapId::of::<dyn SutNavHistoryWrite>()),
-        ),
-        (
-            "SutNavHistoryDrive (Back/Fwd/Pin/Unpin)",
-            cap_set.contains(&CapId::of::<dyn SutNavHistoryDrive>()),
-        ),
-        (
-            "SutViewControl (SwitchView)",
-            cap_set.contains(&CapId::of::<dyn SutViewControl>()),
-        ),
-        (
-            "SutHistoryWrite (Undo/Redo)",
-            cap_set.contains(&CapId::of::<dyn SutHistoryWrite>()),
-        ),
-    ] {
-        eprintln!("[4b-alphabet] EXCLUDED cap present-in-base={present}: {name} (narrowed out of generation)");
-    }
-}
 
 #[test]
 fn benchmark_windowed_per_case_boot_cost() {
@@ -139,39 +79,6 @@ fn benchmark_windowed_per_case_boot_cost() {
 // ─────────────────────────────────────────────────────────────────────────────
 // The windowed generated-sequence proptest loop.
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// The windowed sibling of [`WideE2EMachine`]: identical transition generation /
-/// preconditions / apply (delegated), but `init_state` FIXES the oracle to the narrowed
-/// live windowed cap set (`WINDOWED_CAP_SET`) instead of drawing `any_valid_wiring()`. That
-/// cap set auto-narrows `aggregate_transitions` to the windowed alphabet (the 9 REBIND/OK
-/// gesture rows) and drops the 6 EXCLUDED rows, and it is the same set the per-tick
-/// `check_invariants` non-vacuity floor (`required_invariants`) is computed against.
-struct WideE2EWindowedMachine;
-
-impl ReferenceStateMachine for WideE2EWindowedMachine {
-    type State = ReferenceState;
-    type Transition = E2ETransition;
-
-    fn init_state() -> BoxedStrategy<Self::State> {
-        let cap_set = WINDOWED_CAP_SET
-            .get()
-            .expect("WINDOWED_CAP_SET must be captured (throwaway boot) before the strategy")
-            .clone();
-        Just(wide_e2e_windowed_ref(cap_set)).boxed()
-    }
-
-    fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-        <WideE2EMachine as ReferenceStateMachine>::transitions(state)
-    }
-
-    fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        <WideE2EMachine as ReferenceStateMachine>::preconditions(state, transition)
-    }
-
-    fn apply(state: Self::State, transition: &Self::Transition) -> Self::State {
-        <WideE2EMachine as ReferenceStateMachine>::apply(state, transition)
-    }
-}
 
 /// Drive ONE generated case over a freshly-booted windowed SUT, mirroring
 /// `proptest_state_machine::StateMachineTest::test_sequential` (initial-frame check, then
@@ -266,9 +173,7 @@ fn general_e2e_composed_pbt_windowed() {
     with_windowed_wide_sut(|sut, _default_oracle| {
         let live = sut.cap_set();
         disclose_excluded(&live);
-        WINDOWED_CAP_SET
-            .set(narrow_to_windowed_alphabet(live))
-            .expect("WINDOWED_CAP_SET set once");
+        set_windowed_cap_set(narrow_to_windowed_alphabet(live));
         Some(sut)
     });
 

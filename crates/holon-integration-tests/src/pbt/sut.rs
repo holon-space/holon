@@ -677,7 +677,8 @@ impl E2ESut {
     /// next `wait_for_entity_in_resolved_view_model` (5 s) catches it.
     ///
     /// Reads `self.ctx.reactive_engine` — the engine instance the GPUI
-    /// window's `BuilderServices` uses (via `PbtReadyContext`). The
+    /// window's `BuilderServices` uses (handed over by the phased ready
+    /// callback in `phased.rs`). The
     /// local `self.render.reactive_engine` RefCell is a separate instance
     /// `ensure_reactive_engine` creates inside the SUT and would not
     /// observe focus writes from the GPUI click handler.

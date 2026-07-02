@@ -1,8 +1,9 @@
-//! Frontend-neutral scaffolding for PBT harnesses
-//! (`gpui_ui_pbt`, `tui_ui_pbt`, …).
+//! Frontend-neutral scaffolding for PBT harnesses (the composed windowed
+//! runners: `gpui_composed_windowed_loop`, `tui_ui_pbt`, …).
 //!
-//! These helpers orchestrate the cross-thread / cross-runtime dance that
-//! surrounds [`run_pbt_with_driver_sync_callback`](super::phased::run_pbt_with_driver_sync_callback):
+//! These helpers orchestrate the cross-thread / cross-runtime dance around a
+//! frontend rendering a composed SUT (`with_windowed_wide_sut` on gpui, the
+//! TUI composed runner in `frontends/tui/tests/common/pbt_main.rs`):
 //!
 //! - bumping `PBT_MEMORY_MULTIPLIER` to budget for an extra frontend
 //! - building a per-frontend `target/pbt-screenshots/<subdir>` path

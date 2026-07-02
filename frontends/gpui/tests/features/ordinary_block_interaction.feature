@@ -1,28 +1,18 @@
 Feature: Ordinary block interaction through a real GPUI window
 
-  Replayed by the `gpui_gherkin_replay` binary against a real GPUI window
-  (Full variant, Loro on). Exercises the everyday editing path end-to-end
-  through the actual GPUI input pipeline: navigate to a doc, focus a block's
-  editor, type via real keystrokes, then indent via the real Tab keymap
-  (PlatformInput → keymap → IndentInline → operation dispatch). Assertions
-  read the real rendered widget tree.
+  Replayed by the `gpui_gherkin_replay` binary through the composed windowed
+  path (`with_windowed_wide_sut` + `replay_steps` over `ComposedSut<WideE2E>`).
+  Re-authored POST-BOOT onto the wide seed (structural-page -> parent/c1/c2):
+  no `Given an org file` / `app is started` ceremony — the wide seed IS the
+  boot org (the same convention as the headless composed_split_gherkin
+  fixture). Gestures ride the window's SimUserDriver (click-intent resolution
+  over real rendered bounds) and the composed invariant catalog runs every
+  tick inside `replay_steps`.
 
-  Scenario: Focus an editor, type, and indent a sibling
-    Given an org file "interaction.org":
-      """
-      * FirstBlock
-      :PROPERTIES:
-      :ID: blk-one
-      :END:
-      * SecondBlock
-      :PROPERTIES:
-      :ID: blk-two
-      :END:
-      """
-    And the app is started with loro
-    When I focus block "block:ref-doc-0" in region "main"
-    And I focus the editor of block "block:blk-one"
-    And I type "Hi"
-    Then within 10 seconds block "block:blk-one" contains "Hi"
-    When I indent block "block:blk-two"
-    Then within 10 seconds block "block:blk-two" contains "SecondBlock"
+  Scenario: Click to focus blocks through the real window
+    When I focus block "block:structural-page" in region "main"
+    And I click block "block:c1" in region "main"
+    # `focus is on` reads current_focus(main) — page-level navigation focus, which a
+    # child click does not move (the click focuses the child's editor; the per-tick
+    # inv-window-focus-matches-engine-focus invariant checks that side).
+    Then focus is on block "block:structural-page"

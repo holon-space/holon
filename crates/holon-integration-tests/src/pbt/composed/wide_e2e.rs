@@ -646,6 +646,118 @@ impl ComposedSlice for WideE2E {
     }
 }
 
+/// The narrowed LIVE windowed cap set, captured once (by a throwaway windowed boot at the
+/// top of a windowed random runner) before the proptest strategy is built.
+/// [`WideE2EWindowedMachine::init_state`] reads it so the generated alphabet + the
+/// non-vacuity floor narrow to exactly what the window can drive. Hoisted here
+/// (increment 4c) so the gpui loop and the tui composed runner share ONE machine.
+static WINDOWED_CAP_SET: std::sync::OnceLock<CapSet> = std::sync::OnceLock::new();
+
+/// Capture the live windowed cap set (once per process). Panics on a second call —
+/// a runner must capture it exactly once, before building the strategy.
+pub fn set_windowed_cap_set(cap_set: CapSet) {
+    WINDOWED_CAP_SET
+        .set(cap_set)
+        .expect("WINDOWED_CAP_SET set once");
+}
+
+/// Narrow a live windowed cap set to the windowed GENERATED alphabet.
+///
+/// The deferred windowed base is `full_headless` (a `HeadlessFrontendComponent`), which
+/// still hosts the 6 EXCLUDED-row nav/history/view caps at the Direct-dispatch rung — but
+/// no window-driver mechanism drives them yet (C-3 Rung Audit rows 19–24, tracked Phase 3
+/// blockers). Driving them through the leftover dispatch impl while a window exists would
+/// be an unfaithful cross-rung combination (Design §8.11), so they must NOT enter the
+/// windowed generated alphabet. `CapSet::without` is the sanctioned, DISCLOSED narrowing:
+/// the caps stay in the `CapMap` (their read invariants keep selecting), only the
+/// generation gate drops their transitions. This is NOT the fix-the-cap-not-withhold
+/// anti-pattern (that forbids faking a DIVERGENCE green) — it is the audit-prescribed
+/// exclusion of a genuinely-undriveable transition class.
+///
+/// Cap → EXCLUDED transition rows:
+/// - `SutNavHistoryWrite`  → NavigateHome (row 19)
+/// - `SutNavHistoryDrive`  → NavigateBack/Forward, PinBlock, UnpinBlock (rows 20–22)
+/// - `SutViewControl`      → SwitchView (row 23)
+/// - `SutHistoryWrite`     → UndoLastMutation/Redo (row 24)
+pub fn narrow_to_windowed_alphabet(cap_set: CapSet) -> CapSet {
+    use holon_pbt_core::capabilities::{
+        SutHistoryWrite, SutNavHistoryDrive, SutNavHistoryWrite, SutViewControl,
+    };
+    use holon_pbt_core::composition::CapId;
+    cap_set
+        .without(&CapId::of::<dyn SutNavHistoryWrite>())
+        .without(&CapId::of::<dyn SutNavHistoryDrive>())
+        .without(&CapId::of::<dyn SutViewControl>())
+        .without(&CapId::of::<dyn SutHistoryWrite>())
+}
+
+/// Report which of the 6 EXCLUDED-row caps the LIVE windowed base actually carries, so the
+/// narrowing is disclosed against reality (not assumed).
+pub fn disclose_excluded(cap_set: &CapSet) {
+    use holon_pbt_core::capabilities::{
+        SutHistoryWrite, SutNavHistoryDrive, SutNavHistoryWrite, SutViewControl,
+    };
+    use holon_pbt_core::composition::CapId;
+    for (name, present) in [
+        (
+            "SutNavHistoryWrite (NavigateHome)",
+            cap_set.contains(&CapId::of::<dyn SutNavHistoryWrite>()),
+        ),
+        (
+            "SutNavHistoryDrive (Back/Fwd/Pin/Unpin)",
+            cap_set.contains(&CapId::of::<dyn SutNavHistoryDrive>()),
+        ),
+        (
+            "SutViewControl (SwitchView)",
+            cap_set.contains(&CapId::of::<dyn SutViewControl>()),
+        ),
+        (
+            "SutHistoryWrite (Undo/Redo)",
+            cap_set.contains(&CapId::of::<dyn SutHistoryWrite>()),
+        ),
+    ] {
+        eprintln!(
+            "[windowed-alphabet] EXCLUDED cap present-in-base={present}: {name} \
+             (narrowed out of generation)"
+        );
+    }
+}
+
+/// The windowed sibling of [`WideE2EMachine`]: identical transition generation /
+/// preconditions / apply (delegated), but `init_state` FIXES the oracle to the narrowed
+/// live windowed cap set ([`set_windowed_cap_set`]) instead of drawing
+/// `any_valid_wiring()`. That cap set auto-narrows `aggregate_transitions` to the windowed
+/// alphabet (the REBIND/OK gesture rows) and drops the EXCLUDED rows, and it is the same
+/// set the per-tick `check_invariants` non-vacuity floor (`required_invariants`) is
+/// computed against.
+pub struct WideE2EWindowedMachine;
+
+impl ReferenceStateMachine for WideE2EWindowedMachine {
+    type State = ReferenceState;
+    type Transition = E2ETransition;
+
+    fn init_state() -> BoxedStrategy<Self::State> {
+        use proptest::strategy::Just;
+        let cap_set = WINDOWED_CAP_SET
+            .get()
+            .expect("WINDOWED_CAP_SET must be captured (throwaway boot) before the strategy")
+            .clone();
+        Just(wide_e2e_windowed_ref(cap_set)).boxed()
+    }
+
+    fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+        <WideE2EMachine as ReferenceStateMachine>::transitions(state)
+    }
+
+    fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+        <WideE2EMachine as ReferenceStateMachine>::preconditions(state, transition)
+    }
+
+    fn apply(state: Self::State, transition: &Self::Transition) -> Self::State {
+        <WideE2EMachine as ReferenceStateMachine>::apply(state, transition)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

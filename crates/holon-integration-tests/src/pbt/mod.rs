@@ -72,11 +72,12 @@ pub fn is_synthetic_ref_id(id: &holon_api::EntityUri) -> bool {
 pub use action_actor_state::ActionActorState;
 pub use file_adapter_state::FileAdapterState;
 pub use mcp_server_actor_state::MCPServerActorState;
-pub use phased::{
-    PbtPhaseState, PbtReadyContext, PbtReadyResult, PbtStepResult, PbtUiOperation,
-    pbt_execute_operation, pbt_setup, pbt_step, pbt_step_confirm, pbt_teardown,
-    run_pbt_with_driver_sync_callback,
-};
+// The phased entry points (the ready-context struct + the driver-sync run/replay
+// functions) are deliberately NOT re-exported
+// (increment 4c): the windowed harnesses ride the composed path
+// (`with_windowed_wide_sut` + `replay_steps` over `ComposedSut<WideE2E>`), and
+// `phased.rs` itself is deletion-scheduled (Phase 2). Nothing outside `phased.rs`
+// may depend on them.
 pub use query::{TestQuery, WatchSpec};
 pub use reference_domain_state::ReferenceDomainState;
 pub use reference_state::ReferenceState;

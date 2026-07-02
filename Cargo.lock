@@ -5328,6 +5328,8 @@ dependencies = [
  "holon-mcp",
  "holon-pbt-core",
  "miette",
+ "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "proptest-state-machine",
  "r3bl_tui",
  "serde",
  "serde_json",

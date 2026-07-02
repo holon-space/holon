@@ -34,16 +34,6 @@ name = "reactive_vm_test"
 harness = false
 
 [[test]]
-name = "gpui_ui_pbt"
-harness = false
-required-features = ["pbt"]
-
-[[test]]
-name = "gpui_ui_pbt_no_loro"
-harness = false
-required-features = ["pbt"]
-
-[[test]]
 name = "gpui_gherkin_replay"
 harness = false
 required-features = ["pbt"]
@@ -69,16 +59,6 @@ harness = false
 [[test]]
 name = "test_platform_smoke"
 harness = true
-
-[[test]]
-name = "gpui_ui_pbt_sim"
-harness = false
-required-features = ["pbt"]
-
-[[test]]
-name = "gpui_ui_pbt_sim_no_loro"
-harness = false
-required-features = ["pbt"]
 
 [[test]]
 name = "gpui_sim_replay_capture"
@@ -170,8 +150,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb1
 gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = ["test-support"] }
 # Property-based tests over ReactiveViewModel trees (tests/layout_pbt).
 proptest = "1"
-# Windowed proptest-state-machine shrinking for gpui_ui_pbt (drives the same
-# ReferenceMachine alphabet as the headless slices via a thin init_state wrapper).
+# Windowed proptest-state-machine generation/shrinking for the composed windowed
+# loop (gpui_composed_windowed_loop — same alphabet as the headless keystone).
 proptest-state-machine = { workspace = true }
 # Structural layout snapshot tests (tests/layout_insta).
 insta = { version = "1", features = ["yaml"] }

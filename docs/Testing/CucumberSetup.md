@@ -129,8 +129,12 @@ run_feature_strict::<VariantRef<SqlOnly>, E2ESut<SqlOnly>, SqlOnly>(path);
 ### Real GPUI window
 
 `frontends/gpui/tests/gpui_gherkin_replay.rs` replays a feature through a **real
-GPUI window** with a real `GpuiUserDriver` — keystrokes/clicks go through the
-actual input pipeline, and it drives `E2ESut<Full>` (full suite + budgets):
+GPUI window** via the composed windowed path (increment 4c): gestures go through
+the window's `SimUserDriver`, and it drives `ComposedSut<WideE2E>` with the full
+composed invariant catalog checked every tick. Features must be **post-boot** and
+authored against the wide seed (`structural-page` → `parent`/`c1`/`c2`) — no
+`Given an org file` / `app is started` ceremony (the wide seed IS the boot org,
+the same convention as the headless `composed_split_gherkin` fixture):
 
 ```bash
 cargo test -p holon-gpui --features pbt --test gpui_gherkin_replay
@@ -138,8 +142,7 @@ GHERKIN_FEATURE=/abs/path.feature cargo test -p holon-gpui --features pbt --test
 ```
 
 Default feature: `frontends/gpui/tests/features/ordinary_block_interaction.feature`.
-Env: `GHERKIN_FEATURE` (path), `PBT_KEEP_WINDOW=1` (leave window open),
-`PBT_MCP_PORT=<port>` (live MCP inspection).
+Env: `GHERKIN_FEATURE` (path).
 
 > Only the GPUI input pipeline can catch focus/keystroke-routing bugs (e.g. a
 > page-level editor swallowing a leaf's keystrokes) — those are invisible to the

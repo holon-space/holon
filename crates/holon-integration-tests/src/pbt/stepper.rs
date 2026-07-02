@@ -321,12 +321,13 @@ impl Stepper for BisectionStepper {
 //    `.proptest-regressions` replay are unchanged (they live in
 //    `sequential_strategy`, above the loop).
 //
-// 2. Live GPUI generator (phased.rs `run_pbt_with_driver_sync_callback`).
-//    INTENTIONALLY left hand-rolled — see the block comment above. It already
-//    shares the per-step *primitives* with headless (`E2ESut::drive_transition`,
-//    `apply_transition_async`, `run_invariant_registry`); the loop shell stays
-//    GPUI-specific (mid-sequence window launch + per-step screenshots + seed
-//    repro).
+// 2. Live windowed generators (increment 4c): the composed windowed loop
+//    (`frontends/gpui/tests/gpui_composed_windowed_loop.rs`) and the TUI
+//    composed runner (`frontends/tui/tests/common/pbt_main.rs`) drive
+//    generated sequences directly through `ComposedSut::<WideE2E>::apply` /
+//    `check_invariants` over a windowed boot — the phased GPUI generator
+//    they replaced was hand-rolled and is deletion-scheduled with phased.rs
+//    (Phase 2).
 //
 // 3. GPUI replay + bisection (ADR 0009 §3/§5). `GpuiReplayStepper` re-checks a
 //    captured `Vec<E2ETransition>` on a launched window:

@@ -1,12 +1,13 @@
-//! TestPlatform-backed windowed replay service — synchronous, single-threaded,
-//! no channels, no real NSWindow.
+//! `SimUserDriver` — the TestPlatform-backed `UserDriver` (direct gpui dispatch,
+//! no real NSWindow). The composed windowed harness (`windowed_wide.rs`, the 4b
+//! loop, `gpui_window_slice`, `gpui_compose_sut_windowed`) constructs it over an
+//! already-launched, settled window.
 //!
-//! Replaces the channel-based `WindowHost`/`WindowedReplayer` pair from
-//! `windowed_replay.rs` with a direct-dispatch variant that runs inside
-//! `TestApp`. The proptest state machine, signature pinning, capture format,
-//! and `seen_counter` semantics are unchanged — this swaps only the host.
+//! Increment 4c: the phased `SimReplayer` replay host (and its
+//! `HOLON_PBT_WINDOWED_CATALOG` opt-in per-tick check) was DELETED — the composed
+//! path runs the full catalog every tick as the primary check inside
+//! `ComposedSut::check_invariants`, so the opt-in twin became redundant.
 
-use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,47 +15,10 @@ use std::time::Duration;
 use gpui::{InputEvent, Keystroke, MouseButton, Pixels, Point, TestApp};
 use holon_api::{EntityUri, KeyChord, Region, Value};
 use holon_frontend::geometry::GeometryProvider;
-use holon_frontend::reactive::BuilderServices;
-use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_frontend::user_driver::UserDriver;
 use holon_frontend::{OperationIntent, ReactiveViewModel};
 use holon_gpui::geometry::BoundsRegistry;
-use holon_gpui::RebindHandle;
-use holon_integration_tests::pbt::composed::windowed::run_windowed_composed_check;
-use holon_integration_tests::pbt::fixtures::FixtureStep;
-use holon_integration_tests::pbt::phased::{
-    replay_fixture_with_driver_sync_callback, PbtReadyContext, PbtReadyResult,
-};
-use holon_integration_tests::pbt::ReferenceState;
-
-/// Wait on tokio (real time) until the engine's root layout signal produces
-/// a non-loading view model. Under TestPlatform gpui timers time-skip, so the
-/// in-launch pre-warm (`launch_holon_window_impl`) always "times out" after
-/// microseconds of real time — warm the watcher here instead, before the
-/// window subscribes; the signal then replays the warm value on subscription.
-pub(crate) fn warm_root_signal(engine: &Arc<ReactiveEngine>, rt_handle: &tokio::runtime::Handle) {
-    use futures::StreamExt;
-    use futures_signals::signal::SignalExt;
-    let root_uri = holon_api::root_layout_block_uri();
-    let sig = engine.watch_data_signal(&root_uri);
-    let warmed = rt_handle.block_on(async move {
-        let mut stream = sig.to_stream();
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while let Some(rvm) = stream.next().await {
-                if rvm.widget_name().as_deref() != Some("loading") {
-                    return true;
-                }
-            }
-            false
-        })
-        .await
-        .unwrap_or(false)
-    });
-    assert!(
-        warmed,
-        "root layout signal never produced real data within 30s (engine watcher stalled)"
-    );
-}
 
 /// One sim pump cycle: real tokio time for backend watchers, drain gpui
 /// tasks (test builds draw dirty windows inside flush_effects), fire fake
@@ -70,48 +34,13 @@ fn pump_cycle(app: &TestApp, bounds: &BoundsRegistry) {
     bounds.flush();
 }
 
-/// Settle to a fixed point: pump until the BoundsRegistry element count is
-/// stable across consecutive cycles and no "loading" placeholders remain.
-/// Bounded — panics loudly if the tree never stabilizes.
-fn settle_to_fixed_point(app: &TestApp, bounds: &BoundsRegistry, max_cycles: usize) {
-    let mut last_count = usize::MAX;
-    let mut stable = 0u32;
-    for _ in 0..max_cycles {
-        pump_cycle(app, bounds);
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count > 0 && count == last_count && !still_loading {
-            stable += 1;
-            if stable >= 3 {
-                return;
-            }
-        } else {
-            stable = 0;
-        }
-        last_count = count;
-    }
-    let elements = bounds.all_elements();
-    panic!(
-        "sim settle never reached a fixed point after {max_cycles} cycles: \
-         {} elements, loading={}",
-        elements.len(),
-        elements
-            .iter()
-            .filter(|(_, info)| info.widget_type.as_ref() == "loading")
-            .count()
-    );
-}
-
 // ---------------------------------------------------------------------------
 // SimUserDriver — UserDriver over direct TestPlatform dispatch
 // ---------------------------------------------------------------------------
 
-/// Direct-dispatch UserDriver for TestPlatform. Holds a raw pointer to the
-/// `TestApp` owned by `SimReplayer`. SAFETY: SimReplayer outlives all
-/// SimUserDriver instances; all access is from one thread.
+/// Direct-dispatch UserDriver for TestPlatform. Holds a raw pointer to a
+/// harness-owned `TestApp`. SAFETY: the owner outlives all SimUserDriver
+/// instances; all access is from one thread.
 pub(crate) struct SimUserDriver {
     app_ptr: *const TestApp,
     window: gpui::AnyWindowHandle,
@@ -131,10 +60,9 @@ unsafe impl Send for SimUserDriver {}
 impl SimUserDriver {
     /// Construct a driver over an already-launched, settled window. SAFETY: the
     /// caller must keep the `TestApp` `app_ptr` points at alive and untouched for
-    /// the driver's lifetime, and use the driver only from the gpui thread (same
-    /// contract `SimReplayer::replay` relies on). Used by the windowed composition
-    /// slice (`gpui_window_slice`) to drive a single focus interaction before
-    /// reading `inv-window-focus-matches-engine-focus` over the composed `CapMap`.
+    /// the driver's lifetime, and use the driver only from the gpui thread (the
+    /// same contract `with_windowed_wide_sut` upholds). Used by the windowed
+    /// composition slice (`gpui_window_slice`) and the composed windowed harness.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         app_ptr: *const TestApp,
@@ -682,223 +610,5 @@ impl UserDriver for SimUserDriver {
 
     fn editor_cursor_byte(&self, _: &EntityUri) -> Result<Option<usize>, String> {
         Err("editor caret not observable by SimUserDriver".to_string())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SimReplayer — synchronous replay host
-// ---------------------------------------------------------------------------
-
-pub(crate) struct SimReplayer {
-    app: UnsafeCell<TestApp>,
-    rebind_handle: UnsafeCell<RebindHandle>,
-    window: gpui::AnyWindowHandle,
-    bounds: BoundsRegistry,
-    rt_handle: tokio::runtime::Handle,
-    /// Shared `DebugServices` whose `interaction_tx` the window's
-    /// interaction pump populated at launch (one per process, like the
-    /// real-window host's single shared `DebugServices`).
-    debug: Arc<holon_mcp::server::DebugServices>,
-}
-
-unsafe impl Sync for SimReplayer {}
-
-impl SimReplayer {
-    pub(crate) fn new(
-        app: TestApp,
-        rebind_handle: RebindHandle,
-        bounds: BoundsRegistry,
-        rt_handle: tokio::runtime::Handle,
-        debug: Arc<holon_mcp::server::DebugServices>,
-    ) -> Self {
-        let window = rebind_handle.window();
-        Self {
-            app: UnsafeCell::new(app),
-            rebind_handle: UnsafeCell::new(rebind_handle),
-            window,
-            bounds,
-            rt_handle,
-            debug,
-        }
-    }
-
-    /// Shut down the app, then leak it. `App::shutdown` clears windows, but
-    /// detached pump tasks (root-layout signal, interaction pump) and the
-    /// RebindHandle's entity cache still hold `AppModel`/`ReactiveShell`
-    /// handles, and gpui's leak detector runs before the dispatcher drops
-    /// those tasks — so dropping `TestApp` always panics "leaked handles".
-    /// The process exits right after; leaking here is disclosed and benign.
-    pub(crate) fn dispose(self) {
-        {
-            let app = unsafe { &mut *self.app.get() };
-            app.update(|cx| cx.shutdown());
-            app.run_until_parked();
-        }
-        std::mem::forget(self);
-    }
-
-    pub fn replay(
-        &self,
-        wiring: holon_pbt_core::Wiring,
-        steps: Vec<FixtureStep>,
-        seen_counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    ) -> Result<(), Box<dyn std::any::Any + Send>> {
-        let app_ptr = self.app.get();
-        let rebind_ptr = self.rebind_handle.get();
-        let window = self.window;
-        let bounds = self.bounds.clone();
-        let rt_handle = self.rt_handle.clone();
-        let interaction_tx = self
-            .debug
-            .interaction_tx
-            .get()
-            .expect("interaction_tx not set by window pump")
-            .clone();
-
-        // Engine slot shared between `on_ready` (which sets it once the frontend engine
-        // exists at StartApp) and the per-tick hook (which reads it to build the windowed
-        // `CapMap` each tick). Single-threaded gpui replay, but use Arc<Mutex> so the
-        // closures carry no `!Send`/`!Sync` surprises.
-        let engine_slot: Arc<std::sync::Mutex<Option<Arc<ReactiveEngine>>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let engine_slot_ready = engine_slot.clone();
-
-        // Driver slot — twin of `engine_slot`: `on_ready` stashes the live
-        // `SimUserDriver` so the per-tick hook can build the windowed INPUT
-        // `CapMap` (`window_input_wide`) over the same production driver the
-        // window installs (E4). `SimUserDriver` carries `unsafe impl Send/Sync`,
-        // so the `Arc<Mutex<…>>` is closure-safe.
-        let driver_slot: Arc<std::sync::Mutex<Option<Arc<dyn UserDriver>>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let driver_slot_ready = driver_slot.clone();
-
-        let on_ready = move |ctx: &PbtReadyContext| -> Option<PbtReadyResult> {
-            let app = unsafe { &mut *app_ptr };
-            let rebind = unsafe { &*rebind_ptr };
-
-            // Warm the new engine's root watcher in real time BEFORE the
-            // window subscribes — under TestPlatform the launch pre-warm
-            // time-skips and always misses the (real-time) tokio query.
-            warm_root_signal(&ctx.reactive_engine, &rt_handle);
-
-            // Rebind the window to the new engine.
-            app.update(|cx| {
-                rebind.rebind(ctx.session.clone(), ctx.reactive_engine.clone(), cx);
-            });
-
-            // Post-rebind settle: pump both runtimes until the rendered
-            // tree reaches a fixed point (no loading placeholders, stable
-            // element count).
-            settle_to_fixed_point(unsafe { &*app_ptr }, &bounds, 500);
-
-            // Hand the live engine to the per-tick hook.
-            *engine_slot_ready.lock().unwrap() = Some(ctx.reactive_engine.clone());
-
-            let driver: Arc<dyn UserDriver> = Arc::new(SimUserDriver {
-                app_ptr: app_ptr,
-                window,
-                bounds: bounds.clone(),
-                engine: ctx.reactive_engine.clone(),
-                rt_handle: rt_handle.clone(),
-                interaction_tx: interaction_tx.clone(),
-            });
-            // Hand the live driver to the per-tick hook (E4 windowed input).
-            *driver_slot_ready.lock().unwrap() = Some(driver.clone());
-            Some(PbtReadyResult {
-                driver: Some(driver),
-                frontend_engine: Some(ctx.reactive_engine.clone()),
-                frontend_geometry: Some(Box::new(bounds.clone())),
-                frontend_visual_state: None,
-            })
-        };
-
-        // E4 per-tick composed-catalog hook. OPT-IN via `HOLON_PBT_WINDOWED_CATALOG=1`
-        // (the full catalog + a forced window settle every tick is a real cost — H-B4 —
-        // so default-off keeps existing windowed runs fast; the `E2ESut` per-step
-        // `check_invariants` still runs in parallel, so this is purely additive). When
-        // on, each post-StartApp tick: settle the window, then call the shared
-        // `run_windowed_composed_check` (the single-sourced E4 check) which builds the
-        // windowed INPUT `CapMap` (`window_input_wide` over this window's geometry +
-        // engine + driver) and a ref `CapMap` from the LIVE `ReferenceState`, runs the
-        // composed catalog, and panics on failures / non-vacuity. Same free fn the
-        // `E2ESut` per-step hook calls — one copy.
-        let catalog_enabled = std::env::var("HOLON_PBT_WINDOWED_CATALOG")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let bounds_tick = self.bounds.clone();
-        let mut tick_idx: usize = 0;
-        let per_tick = move |_: &mut holon_integration_tests::pbt::E2ESut,
-                             ref_state: &ReferenceState| {
-            if !catalog_enabled {
-                return;
-            }
-            // B0 finding: `random_pbt_sim::run` keeps a multi-thread `window_rt.enter()`
-            // guard active for the whole replay (`random_pbt_sim.rs:102`), so a tokio
-            // runtime is ENTERED on this gpui thread at the hook point. That makes both
-            // `Handle::block_on` and `block_in_place` panic (the thread is not a worker,
-            // just a context-entered external thread). The escape hatch is
-            // `futures::executor::block_on`: it is runtime-agnostic — it polls the future
-            // on this thread to completion while any tokio primitive the invariants await
-            // still resolves against the entered multi-thread `window_rt` (worker threads
-            // make progress). The window is settled to a fixed point BEFORE this, so the
-            // reads are over already-rendered state and blocking the gpui thread here
-            // needs no further pumping.
-            if tick_idx == 0 {
-                eprintln!(
-                    "[B0] windowed per-tick catalog ON; ambient_runtime_entered={} \
-                     — driving via futures::executor::block_on",
-                    tokio::runtime::Handle::try_current().is_ok()
-                );
-            }
-            tick_idx += 1;
-
-            let t_settle = std::time::Instant::now();
-            settle_to_fixed_point(unsafe { &*app_ptr }, &bounds_tick, 500);
-            let settle_ms = t_settle.elapsed().as_millis();
-
-            let engine = engine_slot
-                .lock()
-                .unwrap()
-                .clone()
-                .expect("per-tick hook fired before StartApp populated the engine slot");
-            let driver = driver_slot
-                .lock()
-                .unwrap()
-                .clone()
-                .expect("per-tick hook fired before StartApp populated the driver slot");
-
-            // The shared, single-sourced windowed check builds `window_input_wide`
-            // over the LIVE geometry + engine + driver and a ref `CapMap` from the
-            // LIVE reference state, runs the composed catalog, and asserts no
-            // divergence + the non-vacuity floor (inv-frontend-bounds-rendered ran).
-            let t_check = std::time::Instant::now();
-            let report = futures::executor::block_on(run_windowed_composed_check(
-                Box::new(bounds_tick.clone()),
-                engine,
-                driver,
-                ref_state,
-                &format!("tick {tick_idx}"),
-            ));
-            let check_ms = t_check.elapsed().as_millis();
-            if std::env::var("HOLON_PBT_WINDOWED_CATALOG_TIMING").is_ok() {
-                eprintln!(
-                    "[windowed-catalog] tick={tick_idx} settle_ms={settle_ms} \
-                     check_ms={check_ms} ran={} failures={}",
-                    report.ran_ids().len(),
-                    report.failures().len()
-                );
-            }
-        };
-
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            replay_fixture_with_driver_sync_callback(
-                wiring,
-                steps,
-                on_ready,
-                per_tick,
-                seen_counter,
-            )
-            .expect("sim replay setup failed");
-        }))
     }
 }

@@ -1,9 +1,14 @@
 //! GPUI Gherkin replay — replays a hand-authored `.feature` through a REAL
-//! GPUI window via the shared `pbt_harness` shell. Differs from `gpui_ui_pbt`
-//! only in the runner: fixture replay instead of random generation.
+//! GPUI window via the composed windowed path (increment 4c: repointed off the
+//! phased driver-sync replay spine onto
+//! `with_windowed_wide_sut` + `replay_steps` over `ComposedSut<WideE2E>`).
 //!
-//! `harness = false` (GPUI needs the main thread). Run with:
-//!   cargo test -p holon-gpui --test gpui_gherkin_replay
+//! Features must be POST-BOOT and authored against the wide seed (the composed
+//! alphabet has no `StartApp` / org-seed ceremony — the wide seed is the boot
+//! org), the same convention as the headless `composed_split_gherkin` fixture.
+//!
+//! `harness = false`. Run with:
+//!   cargo test -p holon-gpui --features pbt --test gpui_gherkin_replay
 //! Override the feature with GHERKIN_FEATURE=/abs/path.feature.
 
 #[path = "pbt_harness/mod.rs"]
@@ -11,7 +16,7 @@ mod pbt_harness;
 
 use holon_integration_tests::pbt::fixtures::gherkin::GherkinFixtureSource;
 use holon_integration_tests::pbt::fixtures::FixtureSource;
-use holon_integration_tests::pbt::phased::replay_fixture_with_driver_sync_callback;
+use pbt_harness::windowed_wide::replay_fixture_windowed;
 
 fn feature_path() -> String {
     std::env::var("GHERKIN_FEATURE").unwrap_or_else(|_| {
@@ -25,29 +30,24 @@ fn feature_path() -> String {
 
 fn main() {
     let path = feature_path();
-    let mut fixtures = GherkinFixtureSource::new(&path).load();
-    assert_eq!(
-        fixtures.len(),
-        1,
-        "gpui_gherkin_replay expects exactly one scenario in {path:?}, got {}",
-        fixtures.len()
+    let fixtures = GherkinFixtureSource::new(&path).load();
+    assert!(
+        !fixtures.is_empty(),
+        "gpui_gherkin_replay expects at least one scenario in {path:?}"
     );
-    let fixture = fixtures.remove(0);
+    for fixture in &fixtures {
+        eprintln!(
+            "[Holon Gherkin Replay] replaying {:?} ({} steps) from {path}",
+            fixture.name,
+            fixture.steps.len()
+        );
+        if let Err(payload) = replay_fixture_windowed("gpui_gherkin_replay", fixture) {
+            std::panic::resume_unwind(payload);
+        }
+    }
     eprintln!(
-        "[Holon Gherkin Replay] replaying {:?} ({} steps) from {path}",
-        fixture.name,
-        fixture.steps.len()
-    );
-    // Hand-authored features carry no recorded wiring — they are written
-    // against the Full (Loro) configuration.
-    let wiring = fixture.wiring.unwrap_or_else(holon_pbt_core::Wiring::full);
-    let steps = fixture.steps;
-
-    pbt_harness::run_in_gpui_window(
-        "Holon Gherkin Replay",
-        "gpui_gherkin",
-        move |_driver, on_ready| {
-            replay_fixture_with_driver_sync_callback(wiring, steps, on_ready, |_, _| {}, None)
-        },
+        "[Holon Gherkin Replay] PASS — {} scenario(s) replayed GREEN through the windowed \
+         ComposedSut<WideE2E>",
+        fixtures.len()
     );
 }

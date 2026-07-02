@@ -1,67 +1,21 @@
 {
-  "name": "gpui_ui_pbt_sim_captured",
-  "description": "Auto-captured from a panicking proptest case. Rename + move into the slice's fixtures_dir to lock it.",
+  "name": "presskey_loro_split_backspace (post-boot re-encode, PressKey tail E4-excluded)",
+  "description": "Locked regression recipe: chained splits (at 1, then 0, then 0) followed by PressKey backspace diverged SUT vs ref (the reference kept the split tail, the SUT lost it). Re-encoded POST-BOOT against the wide seed (increment 4c). DISCLOSED EXCLUSION: the PressKey backspace tail is precondition-gated off the composed base (full_headless wiring has no Actor::UI -> has_editor_buffer() is false; the E4 keystroke input family is a tracked Phase-3 blocker, C-3 rung audit). Revive the tail from VCS history (the pre-4c phased capture) once E4 lands. The split-chain portion replays windowed with the full composed catalog every tick.",
   "environment": {
-    "wiring": {
-      "storage_adapters": [
-        "Loro",
-        "Org",
-        "Markdown",
-        "Turso"
-      ],
-      "sync_adapters": [
-        "Todoist"
-      ],
-      "actors": [
-        "UI",
-        "MCPServer",
-        "ActionEngine"
-      ]
-    },
-    "env_flags": {
-      "PBT_MUTABLE_TEXT": "1"
-    }
+    "wiring": null,
+    "env_flags": {}
   },
   "initial_state": null,
   "transitions": [
     {
-      "WriteOrgFile": {
-        "filename": "__281494.org",
-        "blocks": [
-          {
-            "id": "block:--9qpqbyfb--9-rdu1ts--n3",
-            "parent_id": "block:gen-placeholder",
-            "content": "Q8",
-            "content_type": "text",
-            "source_language": null,
-            "source_name": null,
-            "properties": {
-              "ID": "--9qpqbyfb--9-rdu1ts--n3"
-            },
-            "marks": null,
-            "created_at": 1782126636023,
-            "updated_at": 1782126636023
-          }
-        ],
-        "keyword_set": null
-      }
-    },
-    {
-      "StartApp": {
-        "wait_for_ready": true,
-        "enable_fake_mcp": true,
-        "enable_loro": true
-      }
-    },
-    {
       "NavigateFocus": {
         "region": "main",
-        "block_id": "block:ref-doc-0"
+        "block_id": "block:structural-page"
       }
     },
     {
       "SplitBlock": {
-        "block_id": "block:--9qpqbyfb--9-rdu1ts--n3",
+        "block_id": "block:c1",
         "position": 1
       }
     },
@@ -75,13 +29,6 @@
       "SplitBlock": {
         "block_id": "block::split-1",
         "position": 0
-      }
-    },
-    {
-      "PressKey": {
-        "chord": [
-          "backspace"
-        ]
       }
     }
   ]

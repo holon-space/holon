@@ -7,6 +7,7 @@
 //! deletion-scheduled scaffolding (Phase 1/2), so keeping a single source avoids two
 //! copies drifting.
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,9 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::composed::harness::{ComposedSut, SettleHook};
 use holon_integration_tests::pbt::composed::wide_e2e::{
-    boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E,
+    boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E, WideE2EMachine,
 };
+use holon_integration_tests::pbt::fixtures::{replay_steps, NamedFixture};
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 use holon_integration_tests::pbt::ReferenceState;
@@ -221,4 +223,66 @@ pub fn with_windowed_wide_sut(
     if let Some(sut) = sut {
         std::mem::forget(sut);
     }
+}
+
+/// Whether a caught panic payload's message contains `needle` — the windowed
+/// minimizer's failure-signature classifier (moved here from the deleted
+/// `windowed_replay` rebind service).
+pub fn payload_signature_match(payload: &(dyn std::any::Any + Send), needle: &str) -> bool {
+    let msg = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    msg.contains(needle)
+}
+
+/// Replay a post-boot fixture (capture JSON / `.feature` scenario) through a freshly
+/// booted windowed `ComposedSut<WideE2E>` — the composed successor of the phased
+/// driver-sync replay spine (increment 4c). The base is the
+/// pre-booted, wide-seeded `full_headless` window (no `StartApp` / org-seed ceremony —
+/// the wide seed IS the boot org), so fixtures must be POST-BOOT, matching
+/// composed-keystone captures and re-authored `.feature`s; a fixture that still encodes
+/// `StartApp`/seed steps fails loud at the precondition assert inside `replay_steps`.
+///
+/// Returns `Err(panic payload)` on the first step/invariant failure so ddmin oracles
+/// (the windowed minimizer) can classify the signature; replay binaries re-raise it.
+/// ⚠ `--test-threads=1` semantics apply (one gpui window per process at a time).
+pub fn replay_fixture_windowed(
+    label: &'static str,
+    fixture: &NamedFixture,
+) -> Result<(), Box<dyn std::any::Any + Send + 'static>> {
+    let mut result: Result<(), Box<dyn std::any::Any + Send + 'static>> = Ok(());
+    with_windowed_wide_sut(|sut, oracle| {
+        // The composed windowed base is full_headless-wired; a capture recorded under a
+        // different wiring would replay against the wrong oracle — fail loud, don't fake.
+        if let Some(recorded) = &fixture.wiring {
+            assert_eq!(
+                *recorded, oracle.wiring,
+                "[{label}] fixture {:?} was recorded under wiring {recorded:?}, but the \
+                 windowed composed base is fixed to {:?} — re-record or replay headless",
+                fixture.name, oracle.wiring
+            );
+        }
+        match catch_unwind(AssertUnwindSafe(|| {
+            replay_steps::<WideE2EMachine, ComposedSut<WideE2E>>(
+                label,
+                &fixture.steps,
+                oracle.clone(),
+                sut,
+                |_| {},
+                |_, _| {},
+                None,
+            )
+        })) {
+            Ok(sut) => Some(sut),
+            Err(payload) => {
+                // The SUT was consumed and dropped inside the unwind (this thread is not
+                // runtime-entered, so its Drop is safe); teardown only leaks the app.
+                result = Err(payload);
+                None
+            }
+        }
+    });
+    result
 }
