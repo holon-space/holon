@@ -1196,20 +1196,6 @@ impl HeadlessFrontendComponent {
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl SutFocusWrite for HeadlessFrontendComponent {
-    // ALLOW(unused_param): region is fixed to main by the click-driven focus path
-    async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
-        self.apply_navigate_focus_via(self.driver.as_ref(), id)
-            .await;
-    }
-
-    async fn apply_focus_editable_text(&self, id: &EntityUri) {
-        self.apply_focus_editable_text_via(self.driver.as_ref(), id)
-            .await;
-    }
-}
-
 /// The keystroke-driven editor write caps over the PRODUCTION headless editor
 /// pipeline (`ReactiveEngineDriver` → `HeadlessEditorMirror` → `MutableText`),
 /// the headless analogue of `E2ESut`'s `send_raw_keystroke`-based
@@ -1284,23 +1270,6 @@ impl HeadlessFrontendComponent {
                 .await
                 .unwrap_or_else(|e| panic!("[apply_move_cursor] right failed: {e:#}"));
         }
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl SutEditorMirrorWrite for HeadlessFrontendComponent {
-    async fn apply_type_chars(&self, text: &str) {
-        self.apply_type_chars_via(self.driver.as_ref(), text).await;
-    }
-
-    async fn apply_delete_backward(&self, count: usize) {
-        self.apply_delete_backward_via(self.driver.as_ref(), count)
-            .await;
-    }
-
-    async fn apply_move_cursor(&self, byte_position: usize) {
-        self.apply_move_cursor_via(self.driver.as_ref(), byte_position)
-            .await;
     }
 }
 
@@ -1654,29 +1623,6 @@ impl HeadlessFrontendComponent {
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl SutMutate for HeadlessFrontendComponent {
-    async fn toggle_state(&self, block_id: &EntityUri, new_state: CycleTarget) {
-        // Real production toggle: advance the cycle by dispatching `cycle_task_state`
-        // `click_count` times (each op reads the current `task_state` off the Loro
-        // backend and advances by one), where `click_count` is computed from the
-        // pre-mutation state — the headless analogue of clicking the `state_toggle`
-        // widget that many times. (The windowed sibling uses `toggle_state_via` to click
-        // the real widget through the window driver.)
-        let id = self.resolve_id(block_id);
-        let click_count = self.toggle_click_count(&id, new_state).await;
-        let entity = "block".to_string().into();
-        for _ in 0..click_count {
-            let mut params: StorageEntity = HashMap::new();
-            params.insert("id".into(), Value::String(id.to_string()));
-            self.engine
-                .execute_operation(&entity, "cycle_task_state", params)
-                .await
-                .unwrap_or_else(|e| panic!("toggle_state cycle_task_state({id}) failed: {e}"));
-        }
-    }
-}
-
 impl HeadlessFrontendComponent {
     /// Settle barrier shared by the seam-mutate methods: poll `block_raw` until its
     /// id-set is stable across two consecutive reads (the live `FileSyncController`
@@ -2007,23 +1953,77 @@ impl SutErrorLog for HeadlessFrontendComponent {
     }
 }
 
+// Direct gesture-write trait impls over the component's OWN headless driver — thin
+// wrappers on the `*_via` bodies. Registered CapMaps route these caps through
+// `DriverBoundFrontendWrite` (`register_gesture_writes`); these direct impls exist for
+// the make-or-break PROBE tests (and the `assert_cap_union` compile check) that exercise
+// the component directly rather than through a composed `CapMap`. Same bodies, bound to
+// `self.driver()`. `SutMutate` is intentionally NOT among them — no direct caller needs
+// it, so `state_toggle` toggling has a single path (the shim's `toggle_state_via`).
+#[async_trait::async_trait(?Send)]
+impl SutFocusWrite for HeadlessFrontendComponent {
+    // ALLOW(unused_param): region is fixed to main by the click-driven focus path
+    async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
+        self.apply_navigate_focus_via(self.driver.as_ref(), id)
+            .await;
+    }
+
+    async fn apply_focus_editable_text(&self, id: &EntityUri) {
+        self.apply_focus_editable_text_via(self.driver.as_ref(), id)
+            .await;
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutEditorMirrorWrite for HeadlessFrontendComponent {
+    async fn apply_type_chars(&self, text: &str) {
+        self.apply_type_chars_via(self.driver.as_ref(), text).await;
+    }
+
+    async fn apply_delete_backward(&self, count: usize) {
+        self.apply_delete_backward_via(self.driver.as_ref(), count)
+            .await;
+    }
+
+    async fn apply_move_cursor(&self, byte_position: usize) {
+        self.apply_move_cursor_via(self.driver.as_ref(), byte_position)
+            .await;
+    }
+}
+
 impl CapProvider for HeadlessFrontendComponent {
+    /// Backward-compatible entry: the non-gesture caps PLUS the gesture-write caps
+    /// bound to this component's OWN headless driver. Direct callers (lib slices that
+    /// build a CapMap via `Config`/`register` and never attach a window) get the full
+    /// set. The composed builder instead calls [`Self::register_non_gesture`] +
+    /// [`GestureWriteSource::register_gesture_writes`] separately so the windowed
+    /// `DriverPlacement::Deferred` base can withhold the gesture rung until a window
+    /// exists (§8.12 insert-only overlay).
     fn register(self: Arc<Self>, caps: &mut CapMap) {
+        let driver = self.driver();
+        self.clone().register_non_gesture(caps);
+        self.register_gesture_writes(caps, driver);
+    }
+}
+
+impl HeadlessFrontendComponent {
+    /// Every cap this component provides EXCEPT the driver-bound gesture-write family
+    /// (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`), which
+    /// is enumerated once in [`GestureWriteSource::register_gesture_writes`]. Split out
+    /// so `DriverPlacement` can gate the gesture rung (the windowed base registers the
+    /// reads/projections here and inserts the gesture writes only once a window exists).
+    pub(crate) fn register_non_gesture(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self.clone() as Arc<dyn SutErrorLog>);
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
         caps.insert(self.clone() as Arc<dyn SutViewModel>);
         caps.insert(self.clone() as Arc<dyn SutBackend>);
         caps.insert(self.clone() as Arc<dyn SutWatchRows>);
         caps.insert(self.clone() as Arc<dyn SutOrgRead>);
-        // `SutFocusWrite` is a write cap — no invariant `Needs` it, so registering
-        // it here is selection-neutral; it lets the `NavigateFocus` transition
-        // drive this component through `apply_to_sut(&mut CapMap)`. `SutSqlProjection`
-        // is deliberately NOT registered here (it would newly select
-        // `block_content_sql`); the navigation slice adds it on its own CapMap.
-        caps.insert(self.clone() as Arc<dyn SutFocusWrite>);
-        // `SutNavHistoryWrite` (go_home) — same selection-neutral rationale as
-        // `SutFocusWrite`: no invariant `Needs` it, it just lets the `NavigateHome`
-        // transition drive this component through `apply_to_sut(&mut CapMap)`.
+        // `SutNavHistoryWrite` (go_home) — selection-neutral write cap (no invariant
+        // `Needs` it), it just lets the `NavigateHome` transition drive this component
+        // through `apply_to_sut(&mut CapMap)`. `SutSqlProjection` is deliberately NOT
+        // registered here (it would newly select `block_content_sql`); the navigation
+        // slice adds it on its own CapMap.
         caps.insert(self.clone() as Arc<dyn SutNavHistoryWrite>);
         // `SutWatchRegister` (setup_watch) — same selection-neutral rationale: no
         // invariant `Needs` a write cap; it lets the `SetupWatch` transition drive
@@ -2033,14 +2033,6 @@ impl CapProvider for HeadlessFrontendComponent {
         // also supplies `RefWatches` makes the B5 watch invariants bite over a
         // composed-driven watch.
         caps.insert(self.clone() as Arc<dyn SutWatchRegister>);
-        // Structural block-tree writes through the production op dispatcher (the
-        // session is built via full DI, so `SqlBlockOperations` is registered).
-        // Reuses the single-sourced `OpDispatchWriter` — no per-component forwarding.
-        // Selection-neutral (no invariant `Needs` a write cap); lets the structural
-        // transitions drive this component through `apply_to_sut(&mut CapMap)`.
-        caps.insert(Arc::new(crate::pbt::op_write_cap::OpDispatchWriter::new(
-            self.engine.clone(),
-        )) as Arc<dyn SutBlockTreeWrite>);
         // A1 drive caps (E3 provider-gap port): `SutViewControl` (SwitchView),
         // `SutMcpEmit` (EmitMcpData), `SutHistoryWrite` (Undo/Redo). All
         // selection-neutral write caps — no invariant `Needs` them; they let the
@@ -2053,25 +2045,10 @@ impl CapProvider for HeadlessFrontendComponent {
         // over the production navigation provider ops via the headless session —
         // same selection-neutral rationale (no invariant `Needs` it).
         caps.insert(self.clone() as Arc<dyn SutNavHistoryDrive>);
-        // `SutMutate` (ToggleState) — selection-neutral write cap (no invariant
-        // `Needs` it); lets the `ToggleState` transition drive this component's
-        // headless `set_field task_state` op through `apply_to_sut(&mut CapMap)`.
-        caps.insert(self.clone() as Arc<dyn SutMutate>);
         // `SutSeamMutate` over the live `FileSyncController`: the real composed home for
         // `ApplyMutation`'s External (org) arm and `BulkExternalAdd`, un-narrowing both onto
-        // any frontend CapMap. A write cap (no invariant `Needs` it), safe in `register`.
+        // any frontend CapMap. A write cap (no invariant `Needs` it), safe here.
         caps.insert(self.clone() as Arc<dyn SutSeamMutate>);
-        // `SutEditorMirrorWrite` (TypeChars/DeleteBackward/MoveCursor) over the
-        // production headless editor pipeline — selection-neutral write cap (no
-        // invariant `Needs` a write cap), so it's safe in the general `register`;
-        // it lets the editor transitions drive this component through
-        // `apply_to_sut(&mut CapMap)`. The READ cap (`SutEditorMirrorRead`) is
-        // deliberately NOT registered here — it pairs with `RefEditorMirror` to
-        // select the `inv-editor-{caret,text}-matches-ref` invariants, which the
-        // navigation/structural slices don't drive an editor for; the wide PBT (and
-        // any editor-driving CapMap) adds it explicitly. Same pattern as
-        // `SutSqlProjection` above.
-        caps.insert(self.clone() as Arc<dyn SutEditorMirrorWrite>);
         // `SutAppLifecycle` (CreateDocument) — selection-neutral lifecycle cap (no
         // invariant `Needs` it); lets the `CreateDocument` transition mint a doc through
         // `apply_to_sut(&mut CapMap)`. Only `create_document` is realized; the other
@@ -2080,6 +2057,109 @@ impl CapProvider for HeadlessFrontendComponent {
         // generic per-tick reconcile, not E2ESut's `block_tree_post_action`.
         caps.insert(self.clone() as Arc<dyn SutAppLifecycle>);
         caps.insert(self as Arc<dyn SutOrgRender>);
+    }
+}
+
+impl HeadlessFrontendComponent {
+    /// The driver-parameterized registration of the gesture-write cap family — the ONE
+    /// place that enumerates which caps are gesture writes. Given a `UserDriver`, it binds
+    /// all of them to that driver: the headless base passes its own `ReactiveEngineDriver`
+    /// (§8.11 VM rung); the windowed overlay passes the live window's
+    /// `GpuiUserDriver`/`SimUserDriver` (§8.11 highest-available). Both go through the SAME
+    /// production keystroke/click/toggle bodies via [`DriverBoundFrontendWrite`] — only the
+    /// driver changes. This is the insert-only realization the §8.12 C-3 windowed repoint
+    /// wants: the deferred base registers none of these, the overlay `insert`s them once.
+    pub(crate) fn register_gesture_writes(
+        self: Arc<Self>,
+        caps: &mut CapMap,
+        driver: Arc<dyn UserDriver>,
+    ) {
+        use crate::pbt::op_write_cap::{KeystrokeBlockTreeWriter, OpDispatchWriter};
+        // `SutBlockTreeWrite`: the production keystroke pipeline over `driver` when a
+        // reconcile resolver is wired (the composed/windowed builder shares one so a
+        // split-minted id maps oracle→real). When no resolver is set — the fixed-id lib
+        // slices that build via `register` and never mint — fall back to the plain
+        // `OpDispatchWriter` dispatch floor (behaviour-identical to the former default),
+        // so `keystroke_writer_with`'s fail-loud resolver assert never trips here.
+        let block_tree: Arc<dyn SutBlockTreeWrite> = if self.resolver.get().is_some() {
+            Arc::new(self.keystroke_writer_with(driver.clone()))
+        } else {
+            Arc::new(OpDispatchWriter::new(self.engine.clone()))
+        };
+        caps.insert(block_tree);
+        // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound shim that
+        // delegates to the component's `*_via` bodies (sidebar-click focus, editor
+        // keystrokes, `state_toggle` clicks) so the whole family rides ONE driver.
+        let shim = Arc::new(DriverBoundFrontendWrite::new(self.clone(), driver));
+        caps.insert(shim.clone() as Arc<dyn SutFocusWrite>);
+        caps.insert(shim.clone() as Arc<dyn SutEditorMirrorWrite>);
+        caps.insert(shim as Arc<dyn SutMutate>);
+    }
+}
+
+/// Rebinds the frontend's gesture-write caps ([`SutFocusWrite`],
+/// [`SutEditorMirrorWrite`], [`SutMutate`]) onto a chosen [`UserDriver`] by delegating
+/// every method to the base [`HeadlessFrontendComponent`]'s driver-parameterized `*_via`
+/// bodies — the sidebar-click / editor-keystroke / `state_toggle`-click logic is
+/// driver-invariant, so no logic is re-implemented, only the driver is swapped. Used for
+/// BOTH the headless base (driver = the component's own `ReactiveEngineDriver`) and the
+/// windowed overlay (driver = the window's `GpuiUserDriver`/`SimUserDriver`), §8.12 C-3.
+///
+/// [`SutMutate`]: crate::pbt::local_caps::SutMutate
+pub(crate) struct DriverBoundFrontendWrite {
+    base: Arc<HeadlessFrontendComponent>,
+    driver: Arc<dyn UserDriver>,
+}
+
+impl DriverBoundFrontendWrite {
+    pub(crate) fn new(base: Arc<HeadlessFrontendComponent>, driver: Arc<dyn UserDriver>) -> Self {
+        Self { base, driver }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutFocusWrite for DriverBoundFrontendWrite {
+    // ALLOW(unused_param): region is fixed to main by the click-driven focus path
+    async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
+        self.base
+            .apply_navigate_focus_via(self.driver.as_ref(), id)
+            .await;
+    }
+
+    async fn apply_focus_editable_text(&self, id: &EntityUri) {
+        self.base
+            .apply_focus_editable_text_via(self.driver.as_ref(), id)
+            .await;
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutEditorMirrorWrite for DriverBoundFrontendWrite {
+    async fn apply_type_chars(&self, text: &str) {
+        self.base
+            .apply_type_chars_via(self.driver.as_ref(), text)
+            .await;
+    }
+
+    async fn apply_delete_backward(&self, count: usize) {
+        self.base
+            .apply_delete_backward_via(self.driver.as_ref(), count)
+            .await;
+    }
+
+    async fn apply_move_cursor(&self, byte_position: usize) {
+        self.base
+            .apply_move_cursor_via(self.driver.as_ref(), byte_position)
+            .await;
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutMutate for DriverBoundFrontendWrite {
+    async fn toggle_state(&self, block_id: &EntityUri, new_state: CycleTarget) {
+        self.base
+            .toggle_state_via(self.driver.as_ref(), block_id, new_state)
+            .await;
     }
 }
 

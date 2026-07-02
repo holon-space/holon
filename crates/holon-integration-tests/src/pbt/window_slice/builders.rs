@@ -6,11 +6,10 @@ use std::sync::Arc;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
-use holon_pbt_core::capabilities::{SutBlockTreeWrite, SutEditorMirrorWrite, SutFocusWrite};
 use holon_pbt_core::composition::{CapMap, CapProvider, Config};
 use holon_pbt_core::{Actor, ComponentSet};
 
-use super::components::{GpuiFrontendEngineComponent, GpuiWindowComponent, WindowFrontendWrite};
+use super::components::{GpuiFrontendEngineComponent, GpuiWindowComponent};
 use crate::pbt::composed::seed_primitives::{Plant, apply_plant, seed_ref_tree};
 use crate::pbt::driver_input::DriverInputComponent;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
@@ -173,26 +172,15 @@ pub fn overlay_windowed_caps(
     ))
     .register(&mut caps);
 
-    // ★ §8.12 C-3 (mechanisms 1+2): re-back the frontend's keystroke/click write caps
-    // onto the WINDOW driver. The deferred base registered these over its headless
-    // `ReactiveEngineDriver` (the mixed-rung interim); now that a window exists they must
-    // ride its `GpuiUserDriver`/`SimUserDriver` (§8.11 highest-available). `CapMap::replace`
-    // (fail-loud if the base never registered them) swaps in window-driver-backed impls that
-    // reuse the SAME production keystroke/click bodies — only the driver changes.
-    //
-    // - SutBlockTreeWrite (Split/Join/Indent/Outdent): the same `KeystrokeBlockTreeWriter`
-    //   keystroke sequences over the window driver (move_up/move_down keep the disclosed
-    //   `OpDispatchWriter` fallback — mechanism 3, unchanged).
-    // - SutEditorMirrorWrite (TypeChars/DeleteBackward/MoveCursor), SutFocusWrite
-    //   (NavigateFocus sidebar-click + FocusEditableText), SutMutate (ToggleState): the
-    //   window-driver `WindowFrontendWrite` sibling.
-    caps.replace(
-        Arc::new(frontend.keystroke_writer_with(driver.clone())) as Arc<dyn SutBlockTreeWrite>
-    );
-    let win_write = Arc::new(WindowFrontendWrite::new(frontend, driver));
-    caps.replace(win_write.clone() as Arc<dyn SutFocusWrite>);
-    caps.replace(win_write.clone() as Arc<dyn SutEditorMirrorWrite>);
-    caps.replace(win_write as Arc<dyn crate::pbt::local_caps::SutMutate>);
+    // ★ §8.12 C-3 (mechanisms 1+2): bind the frontend's keystroke/click write caps
+    // (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`) to the
+    // WINDOW driver. The `DriverPlacement::Deferred` base registered NONE of them (it
+    // withheld the whole gesture rung), so these are plain INSERTs — the honest,
+    // insert-only realization: the base never claimed a driver, the overlay is the sole
+    // provider. Same production keystroke/click bodies as the headless base, over the
+    // window's `GpuiUserDriver`/`SimUserDriver` (§8.11 highest-available) instead of the
+    // headless `ReactiveEngineDriver`. `C-2`'s fail-loud `insert` guards double registration.
+    frontend.register_gesture_writes(&mut caps, driver);
     caps
 }
 

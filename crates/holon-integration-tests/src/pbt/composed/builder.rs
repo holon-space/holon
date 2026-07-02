@@ -45,7 +45,7 @@ use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::memory_slice::components::{
     CoreOpsCommit, EditorCommitTarget, InMemEditorComponent,
 };
-use crate::pbt::op_write_cap::{IdResolver, KeystrokeBlockTreeWriter, OpDispatchWriter};
+use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::sql_slice::SqlProjectionComponent;
 use crate::pbt::sql_slice::builders::new_sql_engine_with_structural_ops;
 use crate::pbt::sut_loro::LoroSut;
@@ -81,9 +81,13 @@ pub struct ComposedSut {
     /// The booted frontend `ReactiveEngine` (frontend arm only; `None` otherwise) — the
     /// render tree a gpui window paints. Pairs with `session` for the windowed bind.
     pub reactive: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
-    /// The booted frontend component (frontend arm only; `None` otherwise) — surfaced so
-    /// the windowed overlay (`overlay_windowed_caps`) can rebind its keystroke/click
-    /// write caps onto the window driver via the component's `*_via` bodies (§8.12 C-3).
+    /// The booted frontend component (frontend arm only; `None` otherwise) — surfaced so the
+    /// windowed overlay (`overlay_windowed_caps`) can INSERT the gesture-write caps bound to
+    /// the window driver via `register_gesture_writes` (§8.12 C-3). Kept CONCRETE (not a
+    /// `dyn GestureWriteSource`) because the windowed base's pre-overlay seed focus-align
+    /// (`boot_and_seed_wide_windowed_base`) needs the component's own headless `driver()` to
+    /// drive `NavigateFocus` through a throwaway gesture map — a bare trait object can't
+    /// provide that, so the trait indirection is net-negative.
     pub frontend: Option<Arc<HeadlessFrontendComponent>>,
     /// Whether the harness must use a multi-thread runtime (a booted
     /// `FrontendSession` needs it). False for the synchronous storage backends.
@@ -286,7 +290,11 @@ async fn compose_sut_seeded_impl(
         // block-tree writer below uses. Without this, pinning/focusing a post-split
         // synthetic id targets a ghost and diverges `inv-focus-roots`/`inv-nav-focus`.
         comp.set_resolver(resolver.clone());
-        comp.clone().register(&mut caps);
+        // Register the NON-gesture caps (reads/projections/lifecycle). The gesture-write
+        // family (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`)
+        // is registered separately, gated by `driver_placement`, so the windowed Deferred
+        // base can withhold it until a window exists (see the driver-placement block below).
+        comp.clone().register_non_gesture(&mut caps);
         // `SutSqlProjection` (the TursoProjection focus/nav matview cap) is NOT in the
         // component's `register` (the nav slice adds it explicitly); add it here since
         // Turso storage is active and its invariants belong to this config.
@@ -311,31 +319,6 @@ async fn compose_sut_seeded_impl(
         if has_editor {
             caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
         }
-        // Structural-write cap, VM-rung driver-backed (§8.11 LL-3). `SplitBlock` is
-        // driven through the production keystroke pipeline (focus the editor + home +
-        // N×right + Enter → `HeadlessEditorMirror` split) — the UI-adjacent interaction
-        // layer, not raw op dispatch — so a keystroke/intent/reducer bug localizes to
-        // this layer. The remaining structural ops (`join`/`indent`/`outdent`/`move_*`)
-        // still dispatch via the inner `OpDispatchWriter` fallback (shared-resolver +
-        // `ReactiveEngine` focus sink, so `split_block`/`join_block` hand off focus
-        // through `dispatch_intent_sync` → `apply_structural_focus`) — the rebind is
-        // incremental (Split first). Reuses the component's OWN `ReactiveEngineDriver`
-        // so the single live `HeadlessEditorMirror` is shared with the editor-write caps.
-        // This intentionally REPLACES the plain `OpDispatchWriter` that
-        // `HeadlessFrontendComponent::register` installs under `SutBlockTreeWrite` with the
-        // VM-rung keystroke-driven writer — explicit `replace` (a plain `insert` fails loud
-        // on the duplicate).
-        let structural_fallback = OpDispatchWriter::with_resolver_and_focus(
-            eng.clone(),
-            resolver.clone(),
-            comp.reactive(),
-        );
-        caps.replace(Arc::new(KeystrokeBlockTreeWriter::new(
-            comp.driver(),
-            comp.reactive(),
-            resolver.clone(),
-            structural_fallback,
-        )) as Arc<dyn SutBlockTreeWrite>);
         // Edge-field write cap (`tags` / `requires` on an existing block) — hosted
         // only when a Loro authority doc is present (`loro_doc_store()` is `Some`
         // iff Loro is on for this build). Routes through the production
@@ -358,12 +341,19 @@ async fn compose_sut_seeded_impl(
         // driver (not a fresh one) so the single live `HeadlessEditorMirror` stays shared
         // with the editor-write caps. No geometry → its `require_bounds` precheck is a
         // no-op (the driver resolves targets itself).
-        // Driver rung placement (§8.11): install the headless VM-rung driver ONLY when the
-        // caller asked for it. The windowed repoint passes `Deferred` and later inserts the
-        // live window's `GpuiUserDriver`-backed gesture caps via `overlay_windowed_caps`, so
-        // `SutDriver`/`SutBlockInteract`/`SutArrowNavigate` are inserted ONCE by whoever owns
-        // the rung — never registered here and then overridden.
+        // Driver rung placement (§8.11): install the headless VM-rung driver AND the
+        // gesture-write family bound to it ONLY when the caller asked for it. The windowed
+        // repoint passes `Deferred` and later INSERTs the live window's `GpuiUserDriver`-backed
+        // gesture caps via `overlay_windowed_caps`, so the whole gesture rung
+        // (`SutDriver`/`SutBlockInteract`/`SutArrowNavigate` + `SutBlockTreeWrite`/`SutFocusWrite`/
+        // `SutEditorMirrorWrite`/`SutMutate`) is inserted ONCE by whoever owns the rung — never
+        // registered here and then overridden. The gesture writes ride the component's OWN
+        // `ReactiveEngineDriver` (keystroke split / sidebar-click focus / editor keystrokes /
+        // `state_toggle` clicks) — the UI-adjacent VM rung, not raw op dispatch; the resolver
+        // set above makes `SutBlockTreeWrite` the shared-resolver keystroke writer.
         if matches!(driver_placement, DriverPlacement::HeadlessReactive) {
+            comp.clone()
+                .register_gesture_writes(&mut caps, comp.driver());
             Arc::new(DriverInputComponent::with_input_headless(
                 comp.reactive(),
                 comp.driver(),
@@ -402,8 +392,9 @@ async fn compose_sut_seeded_impl(
         // window as a renderer over this same reactive tree (§Round 5 windowed repoint).
         session = Some(comp.session());
         reactive = Some(comp.reactive());
-        // Surface the component so the windowed overlay can rebind its write caps onto
-        // the window driver (§8.12 C-3) via the component's `*_via` bodies.
+        // Surface the component so the windowed overlay can INSERT its gesture-write caps
+        // bound to the window driver (§8.12 C-3), and so the base seed focus-align can drive
+        // `NavigateFocus` through the component's own headless driver.
         frontend = Some(comp.clone());
         multi_thread = true; // the booted FrontendSession needs a multi-thread runtime
         settle = Duration::from_millis(150);

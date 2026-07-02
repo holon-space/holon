@@ -220,6 +220,26 @@ fn index_org_blocks(
     vec![heading, query_block, render_entity]
 }
 
+/// Uniquify a sequence of raw block ids in document order. Org files require
+/// unique `:ID:`s, so duplicate random ids are an illegal input state — made
+/// unrepresentable by suffixing a repeat with its position index until fresh
+/// (still matches `[a-z0-9-]+`). Without this, two blocks share an id and every
+/// by-id consumer (ref model, the round-trip test's find-by-id) resolves the
+/// wrong block — the keyword_set round-trip red of 2026-07-02.
+fn uniquify_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    ids.into_iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let mut unique = id;
+            while !seen.insert(unique.clone()) {
+                unique = format!("{unique}-{i}");
+            }
+            unique
+        })
+        .collect()
+}
+
 /// Generate `(filename, content)` for a `WriteOrgFile` transition.
 ///
 /// `allow_index_override`: when `false`, only emits non-index files
@@ -280,25 +300,8 @@ pub fn generate_org_file_content_with_keywords(
             // Sibling ids in document order, so a heading can depend on its
             // predecessor by id. Collected up front because the dependency
             // target (`ids[i-1]`) must be known while building block `i`.
-            //
-            // Uniquified: org files require unique `:ID:`s, so duplicate random
-            // ids are an illegal input state — made unrepresentable by suffixing
-            // a repeat with its heading index until fresh (still `[a-z0-9-]+`).
-            // Without this, two blocks share an id and every by-id consumer
-            // (ref model, the round-trip test's find-by-id) resolves the wrong
-            // block — the keyword_set round-trip red of 2026-07-02.
-            let mut seen = std::collections::HashSet::new();
-            let ids: Vec<String> = headings
-                .iter()
-                .enumerate()
-                .map(|(i, (_, id, _, _, _))| {
-                    let mut unique = id.clone();
-                    while !seen.insert(unique.clone()) {
-                        unique = format!("{unique}-{i}");
-                    }
-                    unique
-                })
-                .collect();
+            // Uniquified (see `uniquify_ids`): org files require unique `:ID:`s.
+            let ids = uniquify_ids(headings.iter().map(|(_, id, _, _, _)| id.clone()));
             // First pass: resolve each heading's parent. Flat (doc root) by
             // default; under extended gen, heading `i` parents to
             // `sel % (i + 1)` (0 = root, k = heading k-1) — well-founded by
@@ -495,18 +498,24 @@ pub fn generate_org_file_content_with_keywords(
     )
         .prop_map(|(filename, mount_headline, mount_id, tree_id, children)| {
             let doc_uri = EntityUri::block("gen-placeholder");
-            let mount_uri = EntityUri::block(&mount_id);
+            // Uniquify mount + child ids together (org files require unique
+            // `:ID:`s; a random collision between the mount and a child, or
+            // between two children, is an illegal input state).
+            let ids = uniquify_ids(
+                std::iter::once(mount_id).chain(children.iter().map(|(_, id)| id.clone())),
+            );
+            let mount_uri = EntityUri::block(&ids[0]);
 
             let mut mount = Block::new_text(mount_uri.clone(), doc_uri.clone(), &mount_headline);
-            mount.set_property("ID", Value::String(mount_id.clone()));
+            mount.set_property("ID", Value::String(ids[0].clone()));
             mount.set_property("share-role", Value::String("mount".to_string()));
             mount.set_property("shared-tree-id", Value::String(tree_id.clone()));
 
             let mut blocks = vec![mount];
-            for (headline, id) in children {
+            for ((headline, _), child_id) in children.iter().zip(&ids[1..]) {
                 let mut child =
-                    Block::new_text(EntityUri::block(&id), mount_uri.clone(), &headline);
-                child.set_property("ID", Value::String(id.clone()));
+                    Block::new_text(EntityUri::block(child_id), mount_uri.clone(), headline);
+                child.set_property("ID", Value::String(child_id.clone()));
                 child.set_property("shared-tree-id", Value::String(tree_id.clone()));
                 blocks.push(child);
             }

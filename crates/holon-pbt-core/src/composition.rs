@@ -129,14 +129,21 @@ impl CapMap {
     /// than a second `insert`.
     pub fn insert<C: ?Sized + CapName>(&mut self, provider: Arc<C>) {
         let tid = TypeId::of::<C>();
-        if let Some(existing) = self.names.get(&tid) {
+        if self.names.contains_key(&tid) {
+            // The names map only ever holds `C::NAME`, so there is exactly one
+            // name to report — the earlier "existing vs incoming" duo was a fiction
+            // (both sides printed the same string).
             panic!(
-                "duplicate capability registration: `{}` is already provided \
-                 (existing provider name `{existing}`, incoming `{}`). Two \
-                 components both claim this cap — one would silently shadow the \
-                 other. Register the precedence-winner first and `merge_missing` \
-                 the rest, or insert only the non-overlapping caps.",
-                C::NAME,
+                "duplicate capability registration: `{}` is already provided. Two \
+                 registrations claim this cap; the second would silently shadow the \
+                 first, invalidating whichever invariants read the loser. Pick the \
+                 intended remedy:\n\
+                 - `merge_missing`: fold two overlapping cap sets, FIRST-registered \
+                 wins (register the precedence-winner, then `merge_missing` the rest; \
+                 skipped caps are disclosed).\n\
+                 - `replace`: intentionally specialize/override an already-registered \
+                 cap, SECOND wins (e.g. swap a default provider for a driver-bound one \
+                 under the same cap `TypeId`).",
                 C::NAME,
             );
         }
@@ -162,6 +169,11 @@ impl CapMap {
              overwrites an existing cap; use `insert` for the initial registration",
             C::NAME,
         );
+        // Keep the names table in lock-step with providers. `C::NAME` is invariant
+        // for a given `TypeId`, so this is a no-op today — but leaving it out is the
+        // asymmetry trap: a future rename or a differently-named provider under the
+        // same cap would leave `names` reporting the stale identity in diagnostics.
+        self.names.insert(tid, C::NAME);
         self.providers.insert(tid, Box::new(provider));
     }
 

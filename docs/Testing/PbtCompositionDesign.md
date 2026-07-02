@@ -786,11 +786,15 @@ per-tick hook), but it is **superseded as the target** by the landed windowed `C
   `compose_sut` boot with the driver rung **deferred** (`DriverPlacement::Deferred`) — backend,
   storage, editor caps and the `IdResolver` reconcile all come from the one production booter;
   the window is a **pure renderer** over the same booted `session`/`reactive`.
-- **Pure-insert overlay:** on the gpui thread, `overlay_windowed_caps(caps, geometry, engine,
-  driver)` INSERTS `GpuiWindowComponent` (`SutLayout`) + the window-driver `DriverInputComponent`
-  (`SutDriver`/`SutBlockInteract`/…). No cap is registered-then-overridden; fail-loud if the base
-  wasn't deferred — via `CapMap::insert`'s own duplicate panic (the old hand-rolled `no-prior-SutDriver`
-  assert was deleted as redundant, C-2 2026-07-02).
+- **Pure-insert overlay (whole gesture rung, updated 2026-07-02):** on the gpui thread,
+  `overlay_windowed_caps(caps, frontend, geometry, engine, driver)` INSERTS `GpuiWindowComponent`
+  (`SutLayout`) + the window-driver `DriverInputComponent` (`SutDriver`/`SutBlockInteract`/…) AND the
+  gesture-write family (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`) via
+  `frontend.register_gesture_writes(caps, driver)` — the ONE routine (`register_gesture_writes`) that
+  enumerates the family, shared with the headless base. No cap is registered-then-overridden: the
+  `DriverPlacement::Deferred` base withholds the ENTIRE gesture rung, so every overlay call is a plain
+  `insert` (fail-loud on duplicate, C-2), NOT `CapMap::replace`. The pre-window state is honestly
+  capless — the generated alphabet auto-narrows the gesture transitions out until the window exists.
 - **Injected-handle harness:** `ComposedSut::from_parts` (skips `init_test`'s tokio boot — the
   window has thread affinity, §8.10) + a `SettleHook` that pumps the window to a fixed point
   before each `check_invariants`; a windowed non-vacuity floor keyed off the ACTUAL `SutLayout`
@@ -800,20 +804,17 @@ per-tick hook), but it is **superseded as the target** by the landed windowed `C
   narrows the alphabet to what the window genuinely drives — never `CapSet::without()` fakery
   (a faithful cap is present or the impl is fixed; withholding is an invalid intermediate state).
 
-**⚠ The open divergence this creates — mixed driver rungs in one SUT (violates §8.11 as an end
-state; tolerated only as a disclosed interim).** The deferred base still registers the headless
-frontend component's write caps: `SutFocusWrite` (clicks via its internal `ReactiveEngineDriver`),
-`SutEditorMirrorWrite` (headless editor pipeline), and `SutBlockTreeWrite`
-(`KeystrokeBlockTreeWriter` over the headless driver, with a disclosed `OpDispatchWriter` fallback
-for join/indent/outdent/move). After the overlay, gestures split across rungs: `ClickBlock` rides
-the window's `SimUserDriver`/`GpuiUserDriver` (correct, highest rung) while `NavigateFocus`,
-editor keystrokes, and structural ops ride the **headless VM rung — a lower rung while a window
-exists**, which §8.11 names an unfaithful layer combination. Resolution rule for the harness
-repoint (increment 4+): before the windowed proptest loop generates a transition class, its write
-cap must be re-backed by the *window's* driver (the same one-driver-per-run construction §8.11
-mandates) — or the class must be explicitly excluded from the windowed alphabet with the exclusion
-disclosed, never silently driven cross-rung. The dispatch-fallback structural ops carry the same
-obligation. Tracked in §11 (C-3).
+**Mixed-rung interim — now CLOSED for the write family (2026-07-02).** The former divergence was
+that the deferred base registered the frontend's write caps over its *headless*
+`ReactiveEngineDriver`, and the overlay `CapMap::replace`d them — a register-then-override that split
+gestures across rungs (`ClickBlock` on the window driver, `NavigateFocus`/editor/structural on the
+headless VM rung). The insert-only restructure removes this: the base registers NONE of
+`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`, and `overlay_windowed_caps`
+`insert`s the whole family bound to the *window's* driver via `register_gesture_writes` — so every
+windowed gesture (writes included) rides the one highest-available driver, satisfying §8.11's
+one-driver-per-run rule by construction. move_up/move_down keep the disclosed `OpDispatchWriter`
+fallback inside the keystroke writer (mechanism 3), and the EXCLUDED classes remain excluded until a
+window-driver mechanism exists. Tracked in §11 (C-3).
 
 ---
 

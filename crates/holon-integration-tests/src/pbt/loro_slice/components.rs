@@ -44,10 +44,7 @@ impl LoroBackendComponent {
     /// Wrap an already-shared backend so the read cap and a write target observe
     /// one store.
     pub fn new_shared(backend: Arc<LoroBackend>) -> Self {
-        Self {
-            backend,
-            sync_handle: None,
-        }
+        Self::new_shared_with_sync_handle(backend, None)
     }
 
     /// Wrap a shared backend AND the live sync-controller handle so

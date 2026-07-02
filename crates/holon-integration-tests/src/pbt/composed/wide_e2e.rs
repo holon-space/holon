@@ -344,18 +344,31 @@ pub async fn boot_and_seed_wide_windowed_base(
     .await;
 
     // Align the initial focus onto the oracle's page root via the production `NavigateFocus`
-    // cap — `SutFocusWrite` now dispatches through the reactive engine's `dispatch_intent_sync`,
+    // cap — `SutFocusWrite` dispatches through the reactive engine's `dispatch_intent_sync`,
     // which runs the `navigation.focus` SQL write AND mirrors focus into `engine.focused_block()`
     // (`maybe_mirror_navigation_focus`), exactly as a production sidebar page-nav does. Done on
     // the deferred base pre-window; window bring-up does not reset engine focus, so the first
     // render paints the already-focused engine. Mirrors `boot_and_seed_wide`'s headless drive.
+    //
+    // §8.12 insert-only: the deferred base's `bundle.caps` is gesture-CAPLESS so the gpui-thread
+    // overlay can INSERT the window-driver gesture caps. So this seed focus-align (NOT a tested
+    // transition — it's boot state) drives through a THROWAWAY gesture map bound to the component's
+    // OWN headless `ReactiveEngineDriver`. The focus effect lands on the SHARED engine/reactive,
+    // while `bundle.caps` stays capless for the overlay.
+    let comp = bundle
+        .frontend
+        .clone()
+        .expect("windowed wide base is a frontend arm, so it has a booted component");
+    let mut seed_focus_caps = CapMap::new();
+    comp.clone()
+        .register_gesture_writes(&mut seed_focus_caps, comp.driver());
     TransitionImpl::apply_to_sut(
         &NavigateFocus {
             region: Region::Main,
             block_id: page_root(),
         },
         ref_state,
-        &mut bundle.caps,
+        &mut seed_focus_caps,
     )
     .await;
     tokio::time::sleep(SETTLE).await;
