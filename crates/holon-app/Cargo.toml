@@ -17,6 +17,7 @@ holon-frontend.workspace = true
 holon-orgmode.workspace = true
 holon-filesystem.workspace = true
 holon-loro.workspace = true
+holon-turso.workspace = true
 holon-mcp-client.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
@@ -24,3 +25,6 @@ fluxdi.workspace = true
 futures-signals.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -95,6 +95,8 @@ list(#{item_template: render_block()})
 
 Org files are bidirectionally synced: edit in Emacs/Vim/any editor, changes appear in Holon; edit in Holon, changes are written back to disk. The `OrgSyncController` handles echo suppression to prevent sync loops.
 
+> **⚠️ Vault + file syncers:** see [Vault directory & third-party file sync](#vault-directory--third-party-file-sync-important).
+
 ### Petri-Net Engine & WSJF Ranking
 
 Tasks are materialized into a Petri Net model with typed tokens (Person, Organization, Document, Monetary, Knowledge, Resource). The engine computes WSJF (Weighted Shortest Job First) rankings using prototype blocks with Rhai-evaluated scoring expressions. See [VISION_PETRI_NET.md](VISION_PETRI_NET.md).

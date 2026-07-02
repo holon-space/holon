@@ -222,3 +222,31 @@ pub trait AliasRegistrar: Send + Sync {
     async fn register_alias(&self, doc_id: &EntityUri, path: &Path);
     async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf>;
 }
+
+/// 3-way text-content merge for the no-store conflict path (SqlOnly /
+/// `Consolidator::Store` mode).
+///
+/// When an org-file edit races a UI edit to the SAME block's text content, the
+/// store-owner mode has no live CRDT to merge them, so a naive ingest resolves
+/// by whole-value last-writer-wins — one side's characters are lost. The
+/// merge-fidelity ladder (`docs/Architecture/Model.md`) says this mode must
+/// instead degrade to a base-3-way TEXT merge: the org reconciler already holds
+/// the common ancestor (the last-projected snapshot, read through the
+/// [`BaseStore`](crate::BaseStore) seam), so it feeds `(base, theirs, mine)`
+/// through this seam and ingests the merged text.
+///
+/// The merge is performed by a **transient** CRDT text — a throwaway document
+/// spun up per conflict and dropped afterwards (Model.md: *transient = merge
+/// function only*, never stored, never cached). The concrete impl lives in
+/// holon-loro; holon-filesystem stays storage-agnostic and never depends on
+/// Loro (holon-loro already depends on holon-filesystem — the reverse would be
+/// a cycle).
+pub trait ThreeWayTextMerge: Send + Sync {
+    /// Merge concurrent edits of one block's text content. `base` is the common
+    /// ancestor (last-projected snapshot from the BaseStore), `theirs` the
+    /// on-disk edit, `mine` the current store content. Returns the merged text.
+    /// Callers invoke this only when BOTH `theirs` and `mine` differ from
+    /// `base` (a genuine concurrent edit); the non-conflict cases never reach
+    /// here.
+    fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String>;
+}

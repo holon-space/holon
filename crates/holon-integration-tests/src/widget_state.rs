@@ -144,11 +144,13 @@ impl WidgetStateModel {
     }
 
     /// Extract text content for widgets matching the given locator.
+    /// Column/view filtering is no longer available (the render spec was
+    /// removed), so every locator resolves to the full row text.
     pub fn extract_text(&self, locator: &WidgetLocator) -> String {
         match locator {
-            WidgetLocator::All => self.rows_to_text(self.rows.values().collect()),
-            WidgetLocator::Column(n) => self.extract_column_text(*n),
-            WidgetLocator::ViewId(id) => self.extract_view_text(id),
+            WidgetLocator::All | WidgetLocator::Column(_) | WidgetLocator::ViewId(_) => {
+                self.rows_to_text(self.rows.values().collect())
+            }
         }
     }
 
@@ -179,15 +181,6 @@ impl WidgetStateModel {
         self.rows.len()
     }
 
-    // TODO: render spec was removed; column/view filtering is no longer available
-    fn extract_column_text(&self, _column: usize) -> String {
-        self.rows_to_text(self.rows.values().collect())
-    }
-
-    fn extract_view_text(&self, _view_id: &str) -> String {
-        self.rows_to_text(self.rows.values().collect())
-    }
-
     fn rows_to_text(&self, rows: Vec<&holon_api::StorageEntity>) -> String {
         rows.iter()
             .flat_map(|row| {
@@ -214,6 +207,7 @@ impl std::fmt::Debug for WidgetStateModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use holon_api::Value;
 
     fn make_row(id: &str, content: &str) -> holon_api::StorageEntity {
         let mut row = holon_api::StorageEntity::new();

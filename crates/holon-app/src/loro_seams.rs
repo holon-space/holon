@@ -319,16 +319,6 @@ impl BlockOrdering for LoroBlockOrdering {
         Ok(())
     }
 
-    /// Loro mints the real fractional index when the block is placed; the value
-    /// returned here is overwritten, so a placeholder default key suffices.
-    async fn new_child_anchor(
-        &self,
-        _: &EntityUri,
-        _: Option<&EntityUri>,
-    ) -> BlockOrderingResult<String> {
-        Ok(holon_core::fractional_index::default_sort_key())
-    }
-
     async fn prev_sibling(&self, id: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
         let parent = match self.parent_of(id).await? {
             Some(p) => p,
@@ -567,4 +557,34 @@ impl AliasRegistrar for LoroAliasRegistrar {
         let store = self.doc_store.read().await;
         store.resolve_alias_to_path(doc_id.as_str()).await
     }
+}
+
+#[cfg(test)]
+mod order_minting_type_level {
+    //! Type-level proof for spec 0008 §3.2 (Replication.md §5): the Loro
+    //! ordering seam owns the positional [`BlockOrdering`] surface but is, by
+    //! construction, UNABLE to mint order keys — it does not implement
+    //! [`OrderKeyMinting`], and that trait carries the only `-> String`
+    //! key-minting method. The former placeholder `new_child_anchor` that
+    //! returned a `default_sort_key()` here is gone and cannot be re-added
+    //! without also (illegally) implementing `OrderKeyMinting` for a Loro seam.
+    use super::LoroBlockOrdering;
+    use holon_core::block_ordering::{BlockOrdering, OrderKeyMinting};
+
+    // Positive: the Loro seam IS a positional ordering provider.
+    fn _is_block_ordering(x: &LoroBlockOrdering) -> &dyn BlockOrdering {
+        x
+    }
+
+    // Negative (must NOT compile): the Loro seam is not a key minter. Keeping
+    // this as a compile-fail witness — uncommenting it is a hard error because
+    // `LoroBlockOrdering: !OrderKeyMinting`.
+    //
+    // fn _is_not_a_minter(x: &LoroBlockOrdering) -> &dyn OrderKeyMinting { x }
+
+    // Referenced so the import can't rot into a warning if the negative witness
+    // above is edited; the trait is intentionally never coerced-to here.
+    const _: fn() = || {
+        fn _assert_object_safe(_: &dyn OrderKeyMinting) {}
+    };
 }

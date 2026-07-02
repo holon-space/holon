@@ -436,14 +436,6 @@ impl BlockOrdering for StubBlockOrdering {
         Ok(())
     }
 
-    async fn new_child_anchor(
-        &self,
-        _: &EntityUri,
-        _: Option<&EntityUri>,
-    ) -> BlockOrderingResult<String> {
-        unimplemented!("stub BlockOrdering: only place() is exercised by this test")
-    }
-
     async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
         // Return None so the misalignment check in on_file_changed treats every
         // block as first-child — safe for tests that don't assert order.
@@ -1783,14 +1775,6 @@ mod ordering_replay_tests {
                 after_id.map(|u| u.as_str().to_string()),
             ));
             Ok(())
-        }
-
-        async fn new_child_anchor(
-            &self,
-            _: &EntityUri,
-            _: Option<&EntityUri>,
-        ) -> BlockOrderingResult<String> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
         }
 
         async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {

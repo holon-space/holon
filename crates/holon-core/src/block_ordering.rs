@@ -66,18 +66,6 @@ pub trait BlockOrdering: Send + Sync {
         Ok(())
     }
 
-    /// Compute the sort_key value for a NEW block being created under
-    /// `parent_id`, immediately after `after_id`. In Loro mode this
-    /// returns a placeholder (Loro overwrites once `apply_create` reads
-    /// `Event::position_after_block_id`); in SqlOnly mode this returns
-    /// the `gen_key_between` value to persist verbatim in
-    /// `block.sort_key`.
-    async fn new_child_anchor(
-        &self,
-        parent_id: &EntityUri,
-        after_id: Option<&EntityUri>,
-    ) -> Result<String>;
-
     /// Block id immediately preceding `id` among its siblings (same
     /// parent, strictly-lower sort_key, maximal under that constraint).
     /// `None` when `id` is the first child or has no block parent.
@@ -213,4 +201,31 @@ pub trait BlockOrdering: Send + Sync {
     async fn project_sort_keys(&self, _: &[EntityUri]) -> Result<()> {
         Ok(())
     }
+}
+
+/// Order-key minting — the store-owner's exclusive right to synthesize a
+/// fractional index (`sort_key`) for a NEW block.
+///
+/// This is deliberately a **separate** trait from [`BlockOrdering`], not a
+/// method on it. Replication.md §5 requires that the mode which does NOT own
+/// order be UNABLE to mint keys *by construction*. Only the SqlOnly / `Store`
+/// consolidator owns sibling order, so only its ordering seam
+/// (`SqlBlockOperations`) implements this trait. The Loro-mode seam
+/// (`LoroBlockOrdering`) implements [`BlockOrdering`] alone and therefore has
+/// no `-> String` key-minting method at all — in Loro mode the fractional
+/// index is authoritative (Loro's tree owns it) and `apply_create` derives it
+/// from `Event::position_after_block_id`, so a key never needs minting on that
+/// path. The former placeholder `new_child_anchor` that returned a
+/// `default_sort_key()` in Loro mode is thus unrepresentable, not just unused.
+#[async_trait]
+pub trait OrderKeyMinting: Send + Sync {
+    /// Compute the `sort_key` value for a NEW block being created under
+    /// `parent_id`, immediately after `after_id`, to persist verbatim in
+    /// `block.sort_key`. Implemented only by the `Store` consolidator's order
+    /// owner (the sole minter of fractional indices for its sibling sets).
+    async fn new_child_anchor(
+        &self,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+    ) -> Result<String>;
 }

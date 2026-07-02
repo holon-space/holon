@@ -254,6 +254,10 @@ fn dispatch_sort_key_for_position(
         // already had. Nothing to fix.
         return;
     }
+    // Known debt: the board reorder mints a sort_key in the frontend instead of
+    // routing through BlockOrdering (the order owner). Tracked for migration to
+    // the cell registry's positioned-move primitive.
+    // ALLOW(order_minting): frontend board reorder, pending BlockOrdering routing.
     match holon::storage::gen_key_between(prev, next) {
         Ok(new_key) => {
             dispatch_set_field(services, row_id, "sort_key", new_key, context);

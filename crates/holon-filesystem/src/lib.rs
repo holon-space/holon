@@ -17,6 +17,7 @@ pub mod file_sync_controller;
 pub mod fs_port;
 pub mod in_memory;
 pub mod sync_base_store;
+pub mod sync_conflict;
 pub mod sync_ports;
 
 pub use change_source::{FileChange, FileChangeKind, FileChangeSource, NotifyWatcher};
@@ -28,7 +29,12 @@ pub use file_sync_controller::{FileSyncController, RENDERER_VERSION};
 pub use fs_port::{FileMeta, FileSystem, RealFileSystem, ScannedEntries};
 pub use in_memory::InMemoryFileSystem;
 pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
-pub use sync_ports::{AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider};
+pub use sync_conflict::{
+    conflict_artifacts_error, find_sync_conflict_artifacts, is_sync_conflict_artifact,
+};
+pub use sync_ports::{
+    AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider, ThreeWayTextMerge,
+};
 
 use std::path::Path;
 

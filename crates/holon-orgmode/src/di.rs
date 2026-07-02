@@ -837,6 +837,13 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn AliasRegistrar>()
                     .await;
 
+                // 3-way text merger for the no-store conflict path (spec 0008
+                // §3.1). Present in both containers; the controller consults it
+                // only in `Consolidator::Store` (SqlOnly) mode.
+                let text_merge = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::ThreeWayTextMerge>()
+                    .await;
+
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
                 let mut controller = FileSyncController::with_format(
@@ -855,6 +862,9 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 if let Some(registrar) = alias_registrar {
                     controller = controller.with_alias_registrar(registrar);
+                }
+                if let Some(merger) = text_merge {
+                    controller = controller.with_text_merge(merger);
                 }
 
                 let (rerender_tx, rerender_rx) =

@@ -8,6 +8,7 @@
 pub mod block_cell_registry;
 pub mod capability;
 pub mod consolidator;
+pub mod durable_state;
 
 #[cfg(all(
     feature = "iroh-sync",
@@ -44,6 +45,7 @@ pub mod loro_block_operations;
 pub mod loro_blocks_datasource;
 pub mod loro_document;
 pub mod loro_document_store;
+pub mod loro_meta_cell_backing;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -102,4 +104,4 @@ pub use loro_document_store::*;
 pub use loro_sync_controller::{
     LoroProjection, LoroSyncController, LoroSyncControllerHandle, SinkReader, block_to_params,
 };
-pub use text_merge_provider::{TextHandle, TextMergeProvider};
+pub use text_merge_provider::{TextHandle, TextMergeProvider, TransientLoroTextMerge};

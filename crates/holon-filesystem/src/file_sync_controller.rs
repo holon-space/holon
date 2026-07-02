@@ -28,7 +28,9 @@ use tracing::{debug, info, warn};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::DownstreamProjection;
 
-use crate::sync_ports::{AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider};
+use crate::sync_ports::{
+    AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider, ThreeWayTextMerge,
+};
 use crate::{BaseKey, BaseStore, FileSystem, SyncBaseStore};
 
 /// Bump when the org renderer changes in a way that alters the canonical
@@ -113,6 +115,16 @@ pub struct FileSyncController {
 
     /// Disk access port (ADR 0011). Real fs in production; in-memory in tests.
     fs: Arc<dyn FileSystem>,
+
+    /// 3-way text-content merger for the no-store conflict path. Present only
+    /// when wired (production, via a transient LoroText impl). Consulted only in
+    /// `Consolidator::Store` (SqlOnly) mode: when an org-file edit and a UI edit
+    /// concurrently changed the SAME block's text content (both diverged from
+    /// the BaseStore base), the disk edit is 3-way merged with the current store
+    /// content instead of clobbering it (whole-value LWW). In `Upstream` (Loro)
+    /// mode this is left unused — the live CRDT already merges concurrent edits,
+    /// so adding a second merge here would be wrong.
+    text_merge: Option<Arc<dyn ThreeWayTextMerge>>,
 }
 
 impl FileSyncController {
@@ -147,11 +159,22 @@ impl FileSyncController {
             ordering,
             downstream: None,
             fs,
+            text_merge: None,
         }
     }
 
     pub fn with_alias_registrar(mut self, registrar: Arc<dyn AliasRegistrar>) -> Self {
         self.alias_registrar = Some(registrar);
+        self
+    }
+
+    /// Wire the 3-way text-content merger (the no-store conflict path). Without
+    /// it, a concurrent file-vs-UI edit in SqlOnly mode resolves by whole-value
+    /// last-writer-wins; with it, the disk edit is merged against the current
+    /// store content through a transient CRDT text (Model.md merge-fidelity
+    /// ladder). No-op in `Upstream` (Loro) mode — the live CRDT merges there.
+    pub fn with_text_merge(mut self, merger: Arc<dyn ThreeWayTextMerge>) -> Self {
+        self.text_merge = Some(merger);
         self
     }
 
@@ -179,6 +202,27 @@ impl FileSyncController {
     /// Must be called at startup BEFORE scanning files, so that we have a
     /// diff base for detecting external edits.
     pub async fn initialize(&mut self) -> Result<()> {
+        // Model.md invariant 11: the vault must not be under a byte-level file
+        // syncer. Scan for conflict artifacts (Syncthing/iCloud/Dropbox) and
+        // fail loud if any exist — they get re-ingested as duplicate-ID docs.
+        let scanned = self
+            .fs
+            .scan_directory(&self.root_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "[FileSyncController] scan vault {} for sync-conflict artifacts",
+                    self.root_dir.display()
+                )
+            })?;
+        let conflicts = crate::sync_conflict::find_sync_conflict_artifacts(&scanned.files);
+        if !conflicts.is_empty() {
+            return Err(crate::sync_conflict::conflict_artifacts_error(
+                &self.root_dir,
+                &conflicts,
+            ));
+        }
+
         // Phase 1 fast-path: load persisted `(file_id, content_hash)` pairs
         // from the `file` table BEFORE the in-process cache has replayed file
         // events. If an on-disk file's `hash(RENDERER_VERSION || disk_bytes)`
@@ -263,6 +307,19 @@ impl FileSyncController {
     /// Otherwise, diff against last_projection to compute create/update/delete ops.
     #[tracing::instrument(skip(self), name = "org.on_file_changed", fields(path = %path.display()))]
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
+        // Model.md invariant 11: skip (only) a byte-syncer conflict artifact that
+        // appears at runtime — ingesting it would create a duplicate-ID document.
+        // Disclosed, never silent; normal files are unaffected.
+        if crate::sync_conflict::is_sync_conflict_artifact(path) {
+            tracing::error!(
+                path = %path.display(),
+                "[FileSyncController] Model.md invariant 11: byte-syncer conflict artifact detected \
+                 at runtime — SKIPPING ingestion of this file. A byte-level file syncer \
+                 (Syncthing/iCloud/Dropbox) on the vault is out of contract; cross-device \
+                 convergence must go through Loro/P2P."
+            );
+            return Ok(());
+        }
         let canonical = CanonicalPath::new(path);
         let disk_content = match self.fs.read_to_string(path).await {
             Ok(c) => c,
@@ -529,8 +586,38 @@ impl FileSyncController {
         // Collect all block operations into a batch
         let mut operations: Vec<(String, holon_api::StorageEntity)> = Vec::new();
         let mut has_structural_changes = false;
+        // Set when the updates pass 3-way merged a concurrent file-vs-UI content
+        // edit. A pure content update is not "structural", so the early-return
+        // below would skip the disk write-back — but a merge produces content
+        // that is on NEITHER disk nor in `last_projection`, so we must force the
+        // re-render/write-back so disk converges to the merged text.
+        let mut did_text_merge = false;
         let mut created_ids: Vec<String> = Vec::new();
         let mut updated_via_conflict_ids: Vec<String> = Vec::new();
+
+        // Current store content, keyed by id — the "mine" side of the 3-way text
+        // merge (the live UI/store edit). Fetched once, only when the no-store
+        // conflict path is active: a merger is wired AND this session's
+        // consolidator owns the store directly (SqlOnly / `Store`). In Loro
+        // (`Upstream`) mode the live CRDT already merges, so we skip entirely and
+        // never pay the read. Per Replication invariant 1 the merge BASE comes
+        // from the BaseStore (`old_blocks`), never from this cache read — this
+        // read supplies only "mine", the current store value.
+        let text_merge_active = self.text_merge.is_some()
+            && matches!(self.ordering.consolidator(), Consolidator::Store);
+        let store_content: HashMap<EntityUri, String> = if text_merge_active {
+            self.block_reader
+                .get_blocks(&document_uri)
+                .await
+                .with_context(|| {
+                    format!("read current store blocks for 3-way text merge (doc {document_uri})")
+                })?
+                .into_iter()
+                .map(|b| (b.id.clone(), b.content))
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
         // Creates (in document order so parents before children).
         // Blocks that already exist under a different document are re-parented
@@ -732,15 +819,51 @@ impl FileSyncController {
         for new_block in &new_blocks_vec {
             let id = &new_block.id;
             if let Some(old_block) = old_blocks.get(id) {
-                if self.format.content_differs(old_block, new_block) {
-                    let parent_id = if new_block.parent_id == new_parse.document.id {
+                // No-store conflict path: when the disk content for this block
+                // diverged from the base AND the store holds a competing edit,
+                // 3-way merge the two instead of clobbering with the disk value
+                // (whole-value LWW). `text_merge_active` already restricts this
+                // to SqlOnly (`Store`) mode with a wired merger; the base is the
+                // BaseStore snapshot (`old_block`), "theirs" the disk parse,
+                // "mine" the current store content. Text CONTENT only — edge and
+                // structural fields still take the disk value.
+                let mut merged_block: Option<Block> = None;
+                if text_merge_active && new_block.content != old_block.content {
+                    if let Some(mine) = store_content.get(id) {
+                        let merger = self
+                            .text_merge
+                            .as_ref()
+                            .expect("text_merge_active implies a wired merger");
+                        let (resolved, merged) = three_way_text_content(
+                            &old_block.content,
+                            &new_block.content,
+                            mine,
+                            merger.as_ref(),
+                        )?;
+                        if merged {
+                            tracing::info!(
+                                block = %id,
+                                doc = %document_uri,
+                                "concurrent file-vs-UI edit 3-way text-merged \
+                                 (base/disk/current) in Direct (SqlOnly) mode"
+                            );
+                            let mut b = new_block.clone();
+                            b.content = resolved;
+                            merged_block = Some(b);
+                            did_text_merge = true;
+                        }
+                    }
+                }
+                let effective = merged_block.as_ref().unwrap_or(new_block);
+                if self.format.content_differs(old_block, effective) {
+                    let parent_id = if effective.parent_id == new_parse.document.id {
                         &document_uri
                     } else {
-                        &new_block.parent_id
+                        &effective.parent_id
                     };
                     let mut params =
                         self.format
-                            .build_block_params(new_block, parent_id, &document_uri);
+                            .build_block_params(effective, parent_id, &document_uri);
                     if let Some(Some(prev)) = predecessors.get(id) {
                         params.insert(
                             POSITION_AFTER_BLOCK_ID_PARAM.into(),
@@ -753,7 +876,7 @@ impl FileSyncController {
                     // Junction values are order-undefined on read, so compare as
                     // sets. Idempotent re-ingests of an unchanged vault stop
                     // churning ~2,400 statements per startup.
-                    strip_unchanged_edge_fields(&mut params, old_block, new_block);
+                    strip_unchanged_edge_fields(&mut params, old_block, effective);
                     operations.push(("update".to_string(), params));
                 }
             }
@@ -1126,7 +1249,12 @@ impl FileSyncController {
         // document's identity rename-safe and lets future loads short-circuit the
         // name-chain lookup.
         let needs_id_writeback = bare_id_in_file.is_none();
-        if !has_structural_changes && !needs_id_writeback {
+        // `did_text_merge` forces the round-trip: a merge produced content that
+        // is on NEITHER disk nor in `last_projection`, so recording disk as the
+        // projection and returning would strand the merged text (disk would
+        // never converge). The re-render below reads the merged store content
+        // and writes it back to disk.
+        if !has_structural_changes && !needs_id_writeback && !did_text_merge {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
             self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
@@ -1823,4 +1951,81 @@ fn set_eq<T: Eq + std::hash::Hash>(a: &[T], b: &[T]) -> bool {
     let sa: HashSet<&T> = a.iter().collect();
     let sb: HashSet<&T> = b.iter().collect();
     sa == sb
+}
+
+/// Resolve one block's text content for ingest when the on-disk copy (`theirs`)
+/// has diverged from the diff `base`. Implements the 3-way conflict rule of the
+/// merge-fidelity ladder for the no-store (`Consolidator::Store`) mode:
+///
+/// - **only disk changed** (`mine == base`) → normal ingest: take `theirs`
+///   verbatim, no merge. The store never touched this block.
+/// - **both converged** (`theirs == mine`) → no real conflict: take `theirs`
+///   (equal to `mine`), no merge.
+/// - **both diverged** (`theirs != base` && `mine != base` && `theirs != mine`)
+///   → a genuine concurrent file-vs-UI edit: 3-way merge `(base, theirs, mine)`
+///   through the transient CRDT text.
+///
+/// Returns `(content_to_ingest, merged)` where `merged` is `true` only in the
+/// last case (so the caller can disclose it and force a disk write-back).
+/// Precondition: `theirs != base` (disk changed) — the caller only invokes this
+/// inside the existing disk-vs-base content-diff gate. Structural conflicts
+/// (parent/order) are out of scope: this is text CONTENT only.
+fn three_way_text_content(
+    base: &str,
+    theirs: &str,
+    mine: &str,
+    merger: &dyn ThreeWayTextMerge,
+) -> Result<(String, bool)> {
+    debug_assert_ne!(
+        theirs, base,
+        "caller must gate on disk-changed (theirs != base)"
+    );
+    if mine == base || theirs == mine {
+        // Only the disk side changed (or both landed on the same text): the
+        // store held no competing edit, so the disk content wins as today.
+        return Ok((theirs.to_string(), false));
+    }
+    // Both sides diverged from the common ancestor → merge, don't clobber.
+    let merged = merger
+        .merge_text(base, theirs, mine)
+        .with_context(|| "3-way text merge of concurrent file-vs-UI edit failed")?;
+    Ok((merged, true))
+}
+
+#[cfg(test)]
+mod three_way_text_tests {
+    use super::*;
+
+    /// Stub merger: records that it was called and returns a sentinel so tests
+    /// can assert whether the controller path chose to merge vs pass through.
+    struct StubMerge;
+    impl ThreeWayTextMerge for StubMerge {
+        fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String> {
+            Ok(format!("MERGED({base}|{theirs}|{mine})"))
+        }
+    }
+
+    #[test]
+    fn both_changed_triggers_merge() {
+        // base "abc", disk "Xabc", store "abcY" — a true concurrent edit.
+        let (content, merged) = three_way_text_content("abc", "Xabc", "abcY", &StubMerge).unwrap();
+        assert!(merged, "both sides diverged → must merge");
+        assert_eq!(content, "MERGED(abc|Xabc|abcY)");
+    }
+
+    #[test]
+    fn only_disk_changed_passes_theirs_through() {
+        // store never touched this block (mine == base): disk wins, no merge.
+        let (content, merged) = three_way_text_content("abc", "Xabc", "abc", &StubMerge).unwrap();
+        assert!(!merged, "only disk changed → no merge");
+        assert_eq!(content, "Xabc");
+    }
+
+    #[test]
+    fn converged_edits_pass_through() {
+        // both sides independently produced the same text: no real conflict.
+        let (content, merged) = three_way_text_content("abc", "abZ", "abZ", &StubMerge).unwrap();
+        assert!(!merged, "theirs == mine → no merge");
+        assert_eq!(content, "abZ");
+    }
 }

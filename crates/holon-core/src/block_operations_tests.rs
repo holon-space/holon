@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::block_ordering::BlockOrdering;
+    use crate::block_ordering::{BlockOrdering, OrderKeyMinting};
     use crate::fractional_index::gen_key_between;
     use crate::traits::*;
     use async_trait::async_trait;
@@ -226,28 +226,13 @@ mod tests {
         fn ordering(&self) -> Option<&dyn BlockOrdering> {
             Some(self as &dyn BlockOrdering)
         }
+        fn order_key_minter(&self) -> Option<&dyn OrderKeyMinting> {
+            Some(self as &dyn OrderKeyMinting)
+        }
     }
 
     #[async_trait]
-    impl BlockOrdering for MemStore {
-        async fn place(
-            &self,
-            uri: &EntityUri,
-            parent_id: &EntityUri,
-            after_id: Option<&EntityUri>,
-        ) -> Result<()> {
-            let new_sort_key = self.new_child_anchor(parent_id, after_id).await?;
-            let want = canon(uri.as_str());
-            let mut blocks = self.blocks.lock().unwrap();
-            let block = blocks
-                .iter_mut()
-                .find(|b| b.id.as_str() == want)
-                .ok_or_else(|| anyhow::anyhow!("MemStore::place: block {want} not found"))?;
-            block.parent_id = Some(parent_id.clone());
-            block.sort_key = new_sort_key;
-            Ok(())
-        }
-
+    impl OrderKeyMinting for MemStore {
         async fn new_child_anchor(
             &self,
             parent_id: &EntityUri,
@@ -272,6 +257,27 @@ mod tests {
             };
             gen_key_between(prev_key.as_deref(), next_key.as_deref())
                 .map_err(|e| format!("{e:#}").into())
+        }
+    }
+
+    #[async_trait]
+    impl BlockOrdering for MemStore {
+        async fn place(
+            &self,
+            uri: &EntityUri,
+            parent_id: &EntityUri,
+            after_id: Option<&EntityUri>,
+        ) -> Result<()> {
+            let new_sort_key = self.new_child_anchor(parent_id, after_id).await?;
+            let want = canon(uri.as_str());
+            let mut blocks = self.blocks.lock().unwrap();
+            let block = blocks
+                .iter_mut()
+                .find(|b| b.id.as_str() == want)
+                .ok_or_else(|| anyhow::anyhow!("MemStore::place: block {want} not found"))?;
+            block.parent_id = Some(parent_id.clone());
+            block.sort_key = new_sort_key;
+            Ok(())
         }
 
         async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
