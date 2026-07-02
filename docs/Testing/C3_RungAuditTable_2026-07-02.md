@@ -47,10 +47,12 @@ go through the SAME bodies — `SutBlockTreeWrite` via `keystroke_writer_with(dr
 (`frontend_slice/components.rs`), which delegates to the base's driver-parameterized `*_via`
 bodies — only the driver changes. Because the deferred base registers none of them, the
 overlay's calls are plain `insert`s (C-2's fail-loud `insert` guards double registration),
-NOT `CapMap::replace`. move_up/move_down (row 5, mechanism 3) stay on the disclosed
-`OpDispatchWriter` fallback inside the keystroke writer; the 6 EXCLUDED rows stay excluded;
-headless (`full_headless`) behavior is unchanged (the SutMutate toggle now rides the shim's
-`toggle_state_via` widget-click instead of direct op dispatch — the one-driver UI-adjacent path).
+NOT `CapMap::replace`. move_up/move_down (row 5, mechanism 3) now ride the production
+chord-resolution path (`send_key_chord` over the SAME `driver`, 2026-07-02) — the
+`OpDispatchWriter` fallback inside the keystroke writer is DELETED; the 6 EXCLUDED rows stay
+excluded; headless (`full_headless`) behavior is unchanged (the SutMutate toggle now rides the
+shim's `toggle_state_via` widget-click instead of direct op dispatch — the one-driver
+UI-adjacent path).
 
 Status legend: **OK** = already at target rung in the windowed build.
 **REBIND** = headless impl exists at a lower rung; a window-driver-backed
@@ -66,7 +68,7 @@ apply; included with justification.
 | 2 | JoinBlock | `SutBlockTreeWrite` (`transitions/join_block.rs:138-141`, apply `:165-167`) | `KeystrokeBlockTreeWriter::apply_join_block` `op_write_cap.rs:309-316` (focus + home + backspace, headless driver) | ReactiveEngine | Gpui | **OK** (2026-07-02) | Same windowed sibling as row 1, INSERTed by `register_gesture_writes` (`window_slice/builders.rs`). |
 | 3 | Indent | `SutBlockTreeWrite` (`transitions/indent.rs:114-117`, apply `:141-143`) | `KeystrokeBlockTreeWriter::apply_indent` `op_write_cap.rs:319-324` (focus + tab) | ReactiveEngine | Gpui | **OK** (2026-07-02) | Same windowed sibling as row 1 (`register_gesture_writes` insert). |
 | 4 | Outdent | `SutBlockTreeWrite` (`transitions/outdent.rs:105-108`, apply `:132-134`) | `KeystrokeBlockTreeWriter::apply_outdent` `op_write_cap.rs:326-331` (focus + shift+tab) | ReactiveEngine | Gpui | **OK** (2026-07-02) | Same windowed sibling as row 1 (`register_gesture_writes` insert). |
-| 5 | MoveBlockUp / MoveBlockDown | `SutBlockTreeWrite` (`transitions/move_up.rs:116-119`/`move_down.rs:122-125`, apply `:143-145`/`:149-151`) | `KeystrokeBlockTreeWriter::apply_move_up/down` → `self.fallback` = `OpDispatchWriter::execute("move_up"/"move_down")` `op_write_cap.rs:335-343` → `:180-185` → `engine.execute_operation` `:115-121` | **Direct-dispatch** (even headless) | Gpui (chord) | REBIND (new code) | The ONLY structural ops still on the dispatch floor. No chord path exists at ANY rung yet ("until the chord-resolution rebind (`send_key_chord`) lands", `op_write_cap.rs:332-334`). This is the plan's "finish the KeystrokeBlockTreeWriter rebind" — but scoped to move_up/move_down only. |
+| 5 | MoveBlockUp / MoveBlockDown | `SutBlockTreeWrite` (`transitions/move_up.rs:116-119`/`move_down.rs:122-125`, apply `:143-145`/`:149-151`) | `KeystrokeBlockTreeWriter::apply_move_up/down` → `send_block_chord` → `driver.send_key_chord` (`op_write_cap.rs`): reads the bound chord from `reactive.key_bindings()` (prod's **Alt+Up / Alt+Down**, `holon-frontend/src/reactive.rs:1224-1231`), snapshots the reactive root, dispatches — the chord resolves via `bubble_input` → `ExecuteOperation` exactly like the GPUI page-level chord pump (`frontends/gpui/src/lib.rs:707-746`) | ReactiveEngine (headless router chord) — **Gpui after overlay** | Gpui (chord) | **OK** (2026-07-02) | Rebound off the dispatch floor: `OpDispatchWriter` fallback DELETED (field + `with_resolver_and_focus` + `focus_sink` path removed — all callers hit the plain-execute branch already). Prod has a REAL user gesture for reorder — key chord Alt+Up/Alt+Down (`assets/default/keybindings.yaml` also binds bare Up/Down + leader chords in the `navigation` context; the engine registry is the authority `find_keybinding_for_op` reads) AND the ↑/↓ op-button affordance (`op_button.rs:108-109`). Same mechanism the keystone E2ESut uses (`dispatch_block_op_via_chord`, `sut_capabilities.rs:937-949`). Driver chooses HOW: headless `ReactiveEngineDriver` resolves via `router.bubble_input`; window `GpuiUserDriver`/`SimUserDriver` clicks-to-focus + real `PlatformInput`. Installed once by `register_gesture_writes(driver)` so BOTH rungs carry it. |
 | 6 | TypeChars / DeleteBackward / MoveCursor (editor family) | `SutEditorMirrorWrite` (`type_chars.rs:97-100`, `delete_backward.rs:143-146`, `move_cursor.rs:88-91`) | `HeadlessFrontendComponent` `frontend_slice/components.rs:1175-1237` (`send_raw_keystroke` per char / backspace through the headless `ReactiveEngineDriver` → `HeadlessEditorMirror`) | ReactiveEngine | Gpui (window `InputState` keystrokes) | **OK** (2026-07-02) | Windowed `DriverBoundFrontendWrite` sibling routes `send_raw_keystroke` through the window driver (`apply_type_chars_via`/`apply_delete_backward_via`/`apply_move_cursor_via`, `frontend_slice/components.rs:1225-1290`). ⚠ Routing only — the rebound cap is installed + green in the initial-frame catalog; no existing windowed test yet DRIVES the editor keystrokes end-to-end (4b). §8.11 soft-spot (`InputState` vs `HeadlessEditorMirror`) is where end-to-end faithfulness will be proven. |
 | 7 | PressKey | `SutBlockInteract` (`press_key.rs:32-35`, apply `:235-237`) | `DriverInputComponent` `driver_input.rs:343` — wraps whichever driver the placement installed | MIXED by `DriverPlacement`: Gpui after `overlay_windowed_caps` (`window_slice/builders.rs:158-172`); ReactiveEngine under `HeadlessReactive` (`composed/builder.rs:364-371`) | Gpui | **OK** | Already correct: windowed build gets the window driver, headless gets VM rung — the one-driver-per-run rule working as designed. |
 | 8 | ArrowNavigate | `SutArrowNavigate` (`arrow_navigate.rs:34`, apply `:247-256`) | `DriverInputComponent` `driver_input.rs:521`, registered `:560` | MIXED (same as row 7) | Gpui | **OK** | E4 input family; rides the overlay driver. |
@@ -115,10 +117,17 @@ apply; included with justification.
   to have registered bounds in the window geometry. Medium (the plan's named
   item #1).
 
-**New code (no mechanism exists at any rung yet):**
-- Row 5 MoveUp/MoveDown — the `send_key_chord` chord-resolution rebind
-  (`op_write_cap.rs:332-334`). This is the only structural op still on the
-  dispatch floor and the largest single mechanism gap.
+**New code (mechanism landed 2026-07-02):**
+- Row 5 MoveUp/MoveDown — the `send_key_chord` chord-resolution rebind. DONE:
+  `KeystrokeBlockTreeWriter::send_block_chord` (`op_write_cap.rs`) reads the bound
+  chord (Alt+Up/Alt+Down) from `reactive.key_bindings()` and dispatches through
+  `driver.send_key_chord`, which the trait already implemented at BOTH rungs
+  (headless router `bubble_input`, window real `PlatformInput`). No new driver
+  surface was needed — `send_key_chord`/`resolve_key_chord` predated this work
+  (they back the keystone E2ESut's `dispatch_block_op_via_chord`). The
+  `OpDispatchWriter` fallback (field + `with_resolver_and_focus` + the now-dead
+  `focus_sink` branch) was deleted. This was the last structural op on the
+  dispatch floor.
 
 **Already done (no C-3 work):** rows 7–15 — the entire
 `SutBlockInteract`/`SutArrowNavigate` gesture family rides
@@ -135,11 +144,20 @@ row 5).
 
 **Update 2026-07-02 (Phase 1 step 1, increment 1):** mechanisms 1 (rows 1–4, 6) and
 2 (rows 16–18) landed — all 8 flipped to OK (see the header note + per-row Status).
-Only **mechanism 3 (row 5 move_up/move_down)** remains a REBIND: the `send_key_chord`
-chord-resolution dispatch, the sole structural op still on the `OpDispatchWriter` floor.
-The 6 EXCLUDED rows are unchanged. Caveat carried into 4b: the rebound caps are installed
-on the windowed `CapMap` and pass the initial-frame + ClickBlock catalog green, but no
-existing windowed test yet DRIVES Split/Type/NavigateFocus/ToggleState end-to-end through
+
+**Update 2026-07-02 (Phase 1 step 1, increment 3 — mechanism 3):** row 5
+move_up/move_down landed. `KeystrokeBlockTreeWriter::send_block_chord` drives the
+production chord (Alt+Up/Alt+Down from `reactive.key_bindings()`) through
+`driver.send_key_chord`; the `OpDispatchWriter` fallback (field + the now-dead
+`with_resolver_and_focus`/`focus_sink` focus-handoff path) is deleted. NO new driver
+surface was required — `send_key_chord` already existed at both rungs (it backs the
+keystone E2ESut). **All 9 REBIND rows are now OK; no structural op remains on the
+dispatch floor.** Gates: keystone `general_e2e_composed_pbt` green (1 passed, the real
+teeth — MoveBlockUp/Down are in the headless alphabet); windowed `gpui_compose_sut_windowed`
+green (5/5); lib no regressions (169/16, failure set a strict subset of baseline). The 6
+EXCLUDED rows are unchanged. Caveat carried into 4b: the rebound caps are installed on the
+windowed `CapMap` and pass the initial-frame + ClickBlock catalog green, but no existing
+windowed test yet DRIVES Split/Type/NavigateFocus/ToggleState/MoveBlock end-to-end through
 the window — that end-to-end drive (and any faithfulness surprises it surfaces, esp. the
 §8.11 editor soft spot) is 4b's job.
 
@@ -180,6 +198,7 @@ join/indent/outdent/move rebind. Found in the alphabet but unnamed:
 `KeystrokeBlockTreeWriter` rebind (join/indent/outdent/move off the
 `OpDispatchWriter` fallback)" is stale — join (`op_write_cap.rs:309-316`),
 indent (`:319-324`) and outdent (`:326-331`) are ALREADY keystroke-driven at
-the VM rung; only move_up/move_down remain on the fallback (`:335-343`). The
-remaining fallback scope is smaller than the plan states, but it needs new
-chord machinery, not a rebind.
+the VM rung; move_up/move_down were the last on the fallback and (2026-07-02) are
+now chord-driven too. The fallback is fully gone — and the "new chord machinery"
+the plan implied turned out to already exist (`send_key_chord` at both rungs); the
+work was wiring `KeystrokeBlockTreeWriter` to it, not building it.

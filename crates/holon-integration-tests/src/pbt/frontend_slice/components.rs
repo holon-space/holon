@@ -308,26 +308,22 @@ impl HeadlessFrontendComponent {
     /// the SAME production keystroke sequences the base install uses, but over the given
     /// driver — so the windowed overlay can rebind `SutBlockTreeWrite` onto the window's
     /// `GpuiUserDriver`/`SimUserDriver`. Reuses the component's own `reactive` (live
-    /// editor content reads), the shared `resolver` (oracle→minted id remap), and an
-    /// `OpDispatchWriter` fallback over `engine` (the `move_up`/`move_down` disclosed
-    /// dispatch floor — mechanism 3, unchanged here). Fail-loud if the resolver was never
+    /// editor content reads + the chord-binding registry) and the shared `resolver`
+    /// (oracle→minted id remap). The whole structural family — including `move_up`/
+    /// `move_down` (C-3 mechanism 3, chord-resolved via `send_key_chord`) — now rides
+    /// `driver`; nothing is left on raw op dispatch. Fail-loud if the resolver was never
     /// set (only the composed builder wires it; a caller without it drove nothing).
     pub(crate) fn keystroke_writer_with(
         &self,
         driver: Arc<dyn UserDriver>,
     ) -> crate::pbt::op_write_cap::KeystrokeBlockTreeWriter {
-        use crate::pbt::op_write_cap::{KeystrokeBlockTreeWriter, OpDispatchWriter};
+        use crate::pbt::op_write_cap::KeystrokeBlockTreeWriter;
         let resolver = self
             .resolver
             .get()
             .expect("keystroke_writer_with: resolver must be set by the composed builder")
             .clone();
-        let fallback = OpDispatchWriter::with_resolver_and_focus(
-            self.engine.clone(),
-            resolver.clone(),
-            self.reactive.clone(),
-        );
-        KeystrokeBlockTreeWriter::new(driver, self.reactive.clone(), resolver, fallback)
+        KeystrokeBlockTreeWriter::new(driver, self.reactive.clone(), resolver)
     }
 
     /// The frontend's `LoroDocumentStore` — the authority store the production op

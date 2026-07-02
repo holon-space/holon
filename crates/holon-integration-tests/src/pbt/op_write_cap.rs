@@ -29,7 +29,6 @@ use std::time::Duration;
 use holon::api::BackendEngine;
 use holon::sync::LoroDocumentStore;
 use holon_api::{EdgeFieldUpdate, EntityUri, StorageEntity, Value};
-use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_frontend::user_driver::UserDriver;
 use holon_loro::LoroBackend;
@@ -54,17 +53,6 @@ pub struct OpDispatchWriter {
     /// over an id-minting backend shares a populated map (`with_resolver`) so a
     /// transition referencing an earlier split's oracle id resolves to the real id.
     resolver: IdResolver,
-    /// Optional frontend focus sink. When present (a *booted frontend* config), the
-    /// structural ops that production focus-hands-off — `split_block`/`join_block` —
-    /// dispatch through the engine's production `dispatch_intent_sync`
-    /// (`execute_operation` + `apply_structural_focus`), so the new/merged block
-    /// becomes the engine's `focused_block` (and armed caret seed) exactly as the
-    /// GPUI/TUI keychord handler does. That mirrors the reference's `set_focus` +
-    /// `open_active_editor` on the split target, so a subsequent `TypeChars` types
-    /// into the right block (true split-then-type) — no blur workaround needed.
-    /// Absent (memory/turso storage-only configs, fixed-id slices) ⇒ the raw
-    /// `engine.execute_operation` path, since no frontend focus-handoff exists there.
-    focus_sink: Option<Arc<ReactiveEngine>>,
 }
 
 impl OpDispatchWriter {
@@ -73,33 +61,12 @@ impl OpDispatchWriter {
         Self {
             engine,
             resolver: Arc::new(Mutex::new(BTreeMap::new())),
-            focus_sink: None,
         }
     }
 
     /// Share a populated id map with the composed runner (id-minting backends).
     pub fn with_resolver(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
-        Self {
-            engine,
-            resolver,
-            focus_sink: None,
-        }
-    }
-
-    /// Resolver-sharing writer that ALSO drives the production frontend focus-handoff
-    /// for `split_block`/`join_block` through `reactive` (a booted-frontend config), so
-    /// the split/merge target becomes the engine's focused block — the composed-write
-    /// realization of the frontend split focus-handoff (`apply_structural_focus`).
-    pub fn with_resolver_and_focus(
-        engine: Arc<BackendEngine>,
-        resolver: IdResolver,
-        reactive: Arc<ReactiveEngine>,
-    ) -> Self {
-        Self {
-            engine,
-            resolver,
-            focus_sink: Some(reactive),
-        }
+        Self { engine, resolver }
     }
 
     /// Resolve an oracle-space id to its SUT-space id (identity if unmapped).
@@ -120,31 +87,6 @@ impl OpDispatchWriter {
             .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
     }
 
-    /// Dispatch a focus-handing-off structural op (`split_block`/`join_block`). With a
-    /// frontend focus sink this goes through the production `dispatch_intent_sync`
-    /// (`execute_operation` + `apply_structural_focus`), so the op-response focus result
-    /// moves the engine's `focused_block`/caret-seed onto the new/merged block — the
-    /// exact in-process projection the GPUI/TUI frontends apply. Without a sink it is the
-    /// plain backend execute (storage-only configs have no frontend focus to hand off).
-    async fn execute_structural(&self, op: &str, params: StorageEntity) {
-        match &self.focus_sink {
-            Some(reactive) => {
-                // `OperationIntent::params` is keyed by `String`; `StorageEntity` by
-                // `Arc<str>`. Convert at this boundary.
-                let intent_params: HashMap<String, Value> = params
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect();
-                let intent = OperationIntent::new("block".into(), op.to_string(), intent_params);
-                reactive
-                    .dispatch_intent_sync(intent)
-                    .await
-                    .unwrap_or_else(|e| panic!("block/{op} dispatch_intent_sync failed: {e:#}"));
-            }
-            None => self.execute(op, params).await,
-        }
-    }
-
     fn id_only(&self, id: &EntityUri) -> StorageEntity {
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(self.resolve(id).to_string()));
@@ -157,7 +99,7 @@ impl SutBlockTreeWrite for OpDispatchWriter {
     async fn apply_split_block(&self, id: &EntityUri, position: usize) {
         let mut params = self.id_only(id);
         params.insert("position".into(), Value::Integer(position as i64));
-        self.execute_structural("split_block", params).await;
+        self.execute("split_block", params).await;
     }
 
     async fn apply_join_block(&self, id: &EntityUri) {
@@ -166,7 +108,7 @@ impl SutBlockTreeWrite for OpDispatchWriter {
         // `execute` if the op is genuinely dispatched and unregistered.
         let mut params = self.id_only(id);
         params.insert("position".into(), Value::Integer(0));
-        self.execute_structural("join_block", params).await;
+        self.execute("join_block", params).await;
     }
 
     async fn apply_indent(&self, id: &EntityUri) {
@@ -202,34 +144,36 @@ impl SutBlockTreeWrite for OpDispatchWriter {
 /// `E2ESut`'s windowed `apply_split_block_input_pipeline` performs, minus the
 /// geometry/window-focus prechecks (no platform window headless).
 ///
-/// Ops not yet on the keystroke path (`join`/`indent`/`outdent`/`move_*`) delegate
-/// to the inner [`OpDispatchWriter`] — the rebind is incremental (Split first).
+/// The whole structural family rides `driver`: `split`/`join`/`indent`/`outdent`
+/// via editor keystrokes, and `move_up`/`move_down` via the production
+/// chord-resolution path (`send_key_chord`, C-3 mechanism 3) — the reorder ops
+/// have no editor-mirror keystroke, so they resolve their bound chord (Alt+Up /
+/// Alt+Down, `reactive.rs`) through `bubble_input` → `ExecuteOperation` exactly
+/// as the GPUI page-level chord pump does. No op is left on raw op dispatch.
 pub struct KeystrokeBlockTreeWriter {
     driver: Arc<dyn UserDriver>,
     /// The frontend `ReactiveEngine` (as `BuilderServices`) — read the block's live
     /// `MutableText` content cell for the byte→keystroke conversion (the same source
     /// `editor_live_text` reads; populated by rendering, not the router cache that
-    /// `displayed_text` consults).
+    /// `displayed_text` consults). Also the source of truth for the chord registry
+    /// (`key_bindings()`) and the reactive root snapshot the chord path needs.
     reactive: Arc<ReactiveEngine>,
     resolver: IdResolver,
-    fallback: OpDispatchWriter,
 }
 
 impl KeystrokeBlockTreeWriter {
-    /// `driver` drives the keystrokes; `reactive` reads live editor content; `resolver`
-    /// translates oracle synthetic ids to the SUT-minted ids (shared with `fallback`'s
-    /// resolver); `fallback` dispatches the not-yet-converted ops over the same engine.
+    /// `driver` drives the keystrokes and chords; `reactive` reads live editor content
+    /// AND the keybinding registry; `resolver` translates oracle synthetic ids to the
+    /// SUT-minted ids.
     pub fn new(
         driver: Arc<dyn UserDriver>,
         reactive: Arc<ReactiveEngine>,
         resolver: IdResolver,
-        fallback: OpDispatchWriter,
     ) -> Self {
         Self {
             driver,
             reactive,
             resolver,
-            fallback,
         }
     }
 
@@ -260,6 +204,38 @@ impl KeystrokeBlockTreeWriter {
             .unwrap_or_else(|e| {
                 panic!("[{ctx}/keystroke] {keystroke} {modifiers:?} failed: {e:#}")
             });
+    }
+
+    /// Drive a block-reorder op (`move_up`/`move_down`) through the production
+    /// chord-resolution path — the SAME `find_keybinding_for_op` + `send_key_chord`
+    /// binding the keystone `E2ESut` uses (`sut_capabilities.rs`). The chord is read
+    /// from the live `key_bindings` registry (prod's Alt+Up / Alt+Down), so the test
+    /// follows whatever prod binds; `send_key_chord` clicks-to-focus then resolves the
+    /// chord via `bubble_input` → `ExecuteOperation`. The driver decides HOW (headless
+    /// router vs window `PlatformInput`), so both rungs exercise the real chord→intent
+    /// binding. Fail loud if the op has no registered chord (a prod regression) or the
+    /// chord fails to dispatch.
+    async fn send_block_chord(&self, resolved: &EntityUri, op: &str, ctx: &str) {
+        let chord = self
+            .reactive
+            .key_bindings()
+            .lock_ref()
+            .get(op)
+            .cloned()
+            .unwrap_or_else(|| panic!("[{ctx}/chord] no keybinding registered for op {op:?}"));
+        let root_id = holon_api::root_layout_block_uri();
+        let root_tree = self.reactive.snapshot_reactive(&root_id);
+        let dispatched = self
+            .driver
+            .send_key_chord(&root_id, &root_tree, resolved, &chord, HashMap::new())
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[{ctx}/chord] send_key_chord {chord:?} on {resolved} failed: {e:#}")
+            });
+        assert!(
+            dispatched,
+            "[{ctx}/chord] chord {chord:?} did not dispatch op {op:?} on {resolved}"
+        );
     }
 }
 
@@ -330,14 +306,23 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
     }
 
     // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke (they
-    // ride the chord path, not text editing). Kept on the dispatch fallback until the
-    // chord-resolution rebind (`send_key_chord`) lands.
+    // move siblings, they don't edit text). Prod binds them to a key chord (Alt+Up /
+    // Alt+Down, `reactive.rs` `key_bindings`), so they ride the SAME chord-resolution
+    // path the GPUI page-level chord pump uses — `send_key_chord` clicks-to-focus then
+    // dispatches the chord through `bubble_input` → `ExecuteOperation`. This is the C-3
+    // mechanism-3 rebind: the driver (headless `ReactiveEngineDriver` in the base,
+    // window `GpuiUserDriver`/`SimUserDriver` in the overlay) resolves the chord itself,
+    // so BOTH rungs exercise prod's chord→intent binding — no op left on op dispatch.
     async fn apply_move_up(&self, id: &EntityUri) {
-        self.fallback.apply_move_up(id).await;
+        let resolved = self.resolve(id);
+        self.send_block_chord(&resolved, "move_up", "MoveBlockUp")
+            .await;
     }
 
     async fn apply_move_down(&self, id: &EntityUri) {
-        self.fallback.apply_move_down(id).await;
+        let resolved = self.resolve(id);
+        self.send_block_chord(&resolved, "move_down", "MoveBlockDown")
+            .await;
     }
 }
 
