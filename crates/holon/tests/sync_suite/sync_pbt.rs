@@ -713,7 +713,7 @@ mod tests {
             seed(&b, "root-b", None, "root-b").await;
 
             let share_resp = a
-                .share_subtree("block:shared-parent", "full".into())
+                .share_subtree("block:shared-parent", "none".into())
                 .await
                 .unwrap();
             let j: JsonValue = match share_resp.response.unwrap() {

@@ -603,6 +603,58 @@ mod tests {
     }
 
     #[test]
+    fn none_retention_does_not_leak_sibling_content() {
+        // B1 regression (docs/Reference/SUBTREE_SHARING.md): sharing a subtree
+        // with retention=None must NOT ship the content/history of pruned
+        // sibling subtrees. A `Full` snapshot leaks it (the forked oplog retains
+        // deleted nodes' ops); `None` (shallow snapshot at current frontiers)
+        // must not.
+        const SECRET: &str = "TOP-SECRET-SIBLING-CONTENT-9c1f";
+
+        let doc = LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+
+        let doc_root = tree.create(None).unwrap();
+        let secret_sibling = tree.create(doc_root).unwrap();
+        set_text(&tree, secret_sibling, SECRET);
+        let shared_root = tree.create(doc_root).unwrap();
+        set_text(&tree, shared_root, "Shared heading");
+        let child = tree.create(shared_root).unwrap();
+        set_text(&tree, child, "Block in shared subtree");
+        doc.commit();
+
+        // `None` share: the exported shared doc must not carry the sibling.
+        let none = extract_subtree(&doc, shared_root, HistoryRetention::None).unwrap();
+        let bytes = none.shared_doc.export(ExportMode::Snapshot).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(SECRET),
+            "none-retention share leaked sibling content into the exported snapshot"
+        );
+        // Nor can any node in the shared doc materialize the sibling text.
+        let shared_tree = none.shared_doc.get_tree(TREE_NAME);
+        for node in shared_tree.get_nodes(false) {
+            assert_ne!(
+                read_text(&shared_tree, node.id),
+                SECRET,
+                "sibling node materialized in the shared doc"
+            );
+        }
+
+        // Contrast: `Full` retention DOES leak it — which is exactly why the
+        // op boundary (`parse_retention`) rejects "full". This keeps the
+        // assertion above from being vacuous.
+        let full = extract_subtree(&doc, shared_root, HistoryRetention::Full).unwrap();
+        let full_bytes = full.shared_doc.export(ExportMode::Snapshot).unwrap();
+        assert!(
+            String::from_utf8_lossy(&full_bytes).contains(SECRET),
+            "expected the Full-retention snapshot to leak the sibling — \
+             test is vacuous otherwise"
+        );
+    }
+
+    #[test]
     fn extract_with_edit_history() {
         let doc = LoroDoc::new();
         doc.set_peer_id(1).unwrap();
