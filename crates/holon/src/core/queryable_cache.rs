@@ -944,6 +944,27 @@ where
     }
 }
 
+/// The storage-agnostic cache seam over this Turso-backed cache — providers
+/// consume `dyn EntityCache` / `dyn CacheFactory` (holon-core) instead of
+/// naming `QueryableCache`; delegates to the inherent methods.
+#[async_trait]
+impl<T> holon_core::EntityCache<T> for QueryableCache<T>
+where
+    T: IntoEntity + TryFromEntity + Clone + Send + Sync + 'static,
+{
+    async fn get_all_ids(&self) -> Result<Vec<holon_api::EntityUri>> {
+        QueryableCache::get_all_ids(self).await
+    }
+
+    async fn apply_batch(
+        &self,
+        changes: &[Change<T>],
+        sync_token: Option<&SyncTokenUpdate>,
+    ) -> Result<()> {
+        QueryableCache::apply_batch(self, changes, sync_token).await
+    }
+}
+
 #[async_trait]
 impl<T> DataSource<T> for QueryableCache<T>
 where

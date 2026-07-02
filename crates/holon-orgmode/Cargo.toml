@@ -24,7 +24,6 @@ tokio-stream.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true
-holon.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
 holon-filesystem.workspace = true

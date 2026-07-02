@@ -345,6 +345,15 @@ pub fn register_core_services_with_backend(
         }) as Arc<dyn DbHandleProvider>
     }));
 
+    // Storage-agnostic cache seam (holon-core::CacheFactory) — provider
+    // crates mint per-entity caches through this instead of naming
+    // QueryableCache / DbHandle.
+    injector.provide::<dyn holon_core::CacheFactory>(Provider::root(move |resolver| {
+        let handle = resolver.resolve::<dyn DbHandleProvider>().handle();
+        Arc::new(crate::di::runtime::DbHandleCacheFactory::new(handle))
+            as Arc<dyn holon_core::CacheFactory>
+    }));
+
     injector.provide::<dyn SyncTokenStore>(
         Provider::root_async(move |inj| {
             let h = db_handle_for_sync.clone();

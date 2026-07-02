@@ -257,7 +257,7 @@ impl Module for LoroModule {
             // alive. The same feed drives `block_link` via the link indexer —
             // one feed, many sinks (Phase 4b).
             let block_live = resolver
-                .resolve_async::<crate::sync::event_infra_module::BlockFeed>()
+                .resolve_async::<holon_api::live_data::BlockFeed>()
                 .await
                 .0
                 .clone();

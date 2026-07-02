@@ -32,6 +32,33 @@ BlockOrdering traits; the Turso seam impls and schema wiring live in \
 holon-app::turso_seams. To suppress: // ALLOW(turso): <reason>
 """
 
+# orgmode is holon-free since crate-decoupling Rev 3.5a: LiveData / BlockFeed /
+# ROUTING_DOC_URI_KEY live in holon-api; the Turso seam impls + OrgModeModule
+# live in holon-app::turso_seams. Lock the whole `holon::` namespace out.
+
+[[smell]]
+id = "orgmode-holon-dep"
+pattern = '\bholon::'
+files = "crates/holon-orgmode/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-orgmode no longer depends on the `holon` engine crate (crate-decoupling \
+Rev 3.5a). Generic types live in holon-api / holon-core; Turso-backed seam \
+impls and wiring live in holon-app::turso_seams. \
+To suppress: // ALLOW(orgmode-holon-dep): <reason>
+"""
+
+[[smell]]
+id = "orgmode-holon-dep-manifest"
+pattern = '^holon(\.workspace| *=)'
+files = "crates/holon-orgmode/Cargo.toml"
+case_sensitive = true
+message = """
+holon-orgmode's Cargo.toml must not declare a dependency on the `holon` \
+engine crate (crate-decoupling Rev 3.5a). \
+To suppress: # ALLOW(orgmode-holon-dep-manifest): <reason>
+"""
+
 # frontend_crate_no_platform_imports — only crates/holon-frontend/src.
 
 [[smell]]

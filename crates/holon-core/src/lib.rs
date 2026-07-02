@@ -17,6 +17,7 @@ pub mod cell;
 pub mod cell_registry;
 pub mod core;
 pub mod downstream_projection;
+pub mod entity_cache;
 pub mod file_format;
 pub mod fractional_index;
 pub mod operation_log;
@@ -30,6 +31,7 @@ pub mod util;
 
 pub use canonical_path::CanonicalPath;
 pub use downstream_projection::DownstreamProjection;
+pub use entity_cache::{CacheFactory, EntityCache};
 pub use file_format::{FileFormatAdapter, FileFormatParseResult};
 pub use publish_errors::PublishErrorTracker;
 

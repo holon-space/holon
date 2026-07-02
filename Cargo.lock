@@ -5226,7 +5226,6 @@ dependencies = [
  "futures",
  "futures-signals",
  "hex",
- "holon",
  "holon-api",
  "holon-block-roundtrip-testing",
  "holon-core",

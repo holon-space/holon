@@ -516,7 +516,7 @@ impl Module for OrgModeModule {
             let block_cache = r.resolve_async::<QueryableCache<Block>>().await;
             let mut reader = CacheBlockReader::new(block_cache);
             if let Some(feed) = r
-                .optional_resolve_async::<holon::sync::event_infra_module::BlockFeed>()
+                .optional_resolve_async::<holon_api::live_data::BlockFeed>()
                 .await
             {
                 reader = reader.with_block_feed(feed.0.clone());

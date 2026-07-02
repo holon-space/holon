@@ -61,13 +61,10 @@ fn sql_cell_set_field_writer(
 /// Resolving this from DI triggers the LiveData<Block> → block_link subscription.
 pub struct LinkEventSubscriberHandle;
 
-/// The shared convergent block feed (`LiveData<Block>` over the `block`
-/// matview's CDC stream). Built once and shared by every downstream sink that
-/// needs it (the Loro→SQL controller keeps it alive; the link indexer drives
-/// `block_link` off it). A newtype so DI hands back the inner `Arc` cleanly
-/// (`LiveData::new` already returns an `Arc`). Available in both modes — the
-/// matview exists with or without Loro.
-pub struct BlockFeed(pub Arc<LiveData<Block>>);
+// The BlockFeed newtype itself lives in holon-api (live_data) so backend-blind
+// consumers (holon-orgmode) can resolve it without a `holon` dependency; this
+// module provides it over the block matview's CDC stream.
+use holon_api::live_data::BlockFeed;
 
 /// DI module for shared block infrastructure.
 ///

@@ -27,7 +27,7 @@ pub use lifecycle::{
     create_backend_engine_with_extras, open_and_register_core, preload_startup_views,
 };
 pub use registration::{register_core_services_no_turso, register_core_services_with_backend};
-pub use runtime::create_queryable_cache_async;
+pub use runtime::{DbHandleCacheFactory, create_queryable_cache_async};
 pub use schema_providers::{DbReady, DbResource};
 
 /// Trait for providing the TursoBackend.

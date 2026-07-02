@@ -357,6 +357,15 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     }
 }
 
+/// The shared convergent block feed (`LiveData<Block>` over the block
+/// matview's CDC stream at the composition root). Built once and shared by
+/// every downstream sink that needs it (the Loro→SQL controller keeps it
+/// alive; the link indexer drives `block_link` off it; the org controller's
+/// re-render resolver reads it). A newtype so DI hands back the inner `Arc`
+/// cleanly (`LiveData::new` already returns an `Arc`). Available in both
+/// modes — the backing matview exists with or without Loro.
+pub struct BlockFeed(pub Arc<LiveData<crate::block::Block>>);
+
 #[cfg(test)]
 mod tests {
     use super::*;

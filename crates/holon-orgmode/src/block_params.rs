@@ -27,7 +27,7 @@ pub fn build_block_params(
     // Routing metadata: tells FileSyncController which document this block
     // belongs to, even when parent_id is another block (not a document).
     params.insert(
-        holon::sync::event_bus::ROUTING_DOC_URI_KEY.into(),
+        holon_api::ROUTING_DOC_URI_KEY.into(),
         Value::String(document_uri.to_string()),
     );
     params.insert("content".into(), Value::String(block.content.clone()));
