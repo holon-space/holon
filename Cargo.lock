@@ -4698,14 +4698,12 @@ dependencies = [
  "gql-parser",
  "gql-transform",
  "holon-api",
- "holon-app",
  "holon-block-roundtrip-testing",
  "holon-core",
  "holon-engine",
  "holon-filesystem",
  "holon-loro",
  "holon-macros",
- "holon-orgmode",
  "holon-petri",
  "holon-profiles",
  "holon-turso",
@@ -4785,6 +4783,7 @@ dependencies = [
  "futures-signals",
  "holon",
  "holon-api",
+ "holon-block-roundtrip-testing",
  "holon-core",
  "holon-filesystem",
  "holon-frontend",
@@ -4793,9 +4792,11 @@ dependencies = [
  "holon-orgmode",
  "holon-profiles",
  "holon-turso",
+ "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5082,7 +5083,6 @@ name = "holon-macros"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "holon",
  "holon-api",
  "holon-core",
  "proc-macro2",
@@ -5098,7 +5098,6 @@ name = "holon-macros-test"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "holon",
  "holon-api",
  "holon-core",
  "holon-macros",
