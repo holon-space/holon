@@ -1,5 +1,5 @@
 WITH RECURSIVE paths AS (
-    -- Base case: root blocks (those whose parent is a document, not another block)
+    -- Base case: root blocks (those whose parent is the no-parent sentinel, not another block)
     SELECT
         id,
         parent_id,
@@ -13,8 +13,7 @@ WITH RECURSIVE paths AS (
         '/' || id as path,
         id as root_id
     FROM block
-    WHERE parent_id LIKE 'doc:%'
-       OR parent_id LIKE 'sentinel:%'
+    WHERE parent_id LIKE 'sentinel:%'
 
     UNION ALL
 
