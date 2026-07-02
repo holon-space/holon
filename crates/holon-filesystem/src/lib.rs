@@ -32,7 +32,9 @@ pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
 pub use sync_conflict::{
     conflict_artifacts_error, find_sync_conflict_artifacts, is_sync_conflict_artifact,
 };
-pub use sync_ports::{AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider};
+pub use sync_ports::{
+    AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider, ThreeWayTextMerge,
+};
 
 use std::path::Path;
 

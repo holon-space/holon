@@ -104,4 +104,4 @@ pub use loro_document_store::*;
 pub use loro_sync_controller::{
     LoroProjection, LoroSyncController, LoroSyncControllerHandle, SinkReader, block_to_params,
 };
-pub use text_merge_provider::{TextHandle, TextMergeProvider};
+pub use text_merge_provider::{TextHandle, TextMergeProvider, TransientLoroTextMerge};

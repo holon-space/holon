@@ -205,6 +205,19 @@ impl FrontendInjectorExt for Injector {
                 .map(|a| (a.filename.to_string(), a.content.to_string()))
                 .collect();
             self.provide::<OrgModeConfig>(Provider::root(move |_| Shared::new(org_config.clone())));
+
+            // 3-way text merger for the no-store conflict path (spec 0008 §3.1).
+            // Registered unconditionally here — NOT inside the `loro_enabled`
+            // block — because the conflict path it serves is SqlOnly/`Direct`
+            // mode (no Loro store). The impl is a transient LoroText (the merge
+            // *function* only; it needs the `loro` crate, not a live doc), so it
+            // is safe to construct in both modes; the file-sync controller
+            // consults it only when `Consolidator::Store` owns the store.
+            self.provide::<dyn holon_filesystem::ThreeWayTextMerge>(Provider::root(|_| {
+                Arc::new(holon_loro::TransientLoroTextMerge)
+                    as Arc<dyn holon_filesystem::ThreeWayTextMerge>
+            }));
+
             OrgModeModule
                 .configure(self)
                 .map_err(|e| anyhow::anyhow!("Failed to register OrgModeModule: {}", e))?;

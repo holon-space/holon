@@ -24,8 +24,9 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use loro::LoroText;
+use anyhow::{Context, Result};
+use holon_filesystem::ThreeWayTextMerge;
+use loro::{ExportMode, LoroDoc, LoroText};
 
 use crate::capability::CapabilityProfile;
 
@@ -104,10 +105,99 @@ impl TextMergeProvider for TransientTextMergeProvider {
     }
 }
 
+/// [`ThreeWayTextMerge`] for the no-store conflict path (SqlOnly / `Direct`).
+///
+/// Performs a base-3-way merge of one block's text content via a **transient**
+/// `LoroText`: a throwaway `LoroDoc` seeded with `base`, forked into two peers
+/// that each apply one edit (`theirs`, `mine`), then merged. This is the merge
+/// *function* only — nothing is stored, cached, or committed to any durable
+/// doc; every document created here is dropped when the call returns (Model.md:
+/// *transient = merge function only*).
+///
+/// Wired into `FileSyncController` in Direct mode via
+/// `FileSyncController::with_text_merge`. In Full (Loro-the-store) mode this is
+/// never invoked — the live CRDT already merges concurrent edits.
+pub struct TransientLoroTextMerge;
+
+impl ThreeWayTextMerge for TransientLoroTextMerge {
+    fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String> {
+        // Common ancestor. Fixed peer ids give a deterministic tie-break for
+        // truly concurrent inserts at the same position.
+        let ancestor = LoroDoc::new();
+        ancestor
+            .set_peer_id(0)
+            .context("transient merge: set ancestor peer id")?;
+        ancestor
+            .get_text("content")
+            .update(base, Default::default())
+            .context("transient merge: seed base text")?;
+        ancestor.commit();
+        let snapshot = ancestor
+            .export(ExportMode::Snapshot)
+            .context("transient merge: export base snapshot")?;
+
+        // "theirs" — the on-disk edit — on peer 1.
+        let peer_a = LoroDoc::new();
+        peer_a
+            .set_peer_id(1)
+            .context("transient merge: set peer_a id")?;
+        peer_a
+            .import(&snapshot)
+            .context("transient merge: import base into peer_a")?;
+        peer_a
+            .get_text("content")
+            .update(theirs, Default::default())
+            .context("transient merge: apply theirs")?;
+        peer_a.commit();
+
+        // "mine" — the current store edit — on peer 2.
+        let peer_b = LoroDoc::new();
+        peer_b
+            .set_peer_id(2)
+            .context("transient merge: set peer_b id")?;
+        peer_b
+            .import(&snapshot)
+            .context("transient merge: import base into peer_b")?;
+        peer_b
+            .get_text("content")
+            .update(mine, Default::default())
+            .context("transient merge: apply mine")?;
+        peer_b.commit();
+
+        // Merge peer_b's edits into peer_a and read the converged text.
+        let b_updates = peer_b
+            .export(ExportMode::all_updates())
+            .context("transient merge: export mine updates")?;
+        peer_a
+            .import(&b_updates)
+            .context("transient merge: merge mine into theirs")?;
+        Ok(peer_a.get_text("content").to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use loro::LoroDoc;
+
+    #[test]
+    fn transient_3way_merges_disjoint_edits() {
+        // base "abc"; disk prepends "X", store appends "Y" → both survive.
+        let merger = TransientLoroTextMerge;
+        let merged = merger.merge_text("abc", "Xabc", "abcY").unwrap();
+        assert_eq!(merged, "XabcY");
+    }
+
+    #[test]
+    fn transient_3way_keeps_the_side_that_changed() {
+        // Non-conflict shapes still round-trip through the merger sanely, though
+        // the controller never calls it in these cases (it gates on both-changed):
+        let merger = TransientLoroTextMerge;
+        // only "theirs" changed (mine == base) → theirs.
+        assert_eq!(merger.merge_text("abc", "abcZ", "abc").unwrap(), "abcZ");
+        // only "mine" changed (theirs == base) → mine.
+        assert_eq!(merger.merge_text("abc", "abc", "Wabc").unwrap(), "Wabc");
+    }
 
     #[test]
     fn transient_provider_is_not_mergeable() {

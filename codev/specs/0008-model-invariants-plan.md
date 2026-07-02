@@ -79,11 +79,20 @@ no-Loro-encoding fields; everything else resolves a backing.
 
 ## Phase 3 — complete the merge-fidelity ladder (medium)
 
-**3.1 Wire `TransientTextMergeProvider` into the no-store conflict path.**
+**3.1 Wire `TransientTextMergeProvider` into the no-store conflict path. — DONE**
 Today a file-edit racing a UI edit in SqlOnly resolves by LWW (whole-value).
 The ladder says it should degrade to base-3-way, not LWW: the org diff already
 has the base; feed (base, disk, mine) through the transient `LoroText` and
 write the merged text. Disclose with a `tracing::info!` merge note.
+Landed: new storage-agnostic `ThreeWayTextMerge` seam in holon-filesystem
+(holon-filesystem must NOT depend on holon-loro — the reverse dep already
+exists); impl `TransientLoroTextMerge` in holon-loro spins up a throwaway
+`LoroText` per conflict; wired via `FileSyncController::with_text_merge` and
+injected from holon-app (registered unconditionally so SqlOnly mode gets it).
+The updates pass gates on `Consolidator::Store` + a wired merger, reads the
+base from the `BaseStore` (never the Turso cache — Replication invariant 1)
+and "mine" from the current store, and merges only when BOTH diverged. A merge
+forces the disk write-back so disk converges to the merged text.
 
 **3.2 Make the Loro path unable to mint order keys (type-level). — DONE**
 `split_block` calls `new_child_anchor` in both modes; the Loro impl returns a
