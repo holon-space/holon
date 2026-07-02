@@ -32,8 +32,8 @@ use holon_block_roundtrip_testing::{
 };
 use holon_core::OperationProvider;
 use holon_core::storage::BlockQuerySource;
-use holon_turso::schema_modules::BlockSchemaModule;
 use holon_loro::LoroBackend;
+use holon_turso::schema_modules::BlockSchemaModule;
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;

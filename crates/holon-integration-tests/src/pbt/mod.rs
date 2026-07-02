@@ -39,7 +39,6 @@ pub mod sut;
 pub mod sut_capabilities;
 mod sut_check_invariants;
 mod sut_handle;
-pub mod sut_handle_decomp_spike;
 mod sut_keybindings;
 pub mod sut_loro;
 mod sut_metrics;
