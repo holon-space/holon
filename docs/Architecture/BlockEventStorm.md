@@ -66,7 +66,7 @@ the wired DI graph* — see 🔴 H10.
 🔵 FileSyncStarted (DI marker resolved)        🟡 FileSyncController
    🟣 whenever a non-gitignored .org/.md changes on disk…
 🟠 OrgFileChanged / MarkdownFileChanged         🟡 OrgFileWatcher (FileChangeSource port, ADR 0011)
-🔵 ParseFile(path, content)                      🟡 FileFormatAdapter  (org | markdown — SAME trait)
+🔵 ParseFile(path, content)                      🟡 FileFormatAdapter  (LIVE: org only; markdown impls the trait but is not yet wired — zero prod dependents)
 🟠 FileParsedIntoBlocks                          🟡 parser  (adds block:/doc: schemes to bare ids)
    🟢 old_blocks snapshot (read model for the diff)
 🔵 DiffBlocks(old, new)                           🟡 block_diff
@@ -145,8 +145,8 @@ graduates to CONTEXT.md §4 and is deleted here.
 
 ## 4. Hotspots (🔴 the red stickies)
 
-**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H7, H8, H11, H12 · 🔴 open:
-H5, H6, H10 · ⚪ by-design constraint: H9. Fixed entries are kept
+**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H6, H7, H8, H11, H12 · 🔴 open:
+H5, H10 · ⚪ by-design constraint: H9. Fixed entries are kept
 (condensed) because their *mechanisms* — lossy serde base, gate/emit mismatch,
 blob-LWW — are recurring failure shapes worth recognizing next time.
 
@@ -234,13 +234,33 @@ shipped. The "cannot merge back" claim in particular has never been demonstrated
 by a test — validate before relying on it. Anchors: `share_subtree`,
 `HistoryRetention` in `holon-loro/src/loro_share_backend.rs` / `shared_tree.rs`.
 
-**H6 — Markdown identity drift. 🔴 STILL OPEN (charset rule confirmed present
-2026-07-01; full round-trip behaviour not re-traced).**
-Block ids whose charset isn't Obsidian-friendly are dropped from rendered text, so a
-re-parse mints a fresh UUID → the block loses identity across a round-trip. Also,
-paragraph bodies are folded into the heading block — only headings/fences/images are
-addressable. This is a textbook round-trip-identity PBT target. Anchor: the charset
-comment in `holon-markdown/src/renderer.rs` (~line 185) and `parser.rs`.
+**H6 — Markdown identity drift. ✅ FIXED (2026-07-02) — scoped: latent until the
+markdown adapter is wired into file-sync.**
+An out-of-charset block id used to be *silently* dropped from rendered text (empty
+`^` marker), so the re-parse minted a fresh UUID → the block lost identity across a
+round-trip. `block_id_marker` (`holon-markdown/src/renderer.rs`) now returns a loud
+`MarkdownRenderError::{OutOfCharsetBlockId, EmptyBlockId}` instead of an empty marker;
+the error propagates through the whole inherent render path (`render_document →
+render_blocks → render_tree → render_heading`). Valid-charset ids (`[A-Za-z0-9_-]`,
+UUIDs included) still round-trip identically. Pinned by the focused in-crate PBT
+`holon-markdown/tests/markdown_block_round_trip_pbt.rs` (`parse(render(block)).id ==
+block.id` for valid ids; loud error, no silent remint, for out-of-charset ids) —
+modeled on `holon-orgmode/tests/org_block_round_trip_pbt.rs`.
+
+- **Wiring gap (do not forget):** `holon-markdown` still has **zero prod
+  dependents** — it is not wired into `FileSyncController` (`holon-core/src/
+  file_format.rs` speaks of it in the subjunctive; the live disk path is org-only).
+  The fix is therefore latent. The `FileFormatAdapter` trait's `render_document /
+  render_blocks` return `String`; the markdown adapter surfaces the render error by
+  panicking loudly at that seam (see the `unwrap_or_else` in
+  `holon-markdown/src/file_format.rs`) rather than widening the shared trait to
+  `Result` for a path the live org renderer would have to change to serve. **When
+  markdown graduates into file-sync:** widen the trait to `Result`, drop that panic,
+  and lift this round-trip property into the composed invariant catalog (per the
+  `pbt-composition` skill), retiring the standalone in-crate PBT.
+- **Deliberate addressability limit:** paragraph bodies fold into their heading
+  block — only headings/fences/images are independently addressable on disk. This is
+  by design (the org adapter folds the same way); it is *not* an identity bug.
 
 **H7 — "Page" has multiple coexisting encodings. ✅ FIXED (2026-07-02).**
 The canonical (and now only) representation is `PAGE_TAG = "Page"` via
@@ -317,8 +337,11 @@ cold-boot churn. Caught via the composed `SetEdgeField` PBT transition +
 
 ## 5. What the storm says about the architecture
 
-**Strengths the wall makes visible.** The format ACL is genuinely clean — org and
-markdown implement the *same* `FileFormatAdapter` trait and the bare-id↔scheme
+**Strengths the wall makes visible.** The format ACL is genuinely clean — the
+`FileFormatAdapter` trait is a real seam: org is the live implementation, and
+markdown implements the *same* trait ready to drop in (though it is not yet wired
+into file-sync — zero prod dependents today; `holon-core/src/file_format.rs` still
+speaks of it in the subjunctive). The bare-id↔scheme
 translation is consistently applied at exactly one boundary. The
 command/event/origin model (`EventOrigin::Org`, `ChangeOrigin::{Local,Remote}`) is a
 real, working echo-suppression policy. The driver ladder is a principled write path.
@@ -345,9 +368,10 @@ missing/malformed columns (H8); `ChangeOp` parent refs typed `EntityUri` (H2);
 `doc:`-scheme eliminated and `set_is_document` retired (H7, 2026-07-02).
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
-transition and every 🔴 a candidate invariant. Open candidates: markdown round-trip
-identity (H6 — the highest-value untested one), Loro-vs-Turso query-source
-equivalence (H10), share/merge-back behaviour (H5). Already realized: edge-field
+transition and every 🔴 a candidate invariant. Open candidates: Loro-vs-Turso
+query-source equivalence (H10), share/merge-back behaviour (H5). Already realized:
+markdown round-trip identity (H6 — now pinned by an in-crate PBT; graduates into the
+composed catalog when markdown is wired into file-sync), edge-field
 projection (H12 was *caught* by the composed `SetEdgeField` transition — the
 pattern works), concurrent-property convergence (`h3_property_convergence_tests`;
 still a candidate to lift into the composed catalog), mark replication

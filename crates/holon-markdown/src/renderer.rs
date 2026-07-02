@@ -19,6 +19,43 @@ use std::path::Path;
 use crate::dialect::MarkdownDialect;
 use crate::frontmatter::Frontmatter;
 
+/// A block could not be rendered to round-trip-safe markdown.
+///
+/// The renderer emits a trailing `^id` marker so the next parse re-anchors
+/// the block to its stable id. The marker syntax only survives a reparse for
+/// ids in the charset `[A-Za-z0-9_-]` (see [`is_block_id_char`] and its parser
+/// twin). Historically an out-of-charset id was silently swallowed to an empty
+/// marker — the reparse then found no id and minted a fresh UUID, so the block
+/// lost its identity with no signal. We now fail loudly instead: an id that
+/// cannot round-trip is a data-integrity bug at the mint boundary, not
+/// something the renderer may paper over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkdownRenderError {
+    /// A block carries an empty id — nothing to anchor a `^id` marker to.
+    EmptyBlockId,
+    /// A block id contains `offending`, a character outside `[A-Za-z0-9_-]`.
+    OutOfCharsetBlockId { id: String, offending: char },
+}
+
+impl std::fmt::Display for MarkdownRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyBlockId => write!(
+                f,
+                "block has an empty id; cannot emit a round-trip-safe `^id` marker"
+            ),
+            Self::OutOfCharsetBlockId { id, offending } => write!(
+                f,
+                "block id {id:?} contains {offending:?}, outside the round-trip-safe \
+                 charset [A-Za-z0-9_-]; emitting a `^id` marker would be dropped on \
+                 reparse and remint a fresh UUID, silently losing this block's identity"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MarkdownRenderError {}
+
 /// Renders a `Block` tree to markdown in a configured [`MarkdownDialect`].
 /// Each dialect switch gates exactly the emission its parser counterpart
 /// recognizes, so a parse→render round-trip under the same dialect is stable.
@@ -37,7 +74,7 @@ impl MarkdownRenderer {
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
-    ) -> String {
+    ) -> Result<String, MarkdownRenderError> {
         let mut out = String::new();
         if self.dialect.yaml_frontmatter {
             let fm = frontmatter_from_document(doc);
@@ -54,11 +91,16 @@ impl MarkdownRenderer {
             }
         }
 
-        out.push_str(&self.render_blocks(blocks, file_path, file_id));
-        out
+        out.push_str(&self.render_blocks(blocks, file_path, file_id)?);
+        Ok(out)
     }
 
-    pub fn render_blocks(&self, blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
+    pub fn render_blocks(
+        &self,
+        blocks: &[Block],
+        _: &Path,
+        file_id: &EntityUri,
+    ) -> Result<String, MarkdownRenderError> {
         let mut out = String::new();
         // Sibling order is caller-provided (the ordered read; ADR 0005); the
         // renderer trusts the input order and only imposes a content-type
@@ -76,10 +118,10 @@ impl MarkdownRenderer {
 
         if let Some(roots) = children_by_parent.get(file_id.as_str()) {
             for r in roots {
-                render_tree(r, &children_by_parent, &mut out, 1, &self.dialect);
+                render_tree(r, &children_by_parent, &mut out, 1, &self.dialect)?;
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -89,9 +131,9 @@ fn render_tree<'a>(
     out: &mut String,
     depth: u8,
     dialect: &MarkdownDialect,
-) {
+) -> Result<(), MarkdownRenderError> {
     match block.content_type {
-        ContentType::Text => render_heading(block, depth, out, dialect),
+        ContentType::Text => render_heading(block, depth, out, dialect)?,
         ContentType::Source => render_source(block, out),
         ContentType::Image => render_image(block, out, dialect),
     }
@@ -105,11 +147,17 @@ fn render_tree<'a>(
         } else {
             depth
         };
-        render_tree(c, children_by_parent, out, next_depth, dialect);
+        render_tree(c, children_by_parent, out, next_depth, dialect)?;
     }
+    Ok(())
 }
 
-fn render_heading(block: &Block, depth: u8, out: &mut String, dialect: &MarkdownDialect) {
+fn render_heading(
+    block: &Block,
+    depth: u8,
+    out: &mut String,
+    dialect: &MarkdownDialect,
+) -> Result<(), MarkdownRenderError> {
     let (head, body) = match block.content.split_once('\n') {
         Some((h, b)) => (h, Some(b)),
         None => (block.content.as_str(), None),
@@ -126,7 +174,7 @@ fn render_heading(block: &Block, depth: u8, out: &mut String, dialect: &Markdown
     };
 
     let id_marker = if dialect.block_ids {
-        block_id_marker(block)
+        block_id_marker(block)?
     } else {
         String::new()
     };
@@ -148,6 +196,7 @@ fn render_heading(block: &Block, depth: u8, out: &mut String, dialect: &Markdown
         }
     }
     out.push('\n');
+    Ok(())
 }
 
 fn render_source(block: &Block, out: &mut String) {
@@ -179,19 +228,29 @@ fn render_image(block: &Block, out: &mut String, dialect: &MarkdownDialect) {
     }
 }
 
-fn block_id_marker(block: &Block) -> String {
-    // Only emit the trailing `^id` if the ID is a stable Obsidian-style
-    // string (alphanumerics + `-`/`_`). UUIDs round-trip too — they match
-    // the same charset minus the dashes-are-fine rule.
+fn block_id_marker(block: &Block) -> Result<String, MarkdownRenderError> {
+    // Emit the trailing `^id` only for ids in the round-trip-safe charset
+    // (alphanumerics + `-`/`_`); UUIDs qualify. An out-of-charset id cannot be
+    // encoded without a scheme the reparse would not recognize, so we fail
+    // loudly rather than drop the marker and let the reparse remint a UUID.
     let id = block.id.id();
-    if id.is_empty() || !id.bytes().all(is_block_id_byte) {
-        return String::new();
+    if id.is_empty() {
+        return Err(MarkdownRenderError::EmptyBlockId);
     }
-    format!(" ^{id}")
+    if let Some(offending) = id.chars().find(|&c| !is_block_id_char(c)) {
+        return Err(MarkdownRenderError::OutOfCharsetBlockId {
+            id: id.to_string(),
+            offending,
+        });
+    }
+    Ok(format!(" ^{id}"))
 }
 
-fn is_block_id_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+/// The round-trip-safe block-id charset. Kept byte-for-byte in sync with the
+/// parser's `is_block_id_byte` — the two must agree or a rendered marker would
+/// not reparse.
+fn is_block_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
 fn frontmatter_from_document(doc: &Block) -> Frontmatter {
@@ -263,7 +322,9 @@ mod tests {
     fn renders_simple_heading() {
         let mut block = Block::new_text(EntityUri::block("h1"), doc_uri(), "Top\nbody text");
         block.set_property("ID", holon_api::Value::String("h1".into()));
-        let out = renderer().render_blocks(&[block], &PathBuf::from("/test/note.md"), &doc_uri());
+        let out = renderer()
+            .render_blocks(&[block], &PathBuf::from("/test/note.md"), &doc_uri())
+            .unwrap();
         assert!(out.starts_with("# Top ^h1\n"));
         assert!(out.contains("body text"));
     }
@@ -275,7 +336,9 @@ mod tests {
         let mut child = Block::new_text(EntityUri::block("b"), EntityUri::block("a"), "B");
         child.set_property("ID", holon_api::Value::String("b".into()));
 
-        let out = renderer().render_blocks(&[top, child], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer()
+            .render_blocks(&[top, child], &PathBuf::from("/note.md"), &doc_uri())
+            .unwrap();
         assert!(out.contains("# A ^a"));
         assert!(out.contains("## B ^b"));
     }
@@ -296,8 +359,9 @@ mod tests {
         );
         src.set_property("ID", holon_api::Value::String("s".into()));
 
-        let out =
-            renderer().render_blocks(&[parent, text, src], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer()
+            .render_blocks(&[parent, text, src], &PathBuf::from("/note.md"), &doc_uri())
+            .unwrap();
         let src_pos = out.find("```python").expect("source fence present");
         let sub_pos = out.find("## Sub heading").expect("sub heading present");
         assert!(
@@ -311,7 +375,9 @@ mod tests {
         let mut block = Block::new_text(EntityUri::block("t1"), doc_uri(), "Do thing");
         block.set_property("ID", holon_api::Value::String("t1".into()));
         block.set_property("task_state", holon_api::Value::String("TODO".into()));
-        let out = renderer().render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer()
+            .render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri())
+            .unwrap();
         assert!(out.contains("# [ ] Do thing ^t1"));
     }
 
@@ -320,7 +386,9 @@ mod tests {
         let mut block = Block::new_text(EntityUri::block("t1"), doc_uri(), "Done thing");
         block.set_property("ID", holon_api::Value::String("t1".into()));
         block.set_property("task_state", holon_api::Value::String("DONE".into()));
-        let out = renderer().render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer()
+            .render_blocks(&[block], &PathBuf::from("/note.md"), &doc_uri())
+            .unwrap();
         assert!(out.contains("# [x] Done thing ^t1"));
     }
 
@@ -333,7 +401,9 @@ mod tests {
         let mut head = Block::new_text(EntityUri::block("h"), doc_uri(), "Heading");
         head.set_property("ID", holon_api::Value::String("h".into()));
 
-        let out = renderer().render_document(&doc, &[head], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer()
+            .render_document(&doc, &[head], &PathBuf::from("/note.md"), &doc_uri())
+            .unwrap();
         assert!(out.starts_with("---\n"));
         assert!(out.contains("title: My Note"));
         assert!(out.contains("# Heading ^h"));
@@ -354,7 +424,9 @@ mod tests {
         };
         src.set_property("ID", holon_api::Value::String("s".into()));
 
-        let out = renderer().render_blocks(&[parent, src], &PathBuf::from("/note.md"), &doc_uri());
+        let out = renderer()
+            .render_blocks(&[parent, src], &PathBuf::from("/note.md"), &doc_uri())
+            .unwrap();
         assert!(out.contains("```holon_prql\nfrom x import y\n```"));
     }
 }

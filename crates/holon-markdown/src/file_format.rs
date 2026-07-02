@@ -83,12 +83,25 @@ impl FileFormatAdapter for MarkdownFormatAdapter {
         file_path: &Path,
         file_id: &EntityUri,
     ) -> String {
+        // The shared `FileFormatAdapter` trait returns `String` because the
+        // live org path never fails to render. Markdown *can* fail (an
+        // out-of-charset id has no round-trip-safe marker), but widening the
+        // trait to `Result` purely for this latent, zero-dependents adapter
+        // would ripple through the live org renderer + file-sync controller —
+        // machinery for a path that is not yet wired. So we surface the error
+        // loudly here instead of swallowing it. When markdown graduates into
+        // file-sync, widen the trait to `Result` and drop this panic.
         MarkdownRenderer::new(self.dialect.clone())
             .render_document(document, blocks, file_path, file_id)
+            .unwrap_or_else(|e| panic!("markdown adapter cannot render document {file_id:?}: {e}"))
     }
 
     fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String {
-        MarkdownRenderer::new(self.dialect.clone()).render_blocks(blocks, file_path, file_id)
+        MarkdownRenderer::new(self.dialect.clone())
+            .render_blocks(blocks, file_path, file_id)
+            .unwrap_or_else(|e| {
+                panic!("markdown adapter cannot render blocks under {file_id:?}: {e}")
+            })
     }
 
     // The write-path / identity seam below is exercised only when a
@@ -175,11 +188,9 @@ mod tests {
         let content = "# A ^aa\n\nbody\n";
         let parsed = adapter.parse(&path, content, &parent, &root).unwrap();
         let via_adapter = adapter.render_blocks(&parsed.blocks, &path, &parsed.document.id);
-        let via_direct = MarkdownRenderer::new(MarkdownDialect::obsidian()).render_blocks(
-            &parsed.blocks,
-            &path,
-            &parsed.document.id,
-        );
+        let via_direct = MarkdownRenderer::new(MarkdownDialect::obsidian())
+            .render_blocks(&parsed.blocks, &path, &parsed.document.id)
+            .unwrap();
         assert_eq!(via_adapter, via_direct);
     }
 

@@ -40,5 +40,5 @@ pub use callout::Callout;
 pub use dialect::{DailyNoteConfig, MarkdownDialect, TaskKeywords, TaskMarker};
 pub use file_format::MarkdownFormatAdapter;
 pub use parser::{parse_markdown_file, ParseResult};
-pub use renderer::MarkdownRenderer;
+pub use renderer::{MarkdownRenderError, MarkdownRenderer};
 pub use wikilink::{classify_wikilinks, ClassifiedWikilinks, Wikilink};

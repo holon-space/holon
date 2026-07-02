@@ -5114,6 +5114,7 @@ dependencies = [
  "holon-api",
  "holon-core",
  "markdown",
+ "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "serde_yaml",
