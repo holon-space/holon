@@ -56,7 +56,7 @@ use crate::pbt::composed::subsystem_seed::{build_started_ref, run_with_seeded_re
 // THE SWAP machinery, relocated to the `pbt`-gated `composed::wide_e2e` (single source
 // of truth) so the `tests/` integration test can drive it; the lib slices/teeth here
 // consume it: page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
-// boot_and_seed_wide/WIDE_REQUIRED_INVARIANTS/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
+// boot_and_seed_wide/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
     SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, frontend_wired, page_root, structural_ref,
     wide_e2e_ref, wide_ref,

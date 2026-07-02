@@ -152,49 +152,48 @@ pub fn wide_ref() -> ReferenceState {
     structural_ref_wired(&subsystems)
 }
 
-/// Non-vacuity floor for the wide/swap slices: block + focus/nav/viewmodel/org + Loro
-/// invariants that only the FULL `full_headless` cap set selects. "Green" means the
-/// production enum drove the real headless render+nav+org+loro pipeline and ALL agreed.
-pub const WIDE_REQUIRED_INVARIANTS: &[&str] = &[
-    "inv-no-orphan-blocks",
-    "inv-no-parent-cycles",
-    "inv-blocks-match-ref/block_raw",
-    // SQL-matview per-block equality INCLUDING the junction edge fields (`tags`,
-    // `requires`) — the `/block_raw` variant compares only the {content, properties}
-    // subset and lacks the junction columns. `full_headless` hosts `SutBackend +
-    // SutSqlProjection`, so requiring it every tick makes the ONE PBT the owner of
-    // the Loro→SQL edge-field projection check (catches H12: `blocks_differ`
-    // omitting `requires` from its change gate). Uses `retry_until_ok` (5s) per tick.
-    "inv-blocks-match-ref/matview",
-    "inv-block-parent-matches-ref/block_raw",
-    "inv-blocks-match-ref/org",
-    "inv-navigation-focus",
-    // SQL-projection per-block content equality. `full_headless` hosts `SutSqlProjection`
-    // (the SQL `block_raw.content` read), so requiring it every tick makes the ONE PBT the
-    // owner of this check — replacing the deleted standalone `split_block_content_pbt`.
-    "inv-block-content-matches-ref",
-    "inv-focus-roots",
-    "inv-viewmodel-no-error-widgets",
-    // ViewModel liveness (C-remainder port, 2026-06-23): same root-VM readiness as
-    // `inv-viewmodel-no-error-widgets`, so required every tick = a non-vacuity proof
-    // they run over the real headless render pipeline (not silently skipped).
-    "inv-frontend-engine",
-    "inv-frontend-root-not-error",
-    "inv-loro-no-errors",
-    "inv-loro-children-match-ref",
-    // Per-transition SQL/wall/RSS budget: required every tick = a non-vacuity proof the
-    // composed `ComposedSpanMetrics` lifecycle (reset-on-apply / freeze-on-check) is
-    // actually driven over the production full-headless CapMap. Runs `Ok` (clean) or
-    // `Skipped` (unenforced violation) by default — both count as "ran".
-    "inv-sql-budget",
-    // Cross-store task_state coherence (SQL `json_extract` vs Loro `properties` scalar).
-    // `full_headless` always hosts BOTH `SutSqlProjection` + `SutLoroTaskState` (asserted
-    // in `builder.rs`), so requiring it every tick is safe and makes the ONE PBT the
-    // owner of this check — replacing the deleted standalone `task_state_coherence_pbt`.
-    // It RUNS every tick (both projections compared, trivially coherent when untouched);
-    // that a real `ToggleState` moves both stores in lockstep is the separate non-vacuity
-    // teeth in `composed::invariants::task_state_storage_coherence`.
-    "inv-task-state-storage-coherence",
+/// The caps the widest headless wiring (`full_headless`) legitimately does NOT provide,
+/// so the catalog invariants that `Needs` them deselect headless WITHOUT that being a
+/// silent-deselection bug. Each entry is `(cap-name, why)`. This is the ONLY hand-maintained
+/// list the `wide_cap_presence_guard` consults — the cap-level replacement for the old
+/// per-invariant-id `WIDE_REQUIRED_INVARIANTS` tripwire.
+///
+/// All four are the windowed/GPUI rung: they need a live gpui window (thread affinity
+/// `compose_sut` cannot satisfy — it asserts `!Actor::UI` in `builder.rs`) and are supplied
+/// ONLY by the windowed slice (`window_slice`), so the catalog invariants that `Needs` them
+/// deselect headless AND run only in the windowed harness — NOT a silent-deselection bug. A cap
+/// that SHOULD be headless-present but isn't is NOT allowed here; it is a real finding the guard
+/// must surface (that is the whole point of listing each one explicitly, with a reason).
+///
+/// Note: `SutFrontendEngine` / `SutFrontendEmissions` were STALE entries in the deleted
+/// `WIDE_REQUIRED_INVARIANTS` — listed as "required every tick" yet silently filtered out
+/// headless (the headless full_headless map never provided them post C-5 split), the exact
+/// tripwire-smell this cap-level guard replaces.
+#[cfg(test)]
+const WIDE_HEADLESS_ABSENT_CAPS: &[(&str, &str)] = &[
+    (
+        "SutLayout",
+        "windowed-only: a laid-out widget tree + BoundsRegistry (geometry) comes only from \
+         GpuiWindowComponent over a live gpui window; headless compose_sut has no window",
+    ),
+    (
+        "SutDriver",
+        "windowed-only: the engine-focus read (engine_focused_block / resolve_ref_block_id) is \
+         a window cap; the headless path registers only the gesture WRITE caps \
+         (register_gesture_writes), so the focus-read deselects in the keystone by design",
+    ),
+    (
+        "SutFrontendEngine",
+        "windowed-only (C-5 split): root-VM liveness reads (frontend_root_vm / \
+         frontend_root_is_error / live_vs_fresh_tree_diff); the headless frontend registers no \
+         window engine, only GpuiFrontendEngineComponent does",
+    ),
+    (
+        "SutFrontendEmissions",
+        "windowed-only (C-5 split): drain_vm_emissions / provider_stability_report need the \
+         live windowed frontend engine; the headless ReactiveEngine returns honest-empty and \
+         deselects rather than faking",
+    ),
 ];
 
 /// The wide working tree (`page_root` → `parent`/`c1`/`c2` siblings) as a structured
@@ -597,7 +596,11 @@ impl ComposedSlice for WideE2E {
     type Transition = E2ETransition;
     type Machine = WideE2EMachine;
     type Handle = ();
-    const REQUIRED_INVARIANTS: &'static [&'static str] = WIDE_REQUIRED_INVARIANTS;
+    // Unused for `WideE2E`: the `required_invariants` override below supersedes the static
+    // list, deriving the per-draw floor from the WHOLE shared catalog (every invariant this
+    // draw's caps select). The cap-level `wide_cap_presence_guard` proves the widest wiring
+    // selects the whole catalog; there is no per-id list to maintain.
+    const REQUIRED_INVARIANTS: &'static [&'static str] = &[];
     const SETTLE: Duration = SETTLE;
     const MULTI_THREAD: bool = true;
 
@@ -624,18 +627,20 @@ impl ComposedSlice for WideE2E {
         TransitionImpl::apply_to_sut(transition, ref_state, caps).await;
     }
 
-    /// Per-draw non-vacuity floor: keep only the `WIDE_REQUIRED_INVARIANTS` that THIS
-    /// draw's caps can actually select. The SUT axis is the drawn wiring's cap_set (already
-    /// carried on the ref by [`wide_e2e_ref_for`]); the ref axis registers every ref cap
-    /// unconditionally (see `impl CapProvider for ReferenceState`). A Loro-only draw thus
+    /// Per-draw non-vacuity floor: every invariant in the WHOLE shared catalog that THIS
+    /// draw's caps can actually select MUST run. The SUT axis is the drawn wiring's cap_set
+    /// (already carried on the ref by [`wide_e2e_ref_for`]); the ref axis registers every ref
+    /// cap unconditionally (see `impl CapProvider for ReferenceState`). A Loro-only draw thus
     /// drops the SQL/ViewModel/focus ids it has no caps for, while a `full_headless` draw
-    /// keeps all of them (the intersection is a no-op there — the keystone floor is
-    /// unchanged). Selection here uses the SAME `Needs::selected_against` the runner uses,
-    /// computed against the wiring's EXPECTED cap_set (not the actual booted caps), so the
-    /// floor still has teeth: if the wiring claims a cap the boot fails to wire, the
-    /// invariant is required-but-deselected and the floor REDs. The returned ids are
-    /// parsed FROM the catalog ([`CapInvariant::id`]), so each `WIDE_REQUIRED_INVARIANTS`
-    /// string is a selector validated against the live registry (the `panic!` is the parse).
+    /// keeps every headless-selectable catalog invariant. Selection here uses the SAME
+    /// `Needs::selected_against` the runner uses, computed against the wiring's EXPECTED
+    /// cap_set (not the actual booted caps), so the floor has teeth: if the wiring claims a
+    /// cap the boot fails to wire, the invariant is required-but-deselected and the floor REDs.
+    ///
+    /// This is the runtime complement to the static `wide_cap_presence_guard`: that guard
+    /// proves the WIDEST wiring's CapMap provides every `Needs` cap (so the widest config
+    /// selects the whole catalog); this floor proves each per-draw wiring actually RUNS every
+    /// invariant it selects. Neither needs a hand-maintained per-invariant-id list.
     fn required_invariants(ref_state: &ReferenceState) -> Vec<InvariantId> {
         let sut_caps = ref_state
             .cap_set
@@ -647,18 +652,8 @@ impl ComposedSlice for WideE2E {
             &mut ref_map,
         );
         let ref_caps = ref_map.cap_set();
-        let catalog = composed_invariant_catalog();
-        WIDE_REQUIRED_INVARIANTS
+        composed_invariant_catalog()
             .iter()
-            .copied()
-            .map(|id| {
-                catalog
-                    .iter()
-                    .find(|inv| inv.id().0 == id)
-                    .unwrap_or_else(|| {
-                        panic!("WIDE_REQUIRED invariant {id:?} is not in the composed catalog")
-                    })
-            })
             .filter(|inv| inv.needs().selected_against(&sut_caps, &ref_caps))
             .map(|inv| inv.id())
             .collect()
@@ -881,5 +876,106 @@ mod tests {
                 t.required_caps()
             );
         }
+    }
+
+    /// CAP-PRESENCE GUARD (replaces the hand-maintained `WIDE_REQUIRED_INVARIANTS` per-id
+    /// tripwire): the WIDEST wiring (`full_headless`) must PROVIDE every cap the shared
+    /// catalog's invariants declare in their `Needs` — so every catalog invariant is
+    /// guaranteed SELECTED (and thus run, via the per-draw `required_invariants` floor) in the
+    /// wide config. Deselection has exactly one cause — a `Needs` cap absent from the CapMap —
+    /// so this guard catches it at the cap level, with no per-invariant-id list to keep in sync.
+    ///
+    /// The union of every `Needs.sut_present` is checked against the widest SUT cap_set
+    /// (`full_headless_cap_set`); the union of every `Needs.ref_present` against the ref
+    /// cap_set (the `ReferenceState` registers all ref caps unconditionally). A cap that is
+    /// referenced but absent is a finding UNLESS it is on `WIDE_HEADLESS_ABSENT_CAPS` (the
+    /// windowed/GPUI rung, structurally impossible headless). The failure names the missing
+    /// cap AND the invariant ids that need it — actionable, fail-loud.
+    #[test]
+    fn wide_cap_presence_guard() {
+        use holon_pbt_core::composition::CapProvider;
+
+        // The REAL widest CapMap the keystone drives: `full_headless` booted through the
+        // production builder (`boot_and_seed_wide`), INCLUDING the `ComposedSpanMetrics`
+        // span-metrics caps it registers on top of the bare `compose_sut` map. The bare
+        // `full_headless_cap_set()` is only the generation-narrowing hint and omits those,
+        // so checking against it would false-flag `ComposedBudget`.
+        let ref_state = wide_e2e_ref();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build multi-thread runtime");
+        let sut_caps = rt.block_on(async {
+            let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+            let (caps, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
+            caps.cap_set()
+        });
+        drop(rt);
+
+        let mut ref_map = CapMap::new();
+        CapProvider::register(Arc::new(wide_ref()), &mut ref_map);
+        let ref_caps = ref_map.cap_set();
+
+        // cap-name → sorted, de-duped invariant ids that need it (on either axis).
+        let mut missing: BTreeMap<&'static str, BTreeSet<&'static str>> = BTreeMap::new();
+        for inv in composed_invariant_catalog() {
+            let needs = inv.needs();
+            let id = inv.id().0;
+            for cap in &needs.sut_present {
+                if !sut_caps.contains(cap) {
+                    missing.entry(cap.name()).or_default().insert(id);
+                }
+            }
+            for cap in &needs.ref_present {
+                if !ref_caps.contains(cap) {
+                    missing.entry(cap.name()).or_default().insert(id);
+                }
+            }
+        }
+
+        let excluded: BTreeSet<&'static str> =
+            WIDE_HEADLESS_ABSENT_CAPS.iter().map(|(c, _)| *c).collect();
+
+        // Every excluded cap must ACTUALLY be missing — a stale exclusion (a cap that is now
+        // present) is itself a smell to prune, so fail loud on it too.
+        let stale: Vec<&'static str> = excluded
+            .iter()
+            .copied()
+            .filter(|c| !missing.contains_key(c))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "WIDE_HEADLESS_ABSENT_CAPS lists caps that ARE present in the widest wiring \
+             (stale exclusions — remove them): {stale:?}"
+        );
+
+        let unexpected: Vec<(&'static str, Vec<&'static str>)> = missing
+            .iter()
+            .filter(|(cap, _)| !excluded.contains(**cap))
+            .map(|(cap, ids)| (*cap, ids.iter().copied().collect()))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "the widest wiring (full_headless) is MISSING caps the shared catalog needs, and \
+             they are NOT on the WIDE_HEADLESS_ABSENT_CAPS exclusion list — either the cap \
+             regressed out of the widest CapMap (fix the wiring) or it is a genuinely \
+             headless-absent cap (add it to WIDE_HEADLESS_ABSENT_CAPS with a reason). \
+             missing cap → invariant ids that need it: {unexpected:?}"
+        );
+    }
+
+    /// COUNT FLOOR — belt against silent catalog deletion: the shared catalog has at least its
+    /// current size. Rename-proof (counts entries, not ids). Update N when an invariant is
+    /// DELIBERATELY removed from the catalog.
+    #[test]
+    fn composed_catalog_count_floor() {
+        // N = today's catalog size (45 without `otel-testing`; `sql_budget` adds one under it).
+        const N: usize = 45;
+        let len = composed_invariant_catalog().len();
+        assert!(
+            len >= N,
+            "composed catalog shrank to {len} (floor {N}) — an invariant was removed. If \
+             deliberate, lower N; otherwise a `wire()` line was lost."
+        );
     }
 }

@@ -163,9 +163,9 @@ impl SutLoro for E2ESut {
 // E2ESut-wrapping slice dispatching `inv-task-state-storage-coherence`). Per the
 // convergence rule (Design §8.10) that standalone test was DELETED — not rewritten as a
 // composed slice — because the ONE PBT already covers the cap: `full_headless` hosts
-// `SutLoroTaskState` + `SutSqlProjection`, and `general_e2e_composed_pbt` / `WideE2E` now
-// lists `inv-task-state-storage-coherence` in `WIDE_REQUIRED_INVARIANTS` (runs every
-// tick); the real-SUT lockstep teeth lives in
+// `SutLoroTaskState` + `SutSqlProjection`, so `general_e2e_composed_pbt` / `WideE2E`
+// selects `inv-task-state-storage-coherence` in the wide config and runs it every tick
+// (the per-draw non-vacuity floor); the real-SUT lockstep teeth lives in
 // `composed/invariants/task_state_storage_coherence.rs`. `SutLoroTaskState` is not a
 // `WideProxyCaps` member and the invariant is `NATIVE_ONLY_EXCLUDED`, so the native
 // runner never dispatched it over `E2ESut`. The trait + composed hosts
@@ -177,8 +177,9 @@ impl SutLoro for E2ESut {
 // `sorted_children` / `block_raw_row` / `block_content` / `current_focus_rows` /
 // `focus_roots_rows` / `nav_history_open_rows` / `block_tag_block_ids` / `block_task_state`)
 // is now hosted by the composed `full_headless` CapMap (`SqlProjectionComponent` /
-// `HeadlessFrontendComponent`). Its native consumers — `inv-navigation-focus` (now in
-// `WIDE_REQUIRED_INVARIANTS`) and `inv-block-content-matches-ref` — run only via the
+// `HeadlessFrontendComponent`). Its native consumers — `inv-navigation-focus` (now
+// selected by the wide config + run every tick by the per-draw floor) and
+// `inv-block-content-matches-ref` — run only via the
 // composed catalog (`navigation_focus::wire` + `block_content_sql::wire`); the standalone
 // `split_block_content_pbt` / `peer_conflict_pbt` slices were deleted. See
 // `NATIVE_ONLY_EXCLUDED` + the `SutSqlProjection` row in `E1_RELOCATED_CAP_COVERAGE`.

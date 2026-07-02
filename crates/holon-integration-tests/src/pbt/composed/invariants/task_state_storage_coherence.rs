@@ -105,8 +105,9 @@ mod tests {
 
 /// Real-SUT non-vacuity teeth (relocated from the deleted `task_state_slice.rs`).
 ///
-/// The ONE PBT (`general_e2e_composed_pbt` / `WideE2E`) now lists this invariant in
-/// `WIDE_REQUIRED_INVARIANTS`, so it *runs* every tick — but "runs" is satisfied even
+/// The ONE PBT (`general_e2e_composed_pbt` / `WideE2E`) selects this invariant in the wide
+/// config (its caps are present — the cap-presence guard proves it) and the per-draw floor
+/// runs it every tick — but "runs" is satisfied even
 /// by a never-toggled tree (both projections read `None` ⇒ trivially coherent). This
 /// test is the guard that the check is *meaningful*: a real `ToggleState` over the
 /// composed `full_headless` CapMap must move BOTH the SQL `block_raw.properties`

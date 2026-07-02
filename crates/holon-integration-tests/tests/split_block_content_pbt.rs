@@ -32,8 +32,9 @@
 //! they dispatched `InvBlockContentMatchesRef` over `E2ESut::SutSqlProjection`,
 //! which this stack removes from `E2ESut` (E3). The split-routing regression
 //! now rides on `ComposedSut<WideE2E>` via `split_block_content_composed_gherkin`
-//! (the per-tick `inv-block-content-matches-ref`, in `WIDE_REQUIRED_INVARIANTS`,
-//! catches mis-routing). The pure-parse outline check is SUT-agnostic and stays.
+//! (the per-tick `inv-block-content-matches-ref`, selected by the wide config and run
+//! every tick by the per-draw non-vacuity floor, catches mis-routing). The pure-parse
+//! outline check is SUT-agnostic and stays.
 //!
 //! Coverage not yet ported off the deleted `E2ESut` halves (handoff
 //! `PbtComposition_SutSqlProjection_Handoff.md`, Step 1): the assert-vocabulary
@@ -69,7 +70,8 @@ fn split_block_content_pbt_gherkin_outline_expands() {
 /// re-authored onto the wide seed (no `Given org file` / `app is started`
 /// ceremony — born-booted), focuses + splits `c1`; the split-routing regression
 /// is caught by the per-tick composed catalog (`inv-block-content-matches-ref`,
-/// in `WIDE_REQUIRED_INVARIANTS` → non-vacuous), and the assert vocabulary runs
+/// selected by the wide config + run every tick by the per-draw floor → non-vacuous),
+/// and the assert vocabulary runs
 /// via `impl FixtureAssertable for ComposedSut`.
 #[test]
 fn split_block_content_composed_gherkin() {

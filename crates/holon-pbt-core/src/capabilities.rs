@@ -956,9 +956,9 @@ pub trait SutViewModel {
 /// `ReactiveEngine` is the only faithful source: the headless keystone has no
 /// window, so [`HeadlessFrontendComponent`] does NOT register this cap and
 /// `inv-frontend-engine` / `inv-frontend-root-not-error` honestly DESELECT
-/// there (auto-dropped from the `WIDE_REQUIRED_INVARIANTS` floor by the
-/// `Needs::selected_against` filter) instead of "running" vacuously against an
-/// honest-`None`/`false` shadow. Registered only where a live window's engine
+/// there (this cap is a windowed-only entry on the wide cap-presence guard's
+/// `WIDE_HEADLESS_ABSENT_CAPS` exclusion list) instead of "running" vacuously against
+/// an honest-`None`/`false` shadow. Registered only where a live window's engine
 /// is present (the windowed composition). `inv-frontend-bounds-rendered` (the
 /// windowed geometry family) also reads `frontend_root_vm` for the entity order
 /// its y-order / contiguity / coverage checks compare against.
