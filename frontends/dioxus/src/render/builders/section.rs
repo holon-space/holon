@@ -13,8 +13,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
                 style: "font-weight: bold; color: #aaa; font-size: 0.85em; padding: 4px 0;",
                 "{title}"
             }
-            for (i, child) in children.items.iter().enumerate() {
-                RenderNode { key: "{i}", node: child.clone() }
+            for (k, child) in children.items.iter().enumerate().map(|(i, c)| (super::util::child_key(i, c), c)) {
+                RenderNode { key: "{k}", node: child.clone() }
             }
         }
     }

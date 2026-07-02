@@ -32,6 +32,10 @@ use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use uuid::Uuid;
 
+/// Deterministic timestamp for generated fixture blocks (2024-01-01T00:00:00Z)
+/// so strategies stay reproducible under proptest replay and shrinking.
+const FIXED_FIXTURE_TIMESTAMP_MS: i64 = 1_704_067_200_000;
+
 // ============================================================================
 // Normalized representation for comparison
 // ============================================================================
@@ -347,10 +351,11 @@ pub fn source_block_spec_strategy() -> impl Strategy<Value = SourceBlockSpec> {
             valid_property_value(),
             0..=2,
         ),
+        any::<u128>(),
     )
         .prop_map(
-            |(language, source, name, header_args, custom_properties)| SourceBlockSpec {
-                id: EntityUri::block(&Uuid::new_v4().to_string()),
+            |(language, source, name, header_args, custom_properties, id_bits)| SourceBlockSpec {
+                id: EntityUri::block(&Uuid::from_u128(id_bits).to_string()),
                 language,
                 source,
                 name,
@@ -408,18 +413,16 @@ impl HeadlineSpec {
             }
         }
 
-        block.set_scheduled(
-            self.scheduled
-                .as_deref()
-                // ALLOW(ok): invalid timestamps in test fixtures degrade to None by design
-                .and_then(|s| holon_api::types::Timestamp::parse(s).ok()),
-        );
-        block.set_deadline(
-            self.deadline
-                .as_deref()
-                // ALLOW(ok): invalid timestamps in test fixtures degrade to None by design
-                .and_then(|s| holon_api::types::Timestamp::parse(s).ok()),
-        );
+        block.set_scheduled(self.scheduled.as_deref().map(|s| {
+            holon_api::types::Timestamp::parse(s).unwrap_or_else(|e| {
+                panic!("generated scheduled timestamp {s:?} failed to parse: {e}")
+            })
+        }));
+        block.set_deadline(self.deadline.as_deref().map(|s| {
+            holon_api::types::Timestamp::parse(s).unwrap_or_else(|e| {
+                panic!("generated deadline timestamp {s:?} failed to parse: {e}")
+            })
+        }));
 
         // Set org properties as flat keys (only include :ID: if explicitly set in drawer)
         if let Some(ref explicit_id) = self.properties_drawer.explicit_id {
@@ -447,8 +450,8 @@ impl HeadlineSpec {
                 content_type: ContentType::Source,
                 source_language: Some(sb_spec.language.parse::<SourceLanguage>().unwrap()),
                 source_name: sb_spec.name.clone(),
-                created_at: chrono::Utc::now().timestamp_millis(),
-                updated_at: chrono::Utc::now().timestamp_millis(),
+                created_at: FIXED_FIXTURE_TIMESTAMP_MS,
+                updated_at: FIXED_FIXTURE_TIMESTAMP_MS,
                 ..Block::default()
             };
             if !sb_spec.header_args.is_empty() {
@@ -496,6 +499,7 @@ pub fn headline_spec_strategy(
         prop::option::of(valid_timestamp()),
         prop::option::of(valid_timestamp()),
         prop::collection::vec(source_block_spec_strategy(), 0..=3),
+        any::<u128>(),
     )
         .prop_flat_map(
             move |(
@@ -508,12 +512,13 @@ pub fn headline_spec_strategy(
                 scheduled,
                 deadline,
                 source_blocks,
+                fallback_id_bits,
             )| {
                 // Use explicit_id from drawer if present, otherwise generate a fresh UUID
                 let raw_id = props
                     .explicit_id
                     .clone()
-                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    .unwrap_or_else(|| Uuid::from_u128(fallback_id_bits).to_string());
                 let block_id = EntityUri::block(&raw_id);
 
                 let headline = HeadlineSpec {

@@ -491,7 +491,7 @@ mod backend {
                     .unwrap_or("holon_sql")
                     .to_string();
                 let lang = language.parse::<QueryLanguage>()?;
-                let params = parse_params(&args);
+                let params = parse_params(&args)?;
                 let context_id = args
                     .get("context_id")
                     .and_then(|v| v.as_str())
@@ -523,7 +523,7 @@ mod backend {
 
             "execute_raw_sql" => {
                 let sql = req_str(&args, "sql")?;
-                let params = parse_params(&args);
+                let params = parse_params(&args)?;
                 let result = runtime.block_on(service.execute_raw_sql(&sql, params))?;
                 let rows: Vec<serde_json::Value> = result
                     .rows
@@ -574,27 +574,47 @@ mod backend {
                     .ok_or_else(|| anyhow::anyhow!("missing required field 'columns'"))?;
                 let cols: Vec<holon::api::holon_service::ColumnDef> = cols_val
                     .iter()
-                    .map(|c| holon::api::holon_service::ColumnDef {
-                        name: c
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        sql_type: c
-                            .get("sql_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("TEXT")
-                            .to_string(),
-                        primary_key: c
-                            .get("primary_key")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        default: c
-                            .get("default")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
+                    .enumerate()
+                    .map(|(i, c)| -> anyhow::Result<_> {
+                        let obj = c.as_object().ok_or_else(|| {
+                            anyhow::anyhow!("column {i} must be a JSON object, got {c}")
+                        })?;
+                        let str_field = |field: &str| -> anyhow::Result<String> {
+                            obj.get(field)
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "column {i}: missing required string field '{field}'"
+                                    )
+                                })
+                        };
+                        let primary_key = match obj.get("primary_key") {
+                            None | Some(serde_json::Value::Null) => false,
+                            Some(v) => v.as_bool().ok_or_else(|| {
+                                anyhow::anyhow!("column {i}: 'primary_key' must be a boolean, got {v}")
+                            })?,
+                        };
+                        let default = match obj.get("default") {
+                            None | Some(serde_json::Value::Null) => None,
+                            Some(v) => Some(
+                                v.as_str()
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "column {i}: 'default' must be a string, got {v}"
+                                        )
+                                    })?
+                                    .to_string(),
+                            ),
+                        };
+                        Ok(holon::api::holon_service::ColumnDef {
+                            name: str_field("name")?,
+                            sql_type: str_field("sql_type")?,
+                            primary_key,
+                            default,
+                        })
                     })
-                    .collect();
+                    .collect::<anyhow::Result<_>>()?;
                 runtime.block_on(service.create_table(&table_name, &cols))?;
                 Ok(serde_json::json!({"success": true}))
             }
@@ -607,16 +627,19 @@ mod backend {
                     .ok_or_else(|| anyhow::anyhow!("missing required field 'rows'"))?;
                 let rows: Vec<HashMap<String, Value>> = rows_val
                     .iter()
-                    .map(|row| {
+                    .enumerate()
+                    .map(|(i, row)| {
                         row.as_object()
                             .map(|obj| {
                                 obj.iter()
                                     .map(|(k, v)| (k.clone(), Value::from_json_value(v.clone())))
                                     .collect()
                             })
-                            .unwrap_or_default()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("row {i} must be a JSON object, got {row}")
+                            })
                     })
-                    .collect();
+                    .collect::<anyhow::Result<_>>()?;
                 let count = runtime.block_on(service.insert_data(&table_name, &rows))?;
                 Ok(serde_json::json!({"inserted": count}))
             }
@@ -637,7 +660,7 @@ mod backend {
                     .unwrap_or("holon_prql")
                     .to_string();
                 let lang = language.parse::<QueryLanguage>()?;
-                let params = parse_params(&args);
+                let params = parse_params(&args)?;
 
                 let mut stream =
                     runtime.block_on(service.query_and_watch(&query, lang, params, None))?;
@@ -798,15 +821,7 @@ mod backend {
             "execute_operation" => {
                 let entity_name = req_str(&args, "entity_name")?;
                 let operation = req_str(&args, "operation")?;
-                let storage_entity: StorageEntity = args
-                    .get("params")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter()
-                            .map(|(k, v)| (k.as_str().into(), Value::from_json_value(v.clone())))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let storage_entity = parse_storage_entity(&args)?;
                 let result = runtime.block_on(service.execute_operation(
                     &EntityName::from(entity_name.as_str()),
                     &operation,
@@ -834,21 +849,13 @@ mod backend {
                 let context_params: HashMap<String, Value> = block_result
                     .rows
                     .first()
-                    .map(|row| {
-                        row.iter()
-                            .map(|(k, v)| (k.to_string(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                    .ok_or_else(|| anyhow::anyhow!("block '{}' not found", block_id))?
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect();
 
-                let profile = block_result
-                    .rows
-                    .first()
-                    .map(|_| engine.profile_resolver().resolve(&context_params));
-                let entity_name = profile
-                    .as_ref()
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| "blocks".to_string());
+                let profile = engine.profile_resolver().resolve(&context_params);
+                let entity_name = profile.name.clone();
 
                 let ops = runtime.block_on(service.available_operations(&entity_name));
                 let wirings: Vec<holon_api::render_types::OperationWiring> = ops
@@ -878,15 +885,7 @@ mod backend {
                 let block_id = req_str(&args, "block_id")?;
                 let command_name = req_str(&args, "command_name")?;
                 let entity_name = req_str(&args, "entity_name")?;
-                let mut storage_entity: StorageEntity = args
-                    .get("params")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter()
-                            .map(|(k, v)| (k.as_str().into(), Value::from_json_value(v.clone())))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let mut storage_entity = parse_storage_entity(&args)?;
                 storage_entity
                     .entry("id".into())
                     .or_insert_with(|| Value::String(block_id.clone()));
@@ -927,15 +926,30 @@ mod backend {
             .ok_or_else(|| anyhow::anyhow!("missing required field '{}'", field))
     }
 
-    fn parse_params(args: &serde_json::Value) -> HashMap<String, Value> {
-        args.get("params")
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                obj.iter()
-                    .map(|(k, v)| (k.clone(), Value::from_json_value(v.clone())))
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn parse_params(args: &serde_json::Value) -> anyhow::Result<HashMap<String, Value>> {
+        match args.get("params") {
+            None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
+            Some(serde_json::Value::Object(obj)) => Ok(obj
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::from_json_value(v.clone())))
+                .collect()),
+            Some(other) => Err(anyhow::anyhow!(
+                "'params' must be a JSON object, got {other}"
+            )),
+        }
+    }
+
+    fn parse_storage_entity(args: &serde_json::Value) -> anyhow::Result<StorageEntity> {
+        match args.get("params") {
+            None | Some(serde_json::Value::Null) => Ok(StorageEntity::default()),
+            Some(serde_json::Value::Object(obj)) => Ok(obj
+                .iter()
+                .map(|(k, v)| (k.as_str().into(), Value::from_json_value(v.clone())))
+                .collect()),
+            Some(other) => Err(anyhow::anyhow!(
+                "'params' must be a JSON object, got {other}"
+            )),
+        }
     }
 
     fn change_to_json(change: Change<StorageEntity>) -> serde_json::Value {

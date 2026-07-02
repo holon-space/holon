@@ -356,13 +356,19 @@ pub fn is_on_last_line(text: &str, offset: usize) -> bool {
     text[offset.min(text.len())..].find('\n').is_none()
 }
 
-/// Compute the character offset for a given line and column,
-/// clamping the column to the line's length.
+/// Compute the byte offset for a given line and character column,
+/// clamping the column to the line's character count. Columns are
+/// codepoints (matching `offset_to_line_col` and the GPUI cursor hint);
+/// the returned offset is a byte offset on a char boundary.
 pub fn line_col_to_offset(text: &str, target_line: usize, target_column: usize) -> usize {
     let mut offset = 0;
     for (i, line) in text.split('\n').enumerate() {
         if i == target_line {
-            return offset + target_column.min(line.len());
+            let col_bytes = line
+                .char_indices()
+                .nth(target_column)
+                .map_or(line.len(), |(b, _)| b);
+            return offset + col_bytes;
         }
         offset += line.len() + 1; // +1 for the newline
     }
@@ -424,6 +430,21 @@ mod tests {
         assert_eq!(line_col_to_offset(text, 0, 2), 2);
         assert_eq!(line_col_to_offset(text, 1, 1), 5);
         assert_eq!(line_col_to_offset(text, 2, 3), 11); // clamped to line len
+    }
+
+    /// Columns are codepoints; the returned offset is bytes on a char
+    /// boundary — never mid-codepoint.
+    #[test]
+    fn line_col_to_offset_multibyte() {
+        // 'é' is 2 bytes: char column 3 of "ééab" is byte 5.
+        assert_eq!(line_col_to_offset("ééab", 0, 3), 5);
+        assert_eq!(line_col_to_offset("ééab", 0, 10), 6); // clamped to char count
+        assert_eq!(line_col_to_offset("ab\nééc", 1, 2), 7);
+        // Round-trip with offset_to_line_col (byte offset ↔ char column).
+        let text = "ab\nééc";
+        let (line, col) = offset_to_line_col(text, 7);
+        assert_eq!((line, col), (1, 2));
+        assert_eq!(line_col_to_offset(text, line, col), 7);
     }
 
     #[test]

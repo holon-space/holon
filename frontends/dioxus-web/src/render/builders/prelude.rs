@@ -7,3 +7,5 @@ pub use dioxus::prelude::*;
 pub use holon_frontend::view_model::ViewModel;
 
 pub use super::{DioxusRenderContext, RenderNode};
+
+pub(crate) use super::keyed_children;

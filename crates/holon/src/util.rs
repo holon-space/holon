@@ -39,56 +39,6 @@ where
     wasm_bindgen_futures::spawn_local(future);
 }
 
-/// Strip ORDER BY, LIMIT, and OFFSET clauses from SQL.
-///
-/// Turso materialized views (IVM) only support Filter, Projection, Join,
-/// Aggregate, Union, EmptyRelation, and Values operators. ORDER BY, LIMIT,
-/// and OFFSET are not supported and must be removed before creating a matview.
-pub fn strip_order_by(sql: &str) -> String {
-    strip_unsupported_clauses(sql)
-}
-
-/// Strip ORDER BY, LIMIT, and OFFSET clauses so the SQL can become a matview body.
-///
-/// Uses word-boundary matching to avoid false positives on column names
-/// like `cursor_offset` which contain "OFFSET" as a substring.
-fn strip_unsupported_clauses(sql: &str) -> String {
-    let upper = sql.to_uppercase();
-
-    // Find the earliest of ORDER BY, LIMIT, OFFSET as standalone SQL keywords.
-    // A keyword is standalone if preceded by whitespace (or start of string)
-    // and followed by whitespace, digit, or end of string.
-    let keywords = ["ORDER BY", "LIMIT", "OFFSET"];
-    let earliest = keywords
-        .iter()
-        .filter_map(|kw| find_keyword(&upper, kw))
-        .min();
-
-    match earliest {
-        Some(idx) => sql[..idx].trim().to_string(),
-        None => sql.to_string(),
-    }
-}
-
-/// Find a SQL keyword in the uppercase string, ensuring it's at a word boundary.
-/// Returns the byte position of the keyword if found as a standalone word.
-fn find_keyword(upper: &str, keyword: &str) -> Option<usize> {
-    let mut start = 0;
-    while let Some(pos) = upper[start..].find(keyword) {
-        let abs_pos = start + pos;
-        let before_ok = abs_pos == 0 || upper.as_bytes()[abs_pos - 1].is_ascii_whitespace();
-        let after_pos = abs_pos + keyword.len();
-        let after_ok = after_pos >= upper.len()
-            || upper.as_bytes()[after_pos].is_ascii_whitespace()
-            || upper.as_bytes()[after_pos].is_ascii_digit();
-        if before_ok && after_ok {
-            return Some(abs_pos);
-        }
-        start = abs_pos + 1;
-    }
-    None
-}
-
 /// Check if a Rhai expression references a given variable name.
 /// Uses word-boundary matching to avoid false positives.
 pub fn expr_references(expr: &str, name: &str) -> bool {
@@ -175,54 +125,6 @@ pub fn topo_sort_kahn<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strip_order_by_removes_clause() {
-        let sql = "SELECT * FROM t ORDER BY name ASC";
-        assert_eq!(strip_order_by(sql), "SELECT * FROM t");
-    }
-
-    #[test]
-    fn strip_order_by_also_strips_limit() {
-        let sql = "SELECT * FROM t ORDER BY name ASC LIMIT 10";
-        assert_eq!(strip_order_by(sql), "SELECT * FROM t");
-    }
-
-    #[test]
-    fn strip_limit_without_order_by() {
-        let sql = "SELECT * FROM t WHERE x = 1 LIMIT 10";
-        assert_eq!(strip_order_by(sql), "SELECT * FROM t WHERE x = 1");
-    }
-
-    #[test]
-    fn strip_limit_and_offset() {
-        let sql = "SELECT * FROM t LIMIT 10 OFFSET 5";
-        assert_eq!(strip_order_by(sql), "SELECT * FROM t");
-    }
-
-    #[test]
-    fn strip_order_by_no_clause() {
-        let sql = "SELECT * FROM t WHERE x = 1";
-        assert_eq!(strip_order_by(sql), sql);
-    }
-
-    #[test]
-    fn strip_order_by_case_insensitive() {
-        let sql = "SELECT * FROM t order by name";
-        assert_eq!(strip_order_by(sql), "SELECT * FROM t");
-    }
-
-    #[test]
-    fn offset_in_column_name_not_stripped() {
-        let sql = "SELECT block_id, cursor_offset FROM current_editor_focus WHERE region = 'main'";
-        assert_eq!(strip_order_by(sql), sql);
-    }
-
-    #[test]
-    fn real_offset_clause_still_stripped() {
-        let sql = "SELECT block_id, cursor_offset FROM t LIMIT 10 OFFSET 5";
-        assert_eq!(strip_order_by(sql), "SELECT block_id, cursor_offset FROM t");
-    }
 
     #[test]
     fn test_expr_references() {

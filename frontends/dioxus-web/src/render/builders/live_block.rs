@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use super::prelude::*;
 use crate::render::EntityContext;
 use holon_frontend::view_model::ViewKind;
@@ -6,9 +9,25 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::LiveBlock { block_id, content } = &node.kind else {
         return rsx! {};
     };
-    let block_id = block_id.clone();
-    let content = (**content).clone();
-    rsx! { LiveBlockNode { block_id, content } }
+    // Keyed single-item list: when a position-reused scope is handed a
+    // different block_id, Dioxus drops the old LiveBlockNode (releasing its
+    // subscription + EntityContext via use_drop) and mounts a fresh one,
+    // instead of leaving the once-only hooks bound to the previous block.
+    let entries = [(block_id.clone(), (**content).clone())];
+    rsx! {
+        for (bid, c) in entries {
+            LiveBlockNode { key: "{bid}", block_id: bid.clone(), content: c.clone() }
+        }
+    }
+}
+
+/// Shared between the subscribe task and `use_drop`. Deliberately NOT a
+/// Dioxus signal: it must stay usable after scope teardown so an
+/// `engineWatchView` RPC that is still in flight at unmount can learn its
+/// handle and release the worker-side subscription instead of leaking it.
+struct WatchState {
+    handle: Option<u32>,
+    unmounted: bool,
 }
 
 /// Renders a `live_block` and provides its `block_id` to descendants via
@@ -24,13 +43,24 @@ fn LiveBlockNode(block_id: String, content: ViewModel) -> Element {
     use_context_provider(|| EntityContext(block_id.clone()));
 
     let mut inner_vm: Signal<Option<ViewModel>> = use_signal(|| None);
-    let mut watch_handle: Signal<Option<u32>> = use_signal(|| None);
 
-    let bid_for_future = block_id.clone();
-    use_future(move || {
-        let bid = bid_for_future.clone();
-        async move {
+    let watch: Rc<RefCell<WatchState>> = use_hook(|| {
+        let state = Rc::new(RefCell::new(WatchState {
+            handle: None,
+            unmounted: false,
+        }));
+        let state_task = state.clone();
+        let bid = block_id.clone();
+        // Detached task, not a use_future: a scope-cancelled task dies at
+        // the `call` await and never learns the watch handle, so an unmount
+        // while the RPC is in flight would leak the worker subscription
+        // forever. This task always receives the handle and drops the
+        // subscription itself when the scope is already gone.
+        wasm_bindgen_futures::spawn_local(async move {
             let bridge = loop {
+                if state_task.borrow().unmounted {
+                    return;
+                }
                 if let Some(b) = crate::BRIDGE.with(|b| b.borrow().clone()) {
                     break b;
                 }
@@ -51,7 +81,16 @@ fn LiveBlockNode(block_id: String, content: ViewModel) -> Element {
                     return;
                 }
             };
-            watch_handle.set(Some(handle));
+
+            if state_task.borrow().unmounted {
+                if let Err(e) = bridge.drop_subscription(handle).await {
+                    tracing::error!(
+                        "[live_block] drop_subscription({handle}) after unmount race: {e}"
+                    );
+                }
+                return;
+            }
+            state_task.borrow_mut().handle = Some(handle);
             bridge.on_snapshot(handle, move |json| {
                 match serde_json::from_str::<ViewModel>(&json) {
                     Ok(v) => inner_vm.set(Some(v)),
@@ -60,20 +99,29 @@ fn LiveBlockNode(block_id: String, content: ViewModel) -> Element {
                     }
                 }
             });
-        }
+        });
+        state
     });
 
     use_drop(move || {
-        if let Some(handle) = watch_handle.peek().as_ref().copied() {
-            wasm_bindgen_futures::spawn_local(async move {
-                let bridge = crate::BRIDGE.with(|b| b.borrow().clone());
-                if let Some(bridge) = bridge {
-                    if let Err(e) = bridge.drop_subscription(handle).await {
-                        tracing::error!("[live_block] drop_subscription({handle}): {e}");
-                    }
-                }
-            });
-        }
+        let handle = {
+            let mut st = watch.borrow_mut();
+            st.unmounted = true;
+            st.handle.take()
+        };
+        let Some(handle) = handle else { return };
+        let Some(bridge) = crate::BRIDGE.with(|b| b.borrow().clone()) else {
+            tracing::error!("[live_block] BRIDGE gone before drop_subscription({handle})");
+            return;
+        };
+        // Synchronously, before this scope's signals are dropped, so a
+        // queued snapshot can never fire into a dead `inner_vm`.
+        bridge.remove_snapshot_listener(handle);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = bridge.drop_subscription(handle).await {
+                tracing::error!("[live_block] drop_subscription({handle}): {e}");
+            }
+        });
     });
 
     let live = inner_vm.read().clone();

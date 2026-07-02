@@ -8,8 +8,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let pad = depth * 16;
     rsx! {
         div { style: "padding-left: {pad}px;",
-            for (i, child) in children.items.iter().enumerate() {
-                RenderNode { key: "{i}", node: child.clone() }
+            for (key, child) in keyed_children(&children.items) {
+                RenderNode { key: "{key}", node: child.clone() }
             }
         }
     }

@@ -1,3 +1,10 @@
+# Out-of-workspace crate: listed in the root Cargo.toml `exclude` (macOS 15+
+# SDK issue in ply's dependency chain), so it declares its own [workspace]
+# table and explicit (non-inherited) dependencies. Build with
+# `cargo check` / `cargo build` from this directory.
+[workspace]
+resolver = "2"
+
 [package]
 name = "holon-ply"
 version = "0.1.0"
@@ -12,27 +19,27 @@ chrome-trace = ["holon-frontend/chrome-trace"]
 ply-engine = { git = "https://github.com/TheRedDeveloper/ply-engine" }
 macroquad-ply = "0.4.14"
 
-# Holon workspace crates
-holon.workspace = true
-holon-frontend.workspace = true
-holon-api.workspace = true
-holon-macros.workspace = true
+# Holon crates, path-deps relative to this manifest
+holon = { path = "../../crates/holon" }
+holon-app = { path = "../../crates/holon-app" }
+holon-frontend = { path = "../../crates/holon-frontend" }
+holon-api = { path = "../../crates/holon-api" }
+holon-macros = { path = "../../crates/holon-macros" }
 holon-mcp = { path = "../mcp" }
 
-# DI
-fluxdi.workspace = true
+# DI — same source/features as the root workspace's [workspace.dependencies]
+fluxdi = { git = "https://github.com/holon-space/fluxdi", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
 
 # Async
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync"] }
 tokio-util = "0.7"
 
 # Serialization
-serde_json.workspace = true
+serde_json = "1"
 
 # Error handling
-anyhow.workspace = true
+anyhow = "1.0"
 
 # Observability
-tracing.workspace = true
-tracing-subscriber.workspace = true
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }

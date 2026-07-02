@@ -86,25 +86,31 @@ impl RhaiEvaluator {
     }
 
     /// Check if a token matches all preconditions on an input arc.
-    /// Returns Some(placeholders) if it matches, None otherwise.
+    /// Returns Ok(Some(placeholders)) on match, Ok(None) on no match,
+    /// Err if a precondition expression is malformed.
     pub fn check_precond(
         &self,
         token: &impl TokenState,
         arc: &InputArc,
         existing_placeholders: &BTreeMap<String, Value>,
-    ) -> Option<BTreeMap<String, Value>> {
+    ) -> Result<Option<BTreeMap<String, Value>>, String> {
         if token.token_type() != arc.token_type {
-            return None;
+            return Ok(None);
         }
         let mut new_placeholders = BTreeMap::new();
         for (attr, spec) in &arc.precond {
             let token_val = token.get(attr);
             if spec.starts_with('$') {
-                // Placeholder bind: capture value
-                if let Some(val) = token_val {
-                    new_placeholders.insert(spec.clone(), val.clone());
-                } else {
-                    new_placeholders.insert(spec.clone(), Value::Null);
+                // Placeholder bind: capture value, unifying with any earlier capture
+                let val = token_val.cloned().unwrap_or(Value::Null);
+                let prior = existing_placeholders
+                    .get(spec)
+                    .or_else(|| new_placeholders.get(spec));
+                match prior {
+                    Some(existing) if *existing != val => return Ok(None),
+                    _ => {
+                        new_placeholders.insert(spec.clone(), val);
+                    }
                 }
             } else if spec.starts_with(">=")
                 || spec.starts_with("<=")
@@ -114,21 +120,28 @@ impl RhaiEvaluator {
                 || spec.starts_with("!=")
             {
                 // Rhai comparison expression
-                let token_val = token_val?;
+                let Some(token_val) = token_val else {
+                    return Ok(None);
+                };
                 let rhai_val = token_val.to_rhai_dynamic();
                 let expr = format!("x {spec}");
                 let mut scope = Scope::new();
                 scope.push("x", rhai_val);
-                for (k, v) in existing_placeholders {
-                    scope.push(k.clone(), v.to_rhai_dynamic());
-                }
                 match self.engine.eval_with_scope::<bool>(&mut scope, &expr) {
                     Ok(true) => {}
-                    _ => return None,
+                    Ok(false) => return Ok(None),
+                    Err(e) => {
+                        return Err(format!(
+                            "precondition '{attr}: {spec}' on arc '{}' failed to evaluate: {e}",
+                            arc.bind
+                        ))
+                    }
                 }
             } else {
                 // Exact match
-                let token_val = token_val?;
+                let Some(token_val) = token_val else {
+                    return Ok(None);
+                };
                 let matches = match token_val {
                     Value::String(s) => s == spec,
                     Value::Float(f) => spec.parse::<f64>().is_ok_and(|v| (*f - v).abs() < 1e-9),
@@ -137,32 +150,32 @@ impl RhaiEvaluator {
                     Value::Null => spec == "null",
                 };
                 if !matches {
-                    return None;
+                    return Ok(None);
                 }
             }
         }
-        Some(new_placeholders)
+        Ok(Some(new_placeholders))
     }
 
-    /// Find the first matching token in a place for an input arc.
-    /// Returns (token_id, captured_placeholders).
-    pub fn find_matching_token<M: Marking>(
+    /// Find all matching tokens in a place for an input arc.
+    /// Returns (token_id, captured_placeholders) per candidate.
+    pub fn matching_tokens<M: Marking>(
         &self,
         marking: &M,
         arc: &InputArc,
         already_bound: &[String],
         existing_placeholders: &BTreeMap<String, Value>,
-    ) -> Option<(String, BTreeMap<String, Value>)> {
-        let candidates = marking.tokens_of_type(&arc.token_type);
-        for token in candidates {
+    ) -> Result<Vec<(String, BTreeMap<String, Value>)>, String> {
+        let mut matches = Vec::new();
+        for token in marking.tokens_of_type(&arc.token_type) {
             if already_bound.contains(&token.id().to_string()) {
                 continue;
             }
-            if let Some(placeholders) = self.check_precond(token, arc, existing_placeholders) {
-                return Some((token.id().to_string(), placeholders));
+            if let Some(placeholders) = self.check_precond(token, arc, existing_placeholders)? {
+                matches.push((token.id().to_string(), placeholders));
             }
         }
-        None
+        Ok(matches)
     }
 
     /// Evaluate a postcondition expression in the context of bound tokens.

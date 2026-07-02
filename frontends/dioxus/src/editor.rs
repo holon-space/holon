@@ -24,6 +24,10 @@ pub fn EditorCell(entity_id: String, content: String) -> Element {
             value: "{content}",
             style: "width: 100%; background: transparent; border: none; outline: none; \
                     color: var(--text-primary); font-family: inherit; font-size: inherit; padding: 0;",
+            // Keystrokes inside the editor belong to the webview's native
+            // text editing (incl. Cmd+Z text undo) — never to the root
+            // div's global data undo/redo shortcuts.
+            onkeydown: move |evt| evt.stop_propagation(),
             onchange: move |evt| {
                 let new_content = evt.value();
                 let session = session.clone();

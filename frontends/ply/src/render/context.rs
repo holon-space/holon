@@ -1,10 +1,25 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use holon_api::render_types::RenderExpr;
+use holon_api::streaming::EnrichedChange;
 use holon_api::widget_spec::DataRow;
-use holon_api::EntityUri;
+use holon_api::{BatchWithMetadata, DataRowAccumulator, EntityUri};
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::WidgetState;
+
+/// Live-query watch state, keyed by (language, query, context) in
+/// [`PlyExt::query_watches`]. Owned outside the per-frame render context so
+/// the CDC stream and accumulated rows survive across immediate-mode frames.
+pub enum QueryWatchState {
+    Live {
+        rx: tokio::sync::mpsc::Receiver<BatchWithMetadata<EnrichedChange>>,
+        acc: DataRowAccumulator,
+    },
+    Failed(String),
+}
+
+pub type QueryWatches = Arc<Mutex<HashMap<String, QueryWatchState>>>;
 
 /// Ply-specific extension data threaded through the render tree.
 #[derive(Clone)]
@@ -12,6 +27,8 @@ pub struct PlyExt {
     /// Slot for the columns builder to write the left sidebar's block ID.
     /// Read by the title bar on the next frame to wire the toggle button.
     pub left_sidebar_block_id: Arc<Mutex<Option<String>>>,
+    /// Persistent live-query watchers (see [`QueryWatchState`]).
+    pub query_watches: QueryWatches,
 }
 
 /// Ply-specific render context wrapping the shared RenderContext with Ply extensions.
@@ -63,22 +80,19 @@ impl RenderContext {
     pub fn widget_state(&self, id: &str) -> WidgetState {
         self.services.widget_state(id)
     }
-
-    /// Dispatch an operation intent via services.
-    pub fn dispatch_intent(&self, intent: holon_frontend::operations::OperationIntent) {
-        self.services.dispatch_intent(intent);
-    }
 }
 
 pub fn new_render_context(
     services: Arc<dyn BuilderServices>,
     left_sidebar_block_id: Arc<Mutex<Option<String>>>,
+    query_watches: QueryWatches,
 ) -> RenderContext {
     RenderContext {
         ctx: holon_frontend::RenderContext::default(),
         services,
         ext: PlyExt {
             left_sidebar_block_id,
+            query_watches,
         },
     }
 }

@@ -5,6 +5,7 @@ use crate::render::{render_view_model, EditableTarget, RenderCtx, RenderRegistry
 use crate::stylesheet;
 use holon_api::{EntityName, Value};
 use holon_frontend::cell::TextOp;
+use holon_frontend::editor_caret;
 use holon_frontend::editor_view_model::EditorViewModel;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
@@ -661,6 +662,23 @@ fn key_match_from_input(ev: &InputEvent, leader: bool) -> Option<KeyMatch> {
     })
 }
 
+/// Every action name `run_navigation_action` has a dispatch arm for.
+/// Must stay in lock-step with the match below; the
+/// `yaml_actions_all_dispatchable` test asserts no `keybindings.yaml`
+/// entry references anything outside this list.
+#[cfg(test)]
+const NAVIGATION_ACTIONS: &[&str] = &[
+    "move_up",
+    "move_down",
+    "indent",
+    "outdent",
+    "cycle_task_state",
+    "start_editing",
+    "go_home",
+    "go_back",
+    "go_forward",
+];
+
 /// Dispatch a YAML-resolved navigation action against the focused
 /// state. Updates `status_message` for the user. Action names match
 /// the `action:` field of `keybindings.yaml` entries.
@@ -1078,25 +1096,17 @@ fn handle_edit_input(state: &mut TuiState, input_event: InputEvent) -> EventProp
         }
         Key::SpecialKey(SpecialKey::Backspace) => {
             if edit_state.cursor > 0 {
-                let prev = prev_char_boundary(&current, edit_state.cursor);
-                let len = edit_state.cursor - prev;
-                if let Err(e) = edit_state.vm.apply_local(TextOp::Delete {
-                    pos_codepoint: prev,
-                    len_codepoint: len,
-                }) {
+                let (op, new_cursor) = backspace_op(&current, edit_state.cursor);
+                if let Err(e) = edit_state.vm.apply_local(op) {
                     tracing::error!("MutableText delete failed: {e}");
                 }
-                edit_state.cursor = prev;
+                edit_state.cursor = new_cursor;
             }
         }
         Key::SpecialKey(SpecialKey::Delete) => {
             if edit_state.cursor < current.len() {
-                let next = next_char_boundary(&current, edit_state.cursor);
-                let len = next - edit_state.cursor;
-                if let Err(e) = edit_state.vm.apply_local(TextOp::Delete {
-                    pos_codepoint: edit_state.cursor,
-                    len_codepoint: len,
-                }) {
+                let op = delete_forward_op(&current, edit_state.cursor);
+                if let Err(e) = edit_state.vm.apply_local(op) {
                     tracing::error!("MutableText delete failed: {e}");
                 }
             }
@@ -1121,24 +1131,60 @@ fn handle_edit_input(state: &mut TuiState, input_event: InputEvent) -> EventProp
             // Filter out non-printable control characters (e.g. ESC arrives
             // as both SpecialKey::Esc and possibly a raw control char on
             // some terminals; let SpecialKey::Esc handle it). Also drop
-            // Alt-modified characters — the only Alt+letter we use in edit
-            // mode is `Alt+s` (split), handled above; anything else with
-            // Alt would be either a future shortcut or a typo, never
-            // intended literal text.
-            if !c.is_control() && !alt => {
+            // Alt- and Ctrl-modified characters — the only chords we use in
+            // edit mode (`Ctrl+x` split) are handled above; anything else
+            // with a modifier would be either a future shortcut or a typo,
+            // never intended literal text.
+            if !c.is_control() && !alt && !ctrl_key => {
                 let mut buf = [0u8; 4];
                 let s = c.encode_utf8(&mut buf);
-                if let Err(e) = edit_state.vm.apply_local(TextOp::Insert {
-                    pos_codepoint: edit_state.cursor,
-                    text: s.to_string(),
-                }) {
+                let (op, new_cursor) = insert_op(&current, edit_state.cursor, s);
+                if let Err(e) = edit_state.vm.apply_local(op) {
                     tracing::error!("MutableText insert failed: {e}");
                 }
-                edit_state.cursor += s.len();
+                edit_state.cursor = new_cursor;
             }
         _ => {}
     }
     EventPropagation::ConsumedRender
+}
+
+/// Build the codepoint-indexed `TextOp` for Backspace at byte offset
+/// `cursor` (a char boundary, > 0). `TextOp` positions are codepoints
+/// (Loro's addressing), while the TUI cursor is a byte offset — the
+/// conversion here is the seam between the two units. Returns the op
+/// and the new byte cursor.
+fn backspace_op(current: &str, cursor: usize) -> (TextOp, usize) {
+    let prev = prev_char_boundary(current, cursor);
+    (
+        TextOp::Delete {
+            pos_codepoint: editor_caret::byte_to_codepoint(current, prev),
+            len_codepoint: editor_caret::codepoint_len(current, prev, cursor),
+        },
+        prev,
+    )
+}
+
+/// Build the codepoint-indexed `TextOp` for forward Delete at byte offset
+/// `cursor` (a char boundary, < `current.len()`). The byte cursor stays put.
+fn delete_forward_op(current: &str, cursor: usize) -> TextOp {
+    let next = next_char_boundary(current, cursor);
+    TextOp::Delete {
+        pos_codepoint: editor_caret::byte_to_codepoint(current, cursor),
+        len_codepoint: editor_caret::codepoint_len(current, cursor, next),
+    }
+}
+
+/// Build the codepoint-indexed `TextOp` inserting `s` at byte offset
+/// `cursor` (a char boundary). Returns the op and the new byte cursor.
+fn insert_op(current: &str, cursor: usize, s: &str) -> (TextOp, usize) {
+    (
+        TextOp::Insert {
+            pos_codepoint: editor_caret::byte_to_codepoint(current, cursor),
+            text: s.to_string(),
+        },
+        cursor + s.len(),
+    )
 }
 
 /// Find the byte offset of the char boundary strictly before `from` in `s`.
@@ -1333,5 +1379,76 @@ mod tests {
             other => panic!("expected EnterEdit, got {other:?}"),
         };
         assert_eq!(target.block_id, "block:editor-focus-target");
+    }
+
+    /// Every action declared in `keybindings.yaml` must have a dispatch
+    /// arm in `run_navigation_action` — a YAML entry nothing dispatches
+    /// is dead config that misdocuments the TUI's behavior.
+    #[test]
+    fn yaml_actions_all_dispatchable() {
+        for action in keybindings::global().actions(BindingMode::Navigation) {
+            assert!(
+                NAVIGATION_ACTIONS.contains(&action),
+                "keybindings.yaml binds action '{action}' but \
+                 run_navigation_action has no arm for it"
+            );
+        }
+    }
+
+    // ── TextOp construction: byte cursor → codepoint positions ──────
+    //
+    // TextOp is codepoint-indexed (Loro addressing); the TUI cursor is a
+    // byte offset. These pin the conversion on multibyte content, where
+    // the two units diverge ("héllo" = 6 bytes, 5 codepoints).
+
+    #[test]
+    fn insert_op_converts_byte_cursor_to_codepoints() {
+        let text = "héllo";
+        let (op, new_cursor) = insert_op(text, text.len(), "x");
+        match op {
+            TextOp::Insert {
+                pos_codepoint,
+                text,
+            } => {
+                assert_eq!(pos_codepoint, 5);
+                assert_eq!(text, "x");
+            }
+            other => panic!("expected Insert, got {other:?}"),
+        }
+        assert_eq!(new_cursor, 7);
+    }
+
+    #[test]
+    fn backspace_op_over_multibyte_char_deletes_one_codepoint() {
+        let text = "héllo";
+        // Cursor right after 'é' (byte 3).
+        let (op, new_cursor) = backspace_op(text, 3);
+        match op {
+            TextOp::Delete {
+                pos_codepoint,
+                len_codepoint,
+            } => {
+                assert_eq!(pos_codepoint, 1);
+                assert_eq!(len_codepoint, 1);
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
+        assert_eq!(new_cursor, 1);
+    }
+
+    #[test]
+    fn delete_forward_op_after_multibyte_prefix() {
+        let text = "héllo";
+        // Cursor after 'é' (byte 3), deleting the following 'l'.
+        match delete_forward_op(text, 3) {
+            TextOp::Delete {
+                pos_codepoint,
+                len_codepoint,
+            } => {
+                assert_eq!(pos_codepoint, 2);
+                assert_eq!(len_codepoint, 1);
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
     }
 }

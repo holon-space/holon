@@ -402,13 +402,13 @@ fn extract_code_fences(body: &str) -> (String, Vec<CodeFence>) {
     while i < lines.len() {
         let line = lines[i];
         let trimmed = line.trim_start();
-        if let Some(open_marker) = open_fence(trimmed) {
-            let language = parse_fence_info(trimmed.trim_start_matches(open_marker));
+        if let Some((fence_char, fence_len)) = open_fence(trimmed) {
+            let language = parse_fence_info(&trimmed[fence_len..]);
             i += 1;
             let mut value = String::new();
             while i < lines.len() {
                 let l = lines[i];
-                if l.trim_start().starts_with(open_marker) {
+                if closes_fence(l.trim_start(), fence_char, fence_len) {
                     i += 1;
                     break;
                 }
@@ -433,14 +433,23 @@ fn extract_code_fences(body: &str) -> (String, Vec<CodeFence>) {
     (out, fences)
 }
 
-fn open_fence(s: &str) -> Option<&'static str> {
-    if s.starts_with("```") {
-        Some("```")
-    } else if s.starts_with("~~~") {
-        Some("~~~")
-    } else {
-        None
+/// An opening fence per CommonMark: a run of >= 3 backticks or tildes.
+/// Returns the fence character and the exact run length so the close check
+/// can enforce the same-char, at-least-as-long rule.
+fn open_fence(s: &str) -> Option<(char, usize)> {
+    let ch = s.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
     }
+    let len = s.chars().take_while(|&c| c == ch).count();
+    (len >= 3).then_some((ch, len))
+}
+
+/// A closing fence per CommonMark: a run of the SAME character, at least as
+/// long as the opening run, with nothing but whitespace after it.
+fn closes_fence(s: &str, fence_char: char, open_len: usize) -> bool {
+    let run = s.chars().take_while(|&c| c == fence_char).count();
+    run >= open_len && s[run..].trim().is_empty()
 }
 
 fn parse_fence_info(rest: &str) -> Option<String> {
@@ -636,6 +645,35 @@ mod tests {
         assert!(src.content.contains("print(1)"));
         assert_eq!(src.parent_id, head.id);
         assert!(!head.content.contains("```"));
+    }
+
+    #[test]
+    fn longer_fence_encloses_shorter_fence() {
+        let r = parse("# H ^aa\n\n````markdown\n```\ninner code\n```\n````\n\ntail para\n");
+        let sources: Vec<_> = r
+            .blocks
+            .iter()
+            .filter(|b| b.content_type == ContentType::Source)
+            .collect();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].content, "```\ninner code\n```");
+        let head = &r.blocks[0];
+        assert!(!head.content.contains("inner code"));
+        assert!(head.content.contains("tail para"));
+    }
+
+    #[test]
+    fn fence_language_strips_marker_exactly_once() {
+        let r = parse("# H ^aa\n\n````rust\ncode\n````\n");
+        let src = r
+            .blocks
+            .iter()
+            .find(|b| b.content_type == ContentType::Source)
+            .unwrap();
+        assert_eq!(
+            src.source_language,
+            Some("rust".parse::<SourceLanguage>().unwrap())
+        );
     }
 
     #[test]

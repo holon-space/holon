@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::sql_parser::{extract_table_refs, parse_sql};
 use crate::turso::priority;
@@ -99,10 +99,13 @@ pub struct WatchResult {
 
 /// Command sent to the CDC demultiplexer task.
 enum DemuxCommand {
-    /// Register a new subscriber for a specific view.
+    /// Register a new subscriber for a specific view. `ack` fires once the
+    /// subscriber is registered, so callers can order registration before
+    /// their initial query.
     Subscribe {
         view_name: String,
         tx: mpsc::Sender<BatchWithMetadata<RowChange>>,
+        ack: oneshot::Sender<()>,
     },
 }
 
@@ -205,9 +208,12 @@ impl MatviewManager {
                     // Process new subscriber registrations (only when channel is open)
                     maybe_cmd = cmd_rx.recv(), if cmd_rx_open => {
                         match maybe_cmd {
-                            Some(DemuxCommand::Subscribe { view_name, tx }) => {
+                            Some(DemuxCommand::Subscribe { view_name, tx, ack }) => {
                                 tracing::info!("[Demux] Registered subscriber for '{}'", view_name);
                                 subscribers.entry(view_name).or_default().push(tx);
+                                // Receiver gone = caller aborted before registration
+                                // completed; nothing to notify.
+                                let _ = ack.send(());
                             }
                             None => {
                                 // MatviewManager dropped — stop accepting new subscribers
@@ -240,11 +246,18 @@ impl MatviewManager {
                                         match tx.try_send(batch.clone()) {
                                             Ok(()) => true,
                                             Err(mpsc::error::TrySendError::Full(_)) => {
-                                                tracing::warn!(
-                                                    "[MatviewManager] CDC subscriber for '{}' is full, dropping batch",
+                                                // A dropped delta would silently corrupt the
+                                                // subscriber's incremental state forever (lost
+                                                // rows / ghost rows). Close the stream instead so
+                                                // the consumer sees the end-of-stream and must
+                                                // resubscribe via watch(), re-querying initial rows.
+                                                tracing::error!(
+                                                    "[MatviewManager] CDC subscriber for '{}' is full; \
+                                                     closing its stream (delivering a partial delta \
+                                                     stream would corrupt incremental consumers)",
                                                     view_name
                                                 );
-                                                true // keep subscriber, just drop this batch
+                                                false
                                             }
                                             Err(mpsc::error::TrySendError::Closed(_)) => false,
                                         }
@@ -502,28 +515,34 @@ impl MatviewManager {
     ///
     /// Registers with the single demultiplexer task instead of spawning a
     /// per-subscription filter task. The demux routes batches by `relation_name`
-    /// and prunes closed subscribers automatically.
-    pub fn subscribe_cdc(&self, view_name: &str) -> RowChangeStream {
+    /// and prunes closed subscribers automatically. Awaits the demux's
+    /// registration ack before returning, so a subsequent query is guaranteed
+    /// to observe registration-before-query ordering.
+    pub async fn subscribe_cdc(&self, view_name: &str) -> Result<RowChangeStream> {
         let (tx, rx) = mpsc::channel(1024);
+        let (ack_tx, ack_rx) = oneshot::channel();
         tracing::info!("[MatviewManager] subscribe_cdc('{}')", view_name);
-        if let Err(e) = self.demux_cmd_tx.try_send(DemuxCommand::Subscribe {
-            view_name: view_name.to_string(),
-            tx,
-        }) {
-            tracing::error!(
-                "[MatviewManager] Failed to register CDC subscriber for '{}': {}",
-                view_name,
-                e
-            );
-        }
-        tokio_stream::wrappers::ReceiverStream::new(rx)
+        self.demux_cmd_tx
+            .send(DemuxCommand::Subscribe {
+                view_name: view_name.to_string(),
+                tx,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("failed to register CDC subscriber for '{view_name}': {e}")
+            })?;
+        ack_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("CDC demux dropped subscription ack for '{view_name}'"))?;
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 
     /// Ensure a materialized view exists, query its initial data, and subscribe to CDC.
     #[tracing::instrument(skip(self, sql))]
     pub async fn watch(&self, sql: &str) -> Result<WatchResult> {
         let view_name = self.ensure_view(sql).await?;
-        let stream = self.subscribe_cdc(&view_name);
+        let stream = self.subscribe_cdc(&view_name).await?;
         let initial_rows = self.query_view(&view_name).await?;
         Ok(WatchResult {
             initial_rows,

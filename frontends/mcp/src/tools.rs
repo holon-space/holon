@@ -553,7 +553,7 @@ impl HolonMcpServer {
             watch_id.clone(),
             crate::server::WatchState {
                 pending_changes,
-                _task_handle: task_handle,
+                task_handle,
             },
         );
 
@@ -606,12 +606,13 @@ impl HolonMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut watches = self.watches.lock().await;
 
-        watches.remove(&params.watch_id).ok_or_else(|| {
+        let state = watches.remove(&params.watch_id).ok_or_else(|| {
             rmcp::ErrorData::invalid_params(
                 "watch_not_found",
                 Some(serde_json::json!({"watch_id": params.watch_id})),
             )
         })?;
+        state.task_handle.abort();
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Watch '{}' stopped successfully",
@@ -1492,16 +1493,19 @@ impl HolonMcpServer {
         // Get the document URI for SQL query
         let doc_uri = self.resolve_doc_uri(&params.doc_id).await?;
 
-        // Query SQL for blocks belonging to this document
-        let sql = format!("SELECT * FROM {BLOCK_READ_TABLE} WHERE parent_id LIKE $doc_uri_prefix");
-        let mut query_params = HashMap::new();
-        query_params.insert(
-            "doc_uri_prefix".to_string(),
-            Value::String(format!("{}%", doc_uri)),
+        // Fetch ALL blocks, then select the doc's full subtree by walking
+        // parent chains in Rust. A `parent_id LIKE '<doc_uri>%'` filter only
+        // finds direct children: nested blocks have another block's UUID as
+        // parent_id and would be falsely reported as only_in_loro.
+        // task_state lives inside the properties JSON, so surface it as a
+        // column for the field comparison below.
+        let sql = format!(
+            "SELECT *, json_extract(properties, '$.task_state') AS task_state \
+             FROM {BLOCK_READ_TABLE}"
         );
-        let sql_rows = self
+        let all_rows = self
             .engine()
-            .execute_query(sql.to_string(), query_params, None)
+            .execute_query(sql.to_string(), HashMap::new(), None)
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
@@ -1510,11 +1514,38 @@ impl HolonMcpServer {
                 )
             })?;
 
-        // Build SQL block map by ID
-        let mut sql_map: HashMap<String, &holon_api::StorageEntity> = HashMap::new();
-        for row in &sql_rows {
+        let mut rows_by_id: HashMap<String, &holon_api::StorageEntity> = HashMap::new();
+        for row in &all_rows {
             if let Some(Value::String(id)) = row.get("id") {
-                sql_map.insert(id.clone(), row);
+                rows_by_id.insert(id.clone(), row);
+            }
+        }
+
+        let parent_of = |id: &str| -> Option<String> {
+            match rows_by_id.get(id)?.get("parent_id") {
+                Some(Value::String(p)) => Some(p.clone()),
+                _ => None,
+            }
+        };
+
+        // Build SQL block map: every block whose parent chain reaches the doc.
+        // The starts_with covers legacy hierarchical ids (old `LIKE '<doc_uri>%'`).
+        let mut sql_map: HashMap<String, &holon_api::StorageEntity> = HashMap::new();
+        for (id, row) in &rows_by_id {
+            let mut current = id.clone();
+            let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while let Some(parent) = parent_of(&current) {
+                if parent.starts_with(&doc_uri) {
+                    sql_map.insert(id.clone(), *row);
+                    break;
+                }
+                if !visited.insert(parent.clone()) {
+                    return Err(rmcp::ErrorData::internal_error(
+                        format!("parent_id cycle detected at block '{}'", parent),
+                        Some(serde_json::json!({"block_id": id})),
+                    ));
+                }
+                current = parent;
             }
         }
 
@@ -1529,23 +1560,23 @@ impl HolonMcpServer {
                 // Compare key fields
                 for field in &["content", "parent_id", "content_type", "task_state"] {
                     let loro_val = match *field {
-                        "content" => loro_block.content.clone(),
-                        "parent_id" => loro_block.parent_id.to_string(),
-                        "content_type" => loro_block.content_type.to_string(),
-                        _ => continue,
+                        "content" => Some(loro_block.content.clone()),
+                        "parent_id" => Some(loro_block.parent_id.to_string()),
+                        "content_type" => Some(loro_block.content_type.to_string()),
+                        "task_state" => loro_block.get_property_str("task_state"),
+                        _ => unreachable!("field '{}' listed but not extracted", field),
                     };
-                    if let Some(sql_val) = sql_row.get(*field) {
-                        let sql_str = match sql_val {
-                            Value::String(s) => s.clone(),
-                            other => format!("{:?}", other),
-                        };
-                        if loro_val != sql_str {
-                            diffs.push(serde_json::json!({
-                                "field": field,
-                                "loro": loro_val,
-                                "sql": sql_str,
-                            }));
-                        }
+                    let sql_val = match sql_row.get(*field) {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(s)) => Some(s.clone()),
+                        Some(other) => Some(format!("{:?}", other)),
+                    };
+                    if loro_val != sql_val {
+                        diffs.push(serde_json::json!({
+                            "field": field,
+                            "loro": loro_val,
+                            "sql": sql_val,
+                        }));
                     }
                 }
                 if !diffs.is_empty() {
@@ -1577,7 +1608,7 @@ impl HolonMcpServer {
         let result = serde_json::json!({
             "doc_id": params.doc_id,
             "loro_block_count": loro_blocks.len(),
-            "sql_block_count": sql_rows.len(),
+            "sql_block_count": sql_map.len(),
             "only_in_loro": only_in_loro,
             "only_in_sql": only_in_sql,
             "field_mismatches": mismatches,

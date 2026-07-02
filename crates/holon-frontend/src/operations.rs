@@ -22,6 +22,7 @@ pub fn dispatch_operation(
             .execute_operation(&entity_name, &op_name, params)
             .await
         {
+            session.error_tracker().record_error();
             tracing::error!("Operation {entity_name}.{op_name} failed: {e}");
         }
     });

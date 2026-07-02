@@ -113,8 +113,20 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             };
             push_with_inner_marks(state, &inner, vec![], mark);
         }
+        MarkKindHint::Verbatim | MarkKindHint::Code => {
+            // Org verbatim/code objects are literal: they cannot contain other
+            // objects, so the inner text is emitted verbatim with no recursion
+            // (otherwise `=a *b* c=` would strip the user's literal asterisks).
+            let inner = strip_prefix_suffix(&raw, 1, 1);
+            let mark = match kind_hint {
+                MarkKindHint::Verbatim => InlineMark::Verbatim,
+                MarkKindHint::Code => InlineMark::Code,
+                _ => unreachable!(),
+            };
+            push_with_inner_marks(state, &inner, vec![], mark);
+        }
         _ => {
-            // BOLD/ITALIC/UNDERLINE/VERBATIM/CODE/STRIKE: 1-char delimiter each side.
+            // BOLD/ITALIC/UNDERLINE/STRIKE: 1-char delimiter each side.
             let inner = strip_prefix_suffix(&raw, 1, 1);
             // Recurse into the inner string for nested marks. orgize re-parses
             // the substring fresh; nested mark offsets are scalar offsets
@@ -127,8 +139,6 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
                 MarkKindHint::Bold => InlineMark::Bold,
                 MarkKindHint::Italic => InlineMark::Italic,
                 MarkKindHint::Underline => InlineMark::Underline,
-                MarkKindHint::Verbatim => InlineMark::Verbatim,
-                MarkKindHint::Code => InlineMark::Code,
                 MarkKindHint::Strike => InlineMark::Strike,
                 _ => unreachable!(),
             };

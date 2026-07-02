@@ -124,7 +124,7 @@ impl MarkdownDialect {
 ///
 /// Markers are the text between the brackets (`" "`, `"x"`, `"/"`); lookup is
 /// ASCII-case-insensitive so `[X]` and `[x]` resolve to the same row. The
-/// first row also serves as the fallback marker when a block carries a task
+/// first row also serves as the default marker when a block carries a task
 /// keyword that is not in the table (e.g. an org keyword), so round-trips
 /// never silently drop the task itself.
 #[derive(Debug, Clone, PartialEq, Eq)]

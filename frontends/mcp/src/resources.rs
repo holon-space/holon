@@ -4,13 +4,24 @@ use rmcp::model::*;
 use rmcp::{service::RequestContext, ErrorData as McpError, RoleServer};
 
 impl HolonMcpServer {
+    fn resources_engine(
+        &self,
+    ) -> Result<&std::sync::Arc<holon::api::backend_engine::BackendEngine>, McpError> {
+        self.engine.as_ref().ok_or_else(|| {
+            McpError::internal_error(
+                "resources require a backend engine (not available in this mode)",
+                None,
+            )
+        })
+    }
+
     pub async fn list_resources_impl(
         &self,
         _: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         // Get all available entity names from operations
-        let dispatcher = self.engine().get_dispatcher();
+        let dispatcher = self.resources_engine()?.get_dispatcher();
         let all_ops = OperationProvider::operations(&*dispatcher);
         let mut entity_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -49,7 +60,7 @@ impl HolonMcpServer {
     ) -> Result<ReadResourceResult, McpError> {
         if uri == "holon://operations" {
             // List all operations grouped by entity
-            let dispatcher = self.engine().get_dispatcher();
+            let dispatcher = self.resources_engine()?.get_dispatcher();
             let all_ops = OperationProvider::operations(&*dispatcher);
 
             let mut ops_by_entity: std::collections::HashMap<
@@ -99,7 +110,7 @@ impl HolonMcpServer {
             })
         } else if uri.starts_with("holon://operations/") {
             let entity = uri.strip_prefix("holon://operations/").unwrap();
-            let ops = self.engine().available_operations(entity).await;
+            let ops = self.resources_engine()?.available_operations(entity).await;
 
             // Serialize ops to JSON
             let json_ops: Vec<serde_json::Value> = ops

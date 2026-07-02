@@ -153,7 +153,7 @@ fn strip_rhai_prefix(s: &str) -> String {
 /// are extracted as a `Predicate`; the rest stays as a data-only Rhai string.
 ///
 /// Returns `(data_condition, ui_condition)`.
-fn split_condition(source: &str) -> (Option<String>, Predicate) {
+fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
     let conjuncts: Vec<&str> = source.split("&&").map(|s| s.trim()).collect();
 
     let mut data_parts = Vec::new();
@@ -167,7 +167,7 @@ fn split_condition(source: &str) -> (Option<String>, Predicate) {
             && !has_non_ui_references(conjunct);
 
         if refs_only_ui {
-            ui_predicates.push(parse_conjunct_to_predicate(conjunct));
+            ui_predicates.push(parse_conjunct_to_predicate(conjunct)?);
         } else {
             data_parts.push(*conjunct);
         }
@@ -185,7 +185,7 @@ fn split_condition(source: &str) -> (Option<String>, Predicate) {
         _ => Predicate::And(ui_predicates),
     };
 
-    (data_condition, ui_condition)
+    Ok((data_condition, ui_condition))
 }
 
 /// Check if a conjunct references any variables that are NOT UI state variables.
@@ -233,59 +233,88 @@ fn has_non_ui_references(conjunct: &str) -> bool {
 
 /// Parse a simple conjunct into a Predicate.
 ///
-/// Handles patterns like:
+/// Supported grammar (anything else is rejected — a silently-false predicate
+/// would make the variant never activate with no diagnostic):
 /// - `is_focused` → `Var("is_focused")`
-/// - `view_mode == "table"` → `Eq { field: "view_mode", value: "table" }`
 /// - `!is_focused` → `Not(Var("is_focused"))`
-fn parse_conjunct_to_predicate(conjunct: &str) -> Predicate {
+/// - `view_mode == "table"` → `Eq { field: "view_mode", value: "table" }`
+///   (also `!=`, `<`, `<=`, `>`, `>=` against a literal)
+fn parse_conjunct_to_predicate(conjunct: &str) -> Result<Predicate> {
     let s = conjunct.trim();
 
-    // Equality: `field == "value"`
-    if let Some(idx) = s.find("==") {
-        let field = s[..idx].trim().to_string();
-        let value_str = s[idx + 2..].trim();
-        let value = parse_literal_value(value_str);
-        return Predicate::Eq { field, value };
+    let is_ident = |s: &str| {
+        let mut chars = s.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+
+    if let Some((op, idx)) = find_comparison_operator(s) {
+        let field = s[..idx].trim();
+        anyhow::ensure!(
+            is_ident(field),
+            "unsupported UI condition `{s}`: left side of `{op}` must be a plain variable"
+        );
+        let field = field.to_string();
+        let value = parse_literal_value(s[idx + op.len()..].trim());
+        return Ok(match op {
+            "==" => Predicate::Eq { field, value },
+            "!=" => Predicate::Ne { field, value },
+            "<=" => Predicate::Lte { field, value },
+            ">=" => Predicate::Gte { field, value },
+            "<" => Predicate::Lt { field, value },
+            ">" => Predicate::Gt { field, value },
+            _ => unreachable!("find_comparison_operator returned unknown operator {op}"),
+        });
     }
 
-    // Inequality: `field != "value"`
-    if let Some(idx) = s.find("!=") {
-        let field = s[..idx].trim().to_string();
-        let value_str = s[idx + 2..].trim();
-        let value = parse_literal_value(value_str);
-        return Predicate::Ne { field, value };
-    }
-
-    // Numeric comparisons. Order matters: `<=` and `>=` must be checked
-    // before `<` and `>` so the longer operator wins.
-    if let Some(idx) = s.find("<=") {
-        let field = s[..idx].trim().to_string();
-        let value = parse_literal_value(s[idx + 2..].trim());
-        return Predicate::Lte { field, value };
-    }
-    if let Some(idx) = s.find(">=") {
-        let field = s[..idx].trim().to_string();
-        let value = parse_literal_value(s[idx + 2..].trim());
-        return Predicate::Gte { field, value };
-    }
-    if let Some(idx) = s.find('<') {
-        let field = s[..idx].trim().to_string();
-        let value = parse_literal_value(s[idx + 1..].trim());
-        return Predicate::Lt { field, value };
-    }
-    if let Some(idx) = s.find('>') {
-        let field = s[..idx].trim().to_string();
-        let value = parse_literal_value(s[idx + 1..].trim());
-        return Predicate::Gt { field, value };
-    }
-
-    // Negation: `!var`
     if let Some(rest) = s.strip_prefix('!') {
-        return Predicate::Not(Box::new(Predicate::Var(rest.trim().to_string())));
+        let var = rest.trim();
+        anyhow::ensure!(
+            is_ident(var),
+            "unsupported UI condition `{s}`: `!` must be followed by a plain variable"
+        );
+        return Ok(Predicate::Not(Box::new(Predicate::Var(var.to_string()))));
     }
 
-    // Simple variable truthiness
-    Predicate::Var(s.to_string())
+    if is_ident(s) {
+        return Ok(Predicate::Var(s.to_string()));
+    }
+
+    anyhow::bail!(
+        "unsupported UI condition `{s}`: expected `var`, `!var`, or `var <op> literal` \
+         (rewrite `a || b` as separate variants)"
+    )
+}
+
+/// Find the first comparison operator outside string literals.
+/// Returns the operator token and its byte index. Two-char operators win
+/// over their one-char prefixes at the same position.
+fn find_comparison_operator(s: &str) -> Option<(&'static str, usize)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        for op in ["==", "!=", "<=", ">=", "<", ">"] {
+            if s[i..].starts_with(op) {
+                return Some((op, i));
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Parse a literal value from a Rhai expression fragment.
@@ -320,7 +349,8 @@ pub fn profile_variants_to_stored(
         let (condition_src, data_condition, ui_condition) = if let Some(ref compiled) = pv.condition
         {
             let src = compiled.source.clone();
-            let (dc, uc) = split_condition(&src);
+            let (dc, uc) = split_condition(&src)
+                .with_context(|| format!("in condition of variant '{}'", pv.name))?;
             (src, dc, uc)
         } else {
             (String::new(), None, Predicate::Always)
@@ -931,7 +961,7 @@ mod tests {
     #[test]
     fn split_condition_extracts_numeric_ui_lt() {
         // Pure UI-side conjunct.
-        let (data, ui) = split_condition("available_width_px < 600");
+        let (data, ui) = split_condition("available_width_px < 600").unwrap();
         assert!(data.is_none());
         assert_eq!(
             ui,
@@ -944,7 +974,7 @@ mod tests {
 
     #[test]
     fn split_condition_extracts_numeric_ui_gte_lte() {
-        let (data, ui) = split_condition("available_height_px >= 800");
+        let (data, ui) = split_condition("available_height_px >= 800").unwrap();
         assert!(data.is_none());
         assert_eq!(
             ui,
@@ -954,7 +984,7 @@ mod tests {
             }
         );
 
-        let (data, ui) = split_condition("scale_factor <= 1.5");
+        let (data, ui) = split_condition("scale_factor <= 1.5").unwrap();
         assert!(data.is_none());
         assert_eq!(
             ui,
@@ -968,7 +998,8 @@ mod tests {
     #[test]
     fn split_condition_mixes_data_and_ui_comparison() {
         // Data-side Eq on a non-UI variable + UI-side Lt → split.
-        let (data, ui) = split_condition("task_state == \"done\" && available_width_px < 480");
+        let (data, ui) =
+            split_condition("task_state == \"done\" && available_width_px < 480").unwrap();
         assert_eq!(data.as_deref(), Some("task_state == \"done\""));
         assert_eq!(
             ui,
@@ -982,7 +1013,7 @@ mod tests {
     #[test]
     fn split_condition_combines_ui_var_and_ui_comparison() {
         // Two UI conjuncts → And(Var, Lt).
-        let (data, ui) = split_condition("is_focused && available_width_px < 600");
+        let (data, ui) = split_condition("is_focused && available_width_px < 600").unwrap();
         assert!(data.is_none());
         assert_eq!(
             ui,
@@ -998,7 +1029,7 @@ mod tests {
 
     #[test]
     fn split_condition_extracts_is_expanded_as_ui_predicate() {
-        let (data, ui) = split_condition("is_expanded");
+        let (data, ui) = split_condition("is_expanded").unwrap();
         assert!(data.is_none());
         assert_eq!(ui, Predicate::Var("is_expanded".into()));
     }
@@ -1285,28 +1316,28 @@ variants:
 
     #[test]
     fn test_split_condition_pure_ui() {
-        let (data, ui) = split_condition("is_focused");
+        let (data, ui) = split_condition("is_focused").unwrap();
         assert!(data.is_none());
         assert_eq!(ui, Predicate::Var("is_focused".into()));
     }
 
     #[test]
     fn test_split_condition_pure_data() {
-        let (data, ui) = split_condition("is_task");
+        let (data, ui) = split_condition("is_task").unwrap();
         assert_eq!(data.as_deref(), Some("is_task"));
         assert_eq!(ui, Predicate::Always);
     }
 
     #[test]
     fn test_split_condition_mixed() {
-        let (data, ui) = split_condition("is_source && is_focused");
+        let (data, ui) = split_condition("is_source && is_focused").unwrap();
         assert_eq!(data.as_deref(), Some("is_source"));
         assert_eq!(ui, Predicate::Var("is_focused".into()));
     }
 
     #[test]
     fn test_split_condition_ui_eq() {
-        let (data, ui) = split_condition(r#"is_source && view_mode == "table""#);
+        let (data, ui) = split_condition(r#"is_source && view_mode == "table""#).unwrap();
         assert_eq!(data.as_deref(), Some("is_source"));
         assert_eq!(
             ui,
@@ -1319,7 +1350,7 @@ variants:
 
     #[test]
     fn test_split_condition_all_data() {
-        let (data, ui) = split_condition("task_state != () && priority > 0");
+        let (data, ui) = split_condition("task_state != () && priority > 0").unwrap();
         assert_eq!(data.as_deref(), Some("task_state != () && priority > 0"));
         assert_eq!(ui, Predicate::Always);
     }

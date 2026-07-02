@@ -18,6 +18,23 @@ pub use holon_frontend::view_model::ViewModel;
 
 pub use super::DioxusRenderContext;
 
+/// Stable diff keys for a children list: LiveBlock children are keyed by
+/// their block id so reorders/deletes move each cell's scope (and its
+/// engineWatchView subscription) with the block instead of rebinding a
+/// position-reused scope to a different block; other children fall back to
+/// their index. Prefixes keep the two key classes disjoint.
+pub(crate) fn keyed_children(items: &[ViewModel]) -> impl Iterator<Item = (String, &ViewModel)> {
+    items.iter().enumerate().map(|(i, child)| {
+        let key = match &child.kind {
+            holon_frontend::view_model::ViewKind::LiveBlock { block_id, .. } => {
+                format!("id:{block_id}")
+            }
+            _ => format!("i:{i}"),
+        };
+        (key, child)
+    })
+}
+
 // ── Macro-generated dispatch ──────────────────────────────────────────────
 //
 // `render_node(node, ctx) -> Element` is produced by walking the directory

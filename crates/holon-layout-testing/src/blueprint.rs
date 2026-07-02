@@ -1,5 +1,5 @@
-//! `Shape`, `Blueprint`, and `BlockHandle` — the building blocks for
-//! generating proptest `Scenario` values.
+//! `Shape`, `Blueprint`, and `BlockHandle` — thunk-based handle types for
+//! describing `ReactiveViewModel` trees.
 
 use std::fmt;
 use std::sync::Arc;

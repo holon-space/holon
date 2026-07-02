@@ -21,41 +21,164 @@ where
     wasm_bindgen_futures::spawn_local(future);
 }
 
-/// Strip ORDER BY, LIMIT, and OFFSET clauses from SQL so it can become a
-/// Turso materialized-view body (IVM only supports Filter/Projection/Join/
-/// Aggregate/Union/EmptyRelation/Values).
+/// Strip trailing top-level ORDER BY, LIMIT, and OFFSET clauses from SQL so
+/// it can become a Turso materialized-view body (IVM only supports
+/// Filter/Projection/Join/Aggregate/Union/EmptyRelation/Values).
 ///
-/// Word-boundary matching avoids false positives on identifiers like
-/// `cursor_offset` that contain a keyword as a substring.
+/// Quote- and paren-depth-aware: keywords inside string literals, quoted
+/// identifiers, or subqueries are left untouched. Word-boundary matching
+/// avoids false positives on identifiers like `cursor_offset` that contain
+/// a keyword as a substring.
 pub fn strip_order_by(sql: &str) -> String {
-    let upper = sql.to_uppercase();
-    let keywords = ["ORDER BY", "LIMIT", "OFFSET"];
-    let earliest = keywords
-        .iter()
-        .filter_map(|kw| find_keyword(&upper, kw))
-        .min();
-    match earliest {
+    match find_top_level_trailing_clause(sql) {
         Some(idx) => sql[..idx].trim().to_string(),
         None => sql.to_string(),
     }
 }
 
-/// Find a SQL keyword at a word boundary in the already-uppercased string.
-fn find_keyword(upper: &str, keyword: &str) -> Option<usize> {
-    let mut search_start = 0;
-    while let Some(rel) = upper[search_start..].find(keyword) {
-        let idx = search_start + rel;
-        let before_ok = idx == 0
-            || upper.as_bytes()[idx - 1].is_ascii_whitespace()
-            || upper.as_bytes()[idx - 1] == b')';
-        let after = idx + keyword.len();
-        let after_ok = after >= upper.len()
-            || upper.as_bytes()[after].is_ascii_whitespace()
-            || upper.as_bytes()[after].is_ascii_digit();
-        if before_ok && after_ok {
-            return Some(idx);
+/// Byte index of the earliest top-level (depth 0, outside quotes) occurrence
+/// of ORDER BY / LIMIT / OFFSET as a standalone keyword, if any.
+fn find_top_level_trailing_clause(sql: &str) -> Option<usize> {
+    const KEYWORDS: [&str; 3] = ["ORDER BY", "LIMIT", "OFFSET"];
+    let bytes = sql.as_bytes();
+    let mut depth: i64 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        // '' inside a '-string is an escaped quote, not a close
+                        if quote == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 => {
+                if KEYWORDS.iter().any(|kw| keyword_at(bytes, i, kw)) {
+                    return Some(i);
+                }
+            }
+            _ => {}
         }
-        search_start = idx + keyword.len();
+        i += 1;
     }
     None
+}
+
+fn keyword_at(bytes: &[u8], idx: usize, keyword: &str) -> bool {
+    let kw = keyword.as_bytes();
+    let after = idx + kw.len();
+    if after > bytes.len() || !bytes[idx..after].eq_ignore_ascii_case(kw) {
+        return false;
+    }
+    let before_ok = idx == 0 || bytes[idx - 1].is_ascii_whitespace() || bytes[idx - 1] == b')';
+    let after_ok =
+        after >= bytes.len() || bytes[after].is_ascii_whitespace() || bytes[after].is_ascii_digit();
+    before_ok && after_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_order_by;
+
+    #[test]
+    fn strip_order_by_removes_clause() {
+        assert_eq!(
+            strip_order_by("SELECT * FROM t ORDER BY name ASC"),
+            "SELECT * FROM t"
+        );
+    }
+
+    #[test]
+    fn strip_order_by_also_strips_limit() {
+        assert_eq!(
+            strip_order_by("SELECT * FROM t ORDER BY name ASC LIMIT 10"),
+            "SELECT * FROM t"
+        );
+    }
+
+    #[test]
+    fn strip_limit_without_order_by() {
+        assert_eq!(
+            strip_order_by("SELECT * FROM t WHERE x = 1 LIMIT 10"),
+            "SELECT * FROM t WHERE x = 1"
+        );
+    }
+
+    #[test]
+    fn strip_limit_and_offset() {
+        assert_eq!(
+            strip_order_by("SELECT * FROM t LIMIT 10 OFFSET 5"),
+            "SELECT * FROM t"
+        );
+    }
+
+    #[test]
+    fn strip_order_by_no_clause() {
+        let sql = "SELECT * FROM t WHERE x = 1";
+        assert_eq!(strip_order_by(sql), sql);
+    }
+
+    #[test]
+    fn strip_order_by_case_insensitive() {
+        assert_eq!(
+            strip_order_by("SELECT * FROM t order by name"),
+            "SELECT * FROM t"
+        );
+    }
+
+    #[test]
+    fn offset_in_column_name_not_stripped() {
+        let sql = "SELECT block_id, cursor_offset FROM current_editor_focus WHERE region = 'main'";
+        assert_eq!(strip_order_by(sql), sql);
+    }
+
+    #[test]
+    fn real_offset_clause_still_stripped() {
+        assert_eq!(
+            strip_order_by("SELECT block_id, cursor_offset FROM t LIMIT 10 OFFSET 5"),
+            "SELECT block_id, cursor_offset FROM t"
+        );
+    }
+
+    #[test]
+    fn keyword_inside_string_literal_not_stripped() {
+        let sql = "SELECT * FROM t WHERE note = 'a LIMIT 5'";
+        assert_eq!(strip_order_by(sql), sql);
+    }
+
+    #[test]
+    fn keyword_inside_escaped_string_literal_not_stripped() {
+        let sql = "SELECT * FROM t WHERE note = 'it''s ORDER BY x'";
+        assert_eq!(strip_order_by(sql), sql);
+    }
+
+    #[test]
+    fn keyword_inside_subquery_not_stripped() {
+        let sql = "SELECT * FROM (SELECT * FROM t ORDER BY x LIMIT 5) sub";
+        assert_eq!(strip_order_by(sql), sql);
+    }
+
+    #[test]
+    fn trailing_clause_after_subquery_stripped() {
+        assert_eq!(
+            strip_order_by("SELECT * FROM (SELECT * FROM t LIMIT 5) sub ORDER BY x"),
+            "SELECT * FROM (SELECT * FROM t LIMIT 5) sub"
+        );
+    }
+
+    #[test]
+    fn keyword_inside_quoted_identifier_not_stripped() {
+        let sql = "SELECT \"weird LIMIT col\" FROM t";
+        assert_eq!(strip_order_by(sql), sql);
+    }
 }

@@ -1,6 +1,18 @@
 //! Shared display helpers for builder files.
 
 use holon_api::Value;
+use holon_frontend::view_model::{ViewKind, ViewModel};
+
+/// Stable diff key for a collection child. Live blocks are keyed by their
+/// block id so sibling insertions/reorders move the component scope (with
+/// its watch subscription and `EntityContext`) along with the block instead
+/// of leaving a positional scope holding another block's state.
+pub(crate) fn child_key(i: usize, child: &ViewModel) -> String {
+    match &child.kind {
+        ViewKind::LiveBlock { block_id, .. } => format!("lb-{block_id}"),
+        _ => format!("idx-{i}"),
+    }
+}
 
 /// Format a `holon_api::Value` as a human-readable string.
 pub(crate) fn value_to_display(v: &Value) -> String {

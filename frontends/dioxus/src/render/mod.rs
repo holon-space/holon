@@ -17,7 +17,9 @@ pub use builders::RenderNode;
 /// Dioxus context carrying the entity URI (block id) that should own
 /// any `editable_text` rendered inside the current subtree.
 ///
-/// Provided by `LiveBlockNode`; consumed by `EditableTextNode`. When an
+/// Provided by `LiveBlockNode` as a `Signal<EntityContext>` (so a reused
+/// scope that receives a new `block_id` prop propagates the new id to
+/// existing consumers); consumed by `EditableTextNode`. When an
 /// `editable_text` appears outside any `live_block`, consumers fall back to
 /// an empty id and log a warning — writes to an empty id are rejected at
 /// the worker boundary.

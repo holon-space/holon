@@ -1619,6 +1619,9 @@ impl TursoBackend {
                 {
                     let provides = extract_created_tables(&stmts);
                     Self::mark_resources_available(available_resources, &provides);
+                    if !provides.is_empty() {
+                        Self::process_pending_ddl(conn, pending_ddl, available_resources).await;
+                    }
                 }
                 let _ = response.send(result);
             }
@@ -2002,7 +2005,12 @@ impl TursoBackend {
 
         // Check if we can execute immediately
         if Self::can_execute_ddl(available_resources, &op) {
+            let had_provides = !op.provides.is_empty();
             Self::execute_pending_ddl(conn, available_resources, op).await;
+            // Resources this DDL provided may unblock already-queued ops.
+            if had_provides {
+                Self::process_pending_ddl(conn, pending_ddl, available_resources).await;
+            }
         } else {
             tracing::debug!(
                 "[TursoBackend::Actor] DDL op {} queued, waiting for: {:?}",

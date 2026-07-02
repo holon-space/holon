@@ -22,6 +22,7 @@ members = [
     "crates/holon-petri",
     "crates/holon-profiles",
     "crates/holon-loro",
+    "crates/holon-architecture-tests",
     "frontends/tui",
     "frontends/mcp",
     "frontends/gpui",
@@ -36,8 +37,6 @@ exclude = [
     # Fix landed in codespan-reporting 0.13; waiting for wgpu/naga backport:
     # https://github.com/gfx-rs/wgpu/issues/8366
     "frontends/waterui",
-    # ast-grep depends on tree-sitter 0.26, gpui-component on 0.25 — link conflict
-    "crates/holon-architecture-tests",
     # holon-worker is an out-of-workspace crate targeting wasm32-wasip1-threads
     # via `napi build`. It has its own Cargo.lock and its own [workspace] table.
     # See plan: ~/.claude/plans/nifty-bouncing-ladybug.md (Phase 1, H3).

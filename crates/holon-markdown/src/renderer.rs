@@ -81,8 +81,15 @@ impl MarkdownRenderer {
             out.push_str(&fm.render());
         }
 
-        if !doc.content.is_empty() {
-            out.push_str(doc.content.trim_end_matches('\n'));
+        // The parser stores the synthetic title line (file stem) as the first
+        // content line; only the preamble after it belongs in the file, or a
+        // re-render would prepend another title line each cycle.
+        let preamble = match doc.content.split_once('\n') {
+            Some((_title, rest)) => rest,
+            None => "",
+        };
+        if !preamble.is_empty() {
+            out.push_str(preamble.trim_end_matches('\n'));
             out.push('\n');
             // A blank line between preamble and first heading keeps
             // CommonMark parsers happy.
@@ -188,7 +195,10 @@ fn render_heading(
     out.push('\n');
 
     if let Some(body) = body {
-        let body = body.trim_end_matches('\n');
+        // The parser keeps the body's leading blank line in block.content;
+        // trim it here so the single separator newline below doesn't accrete
+        // one more blank line per parse→render cycle.
+        let body = body.trim_start_matches('\n').trim_end_matches('\n');
         if !body.is_empty() {
             out.push('\n');
             out.push_str(body);

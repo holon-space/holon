@@ -162,15 +162,18 @@ impl OutlineTree {
         let mut roots: Vec<usize> = Vec::new();
         let mut children_of: HashMap<String, Vec<usize>> = HashMap::new();
 
+        let ids: std::collections::HashSet<&str> = sorted_rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()))
+            .collect();
+
         for (i, row) in sorted_rows.iter().enumerate() {
             let pid = row
                 .get(parent_id_col)
                 .and_then(|v| v.as_string())
                 .unwrap_or("");
 
-            let parent_exists = sorted_rows
-                .iter()
-                .any(|r| r.get("id").and_then(|v| v.as_string()) == Some(pid));
+            let parent_exists = ids.contains(pid);
 
             if !parent_exists {
                 roots.push(i);

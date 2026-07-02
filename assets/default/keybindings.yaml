@@ -1,25 +1,13 @@
+# Only leader chords (Space + key, navigation mode) are configurable
+# here. Direct keys (Up/Down focus walk, Tab region switch, Enter edit)
+# and all editing-mode keys (Esc/Enter exit, Ctrl+x split, Backspace-at-0
+# join) are hardcoded in frontends/tui/src/app_main.rs and are NOT
+# consulted from this table.
 bindings:
   # ── Navigation mode ──────────────────────────────────────────────
   #
   # Space acts as a leader key — press Space, then the second key.
   # The status bar shows available sub-commands while leader is active.
-
-  # Direct (no leader needed)
-  - key: "Up"
-    context: "navigation"
-    action: "move_up"
-
-  - key: "Down"
-    context: "navigation"
-    action: "move_down"
-
-  - key: "Enter"
-    context: "navigation"
-    action: "start_editing"
-
-  - key: "Tab"
-    context: "navigation"
-    action: "switch_region"
 
   # Leader chords (Space + key)
   - key: "Up"
@@ -68,24 +56,3 @@ bindings:
     modifiers: ["leader"]
     context: "navigation"
     action: "go_forward"
-
-  # ── Editing mode ─────────────────────────────────────────────────
-  #
-  # Space does NOT act as leader during editing — keystrokes go to text.
-
-  - key: "Esc"
-    context: "editing"
-    action: "exit_editing"
-
-  - key: "Enter"
-    context: "editing"
-    action: "exit_editing"
-
-  - key: "x"
-    modifiers: ["ctrl"]
-    context: "editing"
-    action: "split_block"
-
-  - key: "Backspace"
-    context: "editing"
-    action: "join_block"              # when cursor at position 0

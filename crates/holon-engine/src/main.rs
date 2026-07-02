@@ -47,14 +47,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Command::Enabled => {
             let (net, marking, _) = load_all(&cli.dir)?;
-            let enabled = engine.enabled(&net, &marking);
-            let ranked = engine.rank(&net, &marking, &enabled);
+            let enabled = engine.enabled(&net, &marking)?;
+            let ranked = engine.rank(&net, &marking, &enabled)?;
             display::print_ranked(&ranked);
         }
 
         Command::Step { transition } => {
             let (net, mut marking, mut history) = load_all(&cli.dir)?;
-            let enabled = engine.enabled(&net, &marking);
+            let enabled = engine.enabled(&net, &marking)?;
 
             let binding = if let Some(ref tid) = transition {
                 enabled
@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .find(|b| b.transition_id == *tid)
                     .ok_or_else(|| format!("transition '{tid}' is not enabled"))?
             } else {
-                let ranked = engine.rank(&net, &marking, &enabled);
+                let ranked = engine.rank(&net, &marking, &enabled)?;
                 assert!(!ranked.is_empty(), "no transitions enabled");
                 ranked.into_iter().next().unwrap().binding
             };
@@ -83,16 +83,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Simulate { n } => {
             let (net, mut marking, mut history) = load_all(&cli.dir)?;
             for _ in 0..n {
-                let enabled = engine.enabled(&net, &marking);
+                let enabled = engine.enabled(&net, &marking)?;
                 if enabled.is_empty() {
                     println!("No more transitions enabled.");
                     break;
                 }
-                let ranked = engine.rank(&net, &marking, &enabled);
-                if ranked.is_empty() {
-                    break;
-                }
-                let binding = ranked.into_iter().next().unwrap().binding;
+                let ranked = engine.rank(&net, &marking, &enabled)?;
+                let binding = ranked
+                    .into_iter()
+                    .next()
+                    .expect("rank preserves all enabled transitions")
+                    .binding;
                 let step = history.next_step();
                 let event = engine.fire(&net, &mut marking, &binding, step)?;
                 println!("Step {}: {}", event.step, event.transition);
@@ -105,22 +106,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Command::Whatif { transition } => {
             let (net, marking, _) = load_all(&cli.dir)?;
-            let enabled = engine.enabled(&net, &marking);
+            let enabled = engine.enabled(&net, &marking)?;
             let binding = enabled
                 .into_iter()
                 .find(|b| b.transition_id == transition)
                 .ok_or_else(|| format!("transition '{transition}' is not enabled"))?;
 
             let evaluator = holon_engine::guard::RhaiEvaluator::new();
-            let obj_before = objective::evaluate(&evaluator, &net, &marking)
-                .map(|r| r.value)
-                .unwrap_or(0.0);
+            let obj_before = objective::evaluate(&evaluator, &net, &marking)?.value;
 
             let mut sim = marking.clone();
             let event = engine.fire(&net, &mut sim, &binding, 0)?;
-            let obj_after = objective::evaluate(&evaluator, &net, &sim)
-                .map(|r| r.value)
-                .unwrap_or(0.0);
+            let obj_after = objective::evaluate(&evaluator, &net, &sim)?.value;
 
             display::print_whatif(&event, obj_before, obj_after);
         }

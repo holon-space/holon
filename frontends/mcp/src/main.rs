@@ -48,6 +48,7 @@ struct Config {
 fn parse_args() -> Result<Config> {
     let mut args = std::env::args().skip(1);
     let mut db_path = PathBuf::from(":memory:");
+    let mut db_path_set = false;
     let mut transport_mode = TransportMode::Stdio;
     let mut orgmode_root: Option<PathBuf> = None;
     let mut orgmode_loro_dir: Option<PathBuf> = None;
@@ -110,10 +111,18 @@ fn parse_args() -> Result<Config> {
                 std::process::exit(0);
             }
             _ => {
-                // Treat as database path if it doesn't start with --
-                if !arg.starts_with("--") {
-                    db_path = PathBuf::from(arg);
+                if arg.starts_with("--") {
+                    return Err(anyhow::anyhow!("unknown option '{}'", arg));
                 }
+                if db_path_set {
+                    return Err(anyhow::anyhow!(
+                        "database path given twice: '{}' and '{}'",
+                        db_path.display(),
+                        arg
+                    ));
+                }
+                db_path = PathBuf::from(arg);
+                db_path_set = true;
             }
         }
     }

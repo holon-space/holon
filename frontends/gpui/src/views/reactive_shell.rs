@@ -486,8 +486,6 @@ impl ReactiveShell {
     ///
     /// Called from `new_for_block` after construction, and re-run on every
     /// structural rebuild (after `self.collection_subs.clear()`).
-    /// Regression-guarded by `streaming_collection_data_arrival` in
-    /// `frontends/gpui/tests/layout_pbt.rs`.
     fn subscribe_inner_collections(&mut self, cx: &mut Context<Self>) {
         let Some(ref tree) = self.current_tree else {
             return;

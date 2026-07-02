@@ -18,8 +18,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
                 "{icon} {header}"
             }
             div { style: "padding-left: 12px;",
-                for (i, child) in children.items.iter().enumerate() {
-                    RenderNode { key: "{i}", node: child.clone() }
+                for (k, child) in children.items.iter().enumerate().map(|(i, c)| (super::util::child_key(i, c), c)) {
+                    RenderNode { key: "{k}", node: child.clone() }
                 }
             }
         }

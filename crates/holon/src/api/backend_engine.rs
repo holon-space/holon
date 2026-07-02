@@ -148,7 +148,7 @@ impl BackendEngine {
             );
         }
         let view_name = self.matview_manager.ensure_view(sql).await?;
-        Ok(self.matview_manager.subscribe_cdc(&view_name))
+        self.matview_manager.subscribe_cdc(&view_name).await
     }
 
     /// Register an entity type at runtime (e.g., from MCP integration).
@@ -452,7 +452,7 @@ impl BackendEngine {
 
         let sql_with_params = Self::inline_parameters(&sql, &params);
         let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
-        Ok(self.matview_manager.subscribe_cdc(&view_name))
+        self.matview_manager.subscribe_cdc(&view_name).await
     }
 
     /// Execute a SQL query, set up CDC streaming, and return initial data + change stream.
@@ -498,7 +498,7 @@ impl BackendEngine {
 
         // Ensure view exists, subscribe to CDC, and query initial data
         let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
-        let cdc_stream = self.matview_manager.subscribe_cdc(&view_name);
+        let cdc_stream = self.matview_manager.subscribe_cdc(&view_name).await?;
 
         let mut data = None;
         for attempt in 0..10 {

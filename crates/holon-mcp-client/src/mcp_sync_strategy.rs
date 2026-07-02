@@ -140,10 +140,8 @@ impl SyncStrategy for ToolSync {
                 anyhow::anyhow!("Response missing '{}' array field", self.extract_path)
             })?;
 
-        let records: Vec<serde_json::Map<String, serde_json::Value>> = records_json
-            .iter()
-            .filter_map(|r| r.as_object().cloned())
-            .collect();
+        let records = json_array_to_records(records_json)
+            .map_err(|e| anyhow::anyhow!("Tool '{}' response: {e}", self.list_tool))?;
 
         let new_cursor = self.cursor.as_ref().and_then(|cc| {
             response
@@ -206,10 +204,8 @@ impl SyncStrategy for ResourceSync {
                 anyhow::anyhow!("Resource '{}' did not return a JSON array", self.uri)
             })?;
 
-            let records: Vec<serde_json::Map<String, serde_json::Value>> = records_array
-                .iter()
-                .filter_map(|r| r.as_object().cloned())
-                .collect();
+            let records = json_array_to_records(records_array)
+                .map_err(|e| anyhow::anyhow!("Resource '{}': {e}", self.uri))?;
 
             info!(records = records.len(), "resource fetched");
 
@@ -225,6 +221,25 @@ impl SyncStrategy for ResourceSync {
     fn subscribe_uri(&self) -> Option<&str> {
         Some(&self.uri)
     }
+}
+
+/// Convert a JSON array of records into object maps, erroring on the first
+/// non-object element. Silently dropping non-object elements would let a
+/// server-side format change surface as "zero records fetched", which the
+/// full-sync diff then interprets as "delete everything cached".
+pub fn json_array_to_records(
+    values: &[serde_json::Value],
+) -> anyhow::Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            v.as_object().cloned().ok_or_else(|| {
+                let preview: String = v.to_string().chars().take(120).collect();
+                anyhow::anyhow!("record array element {i} is not a JSON object: {preview}")
+            })
+        })
+        .collect()
 }
 
 /// Expand a URI template by replacing `{key}` placeholders with values from params.

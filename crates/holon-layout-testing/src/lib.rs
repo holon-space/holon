@@ -21,18 +21,14 @@
 //!   VMS builder (which tags each mode button) and the test harness (which
 //!   uses the id to locate the button in `BoundsRegistry`).
 //! - `UiInteraction`: the shared vocabulary of user-visible UI state changes.
-//! - `Shape`, `Blueprint`, `BlockHandle`, `Scenario`: proptest strategy types
-//!   for generating random `ReactiveViewModel` trees and action sequences.
-//! - `run_scenario`: the closure-driven scenario runner.
+//! - `Shape`, `Blueprint`, `BlockHandle`: thunk-based handle types for
+//!   describing `ReactiveViewModel` trees.
 
 pub mod blueprint;
 pub mod display_assertions;
-pub mod generators;
 pub mod invariants;
 pub mod live_tree;
 pub mod registry;
-pub mod scenario;
-pub mod scene_state;
 pub mod snapshot;
 pub mod sut;
 pub mod transitions;
@@ -46,8 +42,6 @@ pub use invariants::{
     assert_layout_ok, assert_no_sibling_overlap, assert_nonempty,
 };
 pub use registry::{BlockEntry, BlockTreeRegistry, BlockTreeThunk};
-pub use scenario::{run_scenario, Scenario, StepInput};
-pub use scene_state::SceneState;
 pub use snapshot::{BoundsSnapshot, VISIBLE_LEAF_TYPES};
 pub use sut::{Clickable, LayoutRef, LayoutRefState, LayoutSut, LiveBlockSink};
 pub use ui_interaction::UiInteraction;

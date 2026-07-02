@@ -28,14 +28,37 @@ type PendingMap = HashMap<u32, oneshot::Sender<Result<JsValue, String>>>;
 /// with `already borrowed: BorrowMutError`.
 type SnapshotCallback = Rc<RefCell<dyn FnMut(String)>>;
 type SnapshotMap = HashMap<u32, SnapshotCallback>;
+type ReadySlot = Rc<RefCell<Option<oneshot::Sender<Result<(), String>>>>>;
 
 struct BridgeInner {
     worker: Worker,
     next_id: Cell<u32>,
     pending: Rc<RefCell<PendingMap>>,
     snapshot_listeners: Rc<RefCell<SnapshotMap>>,
+    /// Set when the worker posts `{kind:'fatal'}` or fires `onerror`.
+    /// Once set, every `call()` fails fast with this reason instead of
+    /// hanging on a worker that will never reply.
+    dead: Rc<RefCell<Option<String>>>,
     // Kept alive so the callback isn't dropped.
     _onmessage: Closure<dyn Fn(MessageEvent)>,
+}
+
+/// Mark the bridge dead: fail boot if `ready` is still pending and error out
+/// every in-flight RPC so callers see the real worker failure instead of
+/// awaiting forever (or timing out with a generic "no ready" message).
+fn mark_dead(
+    reason: &str,
+    dead: &RefCell<Option<String>>,
+    pending: &RefCell<PendingMap>,
+    ready_slot: &ReadySlot,
+) {
+    *dead.borrow_mut() = Some(reason.to_string());
+    if let Some(tx) = ready_slot.borrow_mut().take() {
+        let _ = tx.send(Err(reason.to_string()));
+    }
+    for (_, tx) in pending.borrow_mut().drain() {
+        let _ = tx.send(Err(reason.to_string()));
+    }
 }
 
 /// Cheap-to-clone handle to the holon-worker Web Worker.
@@ -53,13 +76,15 @@ impl WorkerBridge {
             .map_err(|e| format!("Worker::new failed: {e:?}"))?;
 
         let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
-        let ready_slot: Rc<RefCell<Option<_>>> = Rc::new(RefCell::new(Some(ready_tx)));
+        let ready_slot: ReadySlot = Rc::new(RefCell::new(Some(ready_tx)));
         let ready_clone = ready_slot.clone();
 
         let pending: Rc<RefCell<PendingMap>> = Rc::default();
         let snapshot_listeners: Rc<RefCell<SnapshotMap>> = Rc::default();
+        let dead: Rc<RefCell<Option<String>>> = Rc::default();
         let pending_c = pending.clone();
         let snapshot_c = snapshot_listeners.clone();
+        let dead_c = dead.clone();
 
         let onmessage: Closure<dyn Fn(MessageEvent)> =
             Closure::wrap(Box::new(move |e: MessageEvent| {
@@ -94,6 +119,25 @@ impl WorkerBridge {
                     return;
                 }
 
+                // worker-entry.mjs posts `{kind:'fatal', error}` on unhandled
+                // rejections, top-level errors, and child-thread crashes —
+                // the only channel that carries the real error string
+                // (cross-context `error` events are opaque).
+                if kind.as_deref() == Some("fatal") {
+                    let err = Reflect::get(&data, &"error".into()) // ALLOW(ok): JS reflection — absent property is normal
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_else(|| "worker posted fatal without an error string".into());
+                    tracing::error!("[worker fatal] {err}");
+                    mark_dead(
+                        &format!("worker fatal: {err}"),
+                        &dead_c,
+                        &pending_c,
+                        &ready_clone,
+                    );
+                    return;
+                }
+
                 let id = Reflect::get(&data, &"id".into()) // ALLOW(ok): JS reflection — absent property is normal
                     .ok()
                     .and_then(|v| v.as_f64())
@@ -122,9 +166,12 @@ impl WorkerBridge {
 
         worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
-        // Surface worker errors on the main page console. Without this,
-        // panics inside wasm running in the worker are invisible to the
-        // Dioxus app — the worker just silently stops processing.
+        // Surface worker errors on the main page console AND kill the
+        // bridge: a worker script error means it will never reply, so fail
+        // boot and every in-flight RPC instead of hanging forever.
+        let dead_err = dead.clone();
+        let pending_err = pending.clone();
+        let ready_err = ready_slot.clone();
         let onerror: Closure<dyn Fn(web_sys::Event)> =
             Closure::wrap(Box::new(move |e: web_sys::Event| {
                 // ErrorEvent carries message/filename/lineno; fall back
@@ -134,6 +181,12 @@ impl WorkerBridge {
                     .map(|ee| ee.message())
                     .unwrap_or_else(|| format!("{:?}", e.type_()));
                 tracing::error!("[worker error] {msg}");
+                mark_dead(
+                    &format!("worker error: {msg}"),
+                    &dead_err,
+                    &pending_err,
+                    &ready_err,
+                );
             }));
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
         onerror.forget(); // leak on purpose — lives for the app lifetime
@@ -177,6 +230,7 @@ impl WorkerBridge {
             next_id: Cell::new(1),
             pending,
             snapshot_listeners,
+            dead,
             _onmessage: onmessage,
         })))
     }
@@ -187,6 +241,9 @@ impl WorkerBridge {
         kind: &str,
         args: impl IntoIterator<Item = JsValue>,
     ) -> Result<JsValue, String> {
+        if let Some(reason) = self.0.dead.borrow().clone() {
+            return Err(format!("worker is dead: {reason}"));
+        }
         let id = self.0.next_id.get();
         self.0.next_id.set(id + 1);
 
@@ -220,9 +277,17 @@ impl WorkerBridge {
             .insert(handle, Rc::new(RefCell::new(cb)));
     }
 
+    /// Remove the snapshot callback synchronously (listener only, no RPC).
+    ///
+    /// Used by unmount paths that must guarantee no further callback
+    /// invocation before their captured signals are dropped.
+    pub fn remove_snapshot_listener(&self, handle: u32) {
+        self.0.snapshot_listeners.borrow_mut().remove(&handle);
+    }
+
     /// Remove the snapshot callback and abort the worker subscription.
     pub async fn drop_subscription(&self, handle: u32) -> Result<(), String> {
-        self.0.snapshot_listeners.borrow_mut().remove(&handle);
+        self.remove_snapshot_listener(handle);
         self.call("engineDropSubscription", [JsValue::from_f64(handle as f64)])
             .await?;
         Ok(())

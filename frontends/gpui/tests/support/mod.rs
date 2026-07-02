@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-// Each test binary (layout_smoke / layout_pbt / layout_matrix / ...)
+// Each test binary (layout_smoke / layout_matrix / ...)
 // uses a different subset of these re-exports. Allowing unused-imports here
 // avoids per-binary warning spam.
 #[allow(unused_imports)]

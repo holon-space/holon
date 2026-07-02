@@ -217,6 +217,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_render_reaches_fixed_point() {
+        let adapter = MarkdownFormatAdapter::new();
+        let path = PathBuf::from("/tmp/note.md");
+        let root = PathBuf::from("/tmp");
+        let parent = EntityUri::no_parent();
+        let original = "preamble text\n\n# A ^aa\n\nbody\n";
+
+        let parsed = adapter.parse(&path, original, &parent, &root).unwrap();
+        let once =
+            adapter.render_document(&parsed.document, &parsed.blocks, &path, &parsed.document.id);
+        let reparsed = adapter.parse(&path, &once, &parent, &root).unwrap();
+        let twice = adapter.render_document(
+            &reparsed.document,
+            &reparsed.blocks,
+            &path,
+            &reparsed.document.id,
+        );
+        assert_eq!(once, twice, "render∘parse must be idempotent");
+        assert!(
+            !twice.contains("note\n"),
+            "file stem must not leak into the file"
+        );
+    }
+
+    #[test]
     fn round_trip_preserves_code_fence_as_source_child() {
         let adapter = MarkdownFormatAdapter::new();
         let path = PathBuf::from("/tmp/note.md");

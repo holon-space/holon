@@ -38,14 +38,18 @@ impl Engine {
     }
 
     /// Find all enabled transitions with their bindings.
-    pub fn enabled<N: NetDef, M: Marking>(&self, net: &N, marking: &M) -> Vec<Binding> {
+    pub fn enabled<N: NetDef, M: Marking>(
+        &self,
+        net: &N,
+        marking: &M,
+    ) -> Result<Vec<Binding>, String> {
         let mut result = Vec::new();
         for transition in net.transitions() {
-            if let Some(binding) = self.find_binding(transition, marking) {
+            if let Some(binding) = self.find_binding(transition, marking)? {
                 result.push(binding);
             }
         }
-        result
+        Ok(result)
     }
 
     /// Try to find a valid binding for all input arcs of a transition.
@@ -53,25 +57,56 @@ impl Engine {
         &self,
         transition: &T,
         marking: &M,
-    ) -> Option<Binding> {
+    ) -> Result<Option<Binding>, String> {
         let mut token_bindings = BTreeMap::new();
-        let mut placeholders = BTreeMap::new();
         let mut bound_tokens = Vec::new();
+        let mut placeholders = BTreeMap::new();
 
-        for arc in transition.inputs() {
-            let (token_id, new_placeholders) =
-                self.evaluator
-                    .find_matching_token(marking, arc, &bound_tokens, &placeholders)?;
-            token_bindings.insert(arc.bind.clone(), token_id.clone());
-            bound_tokens.push(token_id);
-            placeholders.extend(new_placeholders);
-        }
+        let found = self.bind_arcs(
+            transition.inputs(),
+            marking,
+            &mut token_bindings,
+            &mut bound_tokens,
+            &mut placeholders,
+        )?;
 
-        Some(Binding {
+        Ok(found.then(|| Binding {
             transition_id: transition.id().to_string(),
             token_bindings,
             placeholders,
-        })
+        }))
+    }
+
+    /// Backtracking search for a token assignment that satisfies all input arcs.
+    /// A greedy first-match pass would starve later arcs when an earlier arc of
+    /// the same token type grabs the only token satisfying the later precond.
+    fn bind_arcs<M: Marking>(
+        &self,
+        arcs: &[crate::InputArc],
+        marking: &M,
+        token_bindings: &mut BTreeMap<String, String>,
+        bound_tokens: &mut Vec<String>,
+        placeholders: &mut BTreeMap<String, Value>,
+    ) -> Result<bool, String> {
+        let Some((arc, rest)) = arcs.split_first() else {
+            return Ok(true);
+        };
+        for (token_id, new_placeholders) in
+            self.evaluator
+                .matching_tokens(marking, arc, bound_tokens, placeholders)?
+        {
+            token_bindings.insert(arc.bind.clone(), token_id.clone());
+            bound_tokens.push(token_id);
+            let saved_placeholders = placeholders.clone();
+            placeholders.extend(new_placeholders);
+            if self.bind_arcs(rest, marking, token_bindings, bound_tokens, placeholders)? {
+                return Ok(true);
+            }
+            *placeholders = saved_placeholders;
+            bound_tokens.pop();
+            token_bindings.remove(&arc.bind);
+        }
+        Ok(false)
     }
 
     /// Fire a transition: apply postconditions, move tokens, record changes.
@@ -191,33 +226,34 @@ impl Engine {
         net: &N,
         marking: &M,
         enabled: &[Binding],
-    ) -> Vec<RankedTransition> {
-        let obj_before = crate::objective::evaluate(&self.evaluator, net, marking)
-            .map(|r| r.value)
-            .unwrap_or(0.0);
+    ) -> Result<Vec<RankedTransition>, String> {
+        let obj_before = crate::objective::evaluate(&self.evaluator, net, marking)?.value;
 
-        let mut ranked: Vec<RankedTransition> = enabled
-            .iter()
-            .enumerate()
-            .filter_map(|(i, binding)| {
-                let transition = net.transition(&binding.transition_id)?;
-                let mut sim = marking.clone();
-                // Use a high step offset so created-token IDs don't collide with real firings
-                if self.fire(net, &mut sim, binding, usize::MAX - i).is_err() {
-                    return None;
-                }
-                let obj_after = crate::objective::evaluate(&self.evaluator, net, &sim)
-                    .map(|r| r.value)
-                    .unwrap_or(0.0);
-                let delta = obj_after - obj_before;
-                let duration = transition.duration_minutes().max(0.001);
-                Some(RankedTransition {
-                    binding: binding.clone(),
-                    delta_obj: delta,
-                    delta_per_minute: delta / duration,
-                })
-            })
-            .collect();
+        let mut ranked = Vec::with_capacity(enabled.len());
+        for (i, binding) in enabled.iter().enumerate() {
+            let transition = net
+                .transition(&binding.transition_id)
+                .ok_or_else(|| format!("unknown transition: {}", binding.transition_id))?;
+            let mut sim = marking.clone();
+            // Use a high step offset so created-token IDs don't collide with real firings
+            self.fire(net, &mut sim, binding, usize::MAX - i)
+                .map_err(|e| format!("simulating '{}': {e}", binding.transition_id))?;
+            let obj_after = crate::objective::evaluate(&self.evaluator, net, &sim)
+                .map_err(|e| {
+                    format!(
+                        "objective after simulating '{}': {e}",
+                        binding.transition_id
+                    )
+                })?
+                .value;
+            let delta = obj_after - obj_before;
+            let duration = transition.duration_minutes().max(0.001);
+            ranked.push(RankedTransition {
+                binding: binding.clone(),
+                delta_obj: delta,
+                delta_per_minute: delta / duration,
+            });
+        }
 
         ranked.sort_by(|a, b| {
             b.delta_per_minute
@@ -226,6 +262,6 @@ impl Engine {
                 .then_with(|| a.binding.transition_id.cmp(&b.binding.transition_id))
         });
 
-        ranked
+        Ok(ranked)
     }
 }

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use rhai::{Engine as RhaiEngine, Scope};
 
-use crate::entity_profile::CompiledComputedField;
+use crate::entity_profile::{dynamic_to_value, value_to_dynamic, CompiledComputedField};
 use crate::Value;
 
 /// Evaluate pre-compiled computed fields in order, mutating the context in place.
@@ -32,16 +32,7 @@ pub fn resolve_computed_fields(
         scope.push(k.clone(), value_to_dynamic(v));
     }
 
-    for (name, compiled) in fields {
-        let result = engine
-            .eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &compiled.ast)
-            .unwrap_or_else(|e| {
-                tracing::debug!("Computed field '{name}' eval error: {e}");
-                rhai::Dynamic::UNIT
-            });
-        scope.push(name.clone(), result.clone());
-        context.insert(name.clone(), dynamic_to_value(&result));
-    }
+    resolve_computed_fields_with_scope(&engine, &mut scope, fields, context);
 }
 
 /// Evaluate pre-compiled computed fields with an existing Rhai engine and scope.
@@ -63,35 +54,6 @@ pub fn resolve_computed_fields_with_scope(
             });
         scope.push(name.clone(), result.clone());
         context.insert(name.clone(), dynamic_to_value(&result));
-    }
-}
-
-fn value_to_dynamic(v: &Value) -> rhai::Dynamic {
-    match v {
-        Value::String(s) => rhai::Dynamic::from(s.clone()),
-        Value::Integer(i) => rhai::Dynamic::from(*i),
-        Value::Float(f) => rhai::Dynamic::from(*f),
-        Value::Boolean(b) => rhai::Dynamic::from(*b),
-        Value::Null => rhai::Dynamic::UNIT,
-        Value::DateTime(s) => rhai::Dynamic::from(s.clone()),
-        Value::Json(s) => rhai::Dynamic::from(s.clone()),
-        Value::Array(_) | Value::Object(_) => rhai::Dynamic::UNIT,
-    }
-}
-
-fn dynamic_to_value(d: &rhai::Dynamic) -> Value {
-    if d.is_unit() {
-        Value::Null
-    } else if let Some(s) = d.clone().try_cast::<String>() {
-        Value::String(s)
-    } else if let Some(i) = d.clone().try_cast::<i64>() {
-        Value::Integer(i)
-    } else if let Some(f) = d.clone().try_cast::<f64>() {
-        Value::Float(f)
-    } else if let Some(b) = d.clone().try_cast::<bool>() {
-        Value::Boolean(b)
-    } else {
-        Value::String(d.to_string())
     }
 }
 

@@ -52,7 +52,7 @@ impl ThemeRegistry {
         ];
 
         for yaml in builtins {
-            parse_theme_yaml(yaml, &mut themes);
+            parse_theme_yaml(yaml, &mut themes).expect("builtin theme asset must be valid");
         }
 
         if let Some(dir) = user_themes_dir {
@@ -65,7 +65,12 @@ impl ThemeRegistry {
                             .map_or(false, |e| e == "yaml" || e == "yml")
                         {
                             if let Ok(content) = std::fs::read_to_string(&path) {
-                                parse_theme_yaml(&content, &mut themes);
+                                if let Err(e) = parse_theme_yaml(&content, &mut themes) {
+                                    tracing::error!(
+                                        "Skipping user theme file {}: {e}",
+                                        path.display()
+                                    );
+                                }
                             }
                         }
                     }
@@ -123,31 +128,31 @@ struct ColorEntries {
     warning: String,
 }
 
-fn parse_theme_yaml(yaml: &str, out: &mut HashMap<String, ThemeDef>) {
-    let file: ThemeFile = match serde_yaml::from_str(yaml) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!("Failed to parse theme YAML: {e}");
-            return;
-        }
-    };
+fn parse_theme_yaml(yaml: &str, out: &mut HashMap<String, ThemeDef>) -> Result<(), String> {
+    let file: ThemeFile =
+        serde_yaml::from_str(yaml).map_err(|e| format!("failed to parse theme YAML: {e}"))?;
 
     for (key, entry) in file.themes {
+        let hex = |name: &str, value: &str| -> Result<Rgba8, String> {
+            parse_hex(value)
+                .map_err(|e| format!("theme '{key}': invalid color {name}: '{value}': {e}"))
+        };
+        let c = &entry.colors;
         let colors = ThemeColors {
-            primary: parse_hex(&entry.colors.primary),
-            primary_dark: parse_hex(&entry.colors.primary_dark),
-            primary_light: parse_hex(&entry.colors.primary_light),
-            text_primary: parse_hex(&entry.colors.text_primary),
-            text_secondary: parse_hex(&entry.colors.text_secondary),
-            text_tertiary: parse_hex(&entry.colors.text_tertiary),
-            background: parse_hex(&entry.colors.background),
-            background_secondary: parse_hex(&entry.colors.background_secondary),
-            sidebar_background: parse_hex(&entry.colors.sidebar_background),
-            border: parse_hex(&entry.colors.border),
-            border_focus: parse_hex(&entry.colors.border_focus),
-            success: parse_hex(&entry.colors.success),
-            error: parse_hex(&entry.colors.error),
-            warning: parse_hex(&entry.colors.warning),
+            primary: hex("primary", &c.primary)?,
+            primary_dark: hex("primaryDark", &c.primary_dark)?,
+            primary_light: hex("primaryLight", &c.primary_light)?,
+            text_primary: hex("textPrimary", &c.text_primary)?,
+            text_secondary: hex("textSecondary", &c.text_secondary)?,
+            text_tertiary: hex("textTertiary", &c.text_tertiary)?,
+            background: hex("background", &c.background)?,
+            background_secondary: hex("backgroundSecondary", &c.background_secondary)?,
+            sidebar_background: hex("sidebarBackground", &c.sidebar_background)?,
+            border: hex("border", &c.border)?,
+            border_focus: hex("borderFocus", &c.border_focus)?,
+            success: hex("success", &c.success)?,
+            error: hex("error", &c.error)?,
+            warning: hex("warning", &c.warning)?,
         };
 
         out.insert(
@@ -159,19 +164,28 @@ fn parse_theme_yaml(yaml: &str, out: &mut HashMap<String, ThemeDef>) {
             },
         );
     }
+    Ok(())
 }
 
-fn parse_hex(s: &str) -> Rgba8 {
+/// Parse a `#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA` hex color.
+fn parse_hex(s: &str) -> Result<Rgba8, String> {
     let s = s.trim_start_matches('#');
-    let bytes: Vec<u8> = (0..s.len())
-        .step_by(2)
-        // ALLOW(filter_map_ok): hex color parse — skip invalid bytes
-        .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect();
-    match bytes.len() {
-        3 => [bytes[0], bytes[1], bytes[2], 255],
-        4 => [bytes[0], bytes[1], bytes[2], bytes[3]],
-        _ => [255, 0, 255, 255],
+    if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("non-hex character".into());
+    }
+    let nibble = |i: usize| u8::from_str_radix(&s[i..i + 1], 16).expect("validated hex digit");
+    let byte = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).expect("validated hex digits");
+    match s.len() {
+        3 => Ok([nibble(0) * 17, nibble(1) * 17, nibble(2) * 17, 255]),
+        4 => Ok([
+            nibble(0) * 17,
+            nibble(1) * 17,
+            nibble(2) * 17,
+            nibble(3) * 17,
+        ]),
+        6 => Ok([byte(0), byte(2), byte(4), 255]),
+        8 => Ok([byte(0), byte(2), byte(4), byte(6)]),
+        n => Err(format!("expected 3, 4, 6 or 8 hex digits, got {n}")),
     }
 }
 
@@ -286,13 +300,26 @@ mod tests {
 
     #[test]
     fn test_parse_hex_rgb() {
-        assert_eq!(parse_hex("#FF0000"), [255, 0, 0, 255]);
-        assert_eq!(parse_hex("#00FF00"), [0, 255, 0, 255]);
+        assert_eq!(parse_hex("#FF0000"), Ok([255, 0, 0, 255]));
+        assert_eq!(parse_hex("#00FF00"), Ok([0, 255, 0, 255]));
     }
 
     #[test]
     fn test_parse_hex_rgba() {
-        assert_eq!(parse_hex("#FF0000E6"), [255, 0, 0, 230]);
+        assert_eq!(parse_hex("#FF0000E6"), Ok([255, 0, 0, 230]));
+    }
+
+    #[test]
+    fn test_parse_hex_shorthand() {
+        assert_eq!(parse_hex("#abc"), Ok([0xAA, 0xBB, 0xCC, 255]));
+        assert_eq!(parse_hex("#abcd"), Ok([0xAA, 0xBB, 0xCC, 0xDD]));
+    }
+
+    #[test]
+    fn test_parse_hex_invalid_is_err() {
+        assert!(parse_hex("#zzzzzz").is_err()); // non-hex
+        assert!(parse_hex("#abcde").is_err()); // bad length
+        assert!(parse_hex("#ééé").is_err()); // multibyte, no panic
     }
 
     #[test]

@@ -331,6 +331,38 @@ fn process_headlines(
             )
         };
 
+        // Parse planning timestamps up front. The raw planning line has already
+        // been stripped from the body, so an unparseable timestamp must be
+        // preserved as a literal body line — dropping it would silently delete
+        // the user's SCHEDULED/DEADLINE line on the next write-back.
+        let mut preserved_planning: Vec<String> = Vec::new();
+        let scheduled = scheduled.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
+            Ok(ts) => Some(ts),
+            Err(e) => {
+                tracing::warn!("Unparseable SCHEDULED timestamp {s:?} preserved in body: {e}");
+                preserved_planning.push(format!("SCHEDULED: {s}"));
+                None
+            }
+        });
+        let deadline = deadline.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
+            Ok(ts) => Some(ts),
+            Err(e) => {
+                tracing::warn!("Unparseable DEADLINE timestamp {s:?} preserved in body: {e}");
+                preserved_planning.push(format!("DEADLINE: {s}"));
+                None
+            }
+        });
+        let body = if preserved_planning.is_empty() {
+            body
+        } else {
+            let mut merged = preserved_planning.join("\n");
+            if let Some(b) = body {
+                merged.push('\n');
+                merged.push_str(&b);
+            }
+            Some(merged)
+        };
+
         // Extract properties as JSON
         let string_properties = extract_properties(&headline);
 
@@ -375,24 +407,8 @@ fn process_headlines(
         block.set_task_state(task_state);
         block.set_priority(priority);
         block.set_tags(tags);
-        block.set_scheduled(
-            scheduled.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
-                Ok(ts) => Some(ts),
-                Err(e) => {
-                    tracing::warn!("Ignoring unparseable SCHEDULED timestamp {s:?}: {e}");
-                    None
-                }
-            }),
-        );
-        block.set_deadline(
-            deadline.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
-                Ok(ts) => Some(ts),
-                Err(e) => {
-                    tracing::warn!("Ignoring unparseable DEADLINE timestamp {s:?}: {e}");
-                    None
-                }
-            }),
-        );
+        block.set_scheduled(scheduled);
+        block.set_deadline(deadline);
 
         // Store drawer properties as flat keys in block properties.
         // `REQUIRES` is the only edge-typed drawer key — it gets pulled out

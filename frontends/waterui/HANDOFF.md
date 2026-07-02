@@ -1,88 +1,90 @@
-
 # WaterUI Frontend — Handoff for Remaining Work
 
-## Current State (2026-03-05)
+## Current State (2026-07-02)
 
-The waterui frontend compiles cleanly (`cargo check -p holon-waterui` — zero errors, zero warnings). It has the full Holon architecture wired up:
+Parked experimental frontend. It is **excluded from the root workspace**
+(root `Cargo.toml` `exclude` list) because naga 27 (via wgpu) +
+codespan-reporting 0.12 breaks workspace feature unification
+(https://github.com/gfx-rs/wgpu/issues/7915; fix pending backport in
+https://github.com/gfx-rs/wgpu/issues/8366). It therefore declares its own
+`[workspace]` table (like `frontends/holon-worker`) so it builds standalone:
+
+```sh
+cd frontends/waterui && cargo check   # NOT `cargo check -p holon-waterui` from repo root
+```
+
+`waterui`/`waterui-ffi` are pinned to rev `3baf8b39` — upstream `dev` HEAD
+points its `backends/android` submodule at a force-pushed-away commit and is
+unfetchable. Re-pin to a newer rev once upstream fixes the submodule pointer.
+
+**Known build blocker on Xcode 26+ SDKs**: `waterkit-screen` (mandatory dep
+of `waterui-internal`) compiles Swift using `CGWindowListCreateImage`, which
+the macOS 26 SDK removed ("use ScreenCaptureKit instead") — the same issue
+for which `frontends/ply` is workspace-excluded. Everything else (744 crates
+including all holon crates) checks cleanly; the Swift build script is the
+sole failure. Needs an older SDK/toolchain or an upstream waterkit fix.
+`Cargo.lock` here is seeded from the root workspace lock — a fresh resolve
+picks stable `ed25519 3.0.0` which breaks `ed25519-dalek 3.0.0-pre.1` (root
+pins the `-rc` line); keep the seeded pins.
+
+Architecture wired up:
 
 - `FrontendSession` startup with `watch_ui()` CDC stream
 - Reactive `Binding<WidgetSpec>` + `watch()` for live re-renders on CDC updates
-- Render interpreter that maps `RenderExpr` → waterui `AnyView`
+- The **shared** render interpreter from `holon_frontend::render_interpreter`
+  (`RenderInterpreter<AnyView>`), wired via `holon_macros::builder_registry!`
+  in `src/render/builders/mod.rs::create_interpreter()`
 - Screen layout with sidebar collapsing (left/right sidebars from `collapse_to: "drawer"`)
-- Operations module with `dispatch_operation`, selectable action parsing
-- 19 builder functions + stub passthrough for 8 more
+- Operation dispatch via `holon_frontend` (the local operations module was removed)
 
 ### Files
 
 | File | Purpose |
 |------|---------|
 | `src/lib.rs` | App entry: tokio runtime, FrontendSession, watch_ui, reactive binding, `watch()` root view |
-| `src/state.rs` | `CdcState` — CDC-side widget spec accumulator, sends snapshots via notify callback |
-| `src/cdc.rs` | `ui_event_listener` handling `UiEvent::Structure` and `UiEvent::Data` |
-| `src/operations.rs` | `dispatch_operation`, `dispatch_undo/redo`, `find_set_field_op`, `get_entity_name`, `get_row_id` |
-| `src/render/context.rs` | `RenderContext` with data rows, operations, session, depth tracking |
-| `src/render/interpreter.rs` | Recursive `interpret(RenderExpr) -> AnyView`, arg resolution, binary ops |
-| `src/render/builders.rs` | All builder functions in a single file |
+| `src/render/builders/` | One file per builder + `mod.rs` with `create_interpreter()` (builder_registry!) |
+
+CDC handling and app state live in `holon_frontend`'s `ReactiveEngine`; there
+is no local `state.rs`/`cdc.rs`/`operations.rs`/`render/interpreter.rs`
+anymore. The legacy single-file `render/builders.rs` pipeline was deleted —
+do not resurrect it; extend `render/builders/` instead.
 
 ## Reactivity Architecture
 
 CDC updates flow through a cross-thread bridge:
 
-1. **Tokio side**: `CdcState` receives `UiEvent`s, maintains local `WidgetSpec`, calls `notify` callback on every change
+1. **Tokio side**: `ReactiveEngine` receives `UiEvent`s and maintains the `WidgetSpec`
 2. **Bridge**: `BindingMailbox::handle()` (sync `try_send` via `async_channel::Sender`) queues a job for waterui's local executor
 3. **UI side**: waterui's `LocalExecutor` processes the job, updating `Binding<WidgetSpec>`
 4. **Re-render**: `watch(binding, |ws| render_widget_spec(ws))` fires when binding changes
 
 ## Reference Implementation
 
-**Blinc** (`frontends/blinc/`) is the reference implementation. It uses the same Holon architecture but renders to blinc's `Div` type. Blinc has each builder in a separate file under `src/render/builders/`. The waterui frontend puts them all in one file for now.
+**Blinc** (`frontends/blinc/`) is the reference implementation. It uses the same Holon architecture but renders to blinc's `Div` type, with each builder in a separate file under `src/render/builders/` — the same layout this crate now uses.
 
 ## Remaining Work — Ordered by Impact
 
-### 1. ~~Editable Text Operation Dispatch~~ (DONE)
-
-`build_editable_text` now dispatches `set_field` on every keystroke via `Binding::mapping` setter side-effect, with last-dispatched de-duplication. WaterUI TextField has no on_blur/on_submit — the mapping setter is the only hook point.
-
-**Future improvement**: Add debounce/throttle using nami's `Throttle` to reduce dispatch frequency.
-
-### 2. Icon Support (LOW — currently text placeholder)
+### 1. Icon Support (LOW — currently text placeholder)
 
 Blinc uses a build script (`build.rs`) that embeds SVG icons as data URIs at compile time, then renders them with `img(data_uri)`.
 
 **What to do**: Either port the build script and use waterui's image/SVG support, or use waterui's icon packs (see `~/.cargo/git/checkouts/waterui-*/*/icon-packs/`).
 
-### 3. Theming (LOW — hardcoded colors)
+### 2. Theming (LOW — hardcoded colors)
 
 All colors are hardcoded hex strings. Blinc uses `blinc_theme::ThemeState` with semantic `ColorToken`s.
 
 **What to do**: Use waterui's `theme` module (`waterui::theme`, `ColorScheme`, `Theme`). Check if waterui has semantic color tokens. If not, define a small color palette struct and thread it through `RenderContext`.
 
-### 4. MCP Server (LOW — not started)
+### 3. MCP Server (LOW — not started)
 
-Blinc embeds an MCP HTTP server so external tools can query the running instance.
+Blinc embeds an MCP HTTP server so external tools can query the running instance (`main.rs:48-69`: spawns `holon_mcp::di::run_http_server()` on port 8520).
 
-**What blinc does** (`main.rs:48-69`): Spawns `holon_mcp::di::run_http_server()` on port 8520.
+**What to do**: Add `holon-mcp = { path = "../../crates/holon-mcp" }`, spawn the server in `app()` after session creation. Need `tokio-util` for `CancellationToken`.
 
-**What to do**: Add `holon-mcp = { path = "../mcp" }` to Cargo.toml, spawn the server in `app()` after session creation. Need `tokio-util` for `CancellationToken`.
-
-### 5. Remaining Builder Stubs (LOW — 8 builders)
-
-These builders currently pass through to a generic "render template or show placeholder" stub:
-`badge`, `block_operations`, `pie_menu`, `state_toggle`, `focusable`, `drop_zone`, `query_result`, `draggable`
-
-**Implemented**: `checkbox` (read-only display), `block` (depth-based indentation), `outline` (hierarchical tree with parent-child grouping), `source_block` (language badge + monospace source display + execute button), `source_editor` (delegates to source_block, read-only).
-
-Priority order:
-1. `focusable` — Focus tracking (needs reactive state)
-2. The rest — drag/drop, pie menu, etc. are advanced interaction features
-
-### 6. Sidebar Toggle (LOW — sidebars always open)
+### 4. Sidebar Toggle (LOW — sidebars always open)
 
 Screen layout renders sidebars at fixed 280px width. Blinc uses `State<bool>` per sidebar for open/close toggle. Need to add `Binding<bool>` for each sidebar and wire toggle buttons.
-
-### 7. CLI Arguments (LOW — env vars only)
-
-Blinc accepts `--orgmode-root`, `--loro`, `--help` CLI args. WaterUI only reads env vars since it's a library loaded via FFI (no `main()`). This may not be needed — env vars work fine for FFI libs.
 
 ## WaterUI API Gotchas
 
@@ -90,7 +92,7 @@ Blinc accepts `--orgmode-root`, `--loro`, `--help` CLI args. WaterUI only reads 
 
 2. **View modifiers return new types**: `text("x").bold()` returns `Bold<Text>`, not `Text`. You can't reassign `let mut t = text(...); t = t.bold()`. Either wrap each branch in `AnyView::new()`, or compose the full modifier chain in one expression.
 
-3. **`AnyView::new()` requires `'static`**: Any `&str` borrowed from `RenderContext` or `ResolvedArgs` must be `.to_string()`'d before passing to `AnyView::new(text(...))`.
+3. **`AnyView::new()` requires `'static`**: Any `&str` borrowed from `RenderContext` or resolved args must be `.to_string()`'d before passing to `AnyView::new(text(...))`.
 
 4. **`vstack`/`hstack` accept tuples or `Vec<AnyView>`**: For dynamic lists use `Vec<AnyView>`. For fixed layouts use tuples: `vstack((view1, view2))`.
 
@@ -108,7 +110,7 @@ Blinc accepts `--orgmode-root`, `--loro`, `--help` CLI args. WaterUI only reads 
 
 ### Version Alignment (CRITICAL)
 
-The `Cargo.toml` pulls `waterui` and `waterui-ffi` from the **`dev` branch** of the waterui git repo. The `water` CLI (release v0.1.3) scaffolds the Xcode project with the **release** `apple-backend 0.2.0` Swift package. These two are **incompatible** — the release apple-backend's C header declares FFI symbols (`waterui_color_id`, `waterui_force_as_photo`, etc.) that don't exist in the dev-branch Rust crate.
+The `Cargo.toml` pins `waterui` and `waterui-ffi` to a dev-branch rev of the waterui git repo. The `water` CLI (release v0.1.3) scaffolds the Xcode project with the **release** `apple-backend 0.2.0` Swift package. These two are **incompatible** — the release apple-backend's C header declares FFI symbols (`waterui_color_id`, `waterui_force_as_photo`, etc.) that don't exist in the dev-branch Rust crate.
 
 After the CLI scaffolds `.water/apple/`, you must patch the Xcode project before building:
 
@@ -144,10 +146,10 @@ rm -f .water/apple/WaterUIApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
 ### Building
 
 ```sh
-cargo check -p holon-waterui   # Rust compilation check
+cd frontends/waterui && cargo check   # Rust compilation check (own workspace)
 
 # Scaffold (only needed once, or after deleting .water/):
-cd frontends/waterui && water run --platform macos
+water run --platform macos
 # This will fail on link — apply the patches above, then:
 
 # Build directly:

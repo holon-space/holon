@@ -12,7 +12,7 @@
 use chrono::Utc;
 use holon::petri::{
     Engine, Executor, PrototypeValue, SelfDescriptor, TaskMarking, TaskNet,
-    default_prototype_props, materialize_at, rank_tasks,
+    default_prototype_props, materialize_at, rank_tasks, rhai_ident_fragment,
 };
 use holon_api::EntityUri;
 use holon_api::Priority;
@@ -350,8 +350,12 @@ impl PetriRefState {
         let self_desc = self.effective_self();
         let (net, marking) = materialize_at(&blocks, &self_desc, &prototype_props, Utc::now());
         let engine = Engine::new();
-        let enabled = engine.enabled(&net, &marking);
-        let ranked = engine.rank(&net, &marking, &enabled);
+        let enabled = engine
+            .enabled(&net, &marking)
+            .expect("petri nets use only exact-match preconds; enablement cannot fail");
+        let ranked = engine
+            .rank(&net, &marking, &enabled)
+            .expect("petri net ranking should not fail for materialized nets");
         let ranked_ids: Vec<String> = ranked
             .iter()
             .map(|r| r.binding.transition_id.clone())
@@ -662,13 +666,17 @@ fn check_all_invariants(
     check_delegation(ref_state, net, marking);
     check_question_knowledge(ref_state, net);
     check_output_arcs(net);
-    check_net_constraints(net, marking);
+    check_net_constraints(net);
 }
 
 fn check_engine_invariants(ref_state: &PetriRefState, net: &TaskNet, marking: &TaskMarking) {
     let engine = Engine::new();
-    let enabled = engine.enabled(net, marking);
-    let ranked = engine.rank(net, marking, &enabled);
+    let enabled = engine
+        .enabled(net, marking)
+        .expect("petri nets use only exact-match preconds; enablement cannot fail");
+    let ranked = engine
+        .rank(net, marking, &enabled)
+        .expect("petri net ranking should not fail for materialized nets");
 
     let enabled_ids: BTreeSet<String> = enabled.iter().map(|b| b.transition_id.clone()).collect();
 
@@ -703,7 +711,7 @@ fn check_engine_invariants(ref_state: &PetriRefState, net: &TaskNet, marking: &T
         for dep_id in block.depends_on.iter() {
             if !completed_ids.contains(dep_id) {
                 assert!(
-                    !enabled_ids.contains(&block.id),
+                    !enabled_ids.contains(&sut_id(&block.id)),
                     "Task {} is enabled but depends on incomplete {}",
                     block.id,
                     dep_id
@@ -718,7 +726,7 @@ fn check_engine_invariants(ref_state: &PetriRefState, net: &TaskNet, marking: &T
                 && !completed_ids.contains(&prev_id)
             {
                 assert!(
-                    !enabled_ids.contains(&block.id),
+                    !enabled_ids.contains(&sut_id(&block.id)),
                     "Task {} is enabled but sequential dep {} is incomplete",
                     block.id,
                     prev_id
@@ -726,6 +734,12 @@ fn check_engine_invariants(ref_state: &PetriRefState, net: &TaskNet, marking: &T
             }
         }
     }
+}
+
+/// The SUT mints EntityUris from raw ids, so a reference-model id `x` surfaces
+/// as `block:x` in transition ids, ranked block ids, and token attributes.
+fn sut_id(ref_id: &str) -> String {
+    EntityUri::from_raw(ref_id).to_string()
 }
 
 /// Find the previous sibling (same parent, position just before this block).
@@ -808,7 +822,11 @@ fn check_no_duplicate_transition_ids(net: &TaskNet) {
 }
 
 fn check_active_task_transition_bijection(ref_state: &PetriRefState, net: &TaskNet) {
-    let active_ids: BTreeSet<String> = ref_state.active_block_ids().into_iter().collect();
+    let active_ids: BTreeSet<String> = ref_state
+        .active_block_ids()
+        .iter()
+        .map(|id| sut_id(id))
+        .collect();
     let transition_ids: BTreeSet<String> = net
         .transitions()
         .filter(|t| !t.id().ends_with("_delegate"))
@@ -829,13 +847,13 @@ fn check_completed_tasks(ref_state: &PetriRefState, net: &TaskNet, marking: &Tas
     for id in ref_state.completed_block_ids() {
         // No transition for completed tasks
         assert!(
-            net.transition(&id).is_none(),
+            net.transition(&sut_id(&id)).is_none(),
             "Completed task {} should not have a transition",
             id
         );
 
         // Completion token must exist
-        let completion_id = format!("completed_{id}");
+        let completion_id = format!("completed_{}", rhai_ident_fragment(&sut_id(&id)));
         assert!(
             marking.token(&completion_id).is_some(),
             "Completed task {} must have completion token {}",
@@ -851,7 +869,7 @@ fn check_transition_labels_clean(ref_state: &PetriRefState, net: &TaskNet) {
             continue;
         }
         let transition = net
-            .transition(&block.id)
+            .transition(&sut_id(&block.id))
             .unwrap_or_else(|| panic!("Missing transition for active task {}", block.id));
 
         // The label should be the base_text (prefixes already stripped by generator)
@@ -878,7 +896,7 @@ fn check_transition_durations(
         if block.is_completed() {
             continue;
         }
-        let transition = net.transition(&block.id).unwrap();
+        let transition = net.transition(&sut_id(&block.id)).unwrap();
         let expected = block
             .duration_minutes
             .map(|m| m as f64)
@@ -898,7 +916,7 @@ fn check_dependency_arcs(ref_state: &PetriRefState, net: &TaskNet) {
         if block.is_completed() {
             continue;
         }
-        let transition = net.transition(&block.id).unwrap();
+        let transition = net.transition(&sut_id(&block.id)).unwrap();
 
         // Check explicit depends_on (every dep ID must have a corresponding arc)
         for dep_id in block.depends_on.iter() {
@@ -917,9 +935,13 @@ fn check_dependency_arcs(ref_state: &PetriRefState, net: &TaskNet) {
         if block.has_sequential_dep
             && let Some(prev_id) = find_previous_sibling(ref_state, block)
         {
+            // Sequential deps are resolved SUT-side from materialized block ids,
+            // so the arc precond carries the schemed id.
+            let prev_sut_id = sut_id(&prev_id);
             let has_seq_arc = transition.inputs().iter().any(|i| {
                 i.token_type == "completion"
-                    && i.precond.get("source_task").map(|v| v.as_str()) == Some(prev_id.as_str())
+                    && i.precond.get("source_task").map(|v| v.as_str())
+                        == Some(prev_sut_id.as_str())
             });
             assert!(
                 has_seq_arc,
@@ -981,7 +1003,7 @@ fn check_delegation(ref_state: &PetriRefState, net: &TaskNet, marking: &TaskMark
             );
 
             // Delegate sub-transition must exist
-            let delegate_id = format!("{}_delegate", block.id);
+            let delegate_id = format!("{}_delegate", sut_id(&block.id));
             assert!(
                 net.transition(&delegate_id).is_some(),
                 "Delegated task {} must have delegate transition {}",
@@ -990,7 +1012,7 @@ fn check_delegation(ref_state: &PetriRefState, net: &TaskNet, marking: &TaskMark
             );
 
             // Main transition must have waiting arc
-            let main_t = net.transition(&block.id).unwrap();
+            let main_t = net.transition(&sut_id(&block.id)).unwrap();
             let has_waiting_arc = main_t.inputs().iter().any(|i| i.token_type == "waiting");
             assert!(
                 has_waiting_arc,
@@ -1007,7 +1029,7 @@ fn check_question_knowledge(ref_state: &PetriRefState, net: &TaskNet) {
             continue;
         }
         if block.is_question {
-            let transition = net.transition(&block.id).unwrap();
+            let transition = net.transition(&sut_id(&block.id)).unwrap();
             let has_knowledge = transition
                 .creates()
                 .iter()
@@ -1043,7 +1065,7 @@ fn check_output_arcs(net: &TaskNet) {
 }
 
 /// Verify net constraints are satisfiable and discount_rate is non-negative.
-fn check_net_constraints(net: &TaskNet, _marking: &TaskMarking) {
+fn check_net_constraints(net: &TaskNet) {
     assert!(
         net.constraints().is_empty(),
         "TaskNet should have no constraints, got: {:?}",
@@ -1069,7 +1091,9 @@ fn check_fire_invariants(
     transition_id: &str,
 ) {
     let engine = Engine::new();
-    let enabled = engine.enabled(net, marking);
+    let enabled = engine
+        .enabled(net, marking)
+        .expect("petri nets use only exact-match preconds; enablement cannot fail");
     let binding = enabled
         .iter()
         .find(|b| b.transition_id == transition_id)
@@ -1088,7 +1112,7 @@ fn check_fire_invariants(
         .unwrap_or_else(|e| panic!("fire failed for {}: {e}", binding.transition_id));
 
     // a) Completion token created for the fired transition
-    let completion_id = format!("completed_{}", binding.transition_id);
+    let completion_id = format!("completed_{}", rhai_ident_fragment(&binding.transition_id));
     assert!(
         post_marking.token(&completion_id).is_some(),
         "Firing {} must create completion token {}",
@@ -1097,10 +1121,13 @@ fn check_fire_invariants(
     );
 
     // b) If question task: knowledge token created
-    if let Some(block) = ref_state.blocks.get(&binding.transition_id)
+    if let Some(block) = ref_state
+        .blocks
+        .values()
+        .find(|b| sut_id(&b.id) == binding.transition_id)
         && block.is_question
     {
-        let knowledge_id = format!("knowledge_{}", binding.transition_id);
+        let knowledge_id = format!("knowledge_{}", rhai_ident_fragment(&binding.transition_id));
         assert!(
             post_marking.token(&knowledge_id).is_some(),
             "Question task {} must create knowledge token after firing",
@@ -1156,8 +1183,12 @@ fn check_ranking_reflects_priority(
     marking: &TaskMarking,
 ) {
     let engine = Engine::new();
-    let enabled = engine.enabled(net, marking);
-    let ranked = engine.rank(net, marking, &enabled);
+    let enabled = engine
+        .enabled(net, marking)
+        .expect("petri nets use only exact-match preconds; enablement cannot fail");
+    let ranked = engine
+        .rank(net, marking, &enabled)
+        .expect("petri net ranking should not fail for materialized nets");
 
     let ranked_order: Vec<&str> = ranked
         .iter()
@@ -1168,8 +1199,8 @@ fn check_ranking_reflects_priority(
         for j in (i + 1)..ranked_order.len() {
             let id_a = ranked_order[i];
             let id_b = ranked_order[j];
-            let block_a = ref_state.blocks.get(id_a);
-            let block_b = ref_state.blocks.get(id_b);
+            let block_a = ref_state.blocks.values().find(|b| sut_id(&b.id) == id_a);
+            let block_b = ref_state.blocks.values().find(|b| sut_id(&b.id) == id_b);
             if let (Some(a), Some(b)) = (block_a, block_b) {
                 // Only compare when neither has a deadline (deadlines affect urgency)
                 if a.deadline.is_none() && b.deadline.is_none() {
@@ -1199,7 +1230,7 @@ fn check_ranking_reflects_priority(
 fn check_objective_references_all_tasks(ref_state: &PetriRefState, net: &TaskNet) {
     let obj = net.objective_expr();
     for id in ref_state.active_block_ids() {
-        let completion_ref = format!("completed_{id}");
+        let completion_ref = format!("completed_{}", rhai_ident_fragment(&sut_id(&id)));
         assert!(
             obj.source.contains(&completion_ref),
             "Objective expr must reference '{}' for active task {}. Got: {}",
@@ -1212,7 +1243,7 @@ fn check_objective_references_all_tasks(ref_state: &PetriRefState, net: &TaskNet
 
 /// Exercise rank_tasks() end-to-end: builds blocks, calls rank_tasks, checks result.
 fn check_rank_tasks_e2e(ref_state: &PetriRefState, blocks: &[Block]) {
-    let result = rank_tasks(blocks);
+    let result = rank_tasks(blocks).expect("rank_tasks should succeed for generated blocks");
 
     // mental_slots.occupied == count of DOING blocks
     let doing_count = ref_state
@@ -1232,15 +1263,16 @@ fn check_rank_tasks_e2e(ref_state: &PetriRefState, blocks: &[Block]) {
         "mental_slots.capacity must match self descriptor"
     );
 
-    // All ranked tasks correspond to active tasks (delegate transitions have _delegate suffix)
-    let active_ids: BTreeSet<String> = ref_state.active_block_ids().into_iter().collect();
+    // Every ranked task carries a REAL active block id — never a delegate
+    // sub-transition id (those are engine-internal identity only).
+    let active_ids: BTreeSet<String> = ref_state
+        .active_block_ids()
+        .iter()
+        .map(|id| sut_id(id))
+        .collect();
     for rt in &result.ranked {
-        let base_id = rt
-            .block_id
-            .strip_suffix("_delegate")
-            .unwrap_or(&rt.block_id);
         assert!(
-            active_ids.contains(base_id),
+            active_ids.contains(&rt.block_id),
             "Ranked task {} must correspond to an active task",
             rt.block_id
         );
@@ -1265,16 +1297,20 @@ fn check_rank_tasks_e2e(ref_state: &PetriRefState, blocks: &[Block]) {
 /// position tiebreak favors canary_aaa (position 0) → ordering violated → CAUGHT.
 fn check_canary_ordering(net: &TaskNet, marking: &TaskMarking) {
     let engine = Engine::new();
-    let enabled = engine.enabled(net, marking);
-    let ranked = engine.rank(net, marking, &enabled);
+    let enabled = engine
+        .enabled(net, marking)
+        .expect("petri nets use only exact-match preconds; enablement cannot fail");
+    let ranked = engine
+        .rank(net, marking, &enabled)
+        .expect("petri net ranking should not fail for materialized nets");
 
     let ranked_ids: Vec<&str> = ranked
         .iter()
         .map(|r| r.binding.transition_id.as_str())
         .collect();
 
-    let high_pos = ranked_ids.iter().position(|id| *id == "canary_zzz");
-    let low_pos = ranked_ids.iter().position(|id| *id == "canary_aaa");
+    let high_pos = ranked_ids.iter().position(|id| *id == sut_id("canary_zzz"));
+    let low_pos = ranked_ids.iter().position(|id| *id == sut_id("canary_aaa"));
 
     if let (Some(h), Some(l)) = (high_pos, low_pos) {
         assert!(

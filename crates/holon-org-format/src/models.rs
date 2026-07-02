@@ -131,11 +131,13 @@ pub trait ToOrg {
 /// Input: JSON string -> Output: ":PROPERTIES:\n:KEY: VALUE\n:END:"
 /// Ensures :ID: property is rendered first.
 fn format_properties_drawer(properties_json: &str) -> String {
-    let props: serde_json::Map<String, serde_json::Value> =
-        match serde_json::from_str(properties_json) {
-            Ok(map) => map,
-            Err(_) => return String::new(),
-        };
+    let props: serde_json::Map<String, serde_json::Value> = serde_json::from_str(properties_json)
+        .unwrap_or_else(|e| {
+            panic!(
+                "malformed org_properties JSON {properties_json:?}: {e} — silently dropping the \
+                 :PROPERTIES: drawer would lose :ID: and churn block identity"
+            )
+        });
 
     if props.is_empty() {
         return String::new();
@@ -1206,6 +1208,7 @@ mod tests {
         block.set_tags(Tags::from_csv("work,urgent"));
 
         let org = block.to_org();
-        assert!(org.starts_with("** TODO [#A] Test headline :work:urgent:"));
+        // Tags render in sorted order.
+        assert!(org.starts_with("** TODO [#A] Test headline :urgent:work:"));
     }
 }

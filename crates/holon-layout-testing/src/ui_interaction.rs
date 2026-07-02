@@ -1,5 +1,4 @@
-//! Aggregator enum for UI interactions used by scenario generators and
-//! the scenario runner.
+//! Aggregator enum for user-visible UI state changes shared across PBTs.
 //!
 //! The variant *structs* (`SwitchViewMode`, `ToggleDrawer`,
 //! `DeliverBlockContent`) live in `holon-pbt-core` so multiple PBTs can

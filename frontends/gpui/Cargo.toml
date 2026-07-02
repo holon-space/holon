@@ -148,7 +148,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb1
 # release builds sees any of it. DO NOT remove — `tests/support/mod.rs` relies
 # on it via gpui::{TestAppContext, WindowOptions, WindowBounds, AppContext, …}.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = ["test-support"] }
-# Property-based tests over ReactiveViewModel trees (tests/layout_pbt).
+# Property-based tests (tests/gpui_composed_windowed_loop and friends).
 proptest = "1"
 # Windowed proptest-state-machine generation/shrinking for the composed windowed
 # loop (gpui_composed_windowed_loop — same alphabet as the headless keystone).

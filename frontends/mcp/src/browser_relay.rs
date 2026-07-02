@@ -164,8 +164,24 @@ impl BrowserRelay {
             }
         }
 
-        rx.await
-            .map_err(|_| McpError::internal_error("relay sender dropped", None))?
+        const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        match tokio::time::timeout(FORWARD_TIMEOUT, rx).await {
+            Ok(reply) => {
+                reply.map_err(|_| McpError::internal_error("relay sender dropped", None))?
+            }
+            Err(_) => {
+                let mut pending = self.pending.lock().await;
+                pending.remove(&id);
+                Err(McpError::internal_error(
+                    format!(
+                        "browser relay: no response for tool '{}' after {}s",
+                        req.name,
+                        FORWARD_TIMEOUT.as_secs()
+                    ),
+                    None,
+                ))
+            }
+        }
     }
 }
 

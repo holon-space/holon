@@ -254,7 +254,8 @@ impl MutableTree {
         self.flat.lock_mut().replace_cloned(items);
     }
 
-    /// Update a node's data. If parent_id or sort_key changed, moves the node.
+    /// Update a node's data. If parent_id or sort_key changed, moves the node
+    /// (with its whole subtree) via children-map surgery + reflow.
     pub fn update(
         &mut self,
         id: &EntityUri,
@@ -263,17 +264,51 @@ impl MutableTree {
         widget: Arc<ReactiveViewModel>,
     ) {
         let Some(old) = self.nodes.get(id) else {
-            return;
+            panic!("MutableTree::update on unknown node {id}");
         };
 
-        // Normalize: treat missing parent as root, same as insert.
-        let effective_parent = parent_id.filter(|pid| pid != id && self.nodes.contains_key(pid));
+        // Normalize: treat missing parent as root, same as insert. A parent
+        // inside the node's own subtree (transient state while concurrent
+        // moves converge) would create a cycle — treat it as root too, with
+        // the stated parent retained; the next structural rebuild resolves it.
+        let stated_parent = parent_id.clone();
+        let effective_parent = parent_id.filter(|pid| {
+            pid != id && self.nodes.contains_key(pid) && !self.is_in_subtree_of(pid, id)
+        });
+        if stated_parent.is_some()
+            && effective_parent.is_none()
+            && stated_parent.as_ref() != Some(id)
+        {
+            if let Some(sp) = &stated_parent {
+                if self.nodes.contains_key(sp) {
+                    tracing::warn!(
+                        "MutableTree::update({id}): stated parent {sp} is inside the node's own \
+                         subtree; rendering as root until convergence"
+                    );
+                }
+            }
+        }
         let structure_changed = old.parent_id != effective_parent || old.sort_key != sort_key;
 
         if structure_changed {
-            let id_owned = id.clone();
-            self.remove(&id_owned);
-            self.insert(id_owned, effective_parent, sort_key, widget);
+            let old_parent = old.parent_id.clone();
+            let old_sort_key = old.sort_key.clone();
+            if let Some(siblings) = self.children.get_mut(&old_parent) {
+                siblings.remove(&SortedChild::new(old_sort_key, id.clone()));
+                if siblings.is_empty() {
+                    self.children.remove(&old_parent);
+                }
+            }
+            self.children
+                .entry(effective_parent.clone())
+                .or_default()
+                .insert(SortedChild::new(sort_key.clone(), id.clone()));
+            let node = self.nodes.get_mut(id).expect("node in nodes map");
+            node.parent_id = effective_parent;
+            node.stated_parent = stated_parent;
+            node.sort_key = sort_key;
+            node.widget = widget;
+            self.reflow();
         } else {
             let pos = self.pos_of(id).expect("node in flat_index");
             let node = self.nodes.get_mut(id).expect("node in nodes map");
@@ -405,6 +440,18 @@ impl MutableTree {
     /// O(1) position lookup via flat_index.
     fn pos_of(&self, id: &EntityUri) -> Option<usize> {
         self.flat_index.get(id).copied()
+    }
+
+    /// True if `id` lies inside `ancestor`'s subtree (including `id == ancestor`).
+    fn is_in_subtree_of(&self, id: &EntityUri, ancestor: &EntityUri) -> bool {
+        let mut current = Some(id);
+        while let Some(cur) = current {
+            if cur == ancestor {
+                return true;
+            }
+            current = self.nodes.get(cur).and_then(|n| n.parent_id.as_ref());
+        }
+        false
     }
 
     /// Insert an id into flat_order at `pos` and update flat_index.
@@ -677,6 +724,56 @@ mod tests {
         assert_eq!(snap[0], (eu("a"), 0, false)); // a lost its child
         assert_eq!(snap[1], (eu("b"), 0, true)); // b gained a child
         assert_eq!(snap[2], (eu("c"), 1, false)); // c under b
+    }
+
+    /// Moving a node that has children must carry its whole subtree along —
+    /// descendants only get an UpdateAt when their OWN row changes, so the
+    /// tree can't rely on them being re-delivered.
+    #[test]
+    fn update_reparent_moves_subtree() {
+        let (mut tree, flat) = make_tree();
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
+        tree.insert(eu("b"), None, "1.0".into(), widget("B"));
+        tree.insert(eu("c"), Some(eu("a")), "0.0".into(), widget("C"));
+        tree.insert(eu("gc"), Some(eu("c")), "0.0".into(), widget("GC"));
+
+        // Indent c (with its child gc) from under a to under b.
+        tree.update(&eu("c"), Some(eu("b")), "0.0".into(), widget("C"));
+
+        let snap = tree.flat_snapshot();
+        assert_eq!(snap[0], (eu("a"), 0, false));
+        assert_eq!(snap[1], (eu("b"), 0, true));
+        assert_eq!(snap[2], (eu("c"), 1, true));
+        assert_eq!(snap[3], (eu("gc"), 2, false));
+        assert_eq!(flat.lock_ref().len(), 4);
+    }
+
+    /// Reordering (sort_key change only) must also keep the subtree intact.
+    #[test]
+    fn update_sort_key_moves_subtree() {
+        let (mut tree, _) = make_tree();
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
+        tree.insert(eu("ac"), Some(eu("a")), "0.0".into(), widget("AC"));
+        tree.insert(eu("b"), None, "1.0".into(), widget("B"));
+
+        // Move a (with child ac) after b.
+        tree.update(&eu("a"), None, "2.0".into(), widget("A"));
+
+        assert_eq!(tree.flat_ids(), vec![eu("b"), eu("a"), eu("ac")]);
+    }
+
+    /// A transient parent-inside-own-subtree update must not lose the node
+    /// (rendered as root until convergence), and must not cycle.
+    #[test]
+    fn update_parent_inside_own_subtree_renders_as_root() {
+        let (mut tree, _) = make_tree();
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
+        tree.insert(eu("b"), Some(eu("a")), "0.0".into(), widget("B"));
+
+        // Concurrent-move transient: a claims b (its own child) as parent.
+        tree.update(&eu("a"), Some(eu("b")), "0.0".into(), widget("A"));
+
+        assert_eq!(tree.flat_ids(), vec![eu("a"), eu("b")]);
     }
 
     #[test]

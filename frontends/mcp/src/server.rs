@@ -18,7 +18,7 @@ use crate::types::RowChangeJson;
 
 pub struct WatchState {
     pub pending_changes: Arc<Mutex<Vec<RowChangeJson>>>,
-    pub _task_handle: JoinHandle<()>,
+    pub task_handle: JoinHandle<()>,
 }
 
 /// A command sent from an MCP tool (tokio thread) to the GPUI foreground

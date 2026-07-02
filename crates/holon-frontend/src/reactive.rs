@@ -1974,7 +1974,13 @@ impl BuilderServices for ReactiveEngine {
                 Ok(response) => {
                     apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
                 }
-                Err(e) => tracing::error!("Operation {entity_name}.{op_name} failed: {e}"),
+                Err(e) => {
+                    // Disclose the failed write: the UI already reflects the
+                    // user's gesture, so a dropped error would silently look
+                    // like success. The tracker is the PBT/monitoring seam.
+                    session.error_tracker().record_error();
+                    tracing::error!("Operation {entity_name}.{op_name} failed: {e}");
+                }
             }
         });
     }

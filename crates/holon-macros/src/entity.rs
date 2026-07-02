@@ -150,13 +150,19 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
 
             let from_entity_conversion = if is_option_type(field_type) {
                 quote! {
-                    #field_name: entity.get(#field_name_str).and_then(|v| v.clone().try_into().ok())
+                    #field_name: match entity.get(#field_name_str) {
+                        None => None,
+                        Some(v) => v.clone().try_into()
+                            .map_err(|e| format!("Invalid value for field {}: {}", #field_name_str, e))?,
+                    }
                 }
             } else {
                 quote! {
                     #field_name: entity.get(#field_name_str)
-                        .and_then(|v| v.clone().try_into().ok())
-                        .ok_or_else(|| format!("Missing or invalid field: {}", #field_name_str))?
+                        .ok_or_else(|| format!("Missing field: {}", #field_name_str))?
+                        .clone()
+                        .try_into()
+                        .map_err(|e| format!("Invalid value for field {}: {}", #field_name_str, e))?
                 }
             };
 

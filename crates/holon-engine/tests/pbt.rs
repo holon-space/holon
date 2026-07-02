@@ -204,7 +204,8 @@ proptest! {
         (net, marking) in arb_net_and_marking()
     ) {
         let engine = Engine::new();
-        let enabled = engine.enabled(&net, &marking);
+        let enabled = engine.enabled(&net, &marking)
+            .expect("generated preconds are exact-match and cannot fail to evaluate");
 
         for binding in &enabled {
             let mut sim1 = marking.clone();
@@ -241,7 +242,8 @@ proptest! {
         let engine = Engine::new();
         let mut live = marking.clone();
         let mut history = History { events: vec![] };
-        let enabled = engine.enabled(&net, &live);
+        let enabled = engine.enabled(&net, &live)
+            .expect("generated preconds are exact-match and cannot fail to evaluate");
 
         let mut fired = 0;
         let mut current_enabled = enabled;
@@ -255,7 +257,8 @@ proptest! {
                 }
                 Err(_) => break,
             }
-            current_enabled = engine.enabled(&net, &live);
+            current_enabled = engine.enabled(&net, &live)
+                .expect("generated preconds are exact-match and cannot fail to evaluate");
         }
 
         let mut replayed = marking.clone();
@@ -291,11 +294,18 @@ proptest! {
         let evaluator = RhaiEvaluator::new();
 
         let mut wsjf_marking = marking.clone();
+        // rank() now fails loud when simulating a transition breaks the objective
+        // (e.g., it consumes a token the objective references); such nets can't be
+        // WSJF-ranked, so skip the comparison for them.
+        let mut rank_errored = false;
         for i in 0..5 {
-            let enabled = engine.enabled(&net, &wsjf_marking);
+            let enabled = engine.enabled(&net, &wsjf_marking)
+                .expect("generated preconds are exact-match and cannot fail to evaluate");
             if enabled.is_empty() { break; }
-            let ranked = engine.rank(&net, &wsjf_marking, &enabled);
-            if ranked.is_empty() { break; }
+            let ranked = match engine.rank(&net, &wsjf_marking, &enabled) {
+                Ok(r) => r,
+                Err(_) => { rank_errored = true; break; }
+            };
             let binding = &ranked[0].binding;
             engine.fire(&net, &mut wsjf_marking, binding, i)
                 .expect("fire should succeed for enabled transition");
@@ -305,7 +315,8 @@ proptest! {
 
         let mut lex_marking = marking.clone();
         for i in 0..5 {
-            let enabled = engine.enabled(&net, &lex_marking);
+            let enabled = engine.enabled(&net, &lex_marking)
+                .expect("generated preconds are exact-match and cannot fail to evaluate");
             if enabled.is_empty() { break; }
             let binding = enabled.into_iter()
                 .min_by_key(|b| b.transition_id.clone())
@@ -318,7 +329,7 @@ proptest! {
 
         // Skip comparison when objective can't be evaluated (e.g., consumed token
         // referenced in objective expression → evaluation returns -inf)
-        if wsjf_obj.is_finite() && lex_obj.is_finite() {
+        if !rank_errored && wsjf_obj.is_finite() && lex_obj.is_finite() {
             prop_assert!(wsjf_obj >= lex_obj - 1e-9,
                 "WSJF ({wsjf_obj}) should be >= lexicographic ({lex_obj})");
         }

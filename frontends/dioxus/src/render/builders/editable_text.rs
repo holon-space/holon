@@ -13,8 +13,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
 
 #[component]
 fn EditableTextNode(content: String) -> Element {
-    let entity_id = try_consume_context::<EntityContext>()
-        .map(|ctx| ctx.0)
+    let entity_id = try_consume_context::<Signal<EntityContext>>()
+        .map(|ctx| ctx.read().0.clone())
         .unwrap_or_else(|| {
             tracing::error!(
                 "[render] editable_text rendered without EntityContext — \

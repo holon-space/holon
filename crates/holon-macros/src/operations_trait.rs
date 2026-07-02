@@ -492,8 +492,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     let extraction = if type_str_cleaned == "String" || type_str_cleaned == "&str" {
                         if is_optional {
                             quote! {
-                                let #param_name_ident: Option<String> = params.get(#param_name_str)
-                                    .and_then(|v| v.as_string().map(|s| s.to_string()));
+                                let #param_name_ident: Option<String> = match params.get(#param_name_str) {
+                                    None | Some(holon_api::Value::Null) => None,
+                                    Some(v) => Some(v.as_string().map(|s| s.to_string())
+                                        .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected String)", #param_name_str))?),
+                                };
                             }
                         } else {
                             quote! {
@@ -505,8 +508,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     } else if type_str_cleaned == "bool" {
                         if is_optional {
                             quote! {
-                                let #param_name_ident: Option<bool> = params.get(#param_name_str)
-                                    .and_then(|v| v.as_bool());
+                                let #param_name_ident: Option<bool> = match params.get(#param_name_str) {
+                                    None | Some(holon_api::Value::Null) => None,
+                                    Some(v) => Some(v.as_bool()
+                                        .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected bool)", #param_name_str))?),
+                                };
                             }
                         } else {
                             quote! {
@@ -518,8 +524,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     } else if type_str_cleaned.starts_with("i64") {
                         if is_optional {
                             quote! {
-                                let #param_name_ident: Option<i64> = params.get(#param_name_str)
-                                    .and_then(|v| v.as_i64());
+                                let #param_name_ident: Option<i64> = match params.get(#param_name_str) {
+                                    None | Some(holon_api::Value::Null) => None,
+                                    Some(v) => Some(v.as_i64()
+                                        .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i64)", #param_name_str))?),
+                                };
                             }
                         } else {
                             quote! {
@@ -531,8 +540,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     } else if type_str_cleaned.starts_with("i32") {
                         if is_optional {
                             quote! {
-                                let #param_name_ident: Option<i32> = params.get(#param_name_str)
-                                    .and_then(|v| v.as_i64().map(|i| i as i32));
+                                let #param_name_ident: Option<i32> = match params.get(#param_name_str) {
+                                    None | Some(holon_api::Value::Null) => None,
+                                    Some(v) => Some(v.as_i64().map(|i| i as i32)
+                                        .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i32)", #param_name_str))?),
+                                };
                             }
                         } else {
                             quote! {
@@ -560,8 +572,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         }
                     } else if is_optional && type_str_cleaned.contains("DateTime") {
                         quote! {
-                            let #param_name_ident: Option<chrono::DateTime<chrono::Utc>> = params.get(#param_name_str)
-                                .and_then(|v| v.as_datetime());
+                            let #param_name_ident: Option<chrono::DateTime<chrono::Utc>> = match params.get(#param_name_str) {
+                                None | Some(holon_api::Value::Null) => None,
+                                Some(v) => Some(v.as_datetime()
+                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected DateTime)", #param_name_str))?),
+                            };
                         }
                     } else if type_str_cleaned == "Value" {
                         // For Value type, clone directly
@@ -582,9 +597,13 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         // trait methods see only the parsed form.
                         if is_optional {
                             quote! {
-                                let #param_name_ident: Option<holon_api::EntityUri> = params.get(#param_name_str)
-                                    // ALLOW(entity_uri_from_raw): MCP operation params HashMap string → EntityUri at dispatch edge
-                                    .and_then(|v| v.as_string().map(|s| holon_api::EntityUri::from_raw(s)));
+                                let #param_name_ident: Option<holon_api::EntityUri> = match params.get(#param_name_str) {
+                                    None | Some(holon_api::Value::Null) => None,
+                                    Some(v) => Some(v.as_string()
+                                        // ALLOW(entity_uri_from_raw): MCP operation params HashMap string → EntityUri at dispatch edge
+                                        .map(|s| holon_api::EntityUri::from_raw(s))
+                                        .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected EntityUri-as-String)", #param_name_str))?),
+                                };
                             }
                         } else {
                             quote! {
@@ -1093,11 +1112,15 @@ fn generate_precondition_closure(
             let type_conversion = if type_str_cleaned == "String" || type_str_cleaned == "&str" {
                 if is_optional {
                     quote! {
-                        let #param_name_ident: Option<String> = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_string().map(|s| s.to_string()))
-                            });
+                        let #param_name_ident: Option<String> = match params.get(#param_name_str) {
+                            None => None,
+                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
+                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
+                                holon_api::Value::Null => None,
+                                v => Some(v.as_string().map(|s| s.to_string())
+                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected String)", #param_name_str))?),
+                            },
+                        };
                     }
                 } else {
                     quote! {
@@ -1112,11 +1135,15 @@ fn generate_precondition_closure(
             } else if type_str_cleaned == "bool" {
                 if is_optional {
                     quote! {
-                        let #param_name_ident: Option<bool> = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_bool())
-                            });
+                        let #param_name_ident: Option<bool> = match params.get(#param_name_str) {
+                            None => None,
+                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
+                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
+                                holon_api::Value::Null => None,
+                                v => Some(v.as_bool()
+                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected bool)", #param_name_str))?),
+                            },
+                        };
                     }
                 } else {
                     quote! {
@@ -1131,11 +1158,15 @@ fn generate_precondition_closure(
             } else if type_str_cleaned.starts_with("i64") {
                 if is_optional {
                     quote! {
-                        let #param_name_ident: Option<i64> = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_i64())
-                            });
+                        let #param_name_ident: Option<i64> = match params.get(#param_name_str) {
+                            None => None,
+                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
+                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
+                                holon_api::Value::Null => None,
+                                v => Some(v.as_i64()
+                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i64)", #param_name_str))?),
+                            },
+                        };
                     }
                 } else {
                     quote! {
@@ -1150,11 +1181,15 @@ fn generate_precondition_closure(
             } else if type_str_cleaned.starts_with("i32") {
                 if is_optional {
                     quote! {
-                        let #param_name_ident: Option<i32> = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_i64().map(|i| i as i32))
-                            });
+                        let #param_name_ident: Option<i32> = match params.get(#param_name_str) {
+                            None => None,
+                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
+                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
+                                holon_api::Value::Null => None,
+                                v => Some(v.as_i64().map(|i| i as i32)
+                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i32)", #param_name_str))?),
+                            },
+                        };
                     }
                 } else {
                     quote! {
@@ -1168,11 +1203,15 @@ fn generate_precondition_closure(
                 }
             } else if is_optional && type_str_cleaned.contains("DateTime") {
                 quote! {
-                    let #param_name_ident: Option<chrono::DateTime<chrono::Utc>> = params.get(#param_name_str)
-                        .and_then(|any_val| {
-                            any_val.downcast_ref::<holon_api::Value>()
-                                .and_then(|v| v.as_datetime())
-                        });
+                    let #param_name_ident: Option<chrono::DateTime<chrono::Utc>> = match params.get(#param_name_str) {
+                        None => None,
+                        Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
+                            .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
+                            holon_api::Value::Null => None,
+                            v => Some(v.as_datetime()
+                                .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected DateTime)", #param_name_str))?),
+                        },
+                    };
                 }
             } else {
                 if is_optional {

@@ -19,6 +19,17 @@ use crate::mcp_sync_strategy::{
     SyncStrategy, expand_uri_template, json_value_to_holon_value, match_uri_template,
 };
 
+/// Scheme-prefix a record id value. Single source of truth for id prefixing so
+/// `record_to_entity` and `record_id` can never diverge (a divergence makes the
+/// full-sync diff delete + recreate every row on every sync).
+fn prefixed_id(scheme: &str, value: &Value) -> Option<String> {
+    match value {
+        Value::String(raw) => Some(format!("{scheme}:{raw}")),
+        Value::Integer(n) => Some(format!("{scheme}:{n}")),
+        _ => None,
+    }
+}
+
 /// Compare a freshly-fetched entity against a cached one.
 ///
 /// Uses the fetched entity's fields as the canonical set — any field present in
@@ -111,10 +122,9 @@ impl McpSyncEngine {
         for (key, json_val) in obj {
             let value = json_value_to_holon_value(json_val);
             if key == id_col {
-                if let Value::String(ref raw) = value {
-                    entity.set(key.as_str(), Value::String(format!("{scheme}:{raw}")));
-                } else {
-                    entity.set(key.as_str(), value);
+                match prefixed_id(scheme, &value) {
+                    Some(prefixed) => entity.set(key.as_str(), Value::String(prefixed)),
+                    None => entity.set(key.as_str(), value),
                 }
             } else {
                 entity.set(key.as_str(), value);
@@ -131,11 +141,7 @@ impl McpSyncEngine {
         obj: &serde_json::Map<String, serde_json::Value>,
     ) -> Option<EntityUri> {
         let val = obj.get(id_col)?;
-        let raw = match json_value_to_holon_value(val) {
-            Value::String(raw) => format!("{scheme}:{raw}"),
-            Value::Integer(n) => format!("{scheme}:{n}"),
-            _ => return None,
-        };
+        let raw = prefixed_id(scheme, &json_value_to_holon_value(val))?;
         // ALLOW(entity_uri_from_raw): remote MCP JSON record id at sync boundary
         Some(EntityUri::from_raw(&raw))
     }

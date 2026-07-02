@@ -310,10 +310,25 @@ impl McpOperationProvider {
         })?;
 
         let mut captured = HashMap::new();
+        let mut missing: Vec<&str> = Vec::new();
         for field in capture_fields {
-            if let Some(value) = all_fields.get(field.as_str()) {
-                captured.insert(field.clone(), value.clone());
+            match all_fields.get(field.as_str()) {
+                Some(value) => {
+                    captured.insert(field.clone(), value.clone());
+                }
+                None => missing.push(field.as_str()),
             }
+        }
+        // Warn instead of erroring: an absent key can also mean the field is
+        // legitimately unset on this entity, not just a misnamed capture field.
+        if !missing.is_empty() {
+            tracing::warn!(
+                entity = entity_name,
+                id = entity_id,
+                missing = ?missing,
+                "sidecar undo capture fields absent from cached entity — \
+                 undo will not restore them (misnamed capture field or unset field)"
+            );
         }
         Ok(captured)
     }
@@ -340,13 +355,26 @@ impl McpOperationProvider {
             UndoConfig::Mirror { tool, capture } => {
                 let entity_config = match self.sidecar.entities.get(entity_name) {
                     Some(ec) => ec,
-                    None => return UndoAction::Irreversible,
+                    None => {
+                        tracing::warn!(
+                            "undo for '{original_tool_name}' configured as Mirror but entity \
+                             '{entity_name}' is not in the sidecar — degrading to Irreversible"
+                        );
+                        return UndoAction::Irreversible;
+                    }
                 };
 
                 let id_col = entity_config.id_column_or_default();
                 let entity_id = match params.get(id_col.as_str()) {
                     Some(Value::String(id)) => id.clone(),
-                    _ => return UndoAction::Irreversible,
+                    other => {
+                        tracing::warn!(
+                            "undo for '{original_tool_name}' configured as Mirror but params \
+                             lack a string id column '{id_col}' (got {other:?}) — \
+                             degrading to Irreversible"
+                        );
+                        return UndoAction::Irreversible;
+                    }
                 };
 
                 let old_state = match self

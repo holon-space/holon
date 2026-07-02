@@ -13,9 +13,9 @@ use ply_engine::grow;
 use ply_engine::layout::LayoutDirection;
 use ply_engine::renderer::FontAsset;
 
+use holon_app::FrontendInjectorExt;
 use holon_frontend::cli;
 use holon_frontend::config::{HolonConfig, SessionConfig};
-use holon_frontend::frontend_module::FrontendInjectorExt;
 use holon_frontend::preferences::PrefKey;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine, RenderInterpreterInjectorExt};
 use holon_frontend::FrontendSession;
@@ -86,6 +86,22 @@ struct HolonState {
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
     left_sidebar_block_id: Arc<std::sync::Mutex<Option<String>>>,
+    query_watches: render::context::QueryWatches,
+}
+
+enum InitState {
+    Pending,
+    Ready(HolonState),
+    Failed(String),
+}
+
+impl InitState {
+    fn ready(&self) -> Option<&HolonState> {
+        match self {
+            InitState::Ready(state) => Some(state),
+            InitState::Pending | InitState::Failed(_) => None,
+        }
+    }
 }
 
 #[macroquad::main("Holon")]
@@ -140,6 +156,9 @@ async fn main() {
                     session,
                     engine,
                     left_sidebar_block_id: Arc::new(std::sync::Mutex::new(None)),
+                    query_watches: Arc::new(std::sync::Mutex::new(
+                        std::collections::HashMap::new(),
+                    )),
                 })
             });
 
@@ -150,20 +169,21 @@ async fn main() {
         });
     }
 
-    let mut holon: Option<HolonState> = None;
+    let mut holon = InitState::Pending;
 
     loop {
         // Check if init completed
-        if holon.is_none() {
+        if matches!(holon, InitState::Pending) {
             let mut slot = init_result.lock().unwrap();
             if let Some(result) = slot.take() {
                 match result {
                     Ok(state) => {
                         tracing::info!("Holon backend ready");
-                        holon = Some(state);
+                        holon = InitState::Ready(state);
                     }
                     Err(e) => {
                         tracing::error!("Holon init failed: {e}");
+                        holon = InitState::Failed(format!("Holon init failed: {e}"));
                     }
                 }
             }
@@ -181,10 +201,10 @@ async fn main() {
                 // Title bar
                 {
                     let sidebar_bid = holon
-                        .as_ref()
+                        .ready()
                         .and_then(|h| h.left_sidebar_block_id.lock().unwrap().clone());
                     let is_open = holon
-                        .as_ref()
+                        .ready()
                         .and_then(|h| {
                             sidebar_bid.as_ref().and_then(|bid| {
                                 h.session.ui_settings().widgets.get(bid).map(|ws| ws.open)
@@ -207,7 +227,7 @@ async fn main() {
                         .children(|ui| {
                             if sidebar_bid.is_some() {
                                 let label = if is_open { "\u{2630}" } else { "\u{2261}" };
-                                let session = holon.as_ref().map(|h| Arc::clone(&h.session));
+                                let session = holon.ready().map(|h| Arc::clone(&h.session));
                                 let bid = sidebar_bid.clone();
                                 ui.element()
                                     .width(ply_engine::layout::Sizing::Fixed(28.0))
@@ -243,8 +263,8 @@ async fn main() {
                                 ply_engine::align::AlignY::CenterY,
                             )
                     })
-                    .children(|ui| {
-                        if let Some(ref h) = holon {
+                    .children(|ui| match &holon {
+                        InitState::Ready(h) => {
                             let root_uri = holon_api::root_layout_block_uri();
                             let results = h.engine.ensure_watching(&root_uri);
                             let (render_expr, data_rows) = results.snapshot();
@@ -252,14 +272,19 @@ async fn main() {
                             let mut render_ctx = render::context::new_render_context(
                                 services,
                                 Arc::clone(&h.left_sidebar_block_id),
+                                Arc::clone(&h.query_watches),
                             );
-                            render_ctx.ctx.data_rows = data_rows;
+                            render_ctx.ctx.data_rows = data_rows.into();
 
                             let root_widget =
                                 render::interpreter::interpret(&render_expr, &render_ctx);
                             root_widget(ui);
-                        } else {
+                        }
+                        InitState::Pending => {
                             ui.text("Loading...", |t| t.font_size(16).color(0x888888u32));
+                        }
+                        InitState::Failed(msg) => {
+                            ui.text(msg, |t| t.font_size(14).color(0xFF5252u32));
                         }
                     });
             });

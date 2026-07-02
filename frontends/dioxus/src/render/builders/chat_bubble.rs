@@ -17,8 +17,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
             div { style: "font-size: 0.75em; color: #888; margin-bottom: 2px;",
                 "{sender} · {time}"
             }
-            for (i, child) in children.items.iter().enumerate() {
-                RenderNode { key: "{i}", node: child.clone() }
+            for (k, child) in children.items.iter().enumerate().map(|(i, c)| (super::util::child_key(i, c), c)) {
+                RenderNode { key: "{k}", node: child.clone() }
             }
         }
     }

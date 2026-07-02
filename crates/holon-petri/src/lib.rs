@@ -16,9 +16,9 @@
 //! The engine then ranks enabled transitions by WSJF (Δobj / duration).
 
 use chrono::{DateTime, Utc};
-use holon_api::CompiledExpr;
 use holon_api::block::Block;
 use holon_api::types::{DependsOn, Priority, TaskState, Timestamp};
+use holon_api::{CompiledExpr, EntityUri};
 use holon_engine::arc::{CreateArc, InputArc, OutputArc};
 use holon_engine::value::Value;
 use holon_engine::{Marking, NetDef, TokenState, TransitionDef};
@@ -60,6 +60,10 @@ impl TokenState for TaskToken {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskTransition {
     pub id: String,
+    /// The block id of the task this transition materializes. For delegated
+    /// tasks the `{id}_delegate` sub-transition shares its parent task's block
+    /// id — engine identity lives in `id`, API-facing block identity here.
+    pub source_block_id: String,
     pub label: String,
     pub inputs: Vec<InputArc>,
     pub outputs: Vec<OutputArc>,
@@ -458,35 +462,48 @@ const DEFAULT_ENERGY: f64 = 1.0;
 const DEFAULT_FOCUS: f64 = 0.8;
 const DEFAULT_MENTAL_SLOTS_CAPACITY: i64 = 7;
 
+/// Parse a numeric property value. Org drawer properties arrive as strings,
+/// so `String` is parsed; any other type is a stored-data bug — panic.
+fn numeric_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> f64 {
+    use holon_api::Value as HValue;
+    match v {
+        HValue::Float(f) => *f,
+        HValue::Integer(i) => *i as f64,
+        HValue::String(s) => s.parse().unwrap_or_else(|e| {
+            panic!("stored property {name} = {s:?} on block {block_id} is not numeric: {e}")
+        }),
+        other => {
+            panic!("stored property {name} on block {block_id} has non-numeric type: {other:?}")
+        }
+    }
+}
+
+/// Parse an integer property value; fails loud on fractional or non-numeric values.
+fn integer_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> i64 {
+    let f = numeric_prop(block_id, name, v);
+    if f.fract() != 0.0 {
+        panic!("stored property {name} = {f} on block {block_id} is not an integer");
+    }
+    f as i64
+}
+
 impl SelfDescriptor {
     pub fn from_block(block: &Block) -> Self {
-        use holon_api::Value as HValue;
         let props = &block.properties;
 
         let energy = props
             .get("energy")
-            .map(|v| match v {
-                HValue::Float(f) => *f,
-                HValue::Integer(i) => *i as f64,
-                _ => DEFAULT_ENERGY,
-            })
+            .map(|v| numeric_prop(&block.id, "energy", v))
             .unwrap_or(DEFAULT_ENERGY);
 
         let focus = props
             .get("focus")
-            .map(|v| match v {
-                HValue::Float(f) => *f,
-                HValue::Integer(i) => *i as f64,
-                _ => DEFAULT_FOCUS,
-            })
+            .map(|v| numeric_prop(&block.id, "focus", v))
             .unwrap_or(DEFAULT_FOCUS);
 
         let mental_slots_capacity = props
             .get("mental_slots_capacity")
-            .map(|v| match v {
-                HValue::Integer(i) => *i,
-                _ => DEFAULT_MENTAL_SLOTS_CAPACITY,
-            })
+            .map(|v| integer_prop(&block.id, "mental_slots_capacity", v))
             .unwrap_or(DEFAULT_MENTAL_SLOTS_CAPACITY);
 
         Self {
@@ -606,42 +623,50 @@ impl TaskInfo {
         use holon_api::Value as HValue;
         let props = &block.properties;
 
-        let task_state = props.get("task_state").and_then(|v| match v {
-            HValue::String(s) => Some(TaskState::from_keyword(s)),
-            _ => None,
+        let task_state = props.get("task_state").map(|v| match v {
+            HValue::String(s) => TaskState::from_keyword(s),
+            other => panic!(
+                "stored task_state on block {} has non-string type: {other:?}",
+                block.id
+            ),
         });
 
         task_state.as_ref()?;
 
-        let priority = props.get("priority").and_then(|v| match v {
-            HValue::Integer(i) => Some(Priority::from_int(*i as i32).unwrap_or_else(|e| {
+        let priority = props.get("priority").map(|v| {
+            let i = integer_prop(&block.id, "priority", v);
+            Priority::from_int(i as i32).unwrap_or_else(|e| {
                 panic!("stored priority {i} on block {} is invalid: {e}", block.id)
-            })),
-            _ => None,
+            })
         });
 
-        let deadline = props.get("deadline").and_then(|v| match v {
-            HValue::String(s) => Some(Timestamp::parse(s).unwrap_or_else(|e| {
+        let deadline = props.get("deadline").map(|v| match v {
+            HValue::String(s) => Timestamp::parse(s).unwrap_or_else(|e| {
                 panic!(
                     "stored deadline property {s:?} on block {} is not a valid timestamp: {e}",
                     block.id
                 )
-            })),
-            _ => None,
+            }),
+            other => panic!(
+                "stored deadline on block {} has non-string type: {other:?}",
+                block.id
+            ),
         });
 
         let depends_on = props
             .get("depends_on")
-            .and_then(|v| match v {
-                HValue::String(s) => Some(DependsOn::from_csv(s)),
-                _ => None,
+            .map(|v| match v {
+                HValue::String(s) => DependsOn::from_csv(s),
+                other => panic!(
+                    "stored depends_on on block {} has non-string type: {other:?}",
+                    block.id
+                ),
             })
             .unwrap_or_default();
 
-        let duration_minutes = props.get("duration").and_then(|v| match v {
-            HValue::Integer(i) => Some(*i),
-            _ => None,
-        });
+        let duration_minutes = props
+            .get("duration")
+            .map(|v| integer_prop(&block.id, "duration", v));
 
         let is_completed = task_state.as_ref().map(|ts| ts.is_done()).unwrap_or(false);
 
@@ -722,6 +747,19 @@ pub fn materialize_at(
         .collect();
 
     resolve_sequential_deps(&mut tasks);
+
+    let mut frag_to_id: BTreeMap<String, &str> = BTreeMap::new();
+    for task in &tasks {
+        let frag = rhai_ident_fragment(&task.block_id);
+        if let Some(prev) = frag_to_id.insert(frag.clone(), &task.block_id)
+            && prev != task.block_id
+        {
+            panic!(
+                "block ids {prev:?} and {:?} both sanitize to Rhai identifier fragment {frag:?}",
+                task.block_id
+            );
+        }
+    }
 
     let active: Vec<&TaskInfo> = tasks.iter().filter(|t| !t.is_completed).collect();
     let completed: Vec<&TaskInfo> = tasks.iter().filter(|t| t.is_completed).collect();
@@ -841,11 +879,23 @@ fn build_self_token(active_tasks: &[&TaskInfo], self_desc: &SelfDescriptor) -> T
     }
 }
 
+/// Deterministically map a block id to a valid Rhai identifier fragment.
+///
+/// Real block ids are EntityUris like `block:9f8e-…` whose `:` and `-` are not
+/// valid in Rhai identifiers; token ids built from them become Rhai scope
+/// variables referenced by the objective expression, so they must be
+/// identifier-safe. `materialize_at` asserts the mapping stays injective.
+pub fn rhai_ident_fragment(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
 fn build_completion_tokens(completed: &[&TaskInfo]) -> Vec<TaskToken> {
     completed
         .iter()
         .map(|t| TaskToken {
-            id: format!("completed_{}", t.block_id),
+            id: format!("completed_{}", rhai_ident_fragment(&t.block_id)),
             token_type: "completion".to_string(),
             attributes: {
                 let mut a = BTreeMap::new();
@@ -932,6 +982,7 @@ fn build_task_transitions(
         Executor::Delegated { person } => {
             transitions.push(TaskTransition {
                 id: format!("{}_delegate", task.block_id),
+                source_block_id: task.block_id.clone(),
                 label: format!("Delegate to {person}"),
                 inputs: vec![InputArc {
                     bind: "self".to_string(),
@@ -944,7 +995,7 @@ fn build_task_transitions(
                     postcond: BTreeMap::new(),
                 }],
                 creates: vec![CreateArc {
-                    id_expr: format!("\"waiting_for_{}\"", task.block_id),
+                    id_expr: format!("\"waiting_for_{}\"", rhai_ident_fragment(&task.block_id)),
                     token_type: "waiting".to_string(),
                     attrs: {
                         let mut a = BTreeMap::new();
@@ -1020,7 +1071,7 @@ fn build_task_transitions(
     let weight = task_weights.get(&task.block_id).copied().unwrap_or(1.0);
 
     creates.push(CreateArc {
-        id_expr: format!("\"completed_{}\"", task.block_id),
+        id_expr: format!("\"completed_{}\"", rhai_ident_fragment(&task.block_id)),
         token_type: "completion".to_string(),
         attrs: {
             let mut a = BTreeMap::new();
@@ -1032,7 +1083,7 @@ fn build_task_transitions(
 
     if task.is_question {
         creates.push(CreateArc {
-            id_expr: format!("\"knowledge_{}\"", task.block_id),
+            id_expr: format!("\"knowledge_{}\"", rhai_ident_fragment(&task.block_id)),
             token_type: "knowledge".to_string(),
             attrs: {
                 let mut a = BTreeMap::new();
@@ -1050,6 +1101,7 @@ fn build_task_transitions(
 
     transitions.push(TaskTransition {
         id: task.block_id.clone(),
+        source_block_id: task.block_id.clone(),
         label: task.content.lines().next().unwrap_or("").to_string(),
         inputs,
         outputs,
@@ -1070,7 +1122,8 @@ fn build_objective_expr(tasks: &[&TaskInfo], task_weights: &BTreeMap<String, f64
         .map(|task| {
             let weight = task_weights.get(&task.block_id).copied().unwrap_or(1.0);
             format!(
-                "(if is_def_var(\"completed_{bid}\") && completed_{bid}.source_task == \"{bid}\" {{ {weight:.6} }} else {{ 0.0 }})",
+                "(if is_def_var(\"completed_{frag}\") && completed_{frag}.source_task == \"{bid}\" {{ {weight:.6} }} else {{ 0.0 }})",
+                frag = rhai_ident_fragment(&task.block_id),
                 bid = task.block_id
             )
         })
@@ -1089,7 +1142,7 @@ fn build_objective_expr(tasks: &[&TaskInfo], task_weights: &BTreeMap<String, f64
 /// - A block with `prototype_for` → used as prototype properties
 /// - A block with `is_self: true` → used as the self token source
 /// - All other blocks with `task_state` → treated as tasks
-pub fn rank_tasks(blocks: &[Block]) -> RankResult {
+pub fn rank_tasks(blocks: &[Block]) -> Result<RankResult, String> {
     let rhai_engine = RhaiEngine::new();
 
     let prototype_block = blocks.iter().find(|b| is_prototype_block(b));
@@ -1110,15 +1163,15 @@ pub fn rank_tasks(blocks: &[Block]) -> RankResult {
     let (net, marking) = materialize(blocks, &self_desc, &prototype_props);
 
     let engine = Engine::new();
-    let enabled = engine.enabled(&net, &marking);
-    let ranked = engine.rank(&net, &marking, &enabled);
+    let enabled = engine.enabled(&net, &marking)?;
+    let ranked = engine.rank(&net, &marking, &enabled)?;
 
     let ranked_tasks = ranked
         .into_iter()
         .map(|rt| {
             let transition = net.transition(&rt.binding.transition_id).unwrap();
             RankedTask {
-                block_id: rt.binding.transition_id.clone(),
+                block_id: transition.source_block_id.clone(),
                 label: transition.label.clone(),
                 delta_obj: rt.delta_obj,
                 delta_per_minute: rt.delta_per_minute,
@@ -1141,11 +1194,79 @@ pub fn rank_tasks(blocks: &[Block]) -> RankResult {
         })
         .count();
 
-    RankResult {
+    Ok(RankResult {
         ranked: ranked_tasks,
         mental_slots: MentalSlotsInfo {
             occupied,
             capacity: self_desc.mental_slots_capacity as usize,
         },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task_block(id: &EntityUri, content: &str, state: &str) -> Block {
+        let mut b = Block::new_text(id.clone(), EntityUri::block("parent-1"), content);
+        b.set_property("task_state", holon_api::Value::String(state.to_string()));
+        b
+    }
+
+    /// Real block ids are EntityUris (`block:<uuid>`) whose `:`/`-` are invalid
+    /// in Rhai identifiers — rank_tasks must still compile the objective and
+    /// return real block ids, never delegate sub-transition ids.
+    #[test]
+    fn rank_tasks_with_real_entity_uri_ids() {
+        let self_task = EntityUri::block_random();
+        let delegated_task = EntityUri::block_random();
+        let done_task = EntityUri::block_random();
+
+        let blocks = vec![
+            task_block(&self_task, "Write the report", "TODO"),
+            task_block(&delegated_task, "@[[Alice]]: review doc", "TODO"),
+            task_block(&done_task, "Old chore", "DONE"),
+        ];
+
+        let result = rank_tasks(&blocks).expect("rank_tasks must succeed on real ids");
+
+        assert!(!result.ranked.is_empty(), "active tasks must be ranked");
+        let real_ids = [self_task.to_string(), delegated_task.to_string()];
+        for rt in &result.ranked {
+            assert!(
+                real_ids.contains(&rt.block_id),
+                "ranked block_id {:?} is not a real block id",
+                rt.block_id
+            );
+        }
+        assert!(
+            result.ranked.iter().any(|rt| rt.block_id == real_ids[1]),
+            "delegated task must surface under its own block id"
+        );
+    }
+
+    /// Org drawer properties arrive as strings — they must be parsed, and
+    /// garbage must fail loud rather than silently defaulting.
+    #[test]
+    fn self_descriptor_parses_string_properties() {
+        let mut b = Block::new_text(EntityUri::block_random(), EntityUri::block("p"), "Self");
+        b.set_property("is_self", holon_api::Value::Boolean(true));
+        b.set_property("energy", holon_api::Value::String("0.5".to_string()));
+        b.set_property(
+            "mental_slots_capacity",
+            holon_api::Value::String("5".to_string()),
+        );
+
+        let desc = SelfDescriptor::from_block(&b);
+        assert_eq!(desc.energy, 0.5);
+        assert_eq!(desc.mental_slots_capacity, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not numeric")]
+    fn self_descriptor_panics_on_garbage_energy() {
+        let mut b = Block::new_text(EntityUri::block_random(), EntityUri::block("p"), "Self");
+        b.set_property("energy", holon_api::Value::String("high".to_string()));
+        SelfDescriptor::from_block(&b);
     }
 }

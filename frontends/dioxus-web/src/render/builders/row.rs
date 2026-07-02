@@ -9,8 +9,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     rsx! {
         div {
             style: "display: flex; flex-direction: row; gap: {gap}px; align-items: flex-start; flex-wrap: wrap;",
-            for (i, child) in children.items.iter().enumerate() {
-                RenderNode { key: "{i}", node: child.clone() }
+            for (key, child) in keyed_children(&children.items) {
+                RenderNode { key: "{key}", node: child.clone() }
             }
         }
     }

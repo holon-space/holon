@@ -2,17 +2,20 @@
 //!
 //! Source of truth: `assets/default/keybindings.yaml`, embedded via
 //! `include_str!`. Parsed once at startup into a lookup table indexed by
-//! `(BindingMode, KeyMatch)`. The input handler consults the table first
-//! and falls back to legacy hardcoded matches for actions not yet in the
-//! YAML.
+//! `(BindingMode, KeyMatch)`. Only leader chords (Space + key in
+//! navigation mode) are dispatched through this table — direct keys and
+//! all editing-mode keys are hardcoded in `app_main.rs`, so the YAML
+//! must not declare them (a `keybindings.yaml` entry that no dispatch
+//! arm handles is caught by the `yaml_actions_all_dispatchable` test in
+//! `app_main.rs`).
 //!
 //! The schema is:
 //!
 //! ```yaml
 //! bindings:
 //!   - key: "h"
-//!     modifiers: ["leader"]   # optional; ["ctrl"] | ["alt"] | ["leader"] | omitted
-//!     context: "navigation"   # "navigation" | "editing"
+//!     modifiers: ["leader"]   # ["ctrl"] | ["alt"] | ["shift"] | ["leader"]
+//!     context: "navigation"
 //!     action: "go_home"
 //! ```
 //!
@@ -36,14 +39,12 @@ const KEYBINDINGS_YAML: &str = include_str!("../../../assets/default/keybindings
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingMode {
     Navigation,
-    Editing,
 }
 
 impl BindingMode {
     fn parse(s: &str) -> Option<Self> {
         match s {
             "navigation" => Some(Self::Navigation),
-            "editing" => Some(Self::Editing),
             _ => None,
         }
     }
@@ -112,6 +113,15 @@ impl Bindings {
     /// rule matches; the caller falls back to legacy hardcoded handling.
     pub fn action_for(&self, mode: BindingMode, key: &KeyMatch) -> Option<&str> {
         self.by_mode.get(&mode)?.get(key).map(String::as_str)
+    }
+
+    /// Every action name bound in `mode`. Used by the exhaustiveness
+    /// test that asserts each YAML action has a dispatch arm.
+    pub fn actions(&self, mode: BindingMode) -> impl Iterator<Item = &str> {
+        self.by_mode
+            .get(&mode)
+            .into_iter()
+            .flat_map(|m| m.values().map(String::as_str))
     }
 }
 

@@ -492,7 +492,12 @@ impl McpForeignDataWrapper {
                     .filter_map(|(k, v)| v.as_static().map(|s| (k.clone(), s.to_string())))
                     .collect();
                 let uri = crate::mcp_sync_strategy::expand_uri_template(resource, &static_params)
-                    .unwrap_or_else(|_| resource.clone());
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "list_resource template '{resource}' failed to expand with static \
+                             uri_params {static_params:?}: {e}"
+                        )
+                    });
                 FetchMode::Resource { uri }
             }
         } else {
@@ -726,10 +731,8 @@ impl McpCursor {
             })?,
         };
 
-        let rows: Vec<serde_json::Map<String, serde_json::Value>> = records
-            .iter()
-            .filter_map(|r| r.as_object().cloned())
-            .collect();
+        let rows = crate::mcp_sync_strategy::json_array_to_records(records)
+            .map_err(|e| LimboError::ExtensionError(format!("Tool '{search_tool}': {e}")))?;
         Ok((rows, response))
     }
 
@@ -880,10 +883,8 @@ impl McpCursor {
             LimboError::ExtensionError(format!("Resource '{uri}' did not return a JSON array"))
         })?;
 
-        Ok(records
-            .iter()
-            .filter_map(|r| r.as_object().cloned())
-            .collect())
+        crate::mcp_sync_strategy::json_array_to_records(records)
+            .map_err(|e| LimboError::ExtensionError(format!("Resource '{uri}': {e}")))
     }
 }
 

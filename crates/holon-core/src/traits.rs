@@ -1182,7 +1182,20 @@ where
         let new_content = format!("{}{}", target_content, block_content);
         let target_id = target.id().to_string();
 
-        let block_children: Vec<T> = self.get_children(&join_block_uri).await?;
+        // Children must come from the positional authority when one is wired
+        // (`BlockOrdering`) — `get_children` is UNORDERED (a `get_all`
+        // filter), so iterating it re-parents the subtree in arbitrary order.
+        let block_children: Vec<EntityUri> = match self.ordering() {
+            Some(ordering) => ordering.children(&join_block_uri).await?,
+            // Synthetic in-memory test substrate (no wired ordering): keep the
+            // unordered read; those substrates have no positional authority.
+            None => self
+                .get_children(&join_block_uri)
+                .await?
+                .iter()
+                .map(|c| c.id().clone())
+                .collect(),
+        };
 
         // Case-B refusal (Phase 3.5): joining a first-child block into its
         // parent when it has children of its own would orphan or reposition
@@ -1214,11 +1227,17 @@ where
         // `set_field` shape.
         if !block_children.is_empty() {
             let move_target_uri = target_uri.clone();
-            let target_children: Vec<T> = self.get_children(&move_target_uri).await?;
-            let mut last_after_uri: Option<EntityUri> =
-                target_children.last().map(|c| c.id().clone());
-            for child in block_children.iter() {
-                let child_uri = child.id().clone();
+            // Same authority rule as above: the append anchor must be the
+            // last child IN ORDER, not `.last()` of an unordered read.
+            let mut last_after_uri: Option<EntityUri> = match self.ordering() {
+                Some(ordering) => ordering.children(&move_target_uri).await?.pop(),
+                None => self
+                    .get_children(&move_target_uri)
+                    .await?
+                    .last()
+                    .map(|c| c.id().clone()),
+            };
+            for child_uri in block_children {
                 let move_changes = self
                     .move_to_position(&child_uri, &move_target_uri, last_after_uri.as_ref())
                     .await?;

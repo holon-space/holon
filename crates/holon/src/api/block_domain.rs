@@ -514,7 +514,7 @@ impl<'a> BlockDomain<'a> {
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("rank_tasks: failed to parse block rows")?;
 
-        Ok(crate::petri::rank_tasks(&blocks))
+        crate::petri::rank_tasks(&blocks).map_err(|e| anyhow::anyhow!("rank_tasks: {e}"))
     }
 }
 
