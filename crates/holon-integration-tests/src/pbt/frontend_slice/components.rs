@@ -304,6 +304,32 @@ impl HeadlessFrontendComponent {
         self.driver.clone()
     }
 
+    /// Build a `KeystrokeBlockTreeWriter` backed by `driver` (§8.12 C-3 mechanism 1):
+    /// the SAME production keystroke sequences the base install uses, but over the given
+    /// driver — so the windowed overlay can rebind `SutBlockTreeWrite` onto the window's
+    /// `GpuiUserDriver`/`SimUserDriver`. Reuses the component's own `reactive` (live
+    /// editor content reads), the shared `resolver` (oracle→minted id remap), and an
+    /// `OpDispatchWriter` fallback over `engine` (the `move_up`/`move_down` disclosed
+    /// dispatch floor — mechanism 3, unchanged here). Fail-loud if the resolver was never
+    /// set (only the composed builder wires it; a caller without it drove nothing).
+    pub(crate) fn keystroke_writer_with(
+        &self,
+        driver: Arc<dyn UserDriver>,
+    ) -> crate::pbt::op_write_cap::KeystrokeBlockTreeWriter {
+        use crate::pbt::op_write_cap::{KeystrokeBlockTreeWriter, OpDispatchWriter};
+        let resolver = self
+            .resolver
+            .get()
+            .expect("keystroke_writer_with: resolver must be set by the composed builder")
+            .clone();
+        let fallback = OpDispatchWriter::with_resolver_and_focus(
+            self.engine.clone(),
+            resolver.clone(),
+            self.reactive.clone(),
+        );
+        KeystrokeBlockTreeWriter::new(driver, self.reactive.clone(), resolver, fallback)
+    }
+
     /// The frontend's `LoroDocumentStore` — the authority store the production op
     /// pipeline writes (`LoroBlockOperations`) and `block_raw` projects from. `None`
     /// when Loro is disabled on this build (`new_with_loro(.., false)` → no
@@ -1114,28 +1140,31 @@ impl SutOrgRender for HeadlessFrontendComponent {
 /// click dispatches), then settle CDC to the focus-matview fixed point. The
 /// `NavigateFocus` transition's `apply_to_sut(&mut CapMap)` reaches this through
 /// the `#[capmap_adapter]`-generated `impl SutFocusWrite for CapMap`.
-#[async_trait::async_trait(?Send)]
-impl SutFocusWrite for HeadlessFrontendComponent {
-    // ALLOW(unused_param): region is fixed to main by the click-driven focus path below
-    async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
-        // Focus is set by CLICKING the LeftSidebar entry through the production
-        // `ReactiveEngineDriver` — the SAME way a real user (and E2ESut, and this cap's sibling
-        // `apply_focus_editable_text` below) does it, NOT a synthesized `navigation.focus`
-        // dispatch that skips the UI. The click-intent resolver dispatches the entry's bound
-        // `navigation.focus(region:"main")` action (find_click_intent -> apply_intent ->
-        // dispatch_intent), which mirrors focus into `engine.focused_block()` AND writes the SQL
-        // nav tables — so both the headless keystone (focus read deselected) and the WINDOWED SUT
-        // (window `SutDriver` reads `engine.focused_block()`) see a faithful, consistent focus.
-        // The generator restricts `NavigateFocus` to `Region::Main` on sidebar-listed pages, so
-        // the click always targets the `left_sidebar` entry (`_region` is the nav DESTINATION,
-        // carried by the entry's bound action, not the click location).
+impl HeadlessFrontendComponent {
+    /// `NavigateFocus` driven through an explicit `driver` (§8.12 C-3 mechanism 2).
+    /// The sidebar click + intent-await + focus-matview settle + landing assert are
+    /// driver-invariant; parameterizing the driver is what lets the windowed sibling
+    /// (`window_slice::WindowFrontendWrite`) rebind the click onto the window's
+    /// `GpuiUserDriver`/`SimUserDriver` (the HIGHEST-available rung when a window
+    /// exists) while the headless base keeps its VM-rung `ReactiveEngineDriver`.
+    pub(crate) async fn apply_navigate_focus_via(&self, driver: &dyn UserDriver, id: &EntityUri) {
+        // Focus is set by CLICKING the LeftSidebar entry through `driver` — the SAME way a
+        // real user (and E2ESut, and the sibling `apply_focus_editable_text_via`) does it,
+        // NOT a synthesized `navigation.focus` dispatch that skips the UI. The click-intent
+        // resolver dispatches the entry's bound `navigation.focus(region:"main")` action
+        // (find_click_intent -> apply_intent -> dispatch_intent), which mirrors focus into
+        // `engine.focused_block()` AND writes the SQL nav tables — so both the headless
+        // keystone (focus read deselected) and the WINDOWED SUT (window `SutDriver` reads
+        // `engine.focused_block()`) see a faithful, consistent focus. The generator
+        // restricts `NavigateFocus` to `Region::Main` on sidebar-listed pages, so the click
+        // always targets the `left_sidebar` entry.
         let id = self.resolve_id(id);
         // Do not let the click outrun the async sidebar render: wait until the
         // target's `navigation.focus` intent is actually bound, so `click_entity`
         // dispatches the nav SQL write instead of silently falling through to an
         // in-memory `set_focus`.
         self.await_sidebar_nav_intent(&id).await;
-        self.driver
+        driver
             .click_entity(&id, "left_sidebar")
             .await
             .unwrap_or_else(|e| {
@@ -1148,19 +1177,36 @@ impl SutFocusWrite for HeadlessFrontendComponent {
         self.assert_navigate_focus_landed(&id).await;
     }
 
-    /// Open an editor on `id` the production way: a main-panel `click_entity`
-    /// through the headless `UserDriver`. For an `editable_text` block the click
-    /// binds no intent, so it falls through to `engine.set_focus(id)` (ADR 0010:
-    /// focus is pure in-memory state) — exactly what `FocusEditableText`'s
-    /// geometry path (`apply_focus_editable_text_to_sut`) does after
-    /// `wait_for_bounds`, minus the GPUI layout wait. The mounting editor's caret
-    /// is seeded lazily on the first keystroke (`HeadlessEditorMirror`'s
-    /// `peek_caret_seed`-or-end init), matching production GPUI.
-    async fn apply_focus_editable_text(&self, id: &EntityUri) {
+    /// `FocusEditableText` driven through an explicit `driver` (§8.12 C-3 mechanism 2).
+    /// Open an editor on `id` the production way: a main-panel `click_entity`. For an
+    /// `editable_text` block the click binds no intent, so it falls through to
+    /// `engine.set_focus(id)` (ADR 0010: focus is pure in-memory state). The windowed
+    /// sibling passes the window driver so the click is a real geometry hit-test.
+    pub(crate) async fn apply_focus_editable_text_via(
+        &self,
+        driver: &dyn UserDriver,
+        id: &EntityUri,
+    ) {
         let id = &self.resolve_id(id);
-        self.driver.click_entity(id, "main").await.unwrap_or_else(|e| {
-            panic!("[SutFocusWrite::apply_focus_editable_text] click_entity(main, {id}) failed: {e:#}")
+        driver.click_entity(id, "main").await.unwrap_or_else(|e| {
+            panic!(
+                "[SutFocusWrite::apply_focus_editable_text] click_entity(main, {id}) failed: {e:#}"
+            )
         });
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutFocusWrite for HeadlessFrontendComponent {
+    // ALLOW(unused_param): region is fixed to main by the click-driven focus path
+    async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
+        self.apply_navigate_focus_via(self.driver.as_ref(), id)
+            .await;
+    }
+
+    async fn apply_focus_editable_text(&self, id: &EntityUri) {
+        self.apply_focus_editable_text_via(self.driver.as_ref(), id)
+            .await;
     }
 }
 
@@ -1171,11 +1217,14 @@ impl SutFocusWrite for HeadlessFrontendComponent {
 /// Each `apply_*` settles the focused block's `block_raw.content` to a fixed point
 /// so committed-content parity with the reference's eager
 /// `commit_active_editor_if_changed` holds for `inv-blocks-match-ref/block_raw`.
-#[async_trait::async_trait(?Send)]
-impl SutEditorMirrorWrite for HeadlessFrontendComponent {
-    async fn apply_type_chars(&self, text: &str) {
+impl HeadlessFrontendComponent {
+    /// `TypeChars` driven through an explicit `driver` (§8.12 C-3 mechanism 1, editor
+    /// family). Each char rides `send_raw_keystroke` — driver-parameterized so the
+    /// windowed sibling routes keystrokes through the window's real `InputState`
+    /// (`GpuiUserDriver`/`SimUserDriver`) while headless keeps the `HeadlessEditorMirror`.
+    pub(crate) async fn apply_type_chars_via(&self, driver: &dyn UserDriver, text: &str) {
         for ch in text.chars() {
-            self.driver
+            driver
                 .send_raw_keystroke(&ch.to_string(), &[])
                 .await
                 .unwrap_or_else(|e| {
@@ -1187,9 +1236,10 @@ impl SutEditorMirrorWrite for HeadlessFrontendComponent {
         }
     }
 
-    async fn apply_delete_backward(&self, count: usize) {
+    /// `DeleteBackward` driven through an explicit `driver` (§8.12 C-3 mechanism 1).
+    pub(crate) async fn apply_delete_backward_via(&self, driver: &dyn UserDriver, count: usize) {
         for _ in 0..count {
-            self.driver
+            driver
                 .send_raw_keystroke("backspace", &[])
                 .await
                 .unwrap_or_else(|e| {
@@ -1201,11 +1251,15 @@ impl SutEditorMirrorWrite for HeadlessFrontendComponent {
         }
     }
 
-    async fn apply_move_cursor(&self, byte_position: usize) {
-        // Convert the byte offset to `home` + N `right` keystrokes against the
-        // focused block's live editor text, exactly as `E2ESut::apply_move_cursor`
-        // does (each `right` advances one char). No content settle — MoveCursor
-        // doesn't write block content (mirrors the reference).
+    /// `MoveCursor` driven through an explicit `driver` (§8.12 C-3 mechanism 1). Convert
+    /// the byte offset to `home` + N `right` keystrokes against the focused block's live
+    /// editor text, exactly as `E2ESut::apply_move_cursor` does (each `right` advances one
+    /// char). No content settle — MoveCursor doesn't write block content (mirrors the ref).
+    pub(crate) async fn apply_move_cursor_via(
+        &self,
+        driver: &dyn UserDriver,
+        byte_position: usize,
+    ) {
         let block = self
             .reactive
             .focused_block()
@@ -1220,16 +1274,33 @@ impl SutEditorMirrorWrite for HeadlessFrontendComponent {
             "[apply_move_cursor] byte_position {byte_position} not a char boundary of {text:?}"
         );
         let right_presses = text[..byte_position].chars().count();
-        self.driver
+        driver
             .send_raw_keystroke("home", &[])
             .await
             .unwrap_or_else(|e| panic!("[apply_move_cursor] home failed: {e:#}"));
         for _ in 0..right_presses {
-            self.driver
+            driver
                 .send_raw_keystroke("right", &[])
                 .await
                 .unwrap_or_else(|e| panic!("[apply_move_cursor] right failed: {e:#}"));
         }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutEditorMirrorWrite for HeadlessFrontendComponent {
+    async fn apply_type_chars(&self, text: &str) {
+        self.apply_type_chars_via(self.driver.as_ref(), text).await;
+    }
+
+    async fn apply_delete_backward(&self, count: usize) {
+        self.apply_delete_backward_via(self.driver.as_ref(), count)
+            .await;
+    }
+
+    async fn apply_move_cursor(&self, byte_position: usize) {
+        self.apply_move_cursor_via(self.driver.as_ref(), byte_position)
+            .await;
     }
 }
 
@@ -1541,6 +1612,48 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
 /// `block_tree_post_action` seam, which the composed harness does not yet rebuild — so
 /// those transitions stay out of the composed alphabet (driving them would diverge),
 /// while `ToggleState` drives faithfully.
+impl HeadlessFrontendComponent {
+    /// Shared `ToggleState` click-count math: how many `state_toggle` clicks advance
+    /// the cycle from the pre-mutation state to `new_state`. Read `current` from the
+    /// settled projection (== the Loro doc at a settled point). Fail loud on a no-op
+    /// toggle (the generator excludes them).
+    async fn toggle_click_count(&self, id: &EntityUri, new_state: CycleTarget) -> u8 {
+        let current = self.block_task_state(id).await.unwrap_or_default();
+        let click_count = cycle_click_count(&current, new_state);
+        assert!(
+            click_count > 0,
+            "[toggle_state] click_count=0 ({current:?} == {new_state:?}) — the generator \
+             should exclude no-op toggles"
+        );
+        click_count
+    }
+
+    /// `ToggleState` driven through an explicit `driver` (§8.12 C-3 mechanism 2). CLICK
+    /// the `state_toggle` widget `click_count` times — the faithful user gesture the
+    /// generic `apply_toggle_state_to_sut` runs — so the windowed sibling drives the real
+    /// window `state_toggle` while headless keeps the direct-dispatch path below. Each
+    /// click's bound `cycle_task_state` reads the current state off the Loro backend and
+    /// advances by one, so the up-front `click_count` is stable across the loop.
+    pub(crate) async fn toggle_state_via(
+        &self,
+        driver: &dyn UserDriver,
+        block_id: &EntityUri,
+        new_state: CycleTarget,
+    ) {
+        let id = self.resolve_id(block_id);
+        let click_count = self.toggle_click_count(&id, new_state).await;
+        for n in 0..click_count {
+            driver.click_entity(&id, "main").await.unwrap_or_else(|e| {
+                panic!("[toggle_state] click #{} failed for {id}: {e:#}", n + 1)
+            });
+            // Let CDC propagate so the widget's `current` prop (and its registered
+            // bounds) stay warm for the next click.
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl SutMutate for HeadlessFrontendComponent {
     async fn toggle_state(&self, block_id: &EntityUri, new_state: CycleTarget) {
@@ -1548,16 +1661,10 @@ impl SutMutate for HeadlessFrontendComponent {
         // `click_count` times (each op reads the current `task_state` off the Loro
         // backend and advances by one), where `click_count` is computed from the
         // pre-mutation state — the headless analogue of clicking the `state_toggle`
-        // widget that many times. We read `current` from the settled SQL projection
-        // (== the Loro doc at a settled point, since SQL is a pure Loro projection).
+        // widget that many times. (The windowed sibling uses `toggle_state_via` to click
+        // the real widget through the window driver.)
         let id = self.resolve_id(block_id);
-        let current = self.block_task_state(&id).await.unwrap_or_default();
-        let click_count = cycle_click_count(&current, new_state);
-        assert!(
-            click_count > 0,
-            "[toggle_state] click_count=0 ({current:?} == {new_state:?}) — the generator \
-             should exclude no-op toggles"
-        );
+        let click_count = self.toggle_click_count(&id, new_state).await;
         let entity = "block".to_string().into();
         for _ in 0..click_count {
             let mut params: StorageEntity = HashMap::new();

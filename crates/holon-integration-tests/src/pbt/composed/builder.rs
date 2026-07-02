@@ -81,6 +81,10 @@ pub struct ComposedSut {
     /// The booted frontend `ReactiveEngine` (frontend arm only; `None` otherwise) — the
     /// render tree a gpui window paints. Pairs with `session` for the windowed bind.
     pub reactive: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
+    /// The booted frontend component (frontend arm only; `None` otherwise) — surfaced so
+    /// the windowed overlay (`overlay_windowed_caps`) can rebind its keystroke/click
+    /// write caps onto the window driver via the component's `*_via` bodies (§8.12 C-3).
+    pub frontend: Option<Arc<HeadlessFrontendComponent>>,
     /// Whether the harness must use a multi-thread runtime (a booted
     /// `FrontendSession` needs it). False for the synchronous storage backends.
     pub multi_thread: bool,
@@ -238,6 +242,7 @@ async fn compose_sut_seeded_impl(
     // session/reactive; §Round 5). `None` for the non-frontend arms.
     let mut session: Option<Arc<holon_frontend::FrontendSession>> = None;
     let mut reactive: Option<Arc<holon_frontend::reactive::ReactiveEngine>> = None;
+    let mut frontend: Option<Arc<HeadlessFrontendComponent>> = None;
     let mut multi_thread = false;
     let mut settle = Duration::ZERO;
     let mut scaffold_ids = BTreeSet::new();
@@ -397,6 +402,9 @@ async fn compose_sut_seeded_impl(
         // window as a renderer over this same reactive tree (§Round 5 windowed repoint).
         session = Some(comp.session());
         reactive = Some(comp.reactive());
+        // Surface the component so the windowed overlay can rebind its write caps onto
+        // the window driver (§8.12 C-3) via the component's `*_via` bodies.
+        frontend = Some(comp.clone());
         multi_thread = true; // the booted FrontendSession needs a multi-thread runtime
         settle = Duration::from_millis(150);
     } else if has_turso {
@@ -548,6 +556,7 @@ async fn compose_sut_seeded_impl(
         engine,
         session,
         reactive,
+        frontend,
         multi_thread,
         settle,
         scaffold_ids,

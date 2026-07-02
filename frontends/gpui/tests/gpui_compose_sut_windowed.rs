@@ -260,7 +260,11 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
     // ★ Exercise the pure-insert overlay at runtime. Its internal fail-loud assert also
     // confirms the base DEFERRED its driver (no SutDriver present) before inserting.
     let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
-    let overlaid = overlay_windowed_caps(composed.caps, geometry, engine.clone(), driver);
+    let frontend = composed
+        .frontend
+        .clone()
+        .expect("full_headless → booted HeadlessFrontendComponent");
+    let overlaid = overlay_windowed_caps(composed.caps, frontend, geometry, engine.clone(), driver);
 
     // (1) The overlay INSERTED the window driver rung (absent in the deferred base).
     assert!(
@@ -383,7 +387,11 @@ fn with_windowed_wide_sut(
         interaction_tx,
     ));
     let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
-    let overlaid = overlay_windowed_caps(bundle.caps, geometry, engine.clone(), driver);
+    let frontend = bundle
+        .frontend
+        .clone()
+        .expect("full_headless → booted HeadlessFrontendComponent");
+    let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver);
 
     // The window-settle hook the ComposedSut pumps before each check (mirror sim
     // `pump_cycle`: real wall-clock time for backend watchers on their own worker threads,
