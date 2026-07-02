@@ -161,7 +161,7 @@ pub trait TaskEntity: MaybeSendSync {
 }
 ```
 
-These compile-time traits define built-in entity types. User-defined types (Person, Book, Organization) will be defined at runtime via YAML type definitions with a `FieldLifetime` enum governing storage and reconstruction. See [Entity Type System](Architecture/Schema.md#entity-type-system-partially-implemented).
+These compile-time traits define built-in entity types. User-defined types are defined at runtime via `DynamicSchemaModule`, which builds a schema module from a `TypeDefinition` — see [Module registry](Architecture/Schema.md#module-registry).
 
 ### Domain Operations
 
@@ -213,7 +213,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [render-pipeline.md](Architecture/RenderPipeline.md) | Query compilation (PRQL/GQL/SQL), EntityProfile, ReactiveViewModel, Three-Tier Events |
 | [operations.md](Architecture/Operations.md) | Operation System, Action Watcher, Undo/Redo, Procedural Macros |
 | [integrations.md](Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
-| [schema.md](Architecture/Schema.md) | SchemaModule System, Entity Type System, FieldLifetime, Value Types |
+| [schema.md](Architecture/Schema.md) | Table/view-level schema reference: module registry, block base table + junctions + hydration matview, hierarchy, navigation, sync/operations/links/identity, graph EAV |
 | [engine.md](Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
 | [sync.md](Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
 | [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |

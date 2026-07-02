@@ -1,604 +1,200 @@
-# Schema & Entity Type System
+# Schema Reference
 
-*Part of [Architecture](../Architecture.md)*
+*Part of [Architecture](../Architecture.md). Table/view-level reference for
+the Turso projection — see [Model](Model.md) for the five-layer mental model
+and [Storage](Storage.md) for the Cell/QueryableCache/CDC machinery that
+reads and writes these objects.*
 
-## Schema Module System
+## Shape of the projection
 
-Database objects (tables, views, materialized views) have complex dependencies. A materialized view depends on the tables it queries; views may depend on other views. Creating them in the wrong order causes failures. The Schema Module system provides declarative lifecycle management with automatic dependency ordering.
+There is no `documents` table and no `doc:` / `holon-doc://` entity scheme.
+Everything is a block: pages are blocks tagged `Page`, tasks are blocks with
+a `block_type`, properties live in a nested JSON column. The only
+non-`block:` scheme that appears in `parent_id` is the root sentinel,
+`sentinel:no_parent` — root detection is `parent_id LIKE 'sentinel:%'`, full
+stop (the legacy `doc:%`-prefix branch was dropped from
+`blocks_with_paths.sql`; see the `schema/blocks_with_paths.sql` history).
 
-### SchemaModule Trait
+Turso is a **projection**, not an authority (Model §Five layers, row 3):
+exactly one writer, verbatim, never re-merged, ephemeral by contract. Base
+tables hold structural truth; materialized views (matviews) hydrate them for
+readers. Turso's incremental view maintenance (IVM) fires CDC only on
+matviews, not on base tables — chained matviews (a matview selecting from
+another matview) are supported and used deliberately (`block_requirement_edges`
+joins the `block` matview, not `block_raw`).
 
-Each logical group of database objects implements `SchemaModule`:
+## Module registry
 
-```rust
-#[async_trait]
-pub trait SchemaModule: Send + Sync {
-    /// Unique name for logging and error messages
-    fn name(&self) -> &str;
+Every table/view is owned by exactly one `SchemaModule` (trait in
+`crates/holon-turso/src/schema_module.rs`) or, for `graph_eav`, wired
+directly as DI SQL. `provides()`/`requires()` resources are FluxDI
+`DbReady<R>` markers (`crates/holon/src/di/schema_providers.rs`); dependency
+ordering — e.g. `block_with_path` after the `block` matview — is resolved by
+FluxDI's `resolve_all_eager()`, not by a hand-rolled topological sort.
+Modules are enumerated in `crates/holon/src/storage/schema_modules.rs`:
 
-    /// Resources this module creates (tables, views, materialized views)
-    fn provides(&self) -> Vec<Resource>;
+| Module | Provides | Requires | Kind |
+|--------|----------|----------|------|
+| `CoreSchemaModule` | `block_raw`, `directory`, `file` | (none) | base tables |
+| `BlockSchemaModule` | `block_requires`, `block_tags` | `block_raw` | junction tables |
+| `BlockMatviewSchemaModule` | `block` | `block_raw`, `block_requires`, `block_tags` | matview |
+| `BlockRequirementEdgesSchemaModule` | `block_requirement_edges` | `block`, `block_requires` | chained matview |
+| `BlockHierarchySchemaModule` | `block_with_path` | `block` | matview (recursive CTE) |
+| `NavigationSchemaModule` | `navigation_history`, `navigation_cursor`, `current_focus`, `focus_roots` | (none) | tables + 2 matviews |
+| `SyncStateSchemaModule` | `sync_states` | (none) | base table |
+| `OperationsSchemaModule` | `operation` | (none) | base table |
+| `LinkSchemaModule` | `block_link` | `block` | base table (populated by `LinkEventSubscriber`, not SQL) |
+| `IdentitySchemaModule` | `canonical_entity`, `entity_alias`, `proposal_queue` | (none) | base tables (unpopulated seam) |
+| `GraphEavSchema` (DI-only, `di/schema_providers.rs`) | `graph_eav` (`nodes`, `edges`, `node_labels`, `property_keys`, `*_props_*`) | `block_raw` | base tables |
 
-    /// Resources this module depends on
-    fn requires(&self) -> Vec<Resource>;
+**Runtime-defined types**: `DynamicSchemaModule`
+(`crates/holon-turso/src/dynamic_schema_module.rs`) builds a `SchemaModule`
+at startup from a `TypeDefinition`, creating one extension table per
+user-defined type that foreign-keys to `block(id)`. It plugs into the same
+FluxDI provider graph as the built-in modules above.
 
-    /// Execute DDL to create/update schema objects (idempotent)
-    async fn ensure_schema(&self, backend: &TursoBackend) -> Result<()>;
+## Block: base table, junctions, and hydration matview
 
-    /// Optional post-schema initialization (e.g., seed data)
-    async fn initialize_data(&self, _backend: &TursoBackend) -> Result<()> {
-        Ok(())
-    }
-}
-```
+`block_raw` is the structural base table. Writes always target it directly.
+Reads that need the edge-typed fields go through the `block` matview, which
+LEFT-JOINs the two junction tables and folds each into a JSON array with
+`json_group_array(...) FILTER (WHERE ... IS NOT NULL)`, defaulting to `'[]'`
+when a block has no tags/requires:
 
-### Resource Type
+| Table/view | Columns | Role |
+|---|---|---|
+| `block_raw` | `id`, `parent_id`, `depth`, `sort_key`, `content`, `content_type`, `source_language`, `source_name`, `properties`, `marks`, `collapsed`, `completed`, `block_type`, `created_at`, `updated_at`, `_change_origin` | Base table. Owned by `CoreSchemaModule`. All structural writes land here. |
+| `block_tags` | `block_id`, `tag` (PK on both, FK `block_id → block_raw(id)` cascade) | Junction table for the `tags` edge field. Owned by `BlockSchemaModule`. |
+| `block_requires` | `block_id`, `required_id` (PK on both, FKs to `block_raw(id)` cascade) | Junction table for the `requires` edge field. Owned by `BlockSchemaModule`. |
+| `block` (matview) | all `block_raw` columns + `tags` (JSON array), `requires` (JSON array) | Hydrated read surface. Owned by `BlockMatviewSchemaModule`. Every downstream reader (GQL/PRQL, `block_with_path`, `block_requirement_edges`) reads from here, not `block_raw`. |
+| `block_requirement_edges` (matview) | `block_id`, `required_id`, `required_content` | `JOIN`s `block_requires` against the `block` matview (chained matview — the join target is itself a matview). Owned by `BlockRequirementEdgesSchemaModule`. |
 
-Resources represent database objects that can be provided or required:
+`block_tags`/`block_requires` are **edge fields**: multi-valued fields that
+project to a junction table instead of folding into the `properties` blob.
+`BlockSchemaModule::edge_fields()` returns one `EdgeFieldDescriptor` per
+field (`entity`, `field`, `join_table`, `source_col`, `target_col`) —
+consumed both by the write path (`SqlOperationProvider` routes a
+`Value::Array` payload for a matching field through DELETE+INSERT against
+`join_table` instead of `properties`) and by the read path
+(`graph_schema::build()` wires a `JoinTableEdgeResolver`). They participate
+in CDC/change detection like any other column: a tag add/remove is a
+`block_tags` row insert/delete, which the `block` matview's CDC propagates
+as a changed `block` row.
 
-```rust
-pub enum Resource {
-    Schema(String),      // Tables, views, materialized views
-    Capability(String),  // Abstract capabilities
-}
+`DROP TABLE IF EXISTS task_blockers` runs before `block_requires` is
+(re)created — `task_blockers` is the pre-rename name for the junction table
+and is dropped rather than migrated, since matviews and edge-field
+descriptors all reference `block_requires` now.
 
-impl Resource {
-    pub fn schema(name: &str) -> Self { Resource::Schema(name.to_string()) }
-}
-```
+### Row → `Block` at the boundary
 
-### Concrete Schema Modules
+SQL rows never flow into the app as untyped maps. `impl TryFrom<StorageEntity>
+for Block` (`crates/holon-api/src/block.rs`) parses each column explicitly —
+an absent `parent_id` key is a reader bug (hard error naming the column and
+block id), a `NULL` `parent_id` is the legal root case
+(`EntityUri::no_parent()`), and a malformed `content_type`/`source_language`
+fails loud with the offending value in the message. The wire DTO,
+`BlockWire`, converts `Block ↔ BlockWire` at the process boundary (MCP,
+serialization) — internal code passes `Block`, never a raw row, past the
+`TryFrom` boundary.
 
-The system includes these core modules:
+## Hierarchy: `block_with_path`
 
-| Module | Provides | Requires |
-|--------|----------|----------|
-| `CoreSchemaModule` | `blocks`, `documents`, `directories` | (none) |
-| `BlockHierarchySchemaModule` | `blocks_with_paths` | `blocks` |
-| `NavigationSchemaModule` | `navigation_history`, `navigation_cursor`, `current_focus` | (none) |
-| `SyncStateSchemaModule` | `sync_states` | (none) |
-| `OperationsSchemaModule` | `operations` | (none) |
-| Graph EAV schema (inline DDL) | `nodes`, `edges`, `node_labels`, `property_keys`, `*_props_*` | (none) |
+`block_with_path` (`schema/blocks_with_paths.sql`, owned by
+`BlockHierarchySchemaModule`) is a recursive-CTE matview over the `block`
+matview (not `block_raw`) — another chained matview. Root detection is
+`parent_id LIKE 'sentinel:%'`; the recursive case joins a block to its
+parent's row in the CTE and appends `/id` to the accumulated `path`:
 
-**Runtime-defined types**: User-defined entity types (Person, Book, Organization) generate `SchemaModule` implementations dynamically at startup via `DynamicSchemaModule` (`crates/holon/src/storage/dynamic_schema_module.rs`). Each type becomes a module that provides its extension table (e.g., `person`) and requires `blocks`. The existing topological sort handles this naturally — user-defined type modules are registered alongside built-in modules. See [Entity Type System](#entity-type-system).
+| Column | Description |
+|---|---|
+| `id`, `parent_id`, `content`, `content_type`, `source_language`, `source_name`, `properties`, `created_at`, `updated_at` | Passed through from `block`. |
+| `path` | `/` + `/`-joined ancestor chain, e.g. `/root_id/.../id`. |
+| `root_id` | The root block's id, carried down through every recursive step. |
 
-Example implementation:
+Path-prefix matching against this view (`path LIKE '<prefix>%'`) is how
+`from descendants` context queries work — see `prql_stdlib.prql`. The
+`roots` PRQL stdlib function that used to wrap sentinel-root filtering was
+deleted (2026-07-02); callers filter `parent_id LIKE 'sentinel:%'` directly
+or query `block_with_path` where `root_id == id`.
 
-```rust
-pub struct BlockHierarchySchemaModule;
+## Navigation
 
-#[async_trait]
-impl SchemaModule for BlockHierarchySchemaModule {
-    fn name(&self) -> &str { "block_hierarchy" }
+Owned by `NavigationSchemaModule`. `navigation_history` is an append-only log
+of navigation events per region; `closed_at IS NULL` marks the still-open
+entries (soft-close, not delete, so back/forward history survives closing a
+tab). `navigation_cursor` holds, per region, which history row is "current".
+Two matviews derive read-optimized views from these tables:
 
-    fn provides(&self) -> Vec<Resource> {
-        vec![Resource::schema("blocks_with_paths")]
-    }
+| Table/view | Columns | Role |
+|---|---|---|
+| `navigation_history` | `id`, `region`, `block_id`, `timestamp`, `closed_at` | Append-only history. `block_id IS NULL` rows record "navigated home". |
+| `navigation_cursor` | `region` (PK), `history_id` (FK) | Current position per region. |
+| `current_focus` (matview) | `region`, `block_id`, `timestamp` | `navigation_cursor JOIN navigation_history`: the currently-focused block per region. |
+| `focus_roots` (matview) | `region`, `root_id`, `added_ts`, `history_id` | Open (`closed_at IS NULL`), non-home (`block_id IS NOT NULL`) history rows. Consumers `CHILD_OF*0..N` from `root_id` to render focus + descendants; `history_id` is the sidebar's close-button handle. |
 
-    fn requires(&self) -> Vec<Resource> {
-        vec![Resource::schema("blocks")]  // Must exist before this view
-    }
+The editor caret/cursor is **not** persisted here — that was removed
+(`editor_cursor` table + `current_editor_focus` matview deleted, ADR 0010) as
+pure in-memory UI state.
 
-    async fn ensure_schema(&self, backend: &TursoBackend) -> Result<()> {
-        backend.execute_ddl(r#"
-            CREATE MATERIALIZED VIEW IF NOT EXISTS blocks_with_paths AS
-            WITH RECURSIVE paths AS (
-                SELECT id, parent_id, content, '/' || id as path
-                FROM blocks
-                WHERE parent_id LIKE 'holon-doc://%'
-                   OR parent_id = '__no_parent__'
-                UNION ALL
-                SELECT b.id, b.parent_id, b.content, p.path || '/' || b.id
-                FROM blocks b
-                INNER JOIN paths p ON b.parent_id = p.id
-            )
-            SELECT * FROM paths
-        "#).await
-    }
-}
-```
+## Sync, operations, links, identity
 
-### SchemaRegistry
+| Table | Columns | Role |
+|---|---|---|
+| `sync_states` | `provider_name` (PK), `sync_token`, `updated_at`, `_change_origin` | One row per external sync provider (Todoist, etc.); owned by `SyncStateSchemaModule`. |
+| `operation` | `id`, `operation`, `inverse`, `status`, `created_at`, `display_name`, `entity_name`, `op_name`, `_change_origin` | Undo/redo log; owned by `OperationsSchemaModule`. Schema must match `OperationLogEntry` in `holon-core/src/operation_log.rs`. Part of the command-sourcing seam kept warm for future offline (see Model.md "Offline (future)"). |
+| `block_link` | `source_block_id`, `target_raw`, `target_id`, `display_text`, `position` (PK `source_block_id, position`) | Extracted `[[...]]` links. Populated by `LinkEventSubscriber`, not written directly by sync controllers. `target_id` is entity-scheme-agnostic — it may hold any resolved scheme, not just `block:`. Owned by `LinkSchemaModule`. |
+| `canonical_entity` | `id` (PK), `kind`, `primary_label`, `created_at` | Cross-system entity identity. |
+| `entity_alias` | `canonical_id` (FK), `system`, `foreign_id`, `confidence` (PK `system, foreign_id`) | Foreign-system aliases for a canonical entity. |
+| `proposal_queue` | `id` (PK), `kind`, `evidence_json`, `status`, `created_at` | Pending merge/identity proposals. |
 
-The registry collects modules and initializes them in dependency order:
+`canonical_entity`/`entity_alias`/`proposal_queue` are owned by
+`IdentitySchemaModule` and are empty by default — the tables exist so future
+merge / propose-merge / accept-proposal operations have a schema seam to
+plug into rather than growing ad-hoc identity columns elsewhere.
 
-```rust
-pub struct SchemaRegistry {
-    modules: Vec<Arc<dyn SchemaModule>>,
-}
+## Generic graph: `graph_eav`
 
-impl SchemaRegistry {
-    pub fn register(&mut self, module: Arc<dyn SchemaModule>);
+`graph_eav` (`sql/schema/graph_eav.sql`, wired directly via
+`GraphEavSchema`/`register_schema_providers`, not a `SchemaModule` impl) is a
+generic entity-attribute-value graph store, independent of the block schema:
 
-    /// Initialize all modules in topological order
-    pub async fn initialize_all(
-        &self,
-        backend: Arc<RwLock<TursoBackend>>,
-        scheduler_handle: &SchedulerHandle,
-        pre_available: Vec<Resource>,
-    ) -> Result<(), SchemaRegistryError>;
-}
-```
+| Table | Role |
+|---|---|
+| `nodes` | Node ids (`id` autoincrement). |
+| `edges` | Typed edges between nodes: `source_id`, `target_id`, `type`. |
+| `property_keys` | Interned property key strings. |
+| `node_labels` | Multi-valued labels per node. |
+| `node_props_{int,text,real,bool,json}` | One EAV table per value type, keyed `(node_id, key_id)`. |
+| `edge_props_{int,text,real,bool,json}` | Same shape, keyed `(edge_id, key_id)`. |
 
-### Topological Sort
+This is a separate concern from the block hierarchy — it is not currently a
+projection of `block`/`block_with_path`.
 
-The registry builds a dependency DAG and uses Kahn's algorithm:
+## Directories and files
 
-```
-                    ┌─────────────────┐
-                    │ CoreSchemaModule│
-                    │ provides: blocks│
-                    └────────┬────────┘
-                             │
-              requires: blocks
-                             │
-                             ▼
-               ┌─────────────────────────┐
-               │ BlockHierarchySchemaModule│
-               │ provides: blocks_with_paths│
-               └─────────────────────────┘
-```
+`directory` and `file` (owned by `CoreSchemaModule`, alongside `block_raw`)
+track the on-disk vault layout independent of block content:
 
-1. Build provider map: `Resource → module index`
-2. Compute in-degrees for each module
-3. Process modules with in-degree 0 first
-4. After processing, mark provided resources as available
-5. Decrement in-degrees of dependent modules
-6. Repeat until all modules processed
+| Table | Columns |
+|---|---|
+| `directory` | `id` (PK), `name`, `parent_id`, `depth`, `_change_origin` |
+| `file` | `id` (PK), `name`, `parent_id`, `content_hash`, `document_id`, `_change_origin` |
 
-### Error Handling
-
-```rust
-pub enum SchemaRegistryError {
-    /// Circular dependency detected
-    CycleDetected(String),
-
-    /// Module requires a resource no module provides
-    MissingDependency { module: String, resource: String },
-
-    /// DDL execution or data initialization failed
-    InitializationFailed { module: String, error: String },
-}
-```
-
-### Integration with DI
-
-During application startup in `create_backend_engine()`:
-
-```rust
-// 1. Create TursoBackend and DatabaseActor
-let backend = Arc::new(RwLock::new(TursoBackend::new(db_path).await?));
-let (actor, db_handle) = DatabaseActor::new(backend.clone()).await?;
-tokio::spawn(actor.run());
-
-// 2. Create OperationScheduler for dependency tracking
-let (scheduler, scheduler_handle) = OperationScheduler::new(db_handle.clone());
-tokio::spawn(scheduler.run());
-
-// 3. Register DI services
-register_core_services_with_backend(&mut services, db_path, backend.clone(), db_handle)?;
-
-// 4. Initialize all schemas via registry (replaces manual mark_available calls)
-let registry = create_core_schema_registry();
-registry.initialize_all(backend.clone(), &scheduler_handle, vec![]).await?;
-
-// 5. Build DI container and resolve BackendEngine
-let provider = services.build();
-let engine = Resolver::get_required::<BackendEngine>(&provider);
-```
-
-### Factory Function
-
-```rust
-/// Creates a SchemaRegistry with all core modules registered
-pub fn create_core_schema_registry() -> SchemaRegistry {
-    let mut registry = SchemaRegistry::new();
-    registry.register(Arc::new(CoreSchemaModule));
-    registry.register(Arc::new(BlockHierarchySchemaModule));
-    registry.register(Arc::new(NavigationSchemaModule));
-    registry.register(Arc::new(SyncStateSchemaModule));
-    registry.register(Arc::new(OperationsSchemaModule));
-    registry
-}
-```
-
-### Adding New Schema Objects
-
-To add a new table or view:
-
-1. **Create a SchemaModule** in `storage/schema_modules.rs`:
-   ```rust
-   pub struct MyNewSchemaModule;
-
-   #[async_trait]
-   impl SchemaModule for MyNewSchemaModule {
-       fn name(&self) -> &str { "my_new_schema" }
-       fn provides(&self) -> Vec<Resource> { vec![Resource::schema("my_table")] }
-       fn requires(&self) -> Vec<Resource> { vec![] }  // or dependencies
-       async fn ensure_schema(&self, backend: &TursoBackend) -> Result<()> {
-           backend.execute_ddl("CREATE TABLE IF NOT EXISTS my_table (...)").await
-       }
-   }
-   ```
-
-2. **Register in factory**:
-   ```rust
-   pub fn create_core_schema_registry() -> SchemaRegistry {
-       let mut registry = SchemaRegistry::new();
-       // ... existing modules ...
-       registry.register(Arc::new(MyNewSchemaModule));
-       registry
-   }
-   ```
-
-3. **Export from `storage/mod.rs`** if needed externally.
-
-The registry automatically determines the correct initialization order.
-
-### Cell Field Declaration
-
-Each entity-type module declares which of its fields are exposed as `Cell<T>` and what backing protocol drives them. This is analogous to the `edge_fields()` declaration on `BlockSchemaModule` (`crates/holon/src/sync/block_schema.rs`) for junction tables, but for the reactive read primitive instead of edge storage.
-
-```rust
-impl BlockSchemaModule {
-    pub fn cell_fields(&self) -> Vec<CellFieldDescriptor> {
-        vec![
-            // Rich-text field — Loro-backed in Full mode, LWW in SqlOnly
-            CellFieldDescriptor::text("content"),
-            // Scalar fields stored in LoroMap meta on the tree node
-            CellFieldDescriptor::scalar::<bool>("completed"),
-            CellFieldDescriptor::scalar::<bool>("collapsed"),
-            CellFieldDescriptor::scalar::<String>("block_type"),
-            CellFieldDescriptor::scalar::<i64>("created_at"),
-            // Tree-structural fields
-            CellFieldDescriptor::tree_parent("parent_id"),
-            CellFieldDescriptor::tree_position("sort_key"),
-        ]
-    }
-}
-```
-
-`BlockCellRegistry` reads this declaration to map `(field_name, T)` → backing constructor at runtime. The DI module picks the variant per build mode: `LoroTextCellBacking` / `LoroMetaCellBacking<T>` / `LoroTreeParentCellBacking` / `LoroTreePositionCellBacking` in Full mode; `LwwTextCellBacking` / `LwwScalarBacking<T>` in SqlOnly. Type mismatches (`live_field::<i64>` for a `bool` field) error loudly.
-
-**Implementation status (2026-06-11):** `LoroTextCellBacking` is the only
-backing type implemented. The other five (`LoroMetaCellBacking<T>`,
-`LoroTreeParentCellBacking`, `LoroTreePositionCellBacking`,
-`LwwScalarBacking<T>`, `LwwTextCellBacking`) are planned but deferred past
-Phase 1. The `write_field` carve-outs in `block_cell_registry.rs` handle
-routing correctly without them. See
-`codev/specs/0007-architecture-improvement-plan.md` Phase 1 item 4.
-
-See [Storage](Storage.md) for cell internals and [Sync](Sync.md) for the authority + projection model.
-
-### Key Files
+## Key files
 
 | Path | Description |
 |------|-------------|
-| `crates/holon/src/storage/schema_module.rs` | `SchemaModule` trait, `SchemaRegistry`, topological sort |
-| `crates/holon/src/storage/schema_modules.rs` | Concrete module implementations |
-| `crates/holon/src/storage/resource.rs` | `Resource` enum |
-| `crates/holon/src/di/mod.rs` | Integration with DI and startup |
-| `crates/holon-core/src/cell.rs` | `Cell<T>`, `CellBacking<T>`, `TextCellBacking` |
-| `crates/holon-core/src/cell_registry.rs` | `EntityCellRegistry` trait |
-| `crates/holon/src/sync/block_cell_registry.rs` | `BlockCellRegistry` impl + cell-field declaration |
-
-## Value Types
-
-```rust
-pub enum Value {
-    String(String),
-    Integer(i64),
-    Float(f64),
-    Boolean(bool),
-    DateTime(DateTime<Utc>),
-    Json(serde_json::Value),
-    Null,
-}
-
-pub type StorageEntity = HashMap<String, Value>;
-```
-
-## Schema System
-
-```rust
-pub struct TypeDefinition {
-    pub name: String,                          // Entity/table name
-    pub default_lifetime: FieldLifetime,
-    pub fields: Vec<FieldSchema>,
-    pub primary_key: String,                   // Defaults to "id"
-    pub id_references: Option<String>,         // FK constraint for extension tables
-    pub graph_label: Option<String>,           // GQL node label
-    pub source: TypeSource,                    // BuiltIn or Runtime
-}
-
-pub struct FieldSchema {
-    pub name: String,
-    pub data_type: DataType,
-    pub indexed: bool,
-    pub primary_key: bool,
-    pub nullable: bool,
-}
-
-pub trait IntoEntity {
-    fn to_entity(&self) -> DynamicEntity;
-    fn type_definition() -> TypeDefinition;
-}
-
-pub trait TryFromEntity: Sized {
-    fn from_entity(entity: DynamicEntity) -> Result<Self>;
-}
-```
-
-Auto-generates CREATE TABLE and CREATE INDEX SQL from `TypeDefinition`. The `#[derive(Entity)]` macro generates `IntoEntity` and `TryFromEntity` implementations for built-in types (Block, Document). User-defined types use YAML definitions that produce `TypeDefinition` at runtime. Both coexist — they produce `SchemaModule` implementations with the same table/index conventions. See [Entity Type System](#entity-type-system).
-
-## Entity Type System
-
-Holon supports **runtime-defined typed entities** — user-definable types like Person, Book, Organization — with typed fields, computed expressions, and cross-system identity. This extends the block model without replacing it.
-
-### Implementation Status
-
-Implemented and shipping. The unified surface lives behind `TypeRegistry` (`crates/holon/src/type_registry.rs`) and `TypeDefinition` (`crates/holon-api/src/entity.rs`). `Schema`, `HasSchema`, `EntitySchemaProvider`, `EntitySchema`, `EntityFieldSchema`, and the standalone `ComputedField` struct are gone — every schema flow goes through `TypeDefinition` + `FieldLifetime`. Built-in types (Block, Document) use `#[derive(Entity)]` to generate `TypeDefinition` at compile time; runtime types are loaded from YAML in `assets/default/types/` via `TypeRegistry::load_types_from_directory`. Extension tables are created by `DynamicSchemaModule` through the standard `SchemaRegistry` topological order. Computed fields are pre-compiled to `CompiledExpr` at registration time and evaluated through `TypeDefinition::enrich_with`. New types can also be registered at runtime via the `create_entity_type` MCP tool.
-
-**Single carve-out**: the Petri WSJF scoring engine (`crates/holon/src/petri.rs`) keeps its own `PrototypeValue::{Literal, Computed}` and `resolve_prototype` numeric merge for prototype-block inheritance. That mechanism operates on a different domain (f64-only prototype/instance/context merge for ranking) than `TypeDefinition::enrich_with` (typed entity rows over `StorageEntity`). Unification is **not planned** — the two are intentionally separate. The "Computed Fields and Prototype Blocks" subsection at the end of this document records this decision.
-
-### Design Principles
-
-1. **Blocks remain the universal identity layer.** Every typed entity IS a block — it has a row in the `block` table for tree structure, links, content, and text. Extension tables add typed fields via JOIN on `id`.
-2. **Types are defined at runtime.** No recompile needed. Type definitions are stored as data in Loro, projected to YAML files, and materialized as Turso DDL.
-3. **Turso remains a pure cache.** Deleting the entire Turso database loses no data. Everything reconstructs from Loro (or from org/YAML files if Loro is also gone).
-4. **Structural primacy.** The type system is structural intelligence — it works without AI, survives model swaps, and compounds value as entity density grows.
-
-### Field Lifetimes
-
-Each field in a type definition has a `lifetime` that determines where it is stored, whether it participates in CRDT merge, and how it is reconstructed:
-
-```rust
-enum FieldLifetime {
-    /// Stored in Loro, projected to org/YAML, materialized to Turso.
-    /// Survives any cache wipe. Participates in CRDT merge.
-    Persistent,
-
-    /// Derived from other fields via a Rhai expression. Turso only.
-    /// Not stored in Loro or files. Recomputed on reconstruction.
-    /// Subsumes the current prototype block `=`-prefixed expressions.
-    Computed { expr: String },
-
-    /// Turso only. Not in Loro, not in files. Device-local.
-    /// Re-fetched from Digital Twin source on next sync cycle.
-    /// NULL after cache reconstruction.
-    Transient,
-
-    /// Append-only time series. Survives cache wipe via separate backup.
-    /// Not in Loro (no merge semantics needed). Not in org files.
-    /// Queryable in Turso for historical analysis.
-    Historical,
-}
-```
-
-Propagation rules:
-
-| Lifetime | Loro | Org/YAML | Turso | CRDT merge | Reconstruction |
-|---|---|---|---|---|---|
-| `Persistent` | Yes | Yes | Yes | Yes | From Loro |
-| `Computed` | No | No | Yes | No (derived) | Recompute from persistent fields |
-| `Transient` | No | No | Yes | No (device-local) | Re-fetch from DT source |
-| `Historical` | No | No | Yes + backup | No | From backup |
-
-### Type Definitions
-
-Type definitions are stored in Loro as structured maps and bidirectionally projected to YAML files:
-
-```
-assets/default/
-  index.org              # document tree, text content
-  types/
-    person.yaml          # type definition
-    book.yaml
-    organization.yaml
-```
-
-Example type definition:
-
-```yaml
-name: person
-fields:
-  email:            { type: text, lifetime: persistent, indexed: true }
-  organization:     { type: ref, lifetime: persistent, target: organization }
-  role:             { type: text, lifetime: persistent }
-  display_name:
-    type: text
-    lifetime: computed
-    expr: "first_name + ' ' + last_name"
-  current_location: { type: text, lifetime: transient }
-  energy:           { type: real, lifetime: transient }
-```
-
-**Sync**: A `TypeSyncController` mirrors the existing `FileSyncController` pattern — bidirectional sync between Loro and YAML files with echo-suppression via `last_projection` comparison.
-
-**Loro representation**: Type definitions live under a `types/` key in the LoroDoc as nested LoroMaps. Field names are map keys; field metadata (type, lifetime, expr, indexed, etc.) are nested maps.
-
-### Extension Tables
-
-Each entity type gets a Turso table that extends the universal `block` table:
-
-```
-┌─────────────────────────────────────────────────┐
-│  block table (universal)                         │
-│  id, content, parent_id, content_type, ...       │
-│  Every entity has a row here.                    │
-├───────────────┬───────────────┬─────────────────┤
-│  person       │  book         │  organization    │
-│  (extension)  │  (extension)  │  (extension)     │
-│  email        │  author       │  domain          │
-│  role         │  year         │  industry        │
-│  org_id       │  rating       │  size            │
-│  location*    │               │                  │
-│  energy*      │               │                  │
-│  (* transient)│               │                  │
-└───────────────┴───────────────┴─────────────────┘
-```
-
-Generated DDL from type definitions:
-
-```sql
-CREATE TABLE IF NOT EXISTS person (
-    id TEXT PRIMARY KEY REFERENCES block(id),
-    email TEXT,
-    organization TEXT,
-    role TEXT,
-    display_name TEXT,        -- computed: populated by trigger
-    current_location TEXT,    -- transient: NULL after reconstruction
-    energy REAL               -- transient: NULL after reconstruction
-);
-CREATE INDEX IF NOT EXISTS idx_person_email ON person(email);
-```
-
-**Queries** join naturally:
-
-```prql
-from block
-join person [==id]
-filter role == "Engineering Lead"
-select {block.content, person.email, person.role}
-```
-
-**Schema evolution**: Adding a field = update type definition + `ALTER TABLE ADD COLUMN`. Removing a field = update type definition + drop column from extension table (data stays in Loro properties — no data loss). Renaming = add new + migrate + drop old, standard DDL.
-
-**Schema Module integration**: Each runtime-defined type generates a `SchemaModule` implementation that provides its extension table and requires the `block` table. The existing dependency-ordering infrastructure in `schema_modules.rs` handles this — user-defined type modules are registered alongside the built-in modules.
-
-### Instance Data
-
-Instance data for typed entities lives in the block's properties in Loro — the same `properties` map that already holds freeform org properties like `collapse-to` and `column-order`. The type schema declares which property keys are "typed" (materialized to extension table columns) and which remain freeform (stay in the JSON `properties` column on the `block` table).
-
-In org files, typed properties appear as standard org properties on headings:
-
-```org
-* Sarah Chen
-:PROPERTIES:
-:type: person
-:email: sarah@example.com
-:organization: [[Acme Corp]]
-:role: Engineering Lead
-:END:
-
-Notes from our last conversation...
-```
-
-The `type: person` property links the block to its type definition. On cache reconstruction, the materializer reads the type, looks up the schema, and populates the `person` extension table with the declared persistent fields.
-
-### Reconstruction Guarantee
-
-After a Turso wipe, the startup sequence is:
-
-1. **Load type definitions** from Loro → generate `CREATE TABLE` DDL for each type → execute
-2. **Load blocks** from Loro → `INSERT INTO block` (existing logic)
-3. **Populate extension tables**: for each block with a `type` property, read its properties → `INSERT INTO {type}` with persistent fields only
-4. **Recompute computed fields**: evaluate Rhai expressions for each row, populate computed columns
-5. **Create materialized views, indexes** (existing logic)
-6. **Transient fields**: left NULL — Digital Twin sync fills them on next poll/webhook cycle
-7. **Historical fields**: restored from separate backup if available
-
-Steps 1, 3, and 4 are new. The rest is the existing startup sequence.
-
-### Confirmation-Driven Edge Creation
-
-The Integrator AI role proposes typed relationships between entities for human confirmation:
-
-1. An enrichment agent detects a potential relationship (via embeddings, co-occurrence, shared attributes, or cross-system identity resolution)
-2. It proposes a typed edge: "Person X mentioned in Block A and assigned to JIRA-456 — link them?"
-3. The user confirms or rejects at System 1 speed (1-2 seconds per decision) in Orient mode
-4. Confirmed edges become permanent structure; rejected proposals are discarded
-
-Each confirmed edge increases graph density without adding nodes. Denser graphs produce better future proposals — a compounding flywheel. See [../Vision/AI.md](../Vision/AI.md) §The Integrator for the full interaction design.
-
-**Cross-system entity resolution** is a special case: the same person appears as a Todoist assignee, JIRA reporter, and calendar attendee. The Integrator proposes merges based on matching email, username, or name — the user confirms which are truly the same entity.
-
-### Relationship to Existing Types
-
-Built-in types (`Block`, `Document`) use the compile-time `#[derive(Entity)]` macro which generates `IntoEntity` + `TryFromEntity` + `TypeDefinition`. User-defined types use YAML definitions that produce `TypeDefinition` at runtime. The two coexist:
-
-| Type | Definition | Schema | Extension table |
-|---|---|---|---|
-| Block | `#[derive(Entity)]` in Rust | Compile-time `IntoEntity`/`TryFromEntity` | `block` table (universal) |
-| Document | `#[derive(Entity)]` in Rust | Compile-time `IntoEntity`/`TryFromEntity` | `documents` table |
-| Person | YAML in `types/person.yaml` | Runtime from type definition | `person` table (generated) |
-| Book | YAML in `types/book.yaml` | Runtime from type definition | `book` table (generated) |
-
-The generated extension tables follow the same conventions as the compile-time tables: same column types, same index patterns, same `id TEXT PRIMARY KEY` contract. The `SchemaModule` trait is the unifying abstraction — both built-in and user-defined types implement it.
-
-### Computed Fields and Prototype Blocks
-
-Two computed-expression mechanisms exist side by side. They look similar (both compile Rhai via `holon-engine::CompiledExpr`, both topo-sort by dependency) but operate on different domains:
-
-| Mechanism | Where | Domain | Inputs | Output | Use |
-|---|---|---|---|---|---|
-| `FieldLifetime::Computed` | `holon-api`, `TypeRegistry` | Typed entity rows | `StorageEntity` row + Rhai engine | Enriched `StorageEntity` | Display/derived columns on Person, Block, etc. |
-| `PrototypeValue::Computed` | `crates/holon/src/petri.rs` | Numeric f64 attribute merge | prototype block props + instance block props + numeric context (priority, position, deadline buffer) | `BTreeMap<String, f64>` | WSJF task ranking |
-
-`FieldLifetime::Computed` is the canonical computed-field surface for entity types. Computed fields are pre-compiled at `TypeRegistry::register` time, topo-sorted at registration via `topo_sort_fields`, and evaluated through `TypeDefinition::enrich_with`. Per-instance overrides work: if a block's persistent properties contain a literal value for a computed field's key, the literal wins.
-
-`PrototypeValue::Computed` powers the Petri WSJF scoring engine specifically. The merge is prototype → instance → context, all f64-typed, evaluated through `resolve_prototype`. It does **not** flow through `TypeRegistry` and is **not** scheduled to. The narrower numeric domain and three-layer prototype/instance/context merge don't fit `FieldLifetime::Computed`'s entity-row enrichment shape, and the WSJF scoring path benefits from staying f64-only. See [../Vision/PetriNet.md](../Vision/PetriNet.md) §WSJF-Based Task Sorting.
-
-The render DSL is purely about **presentation** — which columns to show, in what layout — and does not carry computation logic. All numeric/string derivation happens in `FieldLifetime::Computed` (entity rows) or `PrototypeValue::Computed` (WSJF scores).
-
-## Entity Identity
-
-Cross-system entity resolution — the same person appears as a Todoist assignee, a JIRA reporter, and a Gmail sender — is mediated by a small canonical-identity layer. The schema seam is in place and the operation surface is landed (merge / propose / accept / reject). Adding the seam now ensures every future integration plugs into the same identity surface instead of growing ad-hoc identity columns that need ripping out later. See [Vision/LongTerm.md](../Vision/LongTerm.md) "Zeroth Principle" and [Vision/AI.md](../Vision/AI.md) §The Integrator for the motivation.
-
-### Tables
-
-```sql
-CREATE TABLE canonical_entity (
-    id TEXT PRIMARY KEY NOT NULL,
-    kind TEXT NOT NULL,             -- 'person', 'organization', 'task', ...
-    primary_label TEXT NOT NULL,    -- human-readable display name
-    created_at INTEGER NOT NULL
-);
-
-CREATE TABLE entity_alias (
-    canonical_id TEXT NOT NULL REFERENCES canonical_entity(id),
-    system TEXT NOT NULL,           -- 'todoist', 'jira', 'gmail', ...
-    foreign_id TEXT NOT NULL,       -- opaque external ID
-    confidence REAL NOT NULL,       -- 0.0–1.0
-    PRIMARY KEY (system, foreign_id)
-);
-
-CREATE TABLE proposal_queue (
-    id INTEGER PRIMARY KEY NOT NULL,
-    kind TEXT NOT NULL,             -- 'merge', 'split', ...
-    evidence_json TEXT NOT NULL,    -- serialized evidence payload
-    status TEXT NOT NULL,           -- 'pending', 'accepted', 'rejected'
-    created_at INTEGER NOT NULL
-);
-```
-
-`(system, foreign_id)` is the alias primary key — a foreign ID can map to at most one canonical entity per system. `entity_alias.canonical_id` indexes for "all aliases of this canonical." `proposal_queue.status` indexes for fast pending-proposal scans.
-
-### SchemaModule
-
-`IdentitySchemaModule` (`crates/holon/src/storage/schema_modules.rs`) provides `canonical_entity`, `entity_alias`, `proposal_queue` and requires nothing — these tables are independent of `block`. It is wired into the DI provider chain as `DbReady<IdentityTables>` (`crates/holon/src/di/schema_providers.rs`) and listed as a dependency of the `BackendEngine` providers in `registration.rs`, so every engine boot creates the tables.
-
-Smoke tests in `crates/holon/tests/identity_schema_smoke.rs` verify that `ensure_schema` creates the three tables, basic inserts round-trip, and the `(system, foreign_id)` PRIMARY KEY rejects duplicates.
-
-### Operations
-
-`IdentityProvider` (`crates/holon/src/identity/provider.rs`) is registered on the same `OperationDispatcher` surface used by block ops, under entity name `"identity"`. All operations are routed by the dispatcher and logged by `OperationLogObserver` for undo/redo replay.
-
-User-facing:
-
-- `merge_entities(canonical_a, canonical_b)` — folds `a` into `b`: rewrites every `entity_alias.canonical_id = a` to `canonical_id = b`, then deletes the `a` row from `canonical_entity`. Verifies `b` exists before mutating to avoid phantom aliases. Inverse: `restore_canonical_after_merge` carrying the full snapshot of the deleted canonical and the rewritten alias keys.
-- `propose_merge(id, kind, evidence_json, created_at)` — INSERT into `proposal_queue` with `status='pending'`. The `id` is caller-provided so undo→redo cycles are deterministic. Inverse: `delete_proposal(id)`.
-- `accept_proposal(id)` / `reject_proposal(id)` — sets the row's status to `'accepted'` / `'rejected'` after capturing the previous status. Inverse: `revert_proposal_status(id, prev_status)` (self-inverse primitive).
-
-Internal undo primitives (registered so the dispatcher routes inverse executions; not user-facing):
-
-- `restore_canonical_after_merge` — reverses `merge_entities` by re-inserting the canonical and rewriting the snapshotted aliases back. Inverse: `merge_entities(id, merged_into_id)` — symmetric.
-- `delete_proposal` — snapshots and removes a row. Inverse: `restore_proposal(...)` carrying the original status, so even non-pending deletions round-trip exactly.
-- `restore_proposal` / `revert_proposal_status` — the symmetric pair that closes the loop for proposal-row state.
-
-PBT coverage in `crates/holon/tests/identity_operations.rs` includes a proptest that randomizes the canonical/alias topology and asserts `merge → undo` round-trips state exactly. PBTs in `general_e2e_pbt.rs` are not affected because the identity tables are independent of the block tables and start empty. See `codev/specs/0006-pre-velocity-refactors.md` Phase 4.
-
-### Why blocks-and-canonicals coexist
-
-Blocks remain the universal text/structure layer — every typed entity IS a block. Canonical entities are an indirection on top: many blocks (and many external-system records) can map to the same canonical identity. A note about Sarah Chen in a meeting log, a Todoist task assigned to Sarah, and a JIRA issue reported by Sarah all share `canonical_id = canon:sarah-chen` while remaining distinct blocks/records. Queries can pivot through the alias table to gather "everything about Sarah" across systems.
-
+| `crates/holon-turso/src/schema_module.rs` | `SchemaModule` trait, `EdgeFieldDescriptor` |
+| `crates/holon-turso/src/dynamic_schema_module.rs` | `DynamicSchemaModule` (runtime-defined types) |
+| `crates/holon/src/storage/schema_modules.rs` | Concrete built-in module implementations |
+| `crates/holon/src/storage/resource.rs` | Re-export of `Resource` (now in `holon-core`) |
+| `crates/holon/src/di/schema_providers.rs` | FluxDI `DbReady<R>` wiring, dependency ordering, `graph_eav` DI registration |
+| `crates/holon/sql/schema/*.sql` | DDL for every table/matview above |
+| `crates/holon/sql/prql_stdlib.prql` | `children`/`siblings`/`descendants`/context-aware PRQL helpers over `block`/`block_with_path` |
+| `crates/holon-api/src/block.rs` | `Block`, `BlockWire`, `TryFrom<StorageEntity> for Block` |
+
+See [Storage](Storage.md) for how these tables/views feed the Cell Registry
+and CDC pipeline, and [Model](Model.md) for the invariants (verbatim
+projection, single writer, sinks never re-merge) that constrain everything
+in this file.
