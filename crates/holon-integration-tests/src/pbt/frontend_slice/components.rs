@@ -1585,6 +1585,36 @@ impl HeadlessFrontendComponent {
             );
         }
     }
+
+    /// Preserve the SUT's real sibling order across a seam org rewrite.
+    /// `block_raw.sort_key` is the order authority (ADR 0005), but the matview
+    /// snapshot drops it and leaves every sibling tied at `sequence()==0`, so
+    /// `serialize_blocks_to_org_with_doc`'s `(group, sequence, id)` sort would
+    /// collapse to id-order — scrambling the on-disk order (a split-minted
+    /// block's random UUID lands wherever its hex sorts), which the live
+    /// `FileSyncController` re-ingest then faithfully applies to SQL AND Loro.
+    /// Stamp each block's `sequence` from its per-parent `sort_key` rank so the
+    /// re-serialized file reproduces the order a faithful external rewrite sees.
+    async fn stamp_sequence_from_sort_key(&self, blocks: &mut [Block]) {
+        use holon_orgmode::models::OrgBlockExt;
+        let order_rows = self
+            .sql_query("SELECT id, parent_id, sort_key FROM block_raw ORDER BY sort_key, id")
+            .await;
+        let mut rank_per_parent: HashMap<String, i64> = HashMap::new();
+        let mut seq_by_id: HashMap<String, i64> = HashMap::new();
+        for row in &order_rows {
+            let id = Self::cell(row, "id").expect("block_raw row missing id");
+            let parent = Self::cell(row, "parent_id").unwrap_or_default();
+            let rank = rank_per_parent.entry(parent).or_insert(0);
+            seq_by_id.insert(id, *rank);
+            *rank += 1;
+        }
+        for b in blocks.iter_mut() {
+            if let Some(&seq) = seq_by_id.get(b.id.as_str()) {
+                b.set_sequence(seq);
+            }
+        }
+    }
 }
 
 /// Resolve a mutation's *referenced* ids (oracle synthetic → SUT real) via `resolve`, so
@@ -1631,6 +1661,13 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         // org file and the live re-ingest would WIPE the whole tree. The matview carries
         // tags/requires, so page-ness (and any other edge fields) round-trip faithfully.
         let mut current = self.live_block_snapshot().await;
+        // Stamp real sibling order BEFORE applying the mutation: a `Create`'s
+        // canonical slot is `max_sibling_seq + 1` (lands last, matching the
+        // oracle's `Mutation::apply_to`), which is only meaningful over the
+        // real per-parent ranks — over the matview's all-tied `sequence()==0`
+        // the whole file would collapse to id-order on rewrite (the
+        // SplitBlock+External-Create sibling-order scramble).
+        self.stamp_sequence_from_sort_key(&mut current).await;
         resolved.apply_to(&mut current);
         let grouped = holon_api::blocks_by_document(&current);
         let docs_snapshot = self.documents.lock().expect("documents lock").clone();
@@ -1670,35 +1707,10 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         // Matview snapshot (not `all_blocks`) so the doc block's `Page` tag survives — see
         // `apply_mutation` above for why block_raw's missing tags would wipe the tree.
         let mut current = self.live_block_snapshot().await;
-        // Preserve the SUT's real sibling order. `block_raw.sort_key` is the order
-        // authority (ADR 0005), but the matview snapshot drops it and leaves every
-        // sibling tied at `sequence()==0`, so `serialize_blocks_to_org_with_doc`'s
-        // `(group, sequence, id)` sort would collapse to id-order — scrambling the
-        // on-disk order (a split-minted block's random UUID lands wherever its hex
-        // sorts, the flaky bulk+split divergence). Stamp each existing block's
-        // `sequence` from its per-parent `sort_key` rank so the re-serialized file
-        // reproduces the order a faithful external rewrite sees; the new blocks below
-        // keep `sequence()==0` (front), matching the oracle's canonical assignment.
-        {
-            use holon_orgmode::models::OrgBlockExt;
-            let order_rows = self
-                .sql_query("SELECT id, parent_id, sort_key FROM block_raw ORDER BY sort_key, id")
-                .await;
-            let mut rank_per_parent: HashMap<String, i64> = HashMap::new();
-            let mut seq_by_id: HashMap<String, i64> = HashMap::new();
-            for row in &order_rows {
-                let id = Self::cell(row, "id").expect("block_raw row missing id");
-                let parent = Self::cell(row, "parent_id").unwrap_or_default();
-                let rank = rank_per_parent.entry(parent).or_insert(0);
-                seq_by_id.insert(id, *rank);
-                *rank += 1;
-            }
-            for b in current.iter_mut() {
-                if let Some(&seq) = seq_by_id.get(b.id.as_str()) {
-                    b.set_sequence(seq);
-                }
-            }
-        }
+        // Stamp real sibling order first (see `stamp_sequence_from_sort_key`);
+        // the new bulk blocks below keep `sequence()==0` (front), matching the
+        // oracle's canonical assignment.
+        self.stamp_sequence_from_sort_key(&mut current).await;
         for b in blocks {
             let mut nb = b.clone();
             nb.parent_id = self.resolve_id(&nb.parent_id);
