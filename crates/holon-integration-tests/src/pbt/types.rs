@@ -14,7 +14,7 @@ use holon_orgmode::models::OrgBlockExt;
 /// Lives in this neutral module (not `sut`) so component SUTs like
 /// [`crate::pbt::sut_loro::LoroSut`] can hold a clone without depending on the
 /// `E2ESut` facade. `std::sync::Mutex` (not `RefCell`) because the SUT is moved
-/// across threads at teardown (`phased::teardown_sut`).
+/// across threads at teardown.
 pub type DocUriMap = Arc<Mutex<HashMap<EntityUri, EntityUri>>>;
 
 /// Source of a mutation

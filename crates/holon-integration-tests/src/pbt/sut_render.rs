@@ -67,20 +67,6 @@ impl RenderSut {
         }
     }
 
-    /// Install the externally-built GPUI frontend surfaces after StartApp.
-    /// Called by the phased harness once the `on_ready`/callback hook has
-    /// produced them (or `None` for headless runs).
-    pub(super) fn install_frontend(
-        &mut self,
-        engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
-        geometry: Option<Box<dyn holon_frontend::geometry::GeometryProvider>>,
-        visual_state: Option<crate::ui_driver::VisualState>,
-    ) {
-        self.frontend_engine = engine;
-        self.frontend_geometry = geometry;
-        self.frontend_visual_state = visual_state;
-    }
-
     /// Snapshot the current root layout as a `ReactiveViewModel` — the input
     /// the trait-level `send_key_chord` / `resolve_key_chord` needs.
     pub(super) fn current_reactive_tree(

@@ -335,7 +335,7 @@ pub async fn boot_and_seed_wide_windowed_base(
         "the windowed wide base needs a frontend (ViewModel) session for the window to \
          render; got {set:?}"
     );
-    let mut bundle = compose_sut_windowed_base_seeded(
+    let bundle = compose_sut_windowed_base_seeded(
         &set,
         resolver,
         &[("structural-page.org", WIDE_TREE_ORG)],

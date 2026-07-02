@@ -5,11 +5,10 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
 use holon_api::Value;
 use holon_api::block::Block;
@@ -21,8 +20,6 @@ use super::sut_keybindings::leader_key_for;
 use super::sut_loro::LoroSut;
 
 use super::reference_state::ReferenceState;
-
-use super::state_machine::ReferenceMachine;
 
 pub struct E2ESut {
     pub ctx: TestContext,
@@ -1167,64 +1164,6 @@ impl E2ESut {
     /// Look up the keybinding for an operation name from the reactive engine's registry.
     pub(super) fn find_keybinding_for_op(&self, op_name: &str) -> Option<holon_api::KeyChord> {
         self.render.find_keybinding_for_op(op_name)
-    }
-}
-
-impl StateMachineTest for E2ESut {
-    type SystemUnderTest = Self;
-    type Reference = ReferenceMachine;
-
-    fn init_test(
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
-    ) -> Self::SystemUnderTest {
-        tracing::trace!(
-            "[init_test] Starting, ref_state has {} blocks, app_started: {}",
-            ref_state.domain.block_state.blocks.len(),
-            ref_state.action.app_started
-        );
-        // Reuse a process-wide tokio runtime across PBT cases. We empirically
-        // re-measured the per-case alternative (May 2026): it adds 15s/case
-        // on Full and 30s/case on SqlOnly, and it does NOT fix the Loro
-        // wait_for_consumers race (which lives within a single case, not
-        // across cases). Per-case isolation comes from the SUT's own state
-        // (TempDir, DB, session): when the SUT drops, its Arcs go away and
-        // the spawned tasks observe broken channels and exit.
-        static SHARED_RUNTIME: OnceLock<Arc<tokio::runtime::Runtime>> = OnceLock::new();
-        let runtime = SHARED_RUNTIME
-            .get_or_init(|| Arc::new(tokio::runtime::Runtime::new().unwrap()))
-            .clone();
-        let result = E2ESut::new(runtime).unwrap();
-        tracing::trace!("[init_test] Completed (app not started yet - pre-startup phase)");
-        result
-    }
-
-    fn apply(
-        mut state: Self::SystemUnderTest,
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
-        transition: crate::pbt::transitions::E2ETransition,
-    ) -> Self::SystemUnderTest {
-        state.drive_transition(ref_state, &transition);
-        state
-    }
-
-    fn check_invariants(
-        state: &Self::SystemUnderTest,
-        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
-    ) {
-        let runtime = state.runtime.clone();
-        runtime.block_on(state.run_invariant_registry(ref_state));
-    }
-
-    /// End-of-case sweep: a sequence ending in nav-only transitions would
-    /// otherwise finish without the `NotNavOnly`-gated structural invariants
-    /// ever seeing its final state (the nav gate is a per-tick perf
-    /// optimisation, not a correctness claim).
-    fn teardown(
-        state: Self::SystemUnderTest,
-        ref_state: <Self::Reference as ReferenceStateMachine>::State,
-    ) {
-        let runtime = state.runtime.clone();
-        runtime.block_on(state.run_invariant_registry_end_of_case(&ref_state));
     }
 }
 

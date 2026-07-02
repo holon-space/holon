@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon_api::{Block, EntityUri, QueryLanguage, StorageEntity, Value};
+use holon_api::{Block, EntityUri, QueryLanguage};
 use holon_app::HeadlessBuilderServices;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine, ReactiveRenderedRows, table_expr};
 use holon_frontend::{FrontendSession, ReactiveEngineDriver, UserDriver};
@@ -2062,7 +2062,7 @@ impl HeadlessFrontendComponent {
         caps: &mut CapMap,
         driver: Arc<dyn UserDriver>,
     ) {
-        use crate::pbt::op_write_cap::{KeystrokeBlockTreeWriter, OpDispatchWriter};
+        use crate::pbt::op_write_cap::OpDispatchWriter;
         // `SutBlockTreeWrite`: the production keystroke pipeline over `driver` when a
         // reconcile resolver is wired (the composed/windowed builder shares one so a
         // split-minted id maps oracle→real). When no resolver is set — the fixed-id lib

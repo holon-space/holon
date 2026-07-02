@@ -261,8 +261,7 @@ where
                 if ref_state.app_started() {
                     per_tick(&mut sut, &ref_state);
                 }
-                // Fault injection (mirrors the incremental generator's hook in
-                // `phased::run_driver_step`): a deterministic forced failure after
+                // Fault injection: a deterministic forced failure after
                 // the 1-based step `HOLON_PBT_FORCE_FAIL_AT_STEP`, so the windowed
                 // proptest shrinker + capture pipeline can be exercised without a
                 // flaky real seed. The message carries the `format_layer_report`

@@ -43,12 +43,6 @@ pub mod span_metrics;
 #[cfg(any(test, feature = "pbt"))]
 pub mod harness;
 
-/// E2 parity prep: static selection baseline + the E3-readiness coverage gate
-/// for the E1-relocated caps. Test-only — pure registry/catalog inspection,
-/// no PBT run.
-#[cfg(test)]
-pub mod parity;
-
 #[cfg(test)]
 pub mod fixtures;
 

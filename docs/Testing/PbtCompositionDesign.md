@@ -818,6 +818,45 @@ window-driver mechanism exists. Tracked in §11 (C-3).
 
 ---
 
+## 8.13 E1-relocated cap coverage record — the retired `parity.rs` baseline (2026-07-02)
+
+Phase 2 of the native-runner deletion retired `composed/parity.rs`, the static
+selection-parity bridge that computed the native `PbtSuiteSpec::select(register_default())`
+id-set and asserted the composed catalog covers every invariant served by an
+E1-relocated `E2ESut` cap impl. With the native registry deleted there is no
+native selection left to diff against, so the *runtime* gate now is the composed
+catalog itself: `composed::catalog::tests` asserts the catalog carries every id
+below, and the keystone runs them every tick over `full_headless` / `full_gpui`.
+This section preserves parity.rs's `E1_RELOCATED_CAP_COVERAGE` mapping — the
+record of which now-deletable (Phase 3) `E2ESut` cap impl each composed
+invariant id replaces. If a Phase-3 cap deletion is attempted, every id in that
+cap's row must still be present in `composed_invariant_catalog()`.
+
+| relocated cap (E2ESut impl deletes in Phase 3) | composed invariant ids the catalog must carry |
+|---|---|
+| `SutEditorMirrorWrite` | `inv-editor-text-matches-ref`, `inv-editor-caret-matches-ref` |
+| `SutWatchRows` | `inv-watch-rows-match-ref`, `inv-active-watches-match-ref` |
+| `SutOrgRead` | `inv-blocks-match-ref/org` |
+| `SutOrgRender` | `inv-org-render-fixed-point` |
+| `SutRenderer` | `inv-viewmodel-snapshot`, `inv-viewmodel-tree-virtual-slots`, `inv-viewmodel-root-matches-render-expr`, `inv-viewmodel-entity-ids-subset-of-data`, `inv-viewmodel-decompiled-rows-match-query`, `inv-viewmodel-editable-text-triggers`, `inv-viewmodel-state-toggle-correct`, `inv-editable-text-has-draggable`, `inv-matview-consistent-with-ref`, `inv-displayed-text/viewmodel` |
+| `SutLoroLog` | `inv-loro-no-errors`, `inv-loro-children-match-ref`, `inv-blocks-match-ref/loro`, `inv-live-children-match-ref` |
+| `SutErrorLog` | `inv-no-errors` |
+| `SutSpanMetrics` | `inv-sql-budget` |
+| `SutBackend` | `inv-blocks-match-ref/matview`, `inv-blocks-match-ref/block_raw`, `inv-no-orphan-blocks`, `inv-no-parent-cycles`, `inv-source-language-iff-source`, `inv-focus-roots` |
+| `SutLoroTaskState` | `inv-task-state-storage-coherence` (in `WIDE_REQUIRED_INVARIANTS`) |
+| `SutEditorMirrorRead` | `inv-editor-caret-matches-ref`, `inv-editor-text-matches-ref` |
+| `SutSqlProjection` | `inv-navigation-focus`, `inv-block-content-matches-ref` |
+| `SutViewModel` | `inv-view-selection`, `inv-frontend-engine`, `inv-frontend-root-not-error`, `inv-live-tree-matches-fresh`, `inv-viewmodel-no-error-widgets`, `inv-value-fn-provider-identity`, `inv-value-fn-provider-arg-variance-13`, `inv-frontend-no-error-widgets`, `inv-frontend-bounds-rendered` |
+
+Notes preserved from parity.rs: `SutRenderer`'s `inv-displayed-text/widget` is
+**not** here — it binds on `SutLayout` (kept on the E2ESut window shell).
+`SutLoroTaskState` / `SutSqlProjection` / `SutViewModel` / `SutEditorMirrorRead`
+impls were already deleted in prior E-track increments; their ids run only via
+the composed catalog now. There is no standalone `task_state_coherence_pbt` /
+`split_block_content_pbt` / `peer_conflict_pbt` slice — §8.10 convergence rule.
+
+---
+
 ## 9. Risks, gotchas, open questions
 
 - **Step 1 parity is the real risk.** Everything else is mechanical. Land it behind the existing `E2ESut` entry point and diff selection against the blessed slices before deleting the old path.
