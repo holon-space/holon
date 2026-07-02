@@ -231,15 +231,6 @@ impl SutSqlProjection for FixtureSqlProjection {
     async fn block_task_state(&self, id: &EntityUri) -> Option<String> {
         self.task_state.get(id).cloned()
     }
-    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
-        Vec::new()
-    }
-    async fn focus_roots_rows(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
-    async fn nav_history_open_rows(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
 }
 
 impl CapProvider for FixtureSqlProjection {

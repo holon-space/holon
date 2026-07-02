@@ -28,10 +28,10 @@ use holon_frontend::reactive::{BuilderServices, ReactiveEngine, ReactiveRendered
 use holon_frontend::{FrontendSession, ReactiveEngineDriver, UserDriver};
 use holon_pbt_core::capabilities::{
     CapRegion, FrontendRootVm, ProviderStabilityReport, SutBackend, SutBlockTreeWrite,
-    SutEditorMirrorRead, SutEditorMirrorWrite, SutErrorLog, SutFocusWrite, SutHistoryWrite,
-    SutMcpEmit, SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults,
-    SutRenderer, SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister, SutWatchRows,
-    ViewportHint, WatchRow, WidgetSnapshot,
+    SutEditorMirrorRead, SutEditorMirrorWrite, SutErrorLog, SutFocusProjection, SutFocusWrite,
+    SutHistoryWrite, SutMcpEmit, SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender,
+    SutQueryResults, SutRenderer, SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister,
+    SutWatchRows, ViewportHint, WatchRow, WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use tempfile::TempDir;
@@ -1372,7 +1372,14 @@ impl SutSqlProjection for HeadlessFrontendComponent {
             .next()
             .and_then(|r| Self::cell(&r, "content"))
     }
+}
 
+/// `SutFocusProjection` over the live Turso navigation projection — the real
+/// teeth for `inv-navigation-focus` / `inv-focus-roots`. Split off
+/// `SutSqlProjection` (C-5, 2026-07-02) so a storage-only slice that drives no
+/// navigation does not register it and those invariants deselect honestly there.
+#[async_trait::async_trait(?Send)]
+impl SutFocusProjection for HeadlessFrontendComponent {
     async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
         self.sql_query("SELECT region, block_id FROM current_focus")
             .await

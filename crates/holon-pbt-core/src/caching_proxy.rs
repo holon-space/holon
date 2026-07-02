@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use crate::capabilities::{
     EntityUri, FrontendRootVm, ProviderStabilityReport, RenderedElement, SutBackend, SutErrorLog,
-    SutLayout, SutLoroLog, SutOrgRead, SutOrgRender, SutRenderer, SutSqlProjection, SutViewModel,
-    SutWatchRows, ViewportHint, WatchRow, WidgetSnapshot,
+    SutFocusProjection, SutLayout, SutLoroLog, SutOrgRead, SutOrgRender, SutRenderer,
+    SutSqlProjection, SutViewModel, SutWatchRows, ViewportHint, WatchRow, WidgetSnapshot,
 };
 
 /// `widget_tree_snapshot()` runs the expensive headless `interpret_pure`
@@ -147,18 +147,6 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
         self.inner.block_row(id).await
     }
 
-    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
-        self.inner.current_focus_rows().await
-    }
-
-    async fn focus_roots_rows(&self) -> Vec<(String, String)> {
-        self.inner.focus_roots_rows().await
-    }
-
-    async fn nav_history_open_rows(&self) -> Vec<(String, String)> {
-        self.inner.nav_history_open_rows().await
-    }
-
     /// Memoised set snapshot.
     async fn all_block_ids(&self) -> BTreeSet<EntityUri> {
         {
@@ -194,6 +182,24 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
 
     async fn block_content(&self, id: &EntityUri) -> Option<String> {
         self.inner.block_content(id).await
+    }
+}
+
+// ─── SutFocusProjection ───────────────────────────────────────────────
+// Uncached: read at most once per tick by the focus/navigation invariants.
+
+#[async_trait::async_trait(?Send)]
+impl<'a, S: SutFocusProjection> SutFocusProjection for CachingProxy<'a, S> {
+    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
+        self.inner.current_focus_rows().await
+    }
+
+    async fn focus_roots_rows(&self) -> Vec<(String, String)> {
+        self.inner.focus_roots_rows().await
+    }
+
+    async fn nav_history_open_rows(&self) -> Vec<(String, String)> {
+        self.inner.nav_history_open_rows().await
     }
 }
 

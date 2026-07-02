@@ -31,7 +31,7 @@
 use std::time::Duration;
 
 use holon_pbt_core::capabilities::{
-    CapRegion, EngineFocus, EntityUri, RefFocus, SutDriver, SutRenderer, SutSqlProjection,
+    CapRegion, EngineFocus, EntityUri, RefFocus, SutDriver, SutFocusProjection, SutRenderer,
     WidgetSnapshot,
 };
 use holon_pbt_core::composition::CapMap;

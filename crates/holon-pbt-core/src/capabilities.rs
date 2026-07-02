@@ -787,7 +787,19 @@ pub trait SutSqlProjection {
     /// doesn't exist. Used by `inv-block-content-matches-ref` (split-block
     /// content-routing slice).
     async fn block_content(&self, id: &EntityUri) -> Option<String>;
+}
 
+/// SUT-side navigation-focus projection surface (C-5 split off
+/// [`SutSqlProjection`], 2026-07-02). Kept a SEPARATE cap so a storage-only slice
+/// (no navigation driven, e.g. `sql_slice`) does NOT register it and the
+/// focus/navigation invariants honestly DESELECT there — instead of selecting
+/// against an honest-empty `SutSqlProjection` focus family and passing vacuously
+/// (empty focus vs an unnavigated ref). Registered only where navigation is
+/// actually driven through a Turso `current_focus`/`focus_roots`/
+/// `navigation_history` projection (the frontend slice / `full_headless`).
+/// Methods reflect Turso state AFTER CDC quiescence — invariants `quiesce()` first.
+#[holon_macros::capmap_adapter]
+pub trait SutFocusProjection {
     /// Rows of the `current_focus` matview as `(region, block_id)`. `block_id`
     /// is `None` for a region navigated home (NULL in SQL). Used by
     /// `inv-navigation-focus` to compare the SUT's per-region navigation focus

@@ -274,8 +274,8 @@ async fn memory_slice_selects_exactly_the_full_catalog() {
             // Windowed differential focus (E4) — needs `SutDriver` (the windowed
             // slice) + `RefGlobalFocus`/`RefEditorMirror`. No `SutDriver` here.
             "inv-focus-matches-ref",
-            // Focus roots (SutHandle decomposition) — needs `SutSqlProjection` +
-            // `SutBackend` + `RefFocus`. The memory slice has no `SutSqlProjection`.
+            // Focus roots (SutHandle decomposition) — needs `SutFocusProjection` +
+            // `SutBackend` + `RefFocus`. The memory slice has no `SutFocusProjection`.
             "inv-focus-roots",
             // Windowed (E4) — needs `SutLayout` + `SutViewModel`.
             "inv-frontend-bounds-rendered",
@@ -294,8 +294,8 @@ async fn memory_slice_selects_exactly_the_full_catalog() {
             "inv-loro-no-errors",
             // Renderer cluster (C-remainder batch 2b) — needs `SutRenderer` + `RefLayout`.
             "inv-matview-consistent-with-ref",
-            // Navigation focus (SutHandle decomposition) — needs `SutSqlProjection`
-            // + `RefFocus`. The memory slice has no `SutSqlProjection`.
+            // Navigation focus (SutHandle decomposition) — needs `SutFocusProjection`
+            // + `RefFocus`. The memory slice has no `SutFocusProjection`.
             "inv-navigation-focus",
             // App-level error liveness — needs `SutErrorLog` (the frontend slice's
             // `FrontendSession` publish-error tracker). The memory slice has none.

@@ -263,22 +263,10 @@ impl SutSqlProjection for SqlProjectionComponent {
             .next()
             .and_then(|r| Self::cell(&r, "content"))
     }
-
-    /// No `current_focus` projection in this slice (no navigation). Honest empty.
-    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
-        Vec::new()
-    }
-
-    /// No `focus_roots` projection in this slice (no navigation). Honest empty.
-    async fn focus_roots_rows(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
-
-    /// No `navigation_history` in this slice (no navigation). Honest empty.
-    async fn nav_history_open_rows(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
 }
+// No `SutFocusProjection` impl: this slice drives no navigation, so the
+// focus/nav invariants (`inv-navigation-focus`/`inv-focus-roots`) DESELECT here
+// honestly (C-5, 2026-07-02) — no honest-empty focus family to pass vacuously.
 
 impl CapProvider for SqlProjectionComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {

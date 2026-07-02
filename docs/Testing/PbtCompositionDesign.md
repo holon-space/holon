@@ -949,6 +949,28 @@ end state; needs a unification/deletion decision).
   carry the slice's real data AND where no invariant's verdict rests solely on the empty family;
   otherwise split the cap and don't register the absent half. Needs a one-pass audit of existing
   honest-empty methods against the invariants that read them.
+  - **AUDIT DONE (2026-07-01):** `docs/Testing/C5_HonestEmptyAudit_2026-07-01.md` (four tiers).
+  - **FIXES LANDED (2026-07-02, pbt-target-arch):**
+    - *Tier 3 — `SutFocusProjection` cap-split.* `current_focus_rows` / `focus_roots_rows` /
+      `nav_history_open_rows` are now their own cap, split off `SutSqlProjection` and registered
+      ONLY where navigation is driven (frontend / `full_headless` / navigation slice). A
+      storage-only slice (`sql_slice` / `sql_loro_slice`) does not register it, so
+      `inv-navigation-focus` / `inv-focus-roots` DESELECT there honestly instead of comparing an
+      honest-empty focus family against an unnavigated ref (the exact vacuous-green this rule
+      bans). This is the canonical "split the cap, don't register the absent half" pattern.
+    - *Tier 1 — `inv-loro-no-errors` real teeth.* `compose_sut` full mode backs `SutLoroLog`
+      with the live `LoroSyncControllerHandle` error counter
+      (`LoroBackendComponent::new_shared_with_sync_handle`); pure-Loro stays honest-`false`
+      (a standalone CRDT genuinely has no controller). The empty family became a real
+      data-carrying method in the config that has the capability.
+  - **DEFERRED (windowed-harness follow-up):** Tier 1's three `SutViewModel` emission methods
+    and Tier 2's `frontend_root_vm`/`frontend_root_is_error` want the same `SutViewModel`
+    cap-split, but their real impls live on the windowed `GpuiFrontendEngineComponent` — a path
+    the headless gates cannot verify. Splitting there without windowed verification would ship a
+    lying/None impl (a "faked cap" anti-pattern) or a coverage-dormant invariant; both are worse
+    than a scoped handoff. The `required_invariants` cap_set filter already gives the split its
+    payoff for free once done: a windowed-only cap auto-drops the invariant from the headless
+    keystone floor and keeps it on the windowed floor, with no `WIDE_REQUIRED_INVARIANTS` edit.
 - **C-6 Write caps are structurally indistinguishable from read caps** — hence the 14×
   "selection-neutral (no invariant `Needs` it)" comment boilerplate in one `register()` fn.
   Cheap fix candidates: a `WriteCap` marker trait or a `register_write_caps` section convention;

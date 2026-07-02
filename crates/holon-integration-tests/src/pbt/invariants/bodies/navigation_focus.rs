@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use holon_pbt_core::capabilities::{RefFocus, SutSqlProjection};
+use holon_pbt_core::capabilities::{RefFocus, SutFocusProjection};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvNavigationFocus;
@@ -22,7 +22,7 @@ impl InvNavigationFocus {
 impl<R, S> Invariant<R, S> for InvNavigationFocus
 where
     R: RefFocus,
-    S: SutSqlProjection,
+    S: SutFocusProjection,
 {
     fn id(&self) -> InvariantId {
         Self::ID

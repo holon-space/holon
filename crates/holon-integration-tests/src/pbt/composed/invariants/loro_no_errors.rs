@@ -2,7 +2,9 @@
 //! whenever a Loro store is wired. Asserts the LoroSyncController logged no
 //! error since startup. Inert-but-honest in the pure-Loro slice (a standalone
 //! CRDT has no sync controller, so `loro_had_errors` is structurally `false`);
-//! its teeth are in the E2E slice's real counter and in the catch test below.
+//! its real teeth run in the ONE PBT (full mode), where `compose_sut` backs
+//! `SutLoroLog` with the live `LoroSyncControllerHandle` error counter, plus the
+//! fixture-driven catch test below.
 
 use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::SutLoroLog;

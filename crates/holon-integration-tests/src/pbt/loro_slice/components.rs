@@ -29,6 +29,11 @@ use holon_pbt_core::composition::{CapMap, CapProvider};
 /// the CRDT doc, but `Arc` makes the single-store contract explicit.
 pub struct LoroBackendComponent {
     backend: Arc<LoroBackend>,
+    /// The live `LoroSyncController` error counter, when this component wraps a
+    /// backend whose doc a controller is projecting into SQL (full mode). `None`
+    /// for a standalone CRDT (pure-Loro): there is no controller, so there is no
+    /// error source — `loro_had_errors` is then honestly `false`, not fabricated.
+    sync_handle: Option<Arc<holon::sync::LoroSyncControllerHandle>>,
 }
 
 impl LoroBackendComponent {
@@ -39,7 +44,23 @@ impl LoroBackendComponent {
     /// Wrap an already-shared backend so the read cap and a write target observe
     /// one store.
     pub fn new_shared(backend: Arc<LoroBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            sync_handle: None,
+        }
+    }
+
+    /// Wrap a shared backend AND the live sync-controller handle so
+    /// `loro_had_errors` reports the controller's real error counter — the teeth
+    /// for `inv-loro-no-errors` in the full (SQL↔Loro mirror) config.
+    pub fn new_shared_with_sync_handle(
+        backend: Arc<LoroBackend>,
+        sync_handle: Option<Arc<holon::sync::LoroSyncControllerHandle>>,
+    ) -> Self {
+        Self {
+            backend,
+            sync_handle,
+        }
     }
 
     async fn all_blocks(&self) -> Vec<holon_api::Block> {
@@ -72,14 +93,17 @@ impl SutBackend for LoroBackendComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutLoroLog for LoroBackendComponent {
-    /// The standalone CRDT has no `LoroSyncController` — that error counter
-    /// belongs to the SQL→Loro mirror, which is absent in this pure-Loro slice.
-    /// So there is no error source and the honest answer is `false` (§5.1 hidden
-    /// capability: an honest empty/zero, never a fabricated value). The teeth of
-    /// `inv-loro-no-errors` live in its fixture-driven catch test, and in the
-    /// E2E slice where a real controller wires its counter.
+    /// True iff a live `LoroSyncController` has logged an error since startup.
+    /// When this component carries a controller handle (full SQL↔Loro mirror
+    /// config, wired by `compose_sut`), this reads the controller's REAL error
+    /// counter — the production teeth for `inv-loro-no-errors`. A standalone CRDT
+    /// (pure-Loro slice) has no controller, so `sync_handle` is `None` and the
+    /// honest answer is `false` (§5.1 hidden capability: an honest zero, never a
+    /// fabricated value).
     async fn loro_had_errors(&self) -> bool {
-        false
+        self.sync_handle
+            .as_ref()
+            .is_some_and(|h| h.error_count() > 0)
     }
 
     /// Ordered child block ids of `parent` in the live Loro tree, in the tree's

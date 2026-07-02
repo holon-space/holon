@@ -31,8 +31,8 @@ use holon_api::EntityUri;
 use holon_api::repository::{CoreOperations, NewBlock};
 use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead, SutQueryResults,
-    SutSqlProjection,
+    SutBackend, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead, SutFocusProjection,
+    SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use holon_pbt_core::{Actor, ComponentSet, Projection, StorageAdapter};
@@ -286,6 +286,13 @@ async fn compose_sut_seeded_impl(
         // component's `register` (the nav slice adds it explicitly); add it here since
         // Turso storage is active and its invariants belong to this config.
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        // `SutFocusProjection` (C-5 split off `SutSqlProjection`, 2026-07-02): the
+        // real navigation-focus matview surface. This frontend drives navigation
+        // (Turso `current_focus`/`focus_roots`/`navigation_history`), so it hosts the
+        // cap and `inv-navigation-focus`/`inv-focus-roots` keep their WIDE_REQUIRED
+        // teeth in the keystone. Storage-only configs never reach this arm, so they
+        // deselect those invariants honestly.
+        caps.insert(comp.clone() as Arc<dyn SutFocusProjection>);
         // `SutQueryResults` (the full-mode query-engine row-count surface) — same
         // per-config rationale as `SutSqlProjection`: NOT in `register`, added here
         // because a real query engine (Turso `BackendEngine` + reactive watch) backs
@@ -444,7 +451,17 @@ async fn compose_sut_seeded_impl(
         loro_backend = Some(backend.clone());
 
         let mut loro_caps = CapMap::new();
-        Arc::new(LoroBackendComponent::new_shared(backend)).register(&mut loro_caps);
+        // Full mode (frontend booted Loro on) carries the live sync-controller
+        // handle captured above; hand it to the read component so
+        // `SutLoroLog::loro_had_errors` reports the controller's REAL error
+        // counter — the `inv-loro-no-errors` teeth in the keystone. Non-frontend
+        // Loro configs have no controller (`frontend_sync_handle` is `None`), so
+        // `loro_had_errors` honestly stays `false` there.
+        Arc::new(LoroBackendComponent::new_shared_with_sync_handle(
+            backend,
+            frontend_sync_handle.clone(),
+        ))
+        .register(&mut loro_caps);
         // The peer-mesh surface (`SutLoro`) is contributed whenever the `doc_store` it
         // drives over is the SAME doc whose mutations reach the canonical `SutBackend`
         // the block invariants read — so a merged peer block is observable there:
