@@ -297,7 +297,11 @@ pub fn dispatch_share(
     rt_handle.spawn(async move {
         let mut params = std::collections::HashMap::new();
         params.insert("id".to_string(), Value::String(block_id));
-        params.insert("retention".to_string(), Value::String("full".to_string()));
+        // State-only sharing: "full" retention would ship the whole forked
+        // oplog (including pruned sibling subtrees' content) to the accepter —
+        // a whole-vault history leak. "none" exports current state only.
+        // See docs/Reference/SUBTREE_SHARING.md B1.
+        params.insert("retention".to_string(), Value::String("none".to_string()));
         let result = session
             .execute_operation(&EntityName::new("tree"), "share_subtree", params)
             .await;

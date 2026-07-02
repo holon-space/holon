@@ -45,15 +45,36 @@ mod adapter {
 
     const MAX_MSG_SIZE: usize = 10 * 1024 * 1024;
 
-    /// Export the updates the peer is missing (relative to `peer_vv`). When
-    /// local history has been compacted past the peer's version (shallow
-    /// snapshot → `ExportMode::updates` fails), fall back to a full snapshot
-    /// so a stale peer still converges. `label` tags the log line.
+    /// Export the updates the peer is missing (relative to `peer_vv`).
+    ///
+    /// A **shallow** doc (a state-only share exported via `shallow_snapshot`, or
+    /// any doc whose history has been compacted) cannot hand a peer incremental
+    /// updates that predate its shallow start: those ops are gone. If we send
+    /// `ExportMode::updates` anyway, the peer buffers our delta as un-appliable
+    /// "pending" ops (their dependencies are missing) and its tree stays empty —
+    /// a fresh accepter of a state-only share would end up with zero roots.
+    /// So when the peer does not already include our shallow base, send a
+    /// self-contained snapshot instead. This is the path a fresh accepter
+    /// (empty VV) always takes for a `retention="none"` share; once bootstrapped,
+    /// the peer includes the base and subsequent syncs use incremental updates.
+    ///
+    /// The pre-existing `Err` recovery path (below) still covers any other case
+    /// where `updates` refuses. `label` tags the log line.
     fn export_delta_or_full_snapshot(
         doc: &LoroDoc,
         peer_vv: &loro::VersionVector,
         label: &str,
     ) -> Result<Vec<u8>> {
+        if doc.is_shallow() {
+            let shallow_base = doc.shallow_since_vv().to_vv();
+            if !peer_vv.includes_vv(&shallow_base) {
+                // ALLOW(fallback): peer is missing our shallow base; a snapshot
+                // is the only self-contained payload that converges them.
+                return doc.export(ExportMode::Snapshot).with_context(|| {
+                    format!("[{label}] snapshot export for peer below shallow base")
+                });
+            }
+        }
         match doc.export(ExportMode::updates(peer_vv)) {
             Ok(delta) => Ok(delta),
             Err(e) => {

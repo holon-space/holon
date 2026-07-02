@@ -802,13 +802,20 @@ impl LoroShareBackend {
 
 fn parse_retention(s: &str) -> Result<HistoryRetention> {
     match s {
-        "full" => Ok(HistoryRetention::Full),
         "none" => Ok(HistoryRetention::None),
-        "since" => Err(err(
-            "retention 'since' is not yet supported; use 'full' or 'none'",
+        // `HistoryRetention::Full` exports the full forked oplog, which retains
+        // the content/history of the pruned NON-subtree nodes (the rest of the
+        // vault). Sharing that is a whole-vault history leak, so it is disabled
+        // at the boundary. The variant is kept for internal/test use only.
+        // See docs/Reference/SUBTREE_SHARING.md B1.
+        "full" => Err(err(
+            "retention 'full' is disabled: it would leak the content and history \
+             of your other (non-shared) notes to the recipient. Use 'none' \
+             (state-only sharing).",
         )),
+        "since" => Err(err("retention 'since' is not yet supported; use 'none'")),
         other => Err(err(format!(
-            "unknown retention '{other}' (expected 'full' or 'none')"
+            "unknown retention '{other}' (expected 'none')"
         ))),
     }
 }
@@ -1601,15 +1608,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_retention_full_and_none() {
-        assert!(matches!(
-            parse_retention("full").ok().unwrap(),
-            HistoryRetention::Full
-        ));
+    fn parse_retention_none_is_accepted() {
         assert!(matches!(
             parse_retention("none").ok().unwrap(),
             HistoryRetention::None
         ));
+    }
+
+    #[test]
+    fn parse_retention_full_is_rejected_as_leaky() {
+        // "full" is disabled at the boundary because it leaks the whole vault's
+        // history to the recipient (docs/Reference/SUBTREE_SHARING.md B1).
+        let err = parse_retention("full").err().unwrap();
+        let msg = format!("{err}");
+        assert!(msg.contains("disabled"), "unexpected error: {msg}");
+        assert!(msg.contains("leak"), "unexpected error: {msg}");
     }
 
     #[test]
@@ -1655,7 +1668,7 @@ mod tests {
         // No block with this stable_id exists in the empty store, so the
         // downstream Loro lookup should fail.
         let err = backend
-            .share_subtree("block:00000000-0000-0000-0000-000000000000", "full".into())
+            .share_subtree("block:00000000-0000-0000-0000-000000000000", "none".into())
             .await
             .unwrap_err();
         let msg = format!("{err}");
@@ -1670,7 +1683,7 @@ mod tests {
         // Parse-don't-validate boundary: `share_subtree` requires a `block:` URI.
         let (backend, _dir) = make_backend();
         let err = backend
-            .share_subtree("file:foo", "full".into())
+            .share_subtree("file:foo", "none".into())
             .await
             .unwrap_err();
         assert!(
@@ -1752,7 +1765,7 @@ mod tests {
         seed_block(&backend_b, "root-b", None, "root-b").await;
 
         let share_response = backend_a
-            .share_subtree("block:shared-parent", "full".into())
+            .share_subtree("block:shared-parent", "none".into())
             .await
             .unwrap();
         let ticket_json: serde_json::Value = match share_response.response.unwrap() {
@@ -1823,7 +1836,7 @@ mod tests {
         seed_block(&backend_b, "root-b", None, "root-b").await;
 
         let share_response = backend_a
-            .share_subtree("block:shared-parent", "full".into())
+            .share_subtree("block:shared-parent", "none".into())
             .await
             .unwrap();
         let ticket_json: serde_json::Value = match share_response.response.unwrap() {
@@ -1941,7 +1954,7 @@ mod tests {
         seed_block(&backend_b, "root-b", None, "root-b").await;
 
         let resp = backend_a
-            .share_subtree("block:shared", "full".into())
+            .share_subtree("block:shared", "none".into())
             .await
             .unwrap();
         let j: serde_json::Value = match resp.response.unwrap() {
@@ -2004,7 +2017,7 @@ mod tests {
         seed_block(&backend_b, "root-b", None, "root-b").await;
 
         let resp = backend_a
-            .share_subtree("block:shared", "full".into())
+            .share_subtree("block:shared", "none".into())
             .await
             .unwrap();
         let j: serde_json::Value = match resp.response.unwrap() {
