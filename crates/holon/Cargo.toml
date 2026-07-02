@@ -11,7 +11,10 @@ path = "src/lib.rs"
 [features]
 default = ["iroh-sync"]
 # Enable test helpers for integration tests that need access to test utilities
-test-helpers = ["dep:tempfile", "holon-loro/test-helpers"]
+test-helpers = ["dep:tempfile", "holon-loro/test-helpers", "testing"]
+# Enable proptest-backed test utilities (`holon::testing`, `api::pbt_infrastructure`).
+# Keeps proptest / proptest-state-machine out of production builds.
+testing = ["dep:proptest", "dep:proptest-state-machine"]
 # Enable Iroh P2P transport for syncing Loro documents across devices
 iroh-sync = ["iroh", "base64", "holon-loro/iroh-sync"]
 
@@ -65,8 +68,8 @@ tokio = { workspace = true, features = ["full"] }
 iroh = { workspace = true, features = ["default"], optional = true }
 reqwest.workspace = true
 uuid.workspace = true
-proptest.workspace = true
-proptest-state-machine.workspace = true
+proptest = { workspace = true, optional = true }
+proptest-state-machine = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 tempfile = { workspace = true, optional = true }
 

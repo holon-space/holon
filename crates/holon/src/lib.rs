@@ -18,8 +18,9 @@ pub mod navigation;
 pub use holon_petri as petri;
 pub mod storage;
 pub mod sync;
-// `testing` depends on proptest which is native-only (not on any wasm target).
-#[cfg(not(target_arch = "wasm32"))]
+// `testing` depends on proptest which is native-only (not on any wasm target)
+// and gated behind the `testing` feature so proptest stays out of prod builds.
+#[cfg(all(not(target_arch = "wasm32"), feature = "testing"))]
 pub mod testing;
 pub mod type_registry;
 pub mod util;

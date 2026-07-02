@@ -22,8 +22,8 @@ pub mod action_watcher;
 // loro_backend moved to holon-loro; re-exported below
 pub mod memory_backend;
 // pbt_infrastructure pulls in proptest which is native-only.
-// Also gated behind test-helpers: zero production consumers outside #[cfg(test)].
-#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-helpers")))]
+// Gated behind `testing` (or #[cfg(test)]): zero production consumers.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "testing")))]
 pub mod pbt_infrastructure;
 pub mod repository;
 pub mod types;
