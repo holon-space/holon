@@ -80,7 +80,7 @@ impl FrontendInjectorExt for Injector {
         }));
 
         // ThemeRegistry + PreferenceDefs
-        let post_org_write_hook = holon_config.hooks.post_org_write.clone();
+        let post_write_hook = holon_config.hooks.post_org_write.clone();
 
         let theme_registry = theme::ThemeRegistry::load(None);
         let preference_defs = preferences::define_preferences(&theme_registry);
@@ -199,7 +199,7 @@ impl FrontendInjectorExt for Injector {
             }
 
             let mut org_config = OrgModeConfig::new(root);
-            org_config.post_org_write_hook = post_org_write_hook;
+            org_config.post_write_hook = post_write_hook;
             org_config.seed_assets = holon_frontend::DEFAULT_ASSETS
                 .iter()
                 .map(|a| (a.filename.to_string(), a.content.to_string()))

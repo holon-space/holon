@@ -678,7 +678,7 @@ pub struct OrgModeConfig {
     pub root_directory: PathBuf,
     /// Shell command to run after each org file write (e.g. "jj new").
     /// Runs in root_directory with HOLON_FILE env var set to the written path.
-    pub post_org_write_hook: Option<String>,
+    pub post_write_hook: Option<String>,
     /// `(filename, content)` documents seeded through the `FileSystem` port
     /// when the vault contains no .org files (ADR 0011). Filled by the app
     /// wiring from `holon_frontend::DEFAULT_ASSETS`; empty = no seeding.
@@ -693,7 +693,7 @@ impl OrgModeConfig {
         let root_directory = std::fs::canonicalize(&root_directory).unwrap_or(root_directory);
         Self {
             root_directory,
-            post_org_write_hook: None,
+            post_write_hook: None,
             seed_assets: Vec::new(),
         }
     }
@@ -854,8 +854,8 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     ordering,
                     fs.clone(),
                 );
-                if let Some(hook_cmd) = config.post_org_write_hook.clone() {
-                    controller = controller.with_post_org_write_hook(hook_cmd);
+                if let Some(hook_cmd) = config.post_write_hook.clone() {
+                    controller = controller.with_post_write_hook(hook_cmd);
                 }
                 if let Some(downstream) = downstream {
                     controller = controller.with_downstream_projection(downstream);

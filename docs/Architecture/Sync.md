@@ -473,7 +473,7 @@ pub trait FileFormatAdapter: Send + Sync {
 Phase 1 of `codev/specs/0006-pre-velocity-refactors.md` deferred two responsibilities to "decide once a markdown adapter exists." Now that it does, the verdict:
 
 - **Image handling** (`materialize_images` + `ingest_images` in `FileSyncController`): stays in the controller. Both org and markdown carry image children as `ContentType::Image` blocks with a relative file path on `block.content`; the disk-side materialize/ingest is identical and format-agnostic. The format-specific bit is only the *syntax* (org's `[[file:path.png]]` vs markdown's `![[path.png]]`), which already lives in each adapter's parser/renderer. No optional adapter method is needed.
-- **`post_org_write_hook`**: rename to `post_write_hook` and keep on the controller. Same shape applies to a vault (e.g. trigger an Obsidian plugin reload). Renaming is a follow-up cleanup; not required for landing this adapter.
+- **`post_write_hook`** (renamed from `post_org_write_hook`): kept on the controller. Same shape applies to a vault (e.g. trigger an Obsidian plugin reload). The user-facing config key stays `hooks.post_org_write`.
 
 ### Sync Wiring (no EventBus)
 

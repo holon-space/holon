@@ -89,7 +89,7 @@ pub struct FileSyncController {
     alias_registrar: Option<Arc<dyn AliasRegistrar>>,
 
     /// Shell command to run after each org file write (from holon.toml).
-    post_org_write_hook: Option<String>,
+    post_write_hook: Option<String>,
 
     /// Binary image data provider (Loro-backed). Used to materialize image
     /// files to disk on render and ingest them from disk on parse.
@@ -153,7 +153,7 @@ impl FileSyncController {
             doc_manager,
             root_dir,
             alias_registrar: None,
-            post_org_write_hook: None,
+            post_write_hook: None,
             image_data: None,
             format,
             ordering,
@@ -187,8 +187,8 @@ impl FileSyncController {
         self
     }
 
-    pub fn with_post_org_write_hook(mut self, cmd: String) -> Self {
-        self.post_org_write_hook = Some(cmd);
+    pub fn with_post_write_hook(mut self, cmd: String) -> Self {
+        self.post_write_hook = Some(cmd);
         self
     }
 
@@ -1841,7 +1841,7 @@ impl FileSyncController {
 
     /// Run the post-org-write hook (fire-and-forget).
     fn run_post_write_hook(&self, path: &Path) {
-        let Some(ref cmd) = self.post_org_write_hook else {
+        let Some(ref cmd) = self.post_write_hook else {
             return;
         };
         let cmd = cmd.clone();
@@ -1859,13 +1859,13 @@ impl FileSyncController {
             match result {
                 Ok(output) if output.status.success() => {
                     info!(
-                        "[FileSyncController] post_org_write hook succeeded for {}",
+                        "[FileSyncController] post_write hook succeeded for {}",
                         file_path.display()
                     );
                 }
                 Ok(output) => {
                     tracing::warn!(
-                        "[FileSyncController] post_org_write hook failed (exit={}) for {}: {}",
+                        "[FileSyncController] post_write hook failed (exit={}) for {}: {}",
                         output.status,
                         file_path.display(),
                         String::from_utf8_lossy(&output.stderr),
@@ -1873,7 +1873,7 @@ impl FileSyncController {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[FileSyncController] post_org_write hook spawn failed for {}: {}",
+                        "[FileSyncController] post_write hook spawn failed for {}: {}",
                         file_path.display(),
                         e,
                     );
