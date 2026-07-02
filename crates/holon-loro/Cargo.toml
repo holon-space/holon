@@ -13,6 +13,7 @@ test-helpers = ["dep:proptest", "dep:proptest-state-machine"]
 anyhow.workspace = true
 async-trait.workspace = true
 base64 = { version = "0.22", optional = true }
+blake3.workspace = true
 chrono.workspace = true
 futures.workspace = true
 futures-signals.workspace = true

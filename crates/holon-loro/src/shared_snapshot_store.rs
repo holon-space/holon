@@ -197,6 +197,60 @@ impl SharedSnapshotStore {
         Ok(Some(port))
     }
 
+    /// Sidecar path for the per-share monotonic peer-id generation.
+    /// Bumped on every peer-id mint (share/accept/rehydrate) so that a
+    /// stale loaded snapshot cannot re-mint an already-used
+    /// `(peer_id, counter)` after a crash — see [`crate::share_peer_id`].
+    pub fn gen_path(&self, shared_tree_id: &str) -> PathBuf {
+        self.shares_dir.join(format!("{shared_tree_id}.gen"))
+    }
+
+    /// Load the persisted generation. Missing file → `Ok(0)` (fresh
+    /// share or pre-generation vault — benign). Malformed content is an
+    /// error: a persisted identity counter must never be silently reset.
+    pub fn load_generation(&self, shared_tree_id: &str) -> Result<u64> {
+        let path = self.gen_path(shared_tree_id);
+        if !path.is_file() {
+            return Ok(0);
+        }
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let generation: u64 = text
+            .trim()
+            .parse()
+            .with_context(|| format!("parse generation sidecar {}", path.display()))?;
+        Ok(generation)
+    }
+
+    /// Atomically persist the generation for this share (tmp → fsync →
+    /// rename), mirroring [`Self::save_port`].
+    pub fn save_generation(&self, shared_tree_id: &str, generation: u64) -> Result<()> {
+        std::fs::create_dir_all(&self.shares_dir)
+            .with_context(|| format!("create {}", self.shares_dir.display()))?;
+        let final_path = self.gen_path(shared_tree_id);
+        let tmp_path = self.shares_dir.join(format!("{shared_tree_id}.gen.tmp"));
+        {
+            let mut f = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("create tmp {}", tmp_path.display()))?;
+            f.write_all(generation.to_string().as_bytes())
+                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
+            f.sync_all()
+                .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
+        }
+        std::fs::rename(&tmp_path, &final_path)
+            .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
+        Ok(())
+    }
+
+    /// Monotonic bump: load the current generation (default 0), add 1,
+    /// durably persist it, and return the new value. Every peer-id mint
+    /// site calls this before deriving `stable_peer_id`.
+    pub fn next_generation(&self, shared_tree_id: &str) -> Result<u64> {
+        let next = self.load_generation(shared_tree_id)? + 1;
+        self.save_generation(shared_tree_id, next)?;
+        Ok(next)
+    }
+
     /// Load `<id>.loro`. On decode error, quarantine the file (rename
     /// to `<id>.loro.corrupt-<rfc3339-ts>`) and emit
     /// [`ShareDegraded::SnapshotLoadFailed`] on the bus. Returns `Err`
@@ -266,7 +320,12 @@ impl SharedSnapshotStore {
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.ends_with(".loro.tmp") || n.ends_with(".peers.json.tmp"))
+                .map(|n| {
+                    n.ends_with(".loro.tmp")
+                        || n.ends_with(".peers.json.tmp")
+                        || n.ends_with(".gen.tmp")
+                        || n.ends_with(".port.tmp")
+                })
                 .unwrap_or(false)
             {
                 match std::fs::remove_file(&path) {
@@ -284,8 +343,9 @@ impl SharedSnapshotStore {
         Ok(removed)
     }
 
-    /// Delete the snapshot file, its peers sidecar, and any
-    /// `<id>.loro.corrupt-*` quarantine siblings for `shared_tree_id`.
+    /// Delete the snapshot file, its peers/generation/port sidecars,
+    /// and any `<id>.loro.corrupt-*` quarantine siblings for
+    /// `shared_tree_id`.
     /// Returns the number of files removed. Missing files are NOT an
     /// error — this op is expected to run on orphaned ids where some
     /// artifacts may already be absent.
@@ -306,6 +366,8 @@ impl SharedSnapshotStore {
             };
             let matches = name == format!("{shared_tree_id}.loro")
                 || name == format!("{shared_tree_id}.peers.json")
+                || name == format!("{shared_tree_id}.gen")
+                || name == format!("{shared_tree_id}.port")
                 || name.starts_with(&prefix_corrupt);
             if matches {
                 std::fs::remove_file(&path)

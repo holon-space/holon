@@ -429,7 +429,11 @@ impl LoroShareBackend {
     /// debounces + calls `sync_with_peers`. Called wherever
     /// `attach_save_worker` is called.
     pub async fn attach_sync_worker(&self, shared_tree_id: String, doc: Arc<LoroDoc>) {
-        let local_peer_id = stable_peer_id(&self.device_key, &shared_tree_id);
+        // Read the doc's real peer id (already set via `set_peer_id`
+        // before this worker is attached). Recomputing `stable_peer_id`
+        // here would re-bump the generation and diverge from the id the
+        // doc actually authors under.
+        let local_peer_id = doc.peer_id();
         let worker =
             spawn_sync_worker(self.weak_self(), shared_tree_id.clone(), doc, local_peer_id);
         self.sync_workers
@@ -747,6 +751,22 @@ impl LoroShareBackend {
             let guard = self.known_peers.read().await;
             guard.get(shared_tree_id).cloned().unwrap_or_default()
         };
+        // Save-before-push barrier: persist the shared doc so any ops we
+        // are about to push are already durable on disk. A crash right
+        // after a push then always finds the pushed ops locally, so we
+        // never advertise ops we could lose. Complements (does not
+        // replace) the debounced save worker.
+        if let Err(e) = self.snapshot_store.save(shared_tree_id, &doc) {
+            self.degraded_bus.emit(ShareDegraded {
+                shared_tree_id: shared_tree_id.to_string(),
+                reason: ShareDegradedReason::SnapshotSaveFailed(format!(
+                    "pre-push save failed: {e:#}"
+                )),
+            });
+            return Err(err(format!(
+                "pre-push snapshot save failed; refusing to push un-persisted ops: {e:#}"
+            )));
+        }
         let alpn_bytes = make_alpn(ALPN_PREFIX, shared_tree_id);
         let advertiser_ep = self.advertiser.endpoint_for(shared_tree_id).await;
         let mut synced = 0usize;
@@ -935,8 +955,14 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     .map_err(|e| err(format!("extract_for_share failed: {e:#}")))?;
 
             // Stable peer id BEFORE save so the persisted snapshot
-            // already carries the right identity.
-            let peer_id = stable_peer_id(&self.device_key, &shared_tree_id);
+            // already carries the right identity. Bump the generation so
+            // this mint can never reuse a `(peer_id, counter)` from a
+            // stale snapshot after a crash — see `share_peer_id`.
+            let generation = self
+                .snapshot_store
+                .next_generation(&shared_tree_id)
+                .map_err(|e| err(format!("bump peer-id generation: {e:#}")))?;
+            let peer_id = stable_peer_id(&self.device_key, &shared_tree_id, generation);
             extracted
                 .shared_doc
                 .set_peer_id(peer_id)
@@ -1040,7 +1066,11 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // empty mark sets even though the writer thinks the mark applied.
         let shared_doc = LoroDoc::new();
         crate::loro_backend::configure_text_styles(&shared_doc);
-        let peer_id = stable_peer_id(&self.device_key, &t.shared_tree_id);
+        let generation = self
+            .snapshot_store
+            .next_generation(&t.shared_tree_id)
+            .map_err(|e| err(format!("bump peer-id generation: {e:#}")))?;
+        let peer_id = stable_peer_id(&self.device_key, &t.shared_tree_id, generation);
         shared_doc
             .set_peer_id(peer_id)
             .map_err(|e| err(format!("set_peer_id on shared doc: {e:#}")))?;
@@ -1364,7 +1394,27 @@ pub async fn rehydrate_shared_trees(
             }
         };
 
-        let peer_id = stable_peer_id(&backend.device_key, &shared_tree_id);
+        // Bump the generation on every rehydrate so post-restart edits
+        // author under a FRESH peer-id: even a stale loaded snapshot then
+        // cannot cause `(peer_id, counter)` reuse — see `share_peer_id`.
+        let generation = match backend.snapshot_store.next_generation(&shared_tree_id) {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    shared_tree_id = %shared_tree_id,
+                    error = %e,
+                    "[share] bump peer-id generation during rehydrate failed"
+                );
+                backend.degraded_bus.emit(ShareDegraded {
+                    shared_tree_id: shared_tree_id.clone(),
+                    reason: ShareDegradedReason::RehydrationFailed(format!(
+                        "next_generation: {e:#}"
+                    )),
+                });
+                continue;
+            }
+        };
+        let peer_id = stable_peer_id(&backend.device_key, &shared_tree_id, generation);
         if let Err(e) = doc.set_peer_id(peer_id) {
             warn!(
                 shared_tree_id = %shared_tree_id,
@@ -2106,6 +2156,153 @@ mod tests {
             if std::time::Instant::now() >= deadline {
                 panic!("A did not pick up B's edit within 8s: {text}");
             }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
+    }
+
+    /// Regression for the peer-id counter-reuse divergence (B2): a
+    /// restart from a snapshot older than an already-pushed edit must
+    /// mint a FRESH peer-id (generation bump) so subsequent edits cannot
+    /// reuse an already-used `(peer_id, counter)`, and a bidirectional
+    /// sync must still converge A and B to identical shared-tree text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn convergence_after_stale_snapshot_restart() {
+        fn shared_root_text(backend: &LoroShareBackend, shared_tree_id: &str) -> String {
+            let d = backend
+                .manager_for_test()
+                .get_doc(shared_tree_id)
+                .expect("shared doc registered");
+            let tree = d.get_tree(crate::loro_backend::TREE_NAME);
+            let root = tree.roots()[0];
+            let meta = tree.get_meta(root).unwrap();
+            match meta.get("content_raw") {
+                Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => t.to_string(),
+                _ => String::new(),
+            }
+        }
+        fn edit_shared_root(backend: &LoroShareBackend, shared_tree_id: &str, suffix: &str) {
+            let d = backend
+                .manager_for_test()
+                .get_doc(shared_tree_id)
+                .expect("shared doc registered");
+            let tree = d.get_tree(crate::loro_backend::TREE_NAME);
+            let root = tree.roots()[0];
+            let meta = tree.get_meta(root).unwrap();
+            let text = match meta.get("content_raw") {
+                Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => t,
+                _ => panic!("no content_raw on shared root"),
+            };
+            let len = text.len_unicode();
+            text.insert(len, suffix).unwrap();
+            d.commit();
+        }
+
+        let (backend_a, dir_a) = make_backend();
+        let (backend_b, _dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(&backend_a, "shared", Some("root-a"), "Shared").await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let resp = backend_a
+            .share_subtree("block:shared", "none".into())
+            .await
+            .unwrap();
+        let j: serde_json::Value = match resp.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            _ => panic!(),
+        };
+        let ticket = j["ticket"].as_str().unwrap().to_string();
+        let shared_tree_id = j["shared_tree_id"].as_str().unwrap().to_string();
+
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // A pushes an edit to B — the ops are now on B, but A's debounced
+        // snapshot may lag (this is exactly the crash window).
+        edit_shared_root(&backend_a, &shared_tree_id, " [edit-A-pre-restart]");
+        backend_a.sync_with_peers(&shared_tree_id).await.unwrap();
+
+        // Wait for B to import A's pushed edit.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            if shared_root_text(&backend_b, &shared_tree_id).contains("[edit-A-pre-restart]") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "B never imported A's pre-restart edit"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let a_peer_pre = backend_a
+            .manager_for_test()
+            .get_doc(&shared_tree_id)
+            .unwrap()
+            .peer_id();
+
+        // Restart A from disk (same device key → same key material, so
+        // any divergence would come purely from peer-id reuse).
+        backend_a.advertiser_for_test().close_all().await;
+        backend_a.flush_all().await;
+        let dir_a_path = dir_a.path().to_path_buf();
+        drop(backend_a);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let bus = Arc::new(DegradedSignalBus::new());
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_a_path.clone())));
+        let snapshot_store = Arc::new(SharedSnapshotStore::new(dir_a_path.clone(), bus.clone()));
+        let manager = Arc::new(SharedTreeSyncManager::new());
+        let key = crate::device_key_store::load_or_create_device_key(&dir_a_path).unwrap();
+        let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
+        let backend_a = LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key);
+        let collab = backend_a.test_global_doc().await;
+        let doc_arc = collab.doc();
+        let n = rehydrate_shared_trees(&backend_a, &doc_arc).await.unwrap();
+        assert_eq!(n, 1, "A should rehydrate exactly 1 share");
+
+        // The generation bump must have handed A a FRESH peer-id — this is
+        // what makes counter reuse structurally impossible.
+        let a_peer_post = backend_a
+            .manager_for_test()
+            .get_doc(&shared_tree_id)
+            .unwrap()
+            .peer_id();
+        assert_ne!(
+            a_peer_pre, a_peer_post,
+            "rehydrate must mint a fresh peer-id via the generation bump"
+        );
+
+        // Let A's rehydrate kick-sync refresh B's addr for A.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        // A makes a NEW edit under its fresh peer-id and pushes it.
+        edit_shared_root(&backend_a, &shared_tree_id, " [edit-A-post-restart]");
+        backend_a.sync_with_peers(&shared_tree_id).await.unwrap();
+
+        // Both peers must converge to identical text containing both edits.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            let ta = shared_root_text(&backend_a, &shared_tree_id);
+            let tb = shared_root_text(&backend_b, &shared_tree_id);
+            if ta == tb
+                && ta.contains("[edit-A-pre-restart]")
+                && ta.contains("[edit-A-post-restart]")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "A and B did not converge after stale-snapshot restart:\n  A: {ta}\n  B: {tb}"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
 
