@@ -883,6 +883,110 @@ mod tests {
         assert_eq!(read_text(&tree, block_b), "[COLLAB] Block B - shared");
     }
 
+    /// H5 (BlockEventStorm) validation — pins the documented claim that a
+    /// `HistoryRetention::None` share "cannot merge back" (see `unmount` doc
+    /// comment ~L434-436: shallow snapshots break CRDT lineage).
+    ///
+    /// This is a CHARACTERIZATION test. It pins TWO facts:
+    ///   1. Reintegration of a `None`-retention share is LOUD, not silent —
+    ///      `unmount(.., Some(shared_doc))` returns `Err` (the failure is
+    ///      disclosed, satisfying the "fail loud, never fake" contract) rather
+    ///      than silently returning `Ok` while diverging.
+    ///   2. The collaborative edit does NOT merge back into the personal tree
+    ///      (block_b keeps its pre-share text) — i.e. merge-back is genuinely
+    ///      impossible by design, as documented.
+    ///
+    /// Contrast with `unmount_with_reintegration`, which uses
+    /// `HistoryRetention::Full` and succeeds because CRDT lineage is preserved.
+    #[test]
+    fn none_retention_reintegration_fails_loudly() {
+        let doc = LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        let (doc_root, _kept, shared_root, block_b) = build_test_tree(&doc);
+
+        let result = share_subtree(
+            &doc,
+            shared_root,
+            Some(doc_root),
+            "collab-none".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+
+        // Simulate collaboration on the shared (shallow) doc.
+        let shared_tree = result.extracted.shared_doc.get_tree(TREE_NAME);
+        let meta = shared_tree.get_meta(block_b).unwrap();
+        match meta.get("content_raw") {
+            Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
+                t.insert(0, "[COLLAB] ").unwrap();
+            }
+            _ => panic!("expected text"),
+        }
+        result.extracted.shared_doc.commit();
+
+        // Fact 1: reintegration fails LOUDLY — no silent Ok-with-divergence.
+        let unmount_res = unmount(&doc, result.mount_node, Some(&result.extracted.shared_doc));
+        let err = unmount_res
+            .expect_err("None-retention reintegration must fail loudly, not silently diverge");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("reintegrate") && msg.contains("deleted or does not exist"),
+            "error should disclose the broken-lineage reintegration failure, got: {msg}"
+        );
+
+        // Fact 2: the collab edit did NOT merge back — divergence is real, and it
+        // is surfaced via the error above rather than hidden.
+        let tree = doc.get_tree(TREE_NAME);
+        assert!(
+            !read_text(&tree, block_b).contains("[COLLAB]"),
+            "shallow-snapshot edits must not merge back into the personal tree"
+        );
+    }
+
+    /// H5 (BlockEventStorm) validation — pins the documented claim that
+    /// `share_subtree` applies NO encryption to the shared payload (the audit
+    /// confirmed zero encryption call-sites; the auth surface is ticket +
+    /// iroh-endpoint based, out of band from the CRDT payload).
+    ///
+    /// Natural proof: an anonymous `LoroDoc` created with NO key material of any
+    /// kind can import the exported snapshot and read the block content back in
+    /// plaintext. If `share_subtree` encrypted the payload this import-and-read
+    /// would be impossible without a key. There is no key parameter anywhere on
+    /// the share path — that absence is the point.
+    #[test]
+    fn share_subtree_payload_is_plaintext_not_encrypted() {
+        let doc = LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        let (doc_root, _kept, shared_root, block_b) = build_test_tree(&doc);
+
+        let result = share_subtree(
+            &doc,
+            shared_root,
+            Some(doc_root),
+            "collab-plain".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+
+        let snapshot = result
+            .extracted
+            .shared_doc
+            .export(ExportMode::Snapshot)
+            .unwrap();
+
+        // A fresh doc with zero credentials imports and reads the content.
+        let anonymous = LoroDoc::new();
+        anonymous
+            .import(&snapshot)
+            .expect("plaintext snapshot must import without any decryption key");
+        let anon_tree = anonymous.get_tree(TREE_NAME);
+        assert_eq!(
+            read_text(&anon_tree, block_b),
+            "Block B - shared",
+            "shared payload must be readable in plaintext by any peer (no encryption)"
+        );
+    }
+
     #[test]
     fn unmount_on_non_mount_fails() {
         let doc = LoroDoc::new();

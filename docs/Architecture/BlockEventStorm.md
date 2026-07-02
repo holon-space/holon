@@ -145,8 +145,9 @@ graduates to CONTEXT.md §4 and is deleted here.
 
 ## 4. Hotspots (🔴 the red stickies)
 
-**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H6, H7, H8, H11, H12 · 🔴 open:
-H5, H10 · ⚪ by-design constraint: H9. Fixed entries are kept
+**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H6, H7, H8, H11, H12 · 🟡
+validated (claims pinned, not "fixed" — the doc/impl gap is real and now
+demonstrated): H5 · 🔴 open: H10 · ⚪ by-design constraint: H9. Fixed entries are kept
 (condensed) because their *mechanisms* — lossy serde base, gate/emit mismatch,
 blob-LWW — are recurring failure shapes worth recognizing next time.
 
@@ -223,16 +224,41 @@ record; the SQL `marks` column is a projection. Covered by `marks_outbound_tests
 and `loro_backend::tests::marks_round_trip_through_loro`. Anchor:
 `apply_inline_mark` in `holon-loro/src/loro_backend.rs`.
 
-**H5 — Sharing security is documented but unimplemented. 🔴 OPEN (claims NOT
-re-verified 2026-07-01 — see validation task below).**
+**H5 — Sharing security is documented but unimplemented. 🟡 VALIDATED (2026-07-02) —
+both claims re-verified against the code; the doc/impl gap is confirmed real and
+now pinned by tests.**
 ADR 0003 / BLOCK_LORODOC describe capability auth (write=secret key, read=public
 key), delegation, key rotation on unshare. Reality as of 2026-06-28:
 `share_subtree` only picks `HistoryRetention`, no encryption, revocation is
 advisory ("can't un-send"), and shallow `None` retention **cannot merge back**
 (creates a fresh CRDT base). A reader of the ADRs will badly over-estimate what
-shipped. The "cannot merge back" claim in particular has never been demonstrated
-by a test — validate before relying on it. Anchors: `share_subtree`,
-`HistoryRetention` in `holon-loro/src/loro_share_backend.rs` / `shared_tree.rs`.
+shipped. Anchors: `share_subtree`, `HistoryRetention` in
+`holon-loro/src/loro_share_backend.rs` / `shared_tree.rs`.
+
+- **Claim (a) — no capability auth/encryption. CONFIRMED.** Trace: `grep -niE
+  'encrypt|decrypt|cipher|aead|chacha|nonce'` over `loro_share_backend.rs` +
+  `shared_tree.rs` = **zero** call-sites (only the new test's doc comment mentions
+  the word). `share_subtree → extract_for_share → commit_share_prune` never touches
+  a key; the exported CRDT snapshot is plaintext. The auth surface is entirely out
+  of band from the payload: ticket-based (`Ticket::new` / `Ticket::decode`,
+  `ticket.rs`) + iroh-endpoint stable identity (`stable_peer_id(device_key,
+  shared_tree_id)`, `share_peer_id.rs`; key material from
+  `device_key_store::load_or_create_device_key`, `device_key_store.rs`). Threat
+  model deferred to `docs/Reference/SUBTREE_SHARING.md`. Pinned by
+  `shared_tree::tests::share_subtree_payload_is_plaintext_not_encrypted` (an
+  anonymous `LoroDoc` with zero credentials imports the shared snapshot and reads
+  the block content in plaintext — impossible if the payload were encrypted).
+- **Claim (b) — `HistoryRetention::None` share cannot merge back. CONFIRMED, and the
+  failure path is LOUD (not a silent divergence).** `unmount(.., Some(shared_doc))`
+  for a `None`-retention share returns `Err` ("Failed to reintegrate shared tree
+  root … is deleted or does not exist") because the shallow snapshot severed CRDT
+  lineage — the collaborative edit does **not** merge back into the personal tree.
+  The degraded outcome is disclosed via that error, satisfying the "fail loud, never
+  fake" contract. Pinned by
+  `shared_tree::tests::none_retention_reintegration_fails_loudly` (a
+  characterization test: asserts the loud `Err` **and** that the `[COLLAB]` edit is
+  absent from the reintegrated tree). Contrast `unmount_with_reintegration`
+  (`HistoryRetention::Full`) which succeeds because lineage is preserved.
 
 **H6 — Markdown identity drift. ✅ FIXED (2026-07-02) — scoped: latent until the
 markdown adapter is wired into file-sync.**
@@ -369,7 +395,9 @@ missing/malformed columns (H8); `ChangeOp` parent refs typed `EntityUri` (H2);
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
 transition and every 🔴 a candidate invariant. Open candidates: Loro-vs-Turso
-query-source equivalence (H10), share/merge-back behaviour (H5). Already realized:
+query-source equivalence (H10). Already realized: share/merge-back behaviour (H5 —
+now pinned by `shared_tree::tests::{none_retention_reintegration_fails_loudly,
+share_subtree_payload_is_plaintext_not_encrypted}`, 2026-07-02),
 markdown round-trip identity (H6 — now pinned by an in-crate PBT; graduates into the
 composed catalog when markdown is wired into file-sync), edge-field
 projection (H12 was *caught* by the composed `SetEdgeField` transition — the
