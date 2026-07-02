@@ -35,15 +35,12 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base;
-use holon_integration_tests::pbt::composed::harness::{ComposedSut, SettleHook};
-use holon_integration_tests::pbt::composed::wide_e2e::{
-    boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E, WideE2EMachine,
-};
+use holon_integration_tests::pbt::composed::harness::ComposedSut;
+use holon_integration_tests::pbt::composed::wide_e2e::{WideE2E, WideE2EMachine};
 use holon_integration_tests::pbt::fixtures::{replay_steps, FixtureStep};
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::transitions::{ClickBlock, E2ETransition};
 use holon_integration_tests::pbt::window_slice::builders::{overlay_windowed_caps, window_layout};
-use holon_integration_tests::pbt::ReferenceState;
 use holon_pbt_core::ComponentSet;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 // Caps must be in scope to read them through the `CapMap` (capmap_adapter forwards).
@@ -52,6 +49,9 @@ use holon_pbt_core::capabilities::{SutBackend, SutBlockInteract, SutDriver, SutL
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+// The wide windowed per-case boot/teardown helper (extracted to the shared harness so the
+// 4b generated-sequence loop reuses ONE copy — see `pbt_harness/windowed_wide.rs`).
+use pbt_harness::windowed_wide::with_windowed_wide_sut;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_platform(true).text_system()
@@ -304,152 +304,6 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
     std::mem::forget(overlaid);
 }
 
-/// `*const TestApp` behind a `Send` newtype so the window-settle closure (a
-/// `SettleHook = Box<dyn Fn() + Send>`) can hold it. SAFETY: the closure is only ever
-/// called on the gpui thread that owns the window, and `app` is pinned for the driver's
-/// lifetime — the same single-thread contract `SimUserDriver` relies on.
-struct SendApp(*const TestApp);
-unsafe impl Send for SendApp {}
-impl SendApp {
-    // A `&self` accessor so a `move` closure captures the whole `SendApp` (Send) rather than
-    // disjoint-capturing the raw-pointer field (2021 edition), which would be !Send.
-    fn app(&self) -> &TestApp {
-        unsafe { &*self.0 }
-    }
-}
-
-/// Boot the wide-seeded windowed `ComposedSut<WideE2E>` (a gpui window renderer over a
-/// `compose_sut` session + the wide-seeded backend caps + the window's `SimUserDriver`
-/// gesture caps, assembled by `overlay_windowed_caps`), hand it to `run` to drive/check
-/// against the `wide_e2e_ref()` oracle, then tear the window down. `app` stays pinned on
-/// this frame for the whole call, so the `*const TestApp` the settle hook / `SimUserDriver`
-/// hold stays valid. `run` takes the SUT by value and returns it (so it can call the
-/// by-value `StateMachineTest::apply`). ⚠ `--test-threads=1` mandatory (gpui not
-/// parallel-safe).
-fn with_windowed_wide_sut(
-    run: impl FnOnce(ComposedSut<WideE2E>, &ReferenceState) -> ComposedSut<WideE2E>,
-) {
-    let text_system = real_text_system();
-    let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
-
-    let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
-    let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
-    let oracle = wide_e2e_ref();
-
-    // Boot the WIDE-seeded, driver-DEFERRED base (session/reactive surfaced for the window).
-    let (bundle, scaffold) =
-        runtime.block_on(async { boot_and_seed_wide_windowed_base(&resolver, &oracle).await });
-    let session = bundle
-        .session
-        .clone()
-        .expect("full_headless -> booted FrontendSession");
-    let engine = bundle
-        .reactive
-        .clone()
-        .expect("full_headless -> booted ReactiveEngine");
-
-    // Attach the window over the booted session/reactive; Some(debug) so the interaction
-    // pump populates interaction_tx for the SimUserDriver.
-    let debug = Arc::new(holon_mcp::server::DebugServices::default());
-    let bounds = BoundsRegistry::new();
-    let nav = NavigationState::new();
-    let rebind = app
-        .update(|cx| {
-            launch_holon_window_rebindable(
-                session.clone(),
-                engine.clone(),
-                runtime.handle().clone(),
-                nav,
-                bounds.clone(),
-                Some(debug.clone()),
-                "Holon-ComposeSut-Windowed-3b",
-                cx,
-            )
-        })
-        .expect("window opened over wide compose_sut session");
-
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
-
-    // Build the live windowed driver + overlay its gesture caps onto the wide base.
-    let interaction_tx = debug
-        .interaction_tx
-        .get()
-        .expect("interaction_tx set by the window interaction pump")
-        .clone();
-    let app_ptr: *const TestApp = &app;
-    let driver: Arc<dyn UserDriver> = Arc::new(SimUserDriver::new(
-        app_ptr,
-        rebind.window(),
-        bounds.clone(),
-        engine.clone(),
-        runtime.handle().clone(),
-        interaction_tx,
-    ));
-    let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
-    let frontend = bundle
-        .frontend
-        .clone()
-        .expect("full_headless → booted HeadlessFrontendComponent");
-    let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver);
-
-    // The window-settle hook the ComposedSut pumps before each check (mirror sim
-    // `pump_cycle`: real wall-clock time for backend watchers on their own worker threads,
-    // drain gpui, fire fake timers, promote staged bounds — no block_on, driver methods may
-    // already be inside a tokio context).
-    let settle_app = SendApp(app_ptr);
-    let settle_bounds = bounds.clone();
-    let settle: SettleHook = Box::new(move || {
-        let app = settle_app.app();
-        let mut last = usize::MAX;
-        let mut stable = 0u32;
-        for _ in 0..500 {
-            std::thread::sleep(Duration::from_millis(10));
-            app.run_until_parked();
-            app.advance_clock(Duration::from_millis(500));
-            app.run_until_parked();
-            settle_bounds.flush();
-            let els = settle_bounds.all_elements();
-            let count = els.len();
-            let loading = els.iter().any(|(_, i)| i.widget_type.as_ref() == "loading");
-            if count > 0 && count == last && !loading {
-                stable += 1;
-                if stable >= 3 {
-                    return;
-                }
-            } else {
-                stable = 0;
-            }
-            last = count;
-        }
-        panic!("windowed settle hook never reached a fixed point");
-    });
-
-    // A dedicated runtime drives the apply/check leaf futures; the booted backend keeps
-    // running on `runtime`'s worker threads (kept alive by the outer Arc). The gpui thread
-    // is NOT runtime-entered, so `rt.block_on` inside the harness is legal here.
-    let composed_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("composed runtime");
-
-    // Assemble the windowed SUT (the initial page-root focus is already established on the
-    // base by `boot_and_seed_wide_windowed_base` via the engine's `dispatch_intent_sync`).
-    let sut = windowed_composed_sut(overlaid, resolver, scaffold, composed_rt, settle);
-
-    // Hand the live SUT to the caller to drive + check, then take it back for teardown.
-    let sut = run(sut, &oracle);
-
-    // Teardown (see the other tests): release window entities, shut down, leak the !Send app
-    // + the SUT (which transitively holds the session + the composed runtime) so no Drop runs
-    // the gpui leak detector or shuts a runtime down in an async context.
-    drop(rebind);
-    app.update(|cx| cx.shutdown());
-    app.run_until_parked();
-    std::mem::forget(app);
-    std::mem::forget(sut);
-}
-
 #[test]
 fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
     // ★ Increment 3b (sub-step i): the windowed StateMachineTest runner's foundational check.
@@ -464,7 +318,7 @@ fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
              unified composed catalog GREEN over the initial windowed frame (block/storage + \
              windowed families, one oracle, one SUT)"
         );
-        sut
+        Some(sut)
     });
 }
 
@@ -510,7 +364,7 @@ fn windowed_composed_sut_drives_a_click_gesture_sequence_green() {
             "[compose_sut-windowed-3b-ii] PASS - drove a 2-gesture ClickBlock sequence through \
              the windowed ComposedSut<WideE2E>; unified catalog GREEN each tick"
         );
-        sut
+        Some(sut)
     });
 }
 
@@ -548,6 +402,6 @@ fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
              the windowed ComposedSut<WideE2E> (FixtureAssertable bridge); catalog GREEN each tick",
             steps.len()
         );
-        sut
+        Some(sut)
     });
 }

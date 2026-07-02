@@ -16,6 +16,7 @@ pub mod random_pbt;
 pub mod random_pbt_sim;
 pub mod sim_windowed_replay;
 pub mod windowed_replay;
+pub mod windowed_wide;
 
 use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
