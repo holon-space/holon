@@ -27,6 +27,7 @@ use holon_api::EntityUri;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_core::DownstreamProjection;
 use holon_core::MaybeSendSync;
 use holon_core::{OperationProvider, OriginTaggedWrites};
 use holon_core::{OperationResult, Result, UndoAction};
@@ -86,6 +87,18 @@ where
     /// the response JSON under `deleted`.
     #[holon_macros::affects("parent_id")]
     async fn gc_orphans(&self) -> Result<OperationResult>;
+
+    /// Stop sharing the subtree whose mount block is `mount_block_id`.
+    ///
+    /// Tears the share down in a resurrection-safe order: drop the per-share
+    /// workers FIRST (so no worker can re-write the snapshot after we delete
+    /// it), close the advertiser endpoint, unregister the shared doc, delete
+    /// the mount node from the global tree (so the block disappears from the
+    /// UI) plus its projected SQL rows, and finally delete the on-disk
+    /// snapshot. Returns the removed `shared_tree_id` + `mount_block_id` in
+    /// the response JSON. Loud error if `mount_block_id` is not a mount.
+    #[holon_macros::affects("parent_id")]
+    async fn unshare(&self, mount_block_id: &str) -> Result<OperationResult>;
 }
 
 /// Holder for a per-share save worker. Wraps the generic
@@ -164,6 +177,15 @@ pub struct LoroShareBackend {
     /// full DI stack) can keep working; when `None`, mount-node projection
     /// is skipped.
     sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
+    /// The global Loro→SQL projection (the same `DownstreamProjection`
+    /// `LoroSyncController` drives). `share_subtree` flushes it after
+    /// pruning the shared subtree from the global tree so the global
+    /// prune-delete diff is applied to SQL — and its watermark advances —
+    /// BEFORE the sharer re-projects the subtree under the mount. Without
+    /// this barrier the global delete-diff races the re-projection and can
+    /// re-remove the just-re-created rows (see `share_subtree`). `Option`
+    /// for the same reason as `sql_ops`: tests without the DI stack skip it.
+    downstream_projection: Option<Arc<dyn DownstreamProjection>>,
     /// `shared_tree_id → known peer endpoint addrs`. Populated on
     /// accept (ticket author's addr), on every inbound advertiser
     /// handshake, and at startup from the sidecar JSON.
@@ -267,6 +289,7 @@ const PROJECTION_DEBOUNCE: Duration = Duration::from_millis(150);
 fn spawn_projection_worker(
     doc: Arc<LoroDoc>,
     sql_ops: Arc<dyn OriginTaggedWrites>,
+    bus: Arc<DegradedSignalBus>,
     mount_block_uri: String,
     shared_tree_id: String,
 ) -> ProjectionWorker {
@@ -285,6 +308,7 @@ fn spawn_projection_worker(
         move || {
             let doc = doc.clone();
             let sql_ops = sql_ops.clone();
+            let bus = bus.clone();
             let mount_uri = mount_uri.clone();
             let stid = shared_tree_id.clone();
             let watermark = watermark.clone();
@@ -327,18 +351,29 @@ fn spawn_projection_worker(
                 let ops = diff_snapshots_to_ops(&before, &after);
                 if !ops.is_empty() {
                     let entity = EntityName::new("block");
-                    sql_ops
+                    if let Err(e) = sql_ops
                         .execute_batch_with_origin(
                             &entity,
                             ops,
                             crate::event_bus::EventOrigin::Loro,
                         )
                         .await
-                        .map_err(|e| {
-                            Box::<dyn std::error::Error + Send + Sync>::from(format!(
-                                "shared doc projection for {stid} failed: {e}"
-                            ))
-                        })?;
+                    {
+                        // Loro accepted the change but SQL rejected the
+                        // projection — the two now diverge and the UI (which
+                        // reads SQL) is stale. Surface a banner via the bus
+                        // AND return `Err` so the watermark stays put and the
+                        // next commit retries. Mirrors the save worker's
+                        // fail-loud contract; the generic worker loop also
+                        // logs the `Err`.
+                        bus.emit(ShareDegraded {
+                            shared_tree_id: stid.clone(),
+                            reason: ShareDegradedReason::SqlProjectionFailed(format!("{e:#}")),
+                        });
+                        return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                            "shared doc projection for {stid} failed: {e:#}"
+                        )));
+                    }
                 }
 
                 *watermark.lock().unwrap() = current;
@@ -372,6 +407,7 @@ impl LoroShareBackend {
             degraded_bus,
             device_key,
             None,
+            None,
         )
     }
 
@@ -386,6 +422,7 @@ impl LoroShareBackend {
         degraded_bus: Arc<DegradedSignalBus>,
         device_key: SecretKey,
         sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
+        downstream_projection: Option<Arc<dyn DownstreamProjection>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|self_weak| Self {
             store,
@@ -395,6 +432,7 @@ impl LoroShareBackend {
             degraded_bus,
             device_key,
             sql_ops,
+            downstream_projection,
             known_peers: Arc::new(RwLock::new(HashMap::new())),
             save_workers: Arc::new(RwLock::new(HashMap::new())),
             sync_workers: Arc::new(RwLock::new(HashMap::new())),
@@ -458,6 +496,7 @@ impl LoroShareBackend {
         let worker = spawn_projection_worker(
             doc,
             sql_ops.clone(),
+            self.degraded_bus.clone(),
             mount_block_uri,
             shared_tree_id.clone(),
         );
@@ -936,7 +975,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // forks the shared doc; the snapshot is written to disk before
         // we mutate the source tree. If the save fails, Phase B never
         // runs and the source stays untouched — no rollback.
-        let (shared_arc, shared_root) = {
+        let (shared_arc, shared_root, mount_parent_uri) = {
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
 
@@ -948,6 +987,25 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 )));
             }
             let parent = parent_as_option(doc, tid);
+
+            // The mount node replaces the shared subtree in place, so its SQL
+            // parent is the shared subtree's original parent (resolved from the
+            // parent node's STABLE_ID). A shared root has no parent → the mount
+            // becomes a top-level block (`no_parent` sentinel).
+            let mount_parent_uri = match parent {
+                Some(parent_tid) => {
+                    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                    read_stable_id(&tree, parent_tid)
+                        .map(|s| block_uri_from_bare(&s))
+                        .ok_or_else(|| {
+                            err(format!(
+                                "shared subtree's parent node {parent_tid:?} has no STABLE_ID; \
+                                 cannot resolve the mount's SQL parent"
+                            ))
+                        })?
+                }
+                None => EntityUri::no_parent().as_str().to_string(),
+            };
 
             // --- Phase A: fork + extract (source unchanged) ---
             let extracted =
@@ -992,7 +1050,11 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 .map_err(|e| err(format!("set mount stable_id: {e:#}")))?;
             doc.commit();
 
-            (Arc::new(extracted.shared_doc), shared_root)
+            (
+                Arc::new(extracted.shared_doc),
+                shared_root,
+                mount_parent_uri,
+            )
         };
 
         // Flush the global doc so the mount node survives in lockstep
@@ -1009,6 +1071,46 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             });
             return Err(err(format!("global doc save_all failed: {e:#}")));
         }
+
+        // Sharer-side SQL projection. `accept_shared_subtree` projects the
+        // mount + descendants so the UI (which reads SQL, not Loro) renders
+        // shared content; `share_subtree` must too, or the sharing peer loses
+        // the subtree from the UI until the next restart re-hydrates it.
+        //
+        // Ordering matters. The prune commit above removed every descendant
+        // block from the GLOBAL tree, so the global Loro→SQL projection's next
+        // diff emits a DELETE for each. That is a ONE-TIME event: the global
+        // projection diffs the global doc against an advancing base, so once
+        // the pruned snapshot becomes the base it never re-deletes those ids.
+        // If we re-created the descendant rows BEFORE that delete pass ran, the
+        // delete would wipe them again — the race that made this omission
+        // "safe" to skip. We defeat it deterministically:
+        //   1. project the mount row (INSERT OR IGNORE; carries `share-role`);
+        //   2. flush the global projection — this acquires its project lock
+        //      (serializing with the background loop), drains the pending
+        //      prune-delete, and advances its base, so no later pass can
+        //      re-delete the descendants (the mount CREATE is IGNOREd, leaving
+        //      our `share-role` row intact);
+        //   3. re-project the descendants under the mount as the LAST write.
+        // Without the DI-wired projection (tests) there is no global loop to
+        // race, so the flush is simply skipped.
+        let mount_title = format!("Shared tree ({shared_tree_id})");
+        self.project_mount_to_sql(
+            &mount_stable_id,
+            &mount_parent_uri,
+            &shared_tree_id,
+            &mount_title,
+        )
+        .await?;
+        if let Some(projection) = self.downstream_projection.as_ref() {
+            projection.flush().await.map_err(|e| {
+                err(format!(
+                    "flush global projection before re-projecting shared descendants: {e:#}"
+                ))
+            })?;
+        }
+        self.project_descendants_to_sql(&shared_arc, &mount_stable_id, &shared_tree_id)
+            .await?;
 
         self.manager
             .register_arc(shared_tree_id.clone(), shared_arc.clone());
@@ -1260,6 +1362,116 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         }
 
         let response = serde_json::json!({ "deleted": deleted });
+        Ok(
+            OperationResult::irreversible(vec![])
+                .with_response(Value::String(response.to_string())),
+        )
+    }
+
+    async fn unshare(&self, mount_block_id: &str) -> Result<OperationResult> {
+        let mount_uri = EntityUri::parse(mount_block_id)
+            .map_err(|e| err(format!("invalid mount block URI {mount_block_id:?}: {e:#}")))?;
+        if !mount_uri.is_block() {
+            return Err(err(format!(
+                "unshare expects a `block:` URI, got scheme {:?} (full URI: {mount_block_id:?})",
+                mount_uri.scheme()
+            )));
+        }
+
+        // (1) Resolve the shared_tree_id + mount TreeID from the mount block id.
+        // Loud error if the block is not a mount node.
+        let collab = self.global_doc().await?;
+        let (mount_tid, shared_tree_id) = {
+            let doc_arc = collab.doc();
+            let doc = &*doc_arc;
+            let tid = find_tree_id_by_stable_id(doc, &mount_uri).ok_or_else(|| {
+                err(format!(
+                    "mount block {mount_block_id} not found in Loro tree"
+                ))
+            })?;
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            let info = shared_tree::read_mount_info(&tree, tid).ok_or_else(|| {
+                err(format!(
+                    "block {mount_block_id} is not a mount node; unshare only applies to mounts"
+                ))
+            })?;
+            (tid, info.shared_tree_id)
+        };
+
+        // (2) Drop the per-share workers FIRST. Dropping each handle aborts its
+        // task, so no save/sync/projection worker can resurrect the snapshot
+        // (or re-project SQL) after we tear the rest down — closes the
+        // gc_orphans-style resurrection race.
+        self.save_workers.write().await.remove(&shared_tree_id);
+        self.sync_workers.write().await.remove(&shared_tree_id);
+        self.projection_workers
+            .write()
+            .await
+            .remove(&shared_tree_id);
+
+        // (3) Close the advertiser endpoint + stop advertising.
+        self.advertiser
+            .drop_share(&shared_tree_id)
+            .await
+            .map_err(|e| err(format!("drop_share({shared_tree_id}): {e:#}")))?;
+
+        // (4) Unregister the shared doc from the manager. Keep the handle so we
+        // can enumerate the descendant block ids for SQL row deletion below.
+        let shared_doc = self.manager.remove(&shared_tree_id);
+
+        // (5) Delete the mount node from the global tree so the block leaves the
+        // UI, then flush to disk. The global Loro→SQL projection will delete the
+        // mount row on its next diff (one-time; base advances). We ALSO delete
+        // the mount + projected descendant rows explicitly so the disappearance
+        // is immediate and deterministic — the descendant rows live only in SQL
+        // (they were never in the global doc), so the global projection never
+        // touches them.
+        {
+            let doc_arc = collab.doc();
+            let doc = &*doc_arc;
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            tree.delete(mount_tid)
+                .map_err(|e| err(format!("delete mount node {mount_block_id}: {e:#}")))?;
+            doc.commit();
+        }
+        self.store
+            .read()
+            .await
+            .save_all()
+            .await
+            .map_err(|e| err(format!("global doc save_all after unshare: {e:#}")))?;
+
+        if let Some(sql_ops) = self.sql_ops.as_ref() {
+            let entity = EntityName::new("block");
+            if let Some(doc) = shared_doc.as_ref() {
+                for id in crate::loro_backend::snapshot_blocks_from_doc(doc).into_keys() {
+                    let mut params = StorageEntity::new();
+                    params.insert("id".into(), Value::String(id.clone()));
+                    sql_ops
+                        .execute_operation(&entity, "delete", params)
+                        .await
+                        .map_err(|e| {
+                            err(format!("unshare: delete descendant row {id} from SQL: {e}"))
+                        })?;
+                }
+            }
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(mount_block_id.to_string()));
+            sql_ops
+                .execute_operation(&entity, "delete", params)
+                .await
+                .map_err(|e| err(format!("unshare: delete mount row from SQL: {e}")))?;
+        }
+
+        // (6) Delete the on-disk snapshot — now safe, all workers are gone.
+        self.snapshot_store
+            .delete_snapshot(&shared_tree_id)
+            .map_err(|e| err(format!("delete_snapshot({shared_tree_id}): {e:#}")))?;
+
+        let response = serde_json::json!({
+            "shared_tree_id": shared_tree_id,
+            "mount_block_id": mount_block_id,
+        });
         Ok(
             OperationResult::irreversible(vec![])
                 .with_response(Value::String(response.to_string())),
@@ -2795,5 +3007,356 @@ mod tests {
 
         // Restore perms so TempDir can clean up.
         std::fs::set_permissions(&shares_dir, orig_perm).unwrap();
+    }
+
+    // ---- Phase 5 lifecycle fixes: SQL projection + unshare ----
+
+    /// In-memory `OriginTaggedWrites` that records block rows keyed by `id`,
+    /// with `INSERT OR IGNORE` create semantics (mirrors the SQL `block` table
+    /// the projection targets). Lets backend-only tests assert what the sharer
+    /// projected without the full DI/SQL stack.
+    #[derive(Default)]
+    struct RecordingSqlOps {
+        rows: std::sync::Mutex<HashMap<String, StorageEntity>>,
+    }
+
+    impl RecordingSqlOps {
+        fn get(&self, id: &str) -> Option<StorageEntity> {
+            self.rows.lock().unwrap().get(id).cloned()
+        }
+
+        fn apply(&self, op: &str, params: StorageEntity) {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("op params must carry an `id`")
+                .to_string();
+            let mut rows = self.rows.lock().unwrap();
+            match op {
+                // INSERT OR IGNORE — first writer of an id wins.
+                "create" => {
+                    rows.entry(id).or_insert(params);
+                }
+                "delete" => {
+                    rows.remove(&id);
+                }
+                // update / set_field — upsert.
+                _ => {
+                    rows.insert(id, params);
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OperationProvider for RecordingSqlOps {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            vec![]
+        }
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            op_name: &str,
+            params: StorageEntity,
+        ) -> Result<OperationResult> {
+            self.apply(op_name, params);
+            Ok(OperationResult::irreversible(vec![]))
+        }
+    }
+
+    #[async_trait]
+    impl OriginTaggedWrites for RecordingSqlOps {
+        async fn execute_operation_with_origin(
+            &self,
+            _: &EntityName,
+            op_name: &str,
+            params: StorageEntity,
+            _: crate::event_bus::EventOrigin,
+        ) -> Result<OperationResult> {
+            self.apply(op_name, params);
+            Ok(OperationResult::irreversible(vec![]))
+        }
+        async fn execute_batch_with_origin(
+            &self,
+            _: &EntityName,
+            operations: Vec<(String, StorageEntity)>,
+            _: crate::event_bus::EventOrigin,
+        ) -> Result<Vec<OperationResult>> {
+            let mut out = Vec::with_capacity(operations.len());
+            for (op, params) in operations {
+                self.apply(&op, params);
+                out.push(OperationResult::irreversible(vec![]));
+            }
+            Ok(out)
+        }
+    }
+
+    /// `OriginTaggedWrites` whose batch path always fails — drives the
+    /// projection worker's degraded-signal path (Fix 2).
+    struct FailingSqlOps;
+
+    #[async_trait]
+    impl OperationProvider for FailingSqlOps {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            vec![]
+        }
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            _: &str,
+            _: StorageEntity,
+        ) -> Result<OperationResult> {
+            Err(err("stub sql: execute_operation always fails"))
+        }
+    }
+
+    #[async_trait]
+    impl OriginTaggedWrites for FailingSqlOps {
+        async fn execute_operation_with_origin(
+            &self,
+            _: &EntityName,
+            _: &str,
+            _: StorageEntity,
+            _: crate::event_bus::EventOrigin,
+        ) -> Result<OperationResult> {
+            Err(err("stub sql: execute_operation_with_origin always fails"))
+        }
+        async fn execute_batch_with_origin(
+            &self,
+            _: &EntityName,
+            _: Vec<(String, StorageEntity)>,
+            _: crate::event_bus::EventOrigin,
+        ) -> Result<Vec<OperationResult>> {
+            Err(err("stub sql: batch write failure"))
+        }
+    }
+
+    /// Like `make_backend`, but wires a `RecordingSqlOps` so mount/descendant
+    /// projection writes are observable. `downstream_projection` is `None` —
+    /// there is no global `LoroSyncController` loop in these tests, so no
+    /// prune-delete races the projection and the flush barrier is unnecessary.
+    fn make_backend_with_sql() -> (Arc<LoroShareBackend>, Arc<RecordingSqlOps>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let bus = Arc::new(DegradedSignalBus::new());
+        let snapshot_store = Arc::new(SharedSnapshotStore::new(
+            dir.path().to_path_buf(),
+            bus.clone(),
+        ));
+        let manager = Arc::new(SharedTreeSyncManager::new());
+        let key = crate::device_key_store::load_or_create_device_key(dir.path()).unwrap();
+        let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
+        let sql = Arc::new(RecordingSqlOps::default());
+        let backend = LoroShareBackend::new_with_sql(
+            store,
+            snapshot_store,
+            manager,
+            advertiser,
+            bus,
+            key,
+            Some(sql.clone() as Arc<dyn OriginTaggedWrites>),
+            None,
+        );
+        (backend, sql, dir)
+    }
+
+    /// Fix 2: a projection worker whose `sql_ops` batch fails must emit a
+    /// `ShareDegraded { SqlProjectionFailed }` (not just log), so the UI can
+    /// surface the Loro↔SQL divergence.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn projection_worker_failure_emits_degraded() {
+        let bus = Arc::new(DegradedSignalBus::new());
+        let failing: Arc<dyn OriginTaggedWrites> = Arc::new(FailingSqlOps);
+        let doc = Arc::new(LoroDoc::new());
+        let mut rx = bus.subscribe();
+
+        // Spawn BEFORE the commit so the watermark starts empty and the commit
+        // produces a create op the failing sink rejects.
+        let _worker = spawn_projection_worker(
+            doc.clone(),
+            failing,
+            bus.clone(),
+            "block:mount".to_string(),
+            "proj-share".to_string(),
+        );
+
+        {
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            let node = tree.create(None::<TreeID>).unwrap();
+            let meta = tree.get_meta(node).unwrap();
+            meta.insert(STABLE_ID, loro::LoroValue::from("proj-child"))
+                .unwrap();
+            let text: loro::LoroText = meta
+                .insert_container("content_raw", loro::LoroText::new())
+                .unwrap();
+            text.insert(0, "child content").unwrap();
+            doc.commit();
+        }
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(ev)) => ev,
+            Ok(Err(_)) => panic!("bus closed unexpectedly"),
+            Err(_) => panic!("no ShareDegraded event within 2s"),
+        };
+        assert_eq!(ev.shared_tree_id, "proj-share");
+        assert!(
+            matches!(ev.reason, ShareDegradedReason::SqlProjectionFailed(_)),
+            "expected SqlProjectionFailed, got {:?}",
+            ev.reason
+        );
+    }
+
+    /// Fix 1: `share_subtree` must project the mount + descendants into SQL so
+    /// the sharing peer's UI keeps rendering the subtree (it reads SQL, not
+    /// Loro). Without this the sharer loses the subtree until restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn share_subtree_projects_descendants_into_sql() {
+        let (backend, sql, _dir) = make_backend_with_sql();
+        seed_block(&backend, "root-a", None, "root-a").await;
+        seed_block(&backend, "shared-parent", Some("root-a"), "Shared heading").await;
+        seed_block(
+            &backend,
+            "shared-child",
+            Some("shared-parent"),
+            "Shared child",
+        )
+        .await;
+
+        let resp = backend
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .unwrap();
+        let json: serde_json::Value = match resp.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            other => panic!("unexpected response: {other:?}"),
+        };
+        let mount_id = json["mount_block_id"].as_str().unwrap().to_string();
+
+        // Mount row projected, parented under the shared subtree's original
+        // parent, tagged as a mount.
+        let mount = sql
+            .get(&mount_id)
+            .expect("mount row must be projected into SQL");
+        assert_eq!(
+            mount.get("parent_id").and_then(|v| v.as_string()),
+            Some("block:root-a")
+        );
+        assert_eq!(
+            mount.get(SHARE_ROLE_PROPERTY).and_then(|v| v.as_string()),
+            Some(SHARE_ROLE_MOUNT)
+        );
+
+        // Shared root (shared-parent) re-parented under the mount.
+        let parent_row = sql
+            .get("block:shared-parent")
+            .expect("shared-parent row must be projected");
+        assert_eq!(
+            parent_row.get("parent_id").and_then(|v| v.as_string()),
+            Some(mount_id.as_str())
+        );
+
+        // Shared child projected, still under its shared parent.
+        let child_row = sql
+            .get("block:shared-child")
+            .expect("shared-child row must be projected");
+        assert_eq!(
+            child_row.get("parent_id").and_then(|v| v.as_string()),
+            Some("block:shared-parent")
+        );
+
+        backend.advertiser.close_all().await;
+    }
+
+    /// Fix 3: `unshare` stops advertising, unregisters the doc, removes the
+    /// mount node + SQL rows, deletes the snapshot, and — because the workers
+    /// are dropped first — a later commit to the detached doc does NOT
+    /// resurrect the snapshot (the gc-resurrection guard).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn unshare_tears_down_share_and_prevents_resurrection() {
+        let (backend, sql, _dir) = make_backend_with_sql();
+        seed_block(&backend, "root-a", None, "root-a").await;
+        seed_block(&backend, "shared-parent", Some("root-a"), "Shared heading").await;
+        seed_block(
+            &backend,
+            "shared-child",
+            Some("shared-parent"),
+            "Shared child",
+        )
+        .await;
+
+        let resp = backend
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .unwrap();
+        let json: serde_json::Value = match resp.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            other => panic!("unexpected response: {other:?}"),
+        };
+        let mount_id = json["mount_block_id"].as_str().unwrap().to_string();
+        let stid = json["shared_tree_id"].as_str().unwrap().to_string();
+
+        // Preconditions.
+        assert!(backend.advertiser.is_active(&stid).await);
+        assert!(backend.manager.get_doc(&stid).is_some());
+        assert!(backend.snapshot_store.exists(&stid));
+        assert!(sql.get(&mount_id).is_some());
+
+        // Hold the shared doc to simulate a post-unshare commit later.
+        let shared_doc = backend.manager.get_doc(&stid).unwrap();
+
+        backend.unshare(&mount_id).await.unwrap();
+
+        assert!(
+            !backend.advertiser.is_active(&stid).await,
+            "advertiser still active after unshare"
+        );
+        assert!(
+            backend.manager.get_doc(&stid).is_none(),
+            "shared doc still registered after unshare"
+        );
+        assert!(
+            !backend.snapshot_store.exists(&stid),
+            "snapshot file not deleted by unshare"
+        );
+        assert!(
+            sql.get(&mount_id).is_none(),
+            "mount row still in SQL after unshare"
+        );
+        assert!(
+            sql.get("block:shared-child").is_none(),
+            "descendant row still in SQL after unshare"
+        );
+
+        // Mount node removed from the global tree.
+        {
+            let collab = backend.global_doc().await.unwrap();
+            let doc_arc = collab.doc();
+            let doc = &*doc_arc;
+            let bare = mount_id.strip_prefix("block:").unwrap();
+            let uri = EntityUri::block(bare);
+            assert!(
+                find_tree_id_by_stable_id(doc, &uri).is_none(),
+                "mount node still present in global tree"
+            );
+        }
+
+        // gc-resurrection guard: a commit to the detached shared doc must not
+        // recreate the snapshot — the save worker was aborted by unshare.
+        {
+            let tree = shared_doc.get_tree(crate::loro_backend::TREE_NAME);
+            let node = tree.create(None::<TreeID>).unwrap();
+            tree.get_meta(node).unwrap().insert("k", "v").unwrap();
+            shared_doc.commit();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            !backend.snapshot_store.exists(&stid),
+            "snapshot resurrected after unshare (worker not dropped)"
+        );
     }
 }
