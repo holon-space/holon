@@ -515,6 +515,25 @@ pub fn wide_e2e_ref() -> ReferenceState {
     wide_e2e_ref_for(&ComponentSet::full_headless().wiring)
 }
 
+/// Re-wire a caller-built oracle to the `full_headless` (frontend) wiring WITHOUT
+/// attaching a cap_set — the runtime-free half of [`wide_e2e_ref`].
+///
+/// `boot_and_seed_wide` reads ONLY `ref_state.wiring` (via [`set_for_wiring`]) to pick the
+/// SUT's `ComponentSet`, so a Loro-only-wired oracle (`structural_ref`/`wide_ref`) yields a
+/// Loro-thin SUT that is missing the frontend caps (`SutBlockTreeWrite`, `SutFocusWrite`,
+/// `SutNavHistoryDrive`, `SutAppLifecycle`, …) the teeth's transitions select — the
+/// "selected but absent from the CapMap" panic. This override gives the oracle the same
+/// full_headless wiring `wide_e2e_ref` carries, so the SUT boots the full frontend cap map.
+///
+/// Unlike [`wide_e2e_ref`], it does NOT call `cap_set_for_wiring` (which boots its OWN
+/// runtime to extract the cap_set) so it is safe to call from INSIDE a `#[tokio::test]`
+/// (no "runtime within a runtime" panic). The teeth drive transitions by hand and never
+/// generate, so the cap_set — a generator-narrowing hint — is irrelevant to them.
+pub fn frontend_wired(mut state: ReferenceState) -> ReferenceState {
+    state.wiring = ComponentSet::full_headless().wiring.clone();
+    state
+}
+
 /// The WINDOWED swap oracle: the same wide tree/wiring as [`wide_e2e_ref`], but carrying
 /// the LIVE windowed SUT's cap set (read off the assembled SUT via
 /// [`ComposedSut::cap_set`](crate::pbt::composed::harness::ComposedSut::cap_set) after

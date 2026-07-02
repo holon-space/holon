@@ -58,7 +58,8 @@ use crate::pbt::composed::subsystem_seed::{build_started_ref, run_with_seeded_re
 // consume it: page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
 // boot_and_seed_wide/WIDE_REQUIRED_INVARIANTS/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
-    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, page_root, structural_ref, wide_e2e_ref, wide_ref,
+    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, frontend_wired, page_root, structural_ref,
+    wide_e2e_ref, wide_ref,
 };
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
@@ -828,22 +829,29 @@ mod teeth {
 
     /// Teeth for the `NavigateFocus` arm of the **wide** alphabet, in the FULL-catalog
     /// config (`boot_and_seed_wide` — the full frontend cap set). Drive a
-    /// `NavigateFocus(c1)` on the SUT ONLY (oracle stays focused on the page root): the
-    /// SUT's `current_focus` matview moves to `c1` while the oracle still holds the page,
-    /// so `inv-navigation-focus` MUST `Fail`. Proves the focus invariant genuinely
+    /// `NavigateFocus(journals)` on the SUT ONLY (oracle stays focused on the page root):
+    /// the SUT's `current_focus` matview moves to `journals` while the oracle still holds
+    /// the page, so `inv-navigation-focus` MUST `Fail`. Proves the focus invariant genuinely
     /// SELECTS and BITES here (not just runs vacuously) — the non-vacuity the random
     /// `frontend_wide_pbt` run relies on when `NavigateFocus` fires. The block/org
     /// invariants stay green (no block change), so this isolates the focus catch.
+    ///
+    /// The target is `block:journals`, a SIDEBAR-LISTED first-boot page — the faithful
+    /// `SutFocusWrite` focus path is a LeftSidebar entry click, so the divergence target
+    /// must be a sidebar-listed page (a child block like `c1` has no sidebar entry and
+    /// cannot be focused this way). Divergence from the oracle's page-root focus is all this
+    /// teeth needs; the specific page is incidental.
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_frontend_sut_only_navigate_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let oracle = structural_ref(); // focused on the page root
+        let oracle = frontend_wired(structural_ref()); // focused on the page root
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
-        // SUT-only NavigateFocus to c1 — DON'T advance the oracle.
+        // SUT-only NavigateFocus to the sidebar-listed `journals` page — DON'T advance the
+        // oracle (which stays on the structural-page root).
         let nav = NavigateFocus {
             region: Region::Main,
-            block_id: fixed_ids().c1,
+            block_id: EntityUri::parse("block:journals").expect("journals id"),
         };
         TransitionImpl::apply_to_sut(&nav, &oracle, &mut caps).await;
         tokio::time::sleep(SETTLE).await;
@@ -878,7 +886,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_frontend_toggle_state_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = structural_ref();
+        let mut oracle = frontend_wired(structural_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let toggle = ToggleState {
@@ -912,7 +920,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_frontend_sut_only_toggle_state_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let oracle = structural_ref();
+        let oracle = frontend_wired(structural_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only toggle — DON'T advance the oracle.
@@ -976,7 +984,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_frontend_setup_watch_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = structural_ref();
+        let mut oracle = frontend_wired(structural_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let watch = all_blocks_watch("query-allblocks");
@@ -1010,7 +1018,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_frontend_sut_only_watch_rows_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = structural_ref();
+        let mut oracle = frontend_wired(structural_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // Watch on BOTH sides (so the subscription set agrees) ...
@@ -1130,7 +1138,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_split_then_type_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = wide_ref();
+        let mut oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // Split `c1` at position 1 — the new block (the "1" tail of "c1") becomes the
@@ -1258,7 +1266,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_create_document_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = wide_ref();
+        let mut oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let before = sut_ids(&caps).await;
@@ -1314,7 +1322,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_sut_only_create_document_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let oracle = wide_ref();
+        let oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only create — DON'T advance the oracle, DON'T reconcile.
@@ -1348,7 +1356,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_pin_block_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = wide_ref();
+        let mut oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let pin = PinBlock {
@@ -1382,7 +1390,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_sut_only_pin_block_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let oracle = wide_ref();
+        let oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let pin = PinBlock {
@@ -1415,7 +1423,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_indent_outdent_roundtrip_lockstep() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = wide_ref();
+        let mut oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         for t in [
@@ -1450,7 +1458,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_indent_then_split_parent_lockstep() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = wide_ref();
+        let mut oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let indent = E2ETransition::Indent(Indent {
@@ -1505,7 +1513,7 @@ mod teeth {
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_simulate_restart_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut oracle = wide_ref();
+        let mut oracle = frontend_wired(wide_ref());
         let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let before = sut_ids(&caps).await;
