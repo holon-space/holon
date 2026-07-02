@@ -39,7 +39,7 @@ use crate::sync::block_cell_registry::BlockCellRegistry;
 use crate::sync::event_bus::EventOrigin;
 use holon_api::EntityUri;
 use holon_api::capability::{Consolidator, SessionCapabilities};
-use holon_core::block_ordering::BlockOrdering;
+use holon_core::block_ordering::{BlockOrdering, OrderKeyMinting};
 use holon_core::cell_registry::EntityCellRegistry;
 use holon_core::fractional_index::{default_sort_key, gen_key_between, gen_n_keys};
 
@@ -243,6 +243,114 @@ fn relabel_order(ordered_ids: &[&str], cur_keys: &[String]) -> Result<Vec<String
         out.push(new_key);
     }
     Ok(out)
+}
+
+#[async_trait]
+impl OrderKeyMinting for SqlBlockOperations {
+    /// Returns the SQL `block.sort_key` value to persist for a new block
+    /// placed under `parent_id` after `after_id`. Computed unconditionally
+    /// via `gen_key_between` against the neighbor sort_keys in the cache —
+    /// in Loro mode this value is silently overwritten by `apply_create`
+    /// after `Event::position_after_block_id` drives `tree.mov_after`,
+    /// so the unused compute is the price of avoiding a separate Loro
+    /// vs SqlOnly conditional here.
+    ///
+    /// Tied-key rebalance: if any two siblings under `parent_id` already
+    /// share a `sort_key` (e.g. parser-default `"A0"` after a bulk file
+    /// write), `gen_key_between` can't produce a strictly-between key for
+    /// the new slot. We detect the tie and redistribute all siblings into
+    /// distinct evenly-spaced keys via `gen_n_keys`, with the new block's
+    /// slot inserted at the correct position. Existing siblings are
+    /// updated with a single `set_field("sort_key")` each (no re-reads
+    /// between writes — values are computed up-front so the chord-op
+    /// projection race documented in MEMORY can't bite). The new block's
+    /// key is returned for the caller to persist on create.
+    async fn new_child_anchor(
+        &self,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+    ) -> Result<String> {
+        let parent_id = parent_id.as_str();
+        let after_id: Option<&str> = after_id.map(|u| u.as_str());
+        // P1 isolation: only the SqlOnly (no-Loro) order owner mints keys here.
+        // In Loro mode the fractional index is authoritative — `apply_create`
+        // sets it from `position_after_block_id` and this return value is
+        // discarded — so short-circuit BEFORE the `gen_key_between` generator
+        // and its tied-key rebalance, which would otherwise emit spurious
+        // sibling `set_field("sort_key")` writes against the Loro-projected SQL
+        // view. The placeholder routes through `default_sort_key()` (the single
+        // default owner), never a stray literal.
+        if matches!(self.consolidator(), Consolidator::Upstream) {
+            return Ok(default_sort_key());
+        }
+        // `(id, sort_key)` pairs already in `(sort_key, id)` order — matches
+        // `OrgRenderer::render_entity_tree` so the new block's "after" slot is
+        // interpreted in the same order the on-disk render uses.
+        let siblings = self.sibling_keys(parent_id).await?;
+
+        let has_ties = siblings.windows(2).any(|w| w[0].1 == w[1].1);
+
+        if has_ties {
+            // Insertion index: where the new block lands in the rebalanced
+            // sequence. With no `after_id` it's slot 0 (first child).
+            let insert_idx = match after_id {
+                None => 0usize,
+                Some(after) => {
+                    siblings.iter().position(|(id, _)| id == after).ok_or_else(
+                        || -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("new_child_anchor: after block {after} missing").into()
+                        },
+                    )? + 1
+                }
+            };
+            let new_keys = gen_n_keys(siblings.len() + 1).map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() },
+            )?;
+            let new_block_key = new_keys[insert_idx].clone();
+            let entity = EntityName::new(Block::entity_name());
+            for (i, (sib_id, sib_key)) in siblings.iter().enumerate() {
+                let target_key = if i < insert_idx {
+                    &new_keys[i]
+                } else {
+                    &new_keys[i + 1]
+                };
+                if sib_key == target_key {
+                    continue;
+                }
+                let mut params: StorageEntity = HashMap::new();
+                params.insert("id".into(), Value::String(sib_id.clone()));
+                params.insert("field".into(), Value::String("sort_key".to_string()));
+                params.insert("value".into(), Value::String(target_key.clone()));
+                self.sql_ops
+                    .execute_operation(&entity, "set_field", params)
+                    .await?;
+            }
+            return Ok(new_block_key);
+        }
+
+        let (prev_key, next_key): (Option<String>, Option<String>) = match after_id {
+            None => {
+                let first = siblings.first().map(|(_, sk)| sk.clone());
+                (None, first)
+            }
+            Some(after) => {
+                let after_key = siblings
+                    .iter()
+                    .find(|(id, _)| id == after)
+                    .map(|(_, sk)| sk.clone())
+                    .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                        format!("new_child_anchor: after block {after} missing").into()
+                    })?;
+                let next = siblings
+                    .iter()
+                    .find(|(_, sk)| *sk > after_key)
+                    .map(|(_, sk)| sk.clone());
+                (Some(after_key), next)
+            }
+        };
+        gen_key_between(prev_key.as_deref(), next_key.as_deref())
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
 }
 
 #[async_trait]
@@ -630,111 +738,6 @@ impl BlockOrdering for SqlBlockOperations {
                 .await?;
         }
         Ok(())
-    }
-
-    /// Returns the SQL `block.sort_key` value to persist for a new block
-    /// placed under `parent_id` after `after_id`. Computed unconditionally
-    /// via `gen_key_between` against the neighbor sort_keys in the cache —
-    /// in Loro mode this value is silently overwritten by `apply_create`
-    /// after `Event::position_after_block_id` drives `tree.mov_after`,
-    /// so the unused compute is the price of avoiding a separate Loro
-    /// vs SqlOnly conditional here.
-    ///
-    /// Tied-key rebalance: if any two siblings under `parent_id` already
-    /// share a `sort_key` (e.g. parser-default `"A0"` after a bulk file
-    /// write), `gen_key_between` can't produce a strictly-between key for
-    /// the new slot. We detect the tie and redistribute all siblings into
-    /// distinct evenly-spaced keys via `gen_n_keys`, with the new block's
-    /// slot inserted at the correct position. Existing siblings are
-    /// updated with a single `set_field("sort_key")` each (no re-reads
-    /// between writes — values are computed up-front so the chord-op
-    /// projection race documented in MEMORY can't bite). The new block's
-    /// key is returned for the caller to persist on create.
-    async fn new_child_anchor(
-        &self,
-        parent_id: &EntityUri,
-        after_id: Option<&EntityUri>,
-    ) -> Result<String> {
-        let parent_id = parent_id.as_str();
-        let after_id: Option<&str> = after_id.map(|u| u.as_str());
-        // P1 isolation: only the SqlOnly (no-Loro) order owner mints keys here.
-        // In Loro mode the fractional index is authoritative — `apply_create`
-        // sets it from `position_after_block_id` and this return value is
-        // discarded — so short-circuit BEFORE the `gen_key_between` generator
-        // and its tied-key rebalance, which would otherwise emit spurious
-        // sibling `set_field("sort_key")` writes against the Loro-projected SQL
-        // view. The placeholder routes through `default_sort_key()` (the single
-        // default owner), never a stray literal.
-        if matches!(self.consolidator(), Consolidator::Upstream) {
-            return Ok(default_sort_key());
-        }
-        // `(id, sort_key)` pairs already in `(sort_key, id)` order — matches
-        // `OrgRenderer::render_entity_tree` so the new block's "after" slot is
-        // interpreted in the same order the on-disk render uses.
-        let siblings = self.sibling_keys(parent_id).await?;
-
-        let has_ties = siblings.windows(2).any(|w| w[0].1 == w[1].1);
-
-        if has_ties {
-            // Insertion index: where the new block lands in the rebalanced
-            // sequence. With no `after_id` it's slot 0 (first child).
-            let insert_idx = match after_id {
-                None => 0usize,
-                Some(after) => {
-                    siblings.iter().position(|(id, _)| id == after).ok_or_else(
-                        || -> Box<dyn std::error::Error + Send + Sync> {
-                            format!("new_child_anchor: after block {after} missing").into()
-                        },
-                    )? + 1
-                }
-            };
-            let new_keys = gen_n_keys(siblings.len() + 1).map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() },
-            )?;
-            let new_block_key = new_keys[insert_idx].clone();
-            let entity = EntityName::new(Block::entity_name());
-            for (i, (sib_id, sib_key)) in siblings.iter().enumerate() {
-                let target_key = if i < insert_idx {
-                    &new_keys[i]
-                } else {
-                    &new_keys[i + 1]
-                };
-                if sib_key == target_key {
-                    continue;
-                }
-                let mut params: StorageEntity = HashMap::new();
-                params.insert("id".into(), Value::String(sib_id.clone()));
-                params.insert("field".into(), Value::String("sort_key".to_string()));
-                params.insert("value".into(), Value::String(target_key.clone()));
-                self.sql_ops
-                    .execute_operation(&entity, "set_field", params)
-                    .await?;
-            }
-            return Ok(new_block_key);
-        }
-
-        let (prev_key, next_key): (Option<String>, Option<String>) = match after_id {
-            None => {
-                let first = siblings.first().map(|(_, sk)| sk.clone());
-                (None, first)
-            }
-            Some(after) => {
-                let after_key = siblings
-                    .iter()
-                    .find(|(id, _)| id == after)
-                    .map(|(_, sk)| sk.clone())
-                    .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-                        format!("new_child_anchor: after block {after} missing").into()
-                    })?;
-                let next = siblings
-                    .iter()
-                    .find(|(_, sk)| *sk > after_key)
-                    .map(|(_, sk)| sk.clone());
-                (Some(after_key), next)
-            }
-        };
-        gen_key_between(prev_key.as_deref(), next_key.as_deref())
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
 
     async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {

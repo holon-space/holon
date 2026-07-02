@@ -85,12 +85,18 @@ The ladder says it should degrade to base-3-way, not LWW: the org diff already
 has the base; feed (base, disk, mine) through the transient `LoroText` and
 write the merged text. Disclose with a `tracing::info!` merge note.
 
-**3.2 Make the Loro path unable to mint order keys (type-level).**
+**3.2 Make the Loro path unable to mint order keys (type-level). — DONE**
 `split_block` calls `new_child_anchor` in both modes; the Loro impl returns a
 placeholder that `apply_create` overwrites. Split the trait so the Loro-mode
 ordering seam has no `-> String` key-minting method at all (mode-specific
 impl, per Replication §5). Removes the "placeholder that works by convention"
 in `loro_seams.rs`.
+Landed: `new_child_anchor` moved off `BlockOrdering` onto a new
+`OrderKeyMinting` trait (holon-core/block_ordering.rs), implemented only by
+`SqlBlockOperations` (the `Store` order owner). `split_block` reaches it via
+the new `BlockOperations::order_key_minter()` seam on its SqlOnly branch only.
+The `loro_seams.rs` placeholder impl is deleted; `LoroBlockOrdering` can no
+longer mint by construction (compile-level witness in loro_seams.rs tests).
 
 ## Phase 4 — teeth and the real migration (later, sequenced behind the above)
 

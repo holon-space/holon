@@ -15,11 +15,14 @@ pattern = '\b(gen_key_between|new_child_anchor)\s*\((?!\.\.\.)'
 case_sensitive = true
 files = "**/*.rs"
 exclude = [
-    # Defining modules (the mint primitive + the BlockOrdering trait itself):
+    # Defining modules (the mint primitive + the ordering / key-minting traits):
     "crates/holon-core/src/fractional_index.rs",
     "crates/holon-core/src/block_ordering.rs",
-    # Sanctioned order-owner impls / call sites (per Replication.md §5):
-    "crates/holon-app/src/loro_seams.rs",
+    # Sanctioned order-owner impl / call sites (per Replication.md §5): the
+    # SqlOnly `Store` order owner mints via `OrderKeyMinting`; `split_block`'s
+    # SqlOnly branch is its sole chord-op caller. The Loro seam
+    # (`loro_seams.rs`) no longer appears here — the type-level split removed
+    # its `new_child_anchor` entirely, so it can no longer mint by construction.
     "crates/holon/src/core/sql_block_operations.rs",
     "crates/holon-core/src/traits.rs",
     # Tests / examples / integration-tests exercise the mint primitive directly:

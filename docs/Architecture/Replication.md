@@ -259,13 +259,18 @@ Consequences (all desirable, all free once the rule holds):
   Loro-fi-space can never mix. The original sin is structurally impossible.
 - **Loro absent?** The owner role moves (org-3-way, or Turso-LWW in `.db`-only
   mode) and *that* component generates fi locally (existing `gen_key_between`).
-  Still one owner → still one keyspace. Keep `new_child_anchor`-returns-`String`
-  reachable **only** in the mode where that component owns order (mode-specific
-  impl), so the Loro path cannot call it. *(Not yet the case: `split_block`
-  calls `new_child_anchor` in both modes; the Loro-mode impl
-  (`loro_seams.rs`) returns a placeholder that `apply_create` overwrites from
-  the tree position. Works, but the type system doesn't yet make the Loro path
-  unable to mint keys.)*
+  Still one owner → still one keyspace. `new_child_anchor`-returns-`String` is
+  reachable **only** in the mode where that component owns order, enforced at the
+  type level: it lives on a separate `OrderKeyMinting` trait implemented solely
+  by the SqlOnly `Store` order owner (`SqlBlockOperations`). The Loro ordering
+  seam (`LoroBlockOrdering`) implements only `BlockOrdering` and has no minting
+  method at all, so the Loro path *cannot* mint a key — it is unrepresentable,
+  not merely unused. `split_block` reaches minting through
+  `BlockOperations::order_key_minter()`, which returns `Some` only for the store
+  owner and `None` on the Loro path (where `apply_create` derives the fi from
+  `position_after_block_id`). *(Done, spec 0008 §3.2: the former Loro-mode
+  `loro_seams.rs` placeholder that returned a `default_sort_key()` has been
+  deleted.)*
 
 **Partial-replica rows** Loro doesn't have (e.g. Todoist tasks in Turso's union
 domain) get their order from *their* owner (Todoist's sequence), converted to fi

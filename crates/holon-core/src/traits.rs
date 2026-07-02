@@ -728,6 +728,19 @@ where
         None
     }
 
+    /// The order-key minter for this store, present **only** when this store is
+    /// the `Store` consolidator that owns sibling order (SqlOnly mode). Loro-mode
+    /// stores return `None` here by construction: in Loro mode the tree owns the
+    /// fractional index and `apply_create` derives it from
+    /// `position_after_block_id`, so no key is ever minted on that path. This is
+    /// the type-level successor to the former Loro-mode `new_child_anchor`
+    /// placeholder (Replication.md §5): `split_block`'s SqlOnly create branch
+    /// reaches minting through this seam, and the Loro path can't reach it at
+    /// all — the method doesn't exist on the Loro ordering seam.
+    fn order_key_minter(&self) -> Option<&dyn crate::block_ordering::OrderKeyMinting> {
+        None
+    }
+
     /// Move block under its previous sibling (increase indentation).
     ///
     /// Delegates to [`move_block`] for the actual reparenting. The hand-rolled
@@ -981,24 +994,6 @@ where
         // Get current timestamp
         let now = holon_api::clock::now_millis();
 
-        // sort_key for the new block: delegate to BlockOrdering. Loro
-        // mode returns a placeholder (overwritten by apply_create reading
-        // position_after_block_id); SqlOnly mode returns a gen_key_between
-        // value to persist in the SQL `block.sort_key` column directly.
-        let parent_for_anchor = block
-            .parent_id()
-            .cloned()
-            .unwrap_or_else(EntityUri::no_parent);
-        let ordering = self.ordering().ok_or_else(|| {
-            anyhow::anyhow!(
-                "split_block requires a BlockOrdering — this BlockOperations impl \
-                 returned None from ordering()"
-            )
-        })?;
-        let new_sort_key = ordering
-            .new_child_anchor(&parent_for_anchor, Some(id))
-            .await?;
-
         // Route the new-block create through the cell registry when a Loro
         // backing is available. The SQL-direct `self.create(...)` path
         // publishes a `Created` event tagged `EventOrigin::Other("sql")`,
@@ -1042,6 +1037,30 @@ where
             // ALLOW(fallback): synthetic-store / SqlOnly mode has no Loro
             // authority — the SQL `create` path is the only way to persist
             // the new block. Disclosed and intentional.
+            //
+            // sort_key for the new block: mint it here, on the SqlOnly branch
+            // ONLY — this is the sole path that persists a `sort_key` directly.
+            // The key comes through the `OrderKeyMinting` seam, which exists
+            // exclusively on the `Store` consolidator's order owner. The Loro
+            // path (`wrote_create_via_cell == true`) never reaches this branch
+            // and, by construction, has no minter to reach: the fractional index
+            // is authoritative in the tree and `apply_create` derives it from
+            // `position_after_block_id` (Replication.md §5).
+            let parent_for_anchor = block
+                .parent_id()
+                .cloned()
+                .unwrap_or_else(EntityUri::no_parent);
+            let minter = self.order_key_minter().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "split_block's SqlOnly create path requires an OrderKeyMinting \
+                     seam (the Store consolidator's order owner) — this \
+                     BlockOperations impl returned None from order_key_minter()"
+                )
+            })?;
+            let new_sort_key = minter
+                .new_child_anchor(&parent_for_anchor, Some(id))
+                .await?;
+
             let mut new_block_fields = crate::storage::types::StorageEntity::new();
             new_block_fields.insert("id".into(), Value::String(new_block_id.clone()));
             new_block_fields.insert("content".into(), Value::String(content_after));
