@@ -139,15 +139,6 @@ impl SutSqlProjection for ToySut {
     async fn block_row(&self, _: &EntityUri) -> Option<Vec<String>> {
         None
     }
-    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
-        Vec::new()
-    }
-    async fn focus_roots_rows(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
-    async fn nav_history_open_rows(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
     async fn all_block_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         Default::default()
     }
