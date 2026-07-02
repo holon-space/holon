@@ -21,12 +21,14 @@ From `devlog/PARSE_DONT_VALIDATE_AUDIT.md` and `CLAUDE.md`: make illegal states 
 
 `crates/holon-api/src/entity_uri.rs` — the canonical typed URI for all entities in Holon.
 
-Schemes: `block:`, `doc:`, `file:`, `todo:`, `dir:`.
+Schemes: `block:`, `file:`, `todo:`, `dir:`. (The `doc:` scheme was retired
+2026-07-02, H7 — pages are now plain `Page`-tagged blocks addressed with
+`block:` URIs like everything else.)
 
 ```rust
 // AT THE BOUNDARY (parser, SQL deserializer):
 EntityUri::block("abc123")        // produces block:abc123
-EntityUri::from_raw("doc:uuid")   // parses scheme from string
+EntityUri::from_raw("block:uuid") // parses scheme from string
 
 // IN DOWNSTREAM CODE:
 block.id.scheme()  // "block"

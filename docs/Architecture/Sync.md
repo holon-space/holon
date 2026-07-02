@@ -184,7 +184,7 @@ Each block contains:
                    SqlOperationProvider → Turso (LWW) → CDC → UI
 ```
 
-**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the configured **file adapter** seeds the LoroDoc from its files. The file-sync controller is **format-agnostic** (it speaks only to a `FileFormatAdapter`); org is the default format, markdown is an equal peer — neither is privileged. After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
+**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the configured **file adapter** seeds the LoroDoc from its files. The file-sync controller is **format-agnostic** (it speaks only to a `FileFormatAdapter`) — org is the only format currently wired in; `MarkdownFormatAdapter` implements the same trait but has zero prod dependents today (see the `FileFormatAdapter` section below), so it is not yet an equal peer in practice. After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
 
 **P2P Sync Flow (Iroh)**
 

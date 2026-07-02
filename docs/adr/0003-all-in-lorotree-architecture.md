@@ -92,7 +92,7 @@ get_meta() LoroMap:
 
 **Reparent before delete is mandatory.** `LoroTree.delete()` hides all descendants. The subtree root must be moved to the tree root *before* deleting its parent in the fork-and-prune algorithm.
 
-**Production code:** `crates/holon/src/sync/shared_tree.rs` — `extract_subtree`, `share_subtree`, `create_mount_node`, `is_mount_node`, `read_mount_info`, `unmount`, `gc_after_extraction`.
+**Production code:** `crates/holon-loro/src/shared_tree.rs` — `extract_subtree`, `share_subtree`, `create_mount_node`, `is_mount_node`, `read_mount_info`, `unmount`, `gc_after_extraction`.
 
 ### Iroh 0.96 sync findings
 
@@ -111,7 +111,7 @@ get_meta() LoroMap:
 4. Acceptor applies initiator's delta
 5. Both sides converge — bidirectional concurrent edits merge correctly via Loro CRDT
 
-**Production code:** `crates/holon/src/sync/iroh_sync_adapter.rs` — `sync_doc_initiate`, `sync_doc_accept`, `create_endpoint`, `make_alpn`, `SharedTreeSyncManager`.
+**Production code:** `crates/holon-loro/src/iroh_sync_adapter.rs` — `sync_doc_initiate`, `sync_doc_accept`, `create_endpoint`, `make_alpn`, `SharedTreeSyncManager`.
 
 ## References
 

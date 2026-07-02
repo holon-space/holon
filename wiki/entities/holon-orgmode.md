@@ -93,26 +93,38 @@ Source blocks render **before** text children (org format associates source bloc
 
 ## Traits (DI boundary)
 
-`crates/holon-orgmode/src/traits.rs`:
+> **STATUS UPDATE (2026-07-02):** These ports moved to
+> `crates/holon-filesystem/src/sync_ports.rs` (consumer-side ports for the
+> format-agnostic `FileSyncController`) and their shapes changed post-H7:
+> there is no separate `Document` type — `DocumentManager` now operates on
+> plain `Block`s tagged `"Page"`.
+
+`crates/holon-filesystem/src/sync_ports.rs`:
 
 ```rust
 pub trait BlockReader: Send + Sync {
-    async fn get_blocks_for_document(&self, doc_id: &EntityUri) -> Result<Vec<Block>>;
+    async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>>;
+    async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>>;
+    // ...
 }
 
+/// CRUD operations on page blocks (blocks tagged `"Page"`).
 pub trait DocumentManager: Send + Sync {
-    async fn get_document(&self, doc_id: &EntityUri) -> Result<Option<Document>>;
-    async fn create_document(&self, doc: Document) -> Result<()>;
-    async fn update_document(&self, doc: Document) -> Result<()>;
+    async fn find_by_parent_and_name(&self, parent_id: &EntityUri, title: &str) -> Result<Option<Block>>;
+    async fn create(&self, doc: Block) -> Result<Block>;
+    async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>>;
+    async fn update_metadata(&self, doc: &Block) -> Result<()>;
+    // + name_chain / find_by_name_chain / get_or_create_by_name_chain helpers
 }
 ```
 
-DI adapters in `crates/holon-orgmode/src/di.rs` implement these traits using `CacheBlockReader` (wraps `QueryableCache<Block>`) and `DocumentManagerAdapter`.
+DI adapters in `crates/holon-orgmode/src/di.rs` implement these traits: `CacheBlockReader` (wraps `QueryableCache<Block>`) and `LiveDocumentManager`.
 
 ## Org File Conventions
 
 From `docs/Reference/ORG_SYNTAX.md`:
-- IDs stored **without** `block:` / `doc:` scheme prefixes
+- IDs stored **without** a `block:` scheme prefix (the `doc:` scheme was
+  retired 2026-07-02, H7 — there is no separate document scheme to strip)
 - Source blocks get `EntityUri::block()` prefix at parse time
 - Renderer strips scheme: writes `block.id.id()` not `block.id.as_str()`
 - Custom properties (hyphenated like `collapse-to`, `column-order`) survive full round-trip

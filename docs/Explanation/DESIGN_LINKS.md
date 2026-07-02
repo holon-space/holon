@@ -1,5 +1,11 @@
 # Links & Backlinks Design
 
+> **STATUS UPDATE (2026-07-02):** The `doc:` URI scheme this design originally
+> minted has been retired (H7) — the default/fallback scheme for unqualified
+> link targets is now `block:` (see `infer_scheme` /
+> `crates/holon-api/src/link_parser.rs`). Examples below have been updated to
+> use `block:` accordingly.
+
 ## Problem
 
 Holon needs `[[...]]` wiki-style links that:
@@ -17,10 +23,10 @@ The identity of a linked entity is a **deterministic hash** of its canonical cre
 
 ```
 [[Projects/New thing]]
-→ normalize: "doc:projects/new thing"
-→ hash: blake3("doc:projects/new thing")
+→ normalize: "block:projects/new thing"
+→ hash: blake3("block:projects/new thing")
 → format as UUID: 7fc2b308-403a-458e-91a8-0a26fc519320
-→ ID: doc:7fc2b308-403a-458e-91a8-0a26fc519320
+→ ID: block:7fc2b308-403a-458e-91a8-0a26fc519320
 ```
 
 This gives us:
@@ -49,8 +55,8 @@ On save (org file write, Loro sync), the system parses `[[...]]` links, classifi
 
 | `target_raw` | `target_id` | Status |
 |---|---|---|
-| `Projects/New thing` | `doc:7fc2b308-...` | Unresolved (entity doesn't exist) |
-| `doc:7fc2b308-...` | `doc:7fc2b308-...` | Resolved |
+| `Projects/New thing` | `block:7fc2b308-...` | Unresolved (entity doesn't exist) |
+| `block:7fc2b308-...` | `block:7fc2b308-...` | Resolved |
 | `https://example.com` | `NULL` | External (not an entity) |
 
 The deterministic hash is computed at parse time. `target_id` is always known, even before the entity exists. Backlinks work immediately.
@@ -65,7 +71,7 @@ On navigate:
 1. Compute `target_id` from link text (deterministic — same hash)
 2. Check if entity exists
 3. If not: create it (document, person, etc.) with the hashed ID
-4. Rewrite the source link to resolved form: `[[doc:7fc2b308-...]]`
+4. Rewrite the source link to resolved form: `[[block:7fc2b308-...]]`
 5. Navigate to the entity
 
 Note: the resolved form stores **only the ID**, no display text. The display name is resolved at render time from the entity's current `name` field. This means renames are free — no propagation needed.
@@ -73,28 +79,28 @@ Note: the resolved form stores **only the ID**, no display text. The display nam
 ### Phase 4: Resolved Reference (steady state)
 
 ```org
-Check out [[doc:7fc2b308-403a-458e-91a8-0a26fc519320]] for details.
+Check out [[block:7fc2b308-403a-458e-91a8-0a26fc519320]] for details.
 ```
 
 The entity exists. The link is stable. The renderer resolves the ID to the current document name for display. Renaming the document requires zero link updates — every reference automatically shows the new name.
 
-Exception: `[[target][explicit text]]` with user-provided display text is preserved as-is. This is for cases where the user intentionally wants different link text (e.g., `[[doc:7fc2b308-...][click here]]`). Only the renderer-resolved default name updates on rename.
+Exception: `[[target][explicit text]]` with user-provided display text is preserved as-is. This is for cases where the user intentionally wants different link text (e.g., `[[block:7fc2b308-...][click here]]`). Only the renderer-resolved default name updates on rename.
 
 ## Type Inference
 
-The first path segment is checked against a type registry. If it matches a known entity type, it determines the scheme. Otherwise, the default is `doc:`.
+The first path segment is checked against a type registry. If it matches a known entity type, it determines the scheme. Otherwise, the default is `block:`.
 
 | User types | Inferred type | Hash input | Resulting ID |
 |---|---|---|---|
-| `[[Projects/New thing]]` | `doc` (default) | `"doc:projects/new thing"` | `doc:7fc2b308-...` |
+| `[[Projects/New thing]]` | `block` (default) | `"block:projects/new thing"` | `block:7fc2b308-...` |
 | `[[Person/Alice]]` | `person` (registered) | `"person:alice"` | `person:e91c4a2f-...` |
-| `[[Some page]]` | `doc` (default, root) | `"doc:some page"` | `doc:b4e8f1a3-...` |
-| `[[doc:existing-id]]` | — (already resolved) | — | `doc:existing-id` |
+| `[[Some page]]` | `block` (default, root) | `"block:some page"` | `block:b4e8f1a3-...` |
+| `[[block:existing-id]]` | — (already resolved) | — | `block:existing-id` |
 | `[[https://example.com]]` | — (external URL) | — | `NULL` |
 
-The type registry is a simple map: `{"Person" => "person:", "Project" => "project:", ...}`. Initially just `doc:` and `block:`. Grows as entity types are added (person, monetary, etc. per Vision/PetriNet.md).
+The type registry is a simple map: `{"Person" => "person:", "Project" => "project:", ...}`. Initially just `block:`. Grows as entity types are added (person, monetary, etc. per Vision/PetriNet.md).
 
-For inferred types, the type prefix is stripped from the path before it becomes the hierarchy hint. `[[Person/Alice]]` creates an entity with scheme `person:`, name "Alice", no parent path. `[[Projects/Sub/Thing]]` creates `doc:` with name "Thing", parent path "Projects/Sub".
+For inferred types, the type prefix is stripped from the path before it becomes the hierarchy hint. `[[Person/Alice]]` creates an entity with scheme `person:`, name "Alice", no parent path. `[[Projects/Sub/Thing]]` creates `block:` with name "Thing", parent path "Projects/Sub".
 
 ## Hash Function
 
@@ -102,7 +108,7 @@ For inferred types, the type prefix is stripped from the path before it becomes 
 1. Lowercase the entire string
 2. Trim whitespace
 3. Collapse multiple spaces to single space
-4. Prepend scheme if not present: `"doc:projects/new thing"`
+4. Prepend scheme if not present: `"block:projects/new thing"`
 
 **Hash**: Blake3 (or any fast hash already in the dependency tree), formatted as UUID-style hex with dashes to match existing block ID format.
 
@@ -132,14 +138,14 @@ pub fn deterministic_entity_id(scheme: &str, normalized_path: &str) -> EntityUri
 Multiple blocks referencing `[[Projects/New thing]]` all compute the same `target_id`:
 
 ```
-Block A: "Check out [[Projects/New thing]]"     → target_id = doc:7fc2b308-...
-Block B: "Related to [[Projects/New thing]]"     → target_id = doc:7fc2b308-...
-Block C: "See also [[projects/new thing]]"       → target_id = doc:7fc2b308-... (case-insensitive)
+Block A: "Check out [[Projects/New thing]]"     → target_id = block:7fc2b308-...
+Block B: "Related to [[Projects/New thing]]"     → target_id = block:7fc2b308-...
+Block C: "See also [[projects/new thing]]"       → target_id = block:7fc2b308-... (case-insensitive)
 ```
 
-When any of these links is navigated, the entity is created with ID `doc:7fc2b308-...`. All three links resolve to the same entity. No dedup logic needed.
+When any of these links is navigated, the entity is created with ID `block:7fc2b308-...`. All three links resolve to the same entity. No dedup logic needed.
 
-`[[New thing]]` (without path qualifier) produces a *different* hash (`"doc:new thing"` vs `"doc:projects/new thing"`). This is correct — unqualified names are a different creation intent (root-level document). The autocomplete UI should help users pick the right qualified path.
+`[[New thing]]` (without path qualifier) produces a *different* hash (`"block:new thing"` vs `"block:projects/new thing"`). This is correct — unqualified names are a different creation intent (root-level document). The autocomplete UI should help users pick the right qualified path.
 
 **Autocomplete and case correction**: When a document named "Projects" already exists, autocomplete should match case-insensitively but insert the canonical casing. Typing `[[projects/` shows "Projects" and inserts `[[Projects/`. Case normalization in the hash is a safety net for raw org editing; the UI enforces correct casing through autocomplete.
 
@@ -176,7 +182,7 @@ Two forms coexist:
 Check out [[Projects/New thing]] for details.
 
 * Resolved (after navigate-to-create — entity exists)
-Check out [[doc:7fc2b308-403a-458e-91a8-0a26fc519320]] for details.
+Check out [[block:7fc2b308-403a-458e-91a8-0a26fc519320]] for details.
 
 * External (never resolved)
 See [[https://example.com][example site]] for reference.
@@ -188,7 +194,7 @@ Same as org file content. The `[[...]]` text is part of the block's `content` fi
 
 ### Display name resolution
 
-Resolved links like `[[doc:7fc2b308-...]]` store only the ID. The renderer resolves the display name at render time:
+Resolved links like `[[block:7fc2b308-...]]` store only the ID. The renderer resolves the display name at render time:
 
 1. Look up entity by ID in cache
 2. Use entity's `name` field as display text
@@ -196,7 +202,7 @@ Resolved links like `[[doc:7fc2b308-...]]` store only the ID. The renderer resol
 
 This is the same approach LogSeq uses — display names always reflect the current entity name, never go stale.
 
-For links with explicit user-provided display text (`[[doc:7fc2b308-...][click here]]`), the explicit text takes precedence.
+For links with explicit user-provided display text (`[[block:7fc2b308-...][click here]]`), the explicit text takes precedence.
 
 ## Entity Creation Flow
 
@@ -213,7 +219,7 @@ Check: does entity with this ID exist?
             1. Parse path: parent = "Projects", name = "New thing"
             2. Resolve parent document (create recursively if needed)
             3. Create document: id = target_id, name = "New thing", parent_id = resolved parent
-            4. Rewrite source link to [[doc:7fc2b308-...]]
+            4. Rewrite source link to [[block:7fc2b308-...]]
             5. Navigate to new entity
 ```
 
@@ -227,7 +233,7 @@ When typing `[[`, the UI offers:
 - Existing entities (documents, blocks, persons) — filtered by typed text
 - "Create new: Projects/New thing" option if no match
 
-Selecting an existing entity inserts the resolved form directly: `[[doc:7fc2b308-...]]`.
+Selecting an existing entity inserts the resolved form directly: `[[block:7fc2b308-...]]`.
 
 Selecting "create new" inserts the unresolved form: `[[Projects/New thing]]`.
 
@@ -254,7 +260,7 @@ Renames require **zero link updates**. Since resolved links store only the ID an
 | **Type registry** (`holon-api`) | Map path prefixes to entity schemes |
 | **LinkEventSubscriber** (`holon/src/sync/`) | Populate `block_link` on block events (no resolution queries — just hash computation) |
 | **Entity creation** (OperationProvider) | Create entities via events, not direct SQL |
-| **Display name resolution** (frontend/renderer) | Resolve `doc:id` → entity name at render time |
+| **Display name resolution** (frontend/renderer) | Resolve `block:id` → entity name at render time |
 | **Navigation** (frontend) | Navigate-to-create flow |
 | **Autocomplete** (frontend) | Entity search + "create new" option + case correction |
 | **FileSyncController** | Untouched — continues to emit block events |
@@ -284,6 +290,6 @@ The current implementation (in `link_event_subscriber.rs`) uses `target_document
 
 5. **Hash format**: UUID-style hex with dashes, matching existing block ID format.
 
-6. **Type registry**: Hardcoded initially (`doc:`, `block:`). Made configurable later as entity types grow.
+6. **Type registry**: Hardcoded initially (`block:`). Made configurable later as entity types grow.
 
 7. **Hash algorithm**: Blake3 or whatever fast hash is already in the dependency tree. Choice doesn't matter at PKM scale.

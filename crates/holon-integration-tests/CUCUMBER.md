@@ -1,5 +1,12 @@
 # Cucumber Integration Tests - Handoff Document
 
+> **STATUS UPDATE (2026-07-02):** This handoff document predates the `doc:`
+> URI scheme retirement (H7) — pages are now plain `Page`-tagged blocks
+> addressed with `block:` URIs, there is no separate `holon-doc://` scheme or
+> `doc_id`/`doc_uri` concept. The `cucumber` test crate/binary described below
+> no longer exists in the tree (no `--test cucumber` target); treat this file
+> as historical design notes, not a live reference.
+
 ## Overview
 
 This document provides context for the Cucumber integration test redesign. The implementation is **COMPLETE AND FULLY TESTED** with all 4 realistic end-to-end user scenarios passing. Tests verify the full stack: file watcher → database sync → CDC streaming → real-time UI updates.

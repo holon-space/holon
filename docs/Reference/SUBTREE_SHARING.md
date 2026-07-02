@@ -53,12 +53,12 @@ the same peer-id, which keeps CRDT lineage stable across restarts.
 
 ## Files
 
-- `crates/holon/src/sync/ticket.rs` — ticket encode/decode.
-- `crates/holon/src/sync/iroh_advertiser.rs` — persistent accepter pool.
-- `crates/holon/src/sync/share_peer_id.rs` — stable peer-id derivation.
-- `crates/holon/src/sync/shared_tree.rs` — fork-and-prune + mount nodes
+- `crates/holon-loro/src/ticket.rs` — ticket encode/decode.
+- `crates/holon-loro/src/iroh_advertiser.rs` — persistent accepter pool.
+- `crates/holon-loro/src/share_peer_id.rs` — stable peer-id derivation.
+- `crates/holon-loro/src/shared_tree.rs` — fork-and-prune + mount nodes
   (pre-existing).
-- `crates/holon/src/sync/loro_share_backend.rs` — `SubtreeShareOperations`
+- `crates/holon-loro/src/loro_share_backend.rs` — `SubtreeShareOperations`
   trait + impl + `OperationProvider` wiring.
 - `crates/holon/src/sync/loro_module.rs` — DI wiring gated on `iroh-sync`.
 
@@ -89,6 +89,18 @@ After the initial exchange, both sides are running accepters on the same
 ALPN (`loro-sync/<shared_tree_id>`), so either can dial the other to push
 subsequent updates. (Advertiser-to-advertiser push is not yet implemented;
 Phase 2 will add either a periodic exchange or a subscribe-and-push path.)
+
+**Payloads are plaintext.** No encryption is implemented on the shared doc or
+the sync channel beyond whatever iroh's transport provides; do not treat a
+share as confidential.
+
+**`HistoryRetention::None` shares cannot merge back.** A shallow snapshot
+(`HistoryRetention::None`) breaks CRDT lineage — collaborative edits on that
+share do not merge back into the personal tree on unmount. This is not a
+silent drop: reintegration now fails loudly (see
+`none_retention_reintegration_fails_loudly` in
+`crates/holon-loro/src/shared_tree.rs`) rather than quietly discarding the
+divergent edits.
 
 ## Known gaps (Phase 2)
 

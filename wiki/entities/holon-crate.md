@@ -82,7 +82,7 @@ Key methods:
 
 Specifies `current_block_id` (for `from children`), `context_parent_id` (for `from siblings`), and `context_path_prefix` (for `from descendants`). Used by virtual PRQL tables defined in `PRQL_STDLIB`.
 
-PRQL virtual tables: `children`, `siblings`, `descendants`, `roots`, `tasks`, `focus_roots`.
+PRQL virtual tables: `children`, `siblings`, `descendants`, `tasks`, `focus_roots`.
 
 ## HolonService
 

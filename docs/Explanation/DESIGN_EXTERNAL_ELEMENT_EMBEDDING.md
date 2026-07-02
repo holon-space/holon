@@ -4,6 +4,15 @@
 **Decision**: Option 4 (Unified matview) preferred after analysis
 **Use cases**: [Cross-Source Integration Use Cases](../usecases/CROSS_SOURCE_INTEGRATION.md)
 
+> **STATUS UPDATE (2026-07-02):** The "Current Architecture" snapshot below
+> predates the `doc:` URI scheme retirement (H7) — `EntityUri::doc()` and the
+> `doc:`-scheme branches described here no longer exist; only `block:` is
+> minted today. Table/module names below (`blocks`, `blocks_with_paths`, etc.)
+> also predate later schema renames and no longer match
+> `crates/holon/src/storage/schema_modules.rs`. Treat this section as
+> historical context for the design rationale, not a current schema
+> reference.
+
 ## Problem Statement
 
 We want to attach normal holon blocks as children of elements from external systems (e.g., Todoist tasks), enabling cross-references, annotations, and local augmentation that the external system doesn't support. For example: view all Todoist tasks via a `live_query` on the `todoist_tasks` table, and for any task, attach child blocks with additional notes, links, or sub-items.

@@ -88,9 +88,14 @@ From `docs/Reference/ORG_SYNTAX.md`:
 
 ## Document Identity
 
-Documents have two URIs:
-- File-path-based: `holon-doc://file.org`
-- UUID-based: `holon-doc://{uuid}`
+> **STATUS UPDATE (2026-07-02):** The `doc:` URI scheme was retired (H7). Pages
+> are now plain blocks tagged `Page`, identified with `block:` URIs like every
+> other block — there is no separate document URI space or `holon-doc://`
+> scheme.
+
+A page passes through two URIs:
+- File-path-based (transient, during parsing): `file:file.org`
+- UUID-based (canonical): `block:{uuid}`
 
 `LoroDocumentStore.register_alias(uuid, path)` maps UUID → canonical file path. `OrgSyncController` rewrites root block `parent_id`s from file-based to UUID-based URIs after initial parse.
 

@@ -37,7 +37,6 @@ PRQL (Pipelined Relational Query Language) is the primary query language. Compil
 | `children` | blocks with `parent_id = $context_id` | `context_id` |
 | `siblings` | blocks with `parent_id = $context_parent_id` | `context_parent_id` |
 | `descendants` | `block_with_path` prefix match | `context_path_prefix` |
-| `roots` | blocks with `parent_id LIKE 'doc:%'` | none |
 | `tasks` | blocks with non-null `task_state` | none |
 | `focus_roots` | blocks at current navigation focus | none |
 
