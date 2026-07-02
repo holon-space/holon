@@ -2051,6 +2051,312 @@ mod tests {
         backend_b.advertiser.close_all().await;
     }
 
+    /// Share A's `shared-parent` subtree (root-a → shared-parent → shared-child)
+    /// and accept it into B. Returns both share backends plus a `LoroBackend`
+    /// wired over A's global doc + A's share manager — the exact DI wiring
+    /// `LoroBlockOperations` receives. TempDirs are returned so the on-disk
+    /// stores outlive the test body.
+    #[allow(clippy::type_complexity)]
+    async fn share_setup() -> (
+        Arc<LoroShareBackend>,
+        Arc<LoroShareBackend>,
+        crate::loro_backend::LoroBackend,
+        String,
+        TempDir,
+        TempDir,
+    ) {
+        use crate::loro_backend::LoroBackend;
+        use crate::shared_tree::SharedTreeStore;
+
+        let (backend_a, dir_a) = make_backend();
+        let (backend_b, dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(
+            &backend_a,
+            "shared-parent",
+            Some("root-a"),
+            "Shared heading",
+        )
+        .await;
+        seed_block(
+            &backend_a,
+            "shared-child",
+            Some("shared-parent"),
+            "original child",
+        )
+        .await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let share_response = backend_a
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .unwrap();
+        let ticket_json: serde_json::Value = match share_response.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            other => panic!("unexpected response type: {other:?}"),
+        };
+        let ticket = ticket_json["ticket"].as_str().unwrap().to_string();
+        let shared_tree_id = ticket_json["shared_tree_id"].as_str().unwrap().to_string();
+
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+
+        let a_global = backend_a.global_doc().await.unwrap();
+        let manager = backend_a.manager.clone();
+        let write_backend = LoroBackend::from_document(a_global)
+            .with_shared_trees(manager as Arc<dyn SharedTreeStore>);
+
+        (
+            backend_a,
+            backend_b,
+            write_backend,
+            shared_tree_id,
+            dir_a,
+            dir_b,
+        )
+    }
+
+    /// A read backend wired over B's global doc + B's share manager (the peer's
+    /// DI wiring). Used to assert a routed write converged into B's shared doc.
+    async fn peer_read_backend(backend_b: &LoroShareBackend) -> crate::loro_backend::LoroBackend {
+        use crate::loro_backend::LoroBackend;
+        use crate::shared_tree::SharedTreeStore;
+        let b_global = backend_b.global_doc().await.unwrap();
+        LoroBackend::from_document(b_global)
+            .with_shared_trees(backend_b.manager.clone() as Arc<dyn SharedTreeStore>)
+    }
+
+    /// Reader parity: `get_block` of a shared block by its stable id resolves
+    /// through the shared doc (the id was pruned from A's global tree at share
+    /// time) and returns the right content.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn get_block_resolves_shared_stable_id() {
+        use holon_api::repository::CoreOperations;
+        let (backend_a, backend_b, write_backend, _stid, _da, _db) = share_setup().await;
+
+        let block = write_backend
+            .get_block("block:shared-child")
+            .await
+            .expect("get_block must resolve a shared stable id");
+        assert_eq!(block.content, "original child");
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// Group-A routed writers: `update_block_properties` and `update_block_fields`
+    /// on a shared block land in the shared doc and converge to the peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn routed_property_writes_round_trip_and_sync() {
+        use holon_api::repository::CoreOperations;
+        let (backend_a, backend_b, write_backend, shared_tree_id, _da, _db) = share_setup().await;
+
+        let mut props = HashMap::new();
+        props.insert("TODO".to_string(), Value::String("DONE".to_string()));
+        write_backend
+            .update_block_properties("block:shared-child", &props)
+            .await
+            .expect("routed property write must succeed");
+        write_backend
+            .update_block_fields(
+                "block:shared-child",
+                &[(
+                    "PRIORITY".to_string(),
+                    Value::Null,
+                    Value::String("A".to_string()),
+                )],
+            )
+            .await
+            .expect("routed field write must succeed");
+
+        // Round-trips on A (the child lives ONLY in the shared doc).
+        let a_block = write_backend.get_block("block:shared-child").await.unwrap();
+        assert_eq!(
+            a_block.properties.get("TODO"),
+            Some(&Value::String("DONE".to_string()))
+        );
+        assert_eq!(
+            a_block.properties.get("PRIORITY"),
+            Some(&Value::String("A".to_string()))
+        );
+
+        // Converges to B's shared doc after a pull.
+        let synced = backend_b.sync_with_peers(&shared_tree_id).await.unwrap();
+        assert_eq!(synced, 1);
+        let b_read = peer_read_backend(&backend_b).await;
+        let b_block = b_read.get_block("block:shared-child").await.unwrap();
+        assert_eq!(
+            b_block.properties.get("TODO"),
+            Some(&Value::String("DONE".to_string()))
+        );
+        assert_eq!(
+            b_block.properties.get("PRIORITY"),
+            Some(&Value::String("A".to_string()))
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// Create-family routing: a child created under a SHARED parent lands in the
+    /// shared doc (not the global doc), never pollutes the global `id_cache`,
+    /// and syncs to the peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn create_under_shared_parent_lands_in_shared_doc() {
+        use holon_api::repository::CoreOperations;
+        let (backend_a, backend_b, write_backend, shared_tree_id, _da, _db) = share_setup().await;
+
+        let child = write_backend
+            .create_block(
+                EntityUri::block("shared-parent"),
+                holon_api::BlockContent::text("born in shared"),
+                Some(EntityUri::block("shared-new-child")),
+            )
+            .await
+            .expect("create under shared parent must succeed");
+        assert_eq!(child.id, EntityUri::block("shared-new-child"));
+
+        // Landed in A's shared doc.
+        assert_eq!(
+            shared_text(&backend_a, &shared_tree_id, "shared-new-child").as_deref(),
+            Some("born in shared"),
+        );
+        // NOT in A's global tree.
+        let a_global = backend_a.global_doc().await.unwrap();
+        assert!(
+            find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-new-child"))
+                .is_none(),
+            "shared child must not appear in the global tree"
+        );
+        // The global id_cache never gained the shared child's id.
+        assert!(
+            write_backend.peek_id_cache("shared-new-child").is_none(),
+            "shared child id must not leak into the global id_cache"
+        );
+
+        // Syncs to B.
+        let synced = backend_b.sync_with_peers(&shared_tree_id).await.unwrap();
+        assert_eq!(synced, 1);
+        assert_eq!(
+            shared_text(&backend_b, &shared_tree_id, "shared-new-child").as_deref(),
+            Some("born in shared"),
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// Delete of a shared block routes to the shared doc.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn delete_shared_block_routes_to_shared_doc() {
+        use holon_api::repository::CoreOperations;
+        let (backend_a, backend_b, write_backend, shared_tree_id, _da, _db) = share_setup().await;
+
+        assert!(shared_text(&backend_a, &shared_tree_id, "shared-child").is_some());
+        write_backend
+            .delete_block("block:shared-child")
+            .await
+            .expect("routed delete must succeed");
+        assert!(
+            shared_text(&backend_a, &shared_tree_id, "shared-child").is_none(),
+            "the shared child must be gone from the shared doc"
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// A cross-doc move (out of a shared subtree into the global doc) rejects
+    /// loudly; a same-doc move WITHIN the shared subtree succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn cross_doc_move_rejects_same_doc_move_succeeds() {
+        use holon_api::repository::CoreOperations;
+        let (backend_a, backend_b, write_backend, _stid, _da, _db) = share_setup().await;
+
+        // Seed a second child in the shared subtree (create under shared parent).
+        write_backend
+            .create_block(
+                EntityUri::block("shared-parent"),
+                holon_api::BlockContent::text("sibling"),
+                Some(EntityUri::block("shared-child2")),
+            )
+            .await
+            .unwrap();
+
+        // Cross-doc: shared-child (shared doc) → root-a (global doc) rejects.
+        let err = write_backend
+            .move_block(
+                &EntityUri::block("shared-child"),
+                EntityUri::block("root-a"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cross-boundary move"),
+            "expected a cross-boundary rejection, got: {msg}"
+        );
+
+        // Same-doc: shared-child2 → under shared-child (both in the shared doc) succeeds.
+        write_backend
+            .move_block(
+                &EntityUri::block("shared-child2"),
+                EntityUri::block("shared-child"),
+                None,
+            )
+            .await
+            .expect("same-doc move within the shared subtree must succeed");
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// A content write to a mount node (the pointer A's global tree holds in
+    /// place of the shared subtree) rejects loudly — mounts are not editable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn write_to_mount_node_rejects() {
+        let (backend_a, backend_b, write_backend, _stid, _da, _db) = share_setup().await;
+
+        // Find the mount node A's global tree holds after the share.
+        let a_global = backend_a.global_doc().await.unwrap();
+        let mount_uri = {
+            let doc = a_global.doc();
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            let mount_tid = tree
+                .get_nodes(false)
+                .iter()
+                .find(|n| {
+                    !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
+                        && shared_tree::is_mount_node(&tree, n.id)
+                })
+                .map(|n| n.id)
+                .expect("A's global tree must hold a mount node after share");
+            EntityUri::block_from_tree_id(mount_tid.peer, mount_tid.counter).to_string()
+        };
+
+        let err = write_backend
+            .update_block_text(&mount_uri, "should not land")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("mount node"),
+            "expected a mount-node rejection, got: {err}"
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
     /// Drive many commits in rapid succession and assert the save
     /// worker coalesces them into a handful of disk writes. Validates
     /// the `SAVE_DEBOUNCE` window (currently 150 ms).

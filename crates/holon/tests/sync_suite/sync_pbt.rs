@@ -549,8 +549,8 @@ mod tests {
             shared_tree_id: &str,
             ref_a: &RefPeer,
             ref_b: &RefPeer,
-            initial_peer_id_a: u64,
-            initial_peer_id_b: u64,
+            expected_peer_id_a: u64,
+            expected_peer_id_b: u64,
         ) {
             // P-NO-SILENT-CORRUPT + P-NO-TMP-LEFTOVER on A and B.
             for (label, dir) in [("A", dir_a), ("B", dir_b)] {
@@ -587,23 +587,25 @@ mod tests {
                 );
             }
 
-            // P-KEY on each peer: the shared doc's peer_id must not
-            // drift across restarts on that peer (derived from the
-            // persistent device.key).
+            // P-KEY on each peer: BETWEEN restarts the shared doc's
+            // peer_id is stable; the expected value is re-baselined at
+            // each restart (see RestartA/RestartB), where B2's generation
+            // bump re-mints it. A change here (outside a restart) would be
+            // an accidental peer-id instability regression.
             if ref_a.share_usable {
                 let d = a.manager_for_test().get_doc(shared_tree_id).unwrap();
                 assert_eq!(
                     d.peer_id(),
-                    initial_peer_id_a,
-                    "P-KEY/A: shared doc peer_id drifted after restart"
+                    expected_peer_id_a,
+                    "P-KEY/A: shared doc peer_id changed outside a restart"
                 );
             }
             if ref_b.share_usable {
                 let d = b.manager_for_test().get_doc(shared_tree_id).unwrap();
                 assert_eq!(
                     d.peer_id(),
-                    initial_peer_id_b,
-                    "P-KEY/B: shared doc peer_id drifted after restart"
+                    expected_peer_id_b,
+                    "P-KEY/B: shared doc peer_id changed outside a restart"
                 );
             }
 
@@ -730,15 +732,18 @@ mod tests {
 
             // Capture each peer's initial shared-doc peer_id — they
             // differ because `stable_peer_id` derives from the
-            // *device* key, and A and B are distinct devices — but
-            // each side's own peer_id must stay stable across its own
-            // restarts (P-KEY).
-            let initial_peer_id_a = a
+            // *device* key, and A and B are distinct devices. Post-B2 a
+            // peer_id is stable BETWEEN restarts but is re-minted with a
+            // fresh generation AT each restart (so a stale snapshot can
+            // never reuse a CRDT counter). P-KEY tracks the current
+            // expected value; RestartA/RestartB re-baseline it and assert
+            // the mint actually changed.
+            let mut expected_peer_id_a = a
                 .manager_for_test()
                 .get_doc(&shared_tree_id)
                 .unwrap()
                 .peer_id();
-            let initial_peer_id_b = b
+            let mut expected_peer_id_b = b
                 .manager_for_test()
                 .get_doc(&shared_tree_id)
                 .unwrap()
@@ -880,6 +885,20 @@ mod tests {
                             ref_a.share_usable = false;
                             ref_a.corrupt_pending = false;
                             expected_load_failures_on_a += 1;
+                        } else if ref_a.share_usable {
+                            // B2: rehydrate re-mints the peer_id under a fresh
+                            // generation so a stale snapshot can never reuse a
+                            // CRDT counter. Assert it changed, then re-baseline.
+                            let new_pid = a
+                                .manager_for_test()
+                                .get_doc(&shared_tree_id)
+                                .expect("A's shared doc re-registered after restart")
+                                .peer_id();
+                            assert_ne!(
+                                new_pid, expected_peer_id_a,
+                                "B2: A's shared-doc peer_id must change across restart (generation bump)"
+                            );
+                            expected_peer_id_a = new_pid;
                         }
                     }
                     Action::RestartB => {
@@ -888,6 +907,20 @@ mod tests {
                         let old_bus = bus_b.clone();
                         drop(b);
                         b = backend_at(dir_b.path(), old_bus).await;
+                        if ref_b.share_usable {
+                            // B2: peer_id re-minted with a fresh generation on
+                            // restart (see RestartA).
+                            let new_pid = b
+                                .manager_for_test()
+                                .get_doc(&shared_tree_id)
+                                .expect("B's shared doc re-registered after restart")
+                                .peer_id();
+                            assert_ne!(
+                                new_pid, expected_peer_id_b,
+                                "B2: B's shared-doc peer_id must change across restart (generation bump)"
+                            );
+                            expected_peer_id_b = new_pid;
+                        }
                     }
                     Action::MarkOnA(kind) => {
                         if ref_a.share_usable
@@ -938,6 +971,22 @@ mod tests {
                         let old_bus = bus_a.clone();
                         drop(a);
                         a = backend_at(dir_a.path(), old_bus).await;
+
+                        // B2: this restart also re-mints A's peer_id under a
+                        // fresh generation — re-baseline P-KEY (share_usable is
+                        // guaranteed by the guard above).
+                        {
+                            let new_pid = a
+                                .manager_for_test()
+                                .get_doc(&shared_tree_id)
+                                .expect("A's shared doc re-registered after restart")
+                                .peer_id();
+                            assert_ne!(
+                                new_pid, expected_peer_id_a,
+                                "B2: A's shared-doc peer_id must change across restart (generation bump)"
+                            );
+                            expected_peer_id_a = new_pid;
+                        }
 
                         // After restart, A's sidecar should still list
                         // B as a known peer (populated during the
@@ -993,8 +1042,8 @@ mod tests {
                     &shared_tree_id,
                     &ref_a,
                     &ref_b,
-                    initial_peer_id_a,
-                    initial_peer_id_b,
+                    expected_peer_id_a,
+                    expected_peer_id_b,
                 )
                 .await;
             }
