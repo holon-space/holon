@@ -241,6 +241,62 @@ pub fn find_click_intent_in_region(
     find_click_intent_in_view_model(panel, entity_id)
 }
 
+/// Resolve the intent a click on `entity_id`'s `state_toggle` glyph dispatches,
+/// within `region`'s panel. `state_toggle` cycling is NOT a bound click-INTENT:
+/// `cycle_task_state` is key-chord-bound (Cmd+Enter), so `find_click_intent_*`
+/// deliberately ignores it. Instead the GPUI `state_toggle` widget hardcodes its
+/// `on_mouse_down` to compute the NEXT cycle value and dispatch a `set_field`
+/// write (see `frontends/gpui/src/render/builders/state_toggle.rs`). This mirrors
+/// that exact behaviour so the headless driver's `click_entity` advances a visible
+/// task row's state the same way the windowed geometry click does — closing the
+/// headless/windowed parity gap that made `state_toggle` clicks a no-op headless.
+pub fn state_toggle_cycle_intent(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+) -> Option<crate::operations::OperationIntent> {
+    use crate::view_model::ViewKind;
+
+    fn walk(
+        node: &crate::view_model::ViewModel,
+        entity_id: &EntityUri,
+    ) -> Option<crate::operations::OperationIntent> {
+        if let ViewKind::StateToggle {
+            field,
+            current,
+            states,
+            ..
+        } = &node.kind
+        {
+            if node.entity_id().as_ref() == Some(entity_id) {
+                // Same op lookup + cycle math the GPUI widget performs.
+                let op = crate::operations::find_set_field_op(field, &node.operations)?;
+                let states_vec: Vec<String> =
+                    states.split(',').map(|s| s.trim().to_string()).collect();
+                let next = holon_api::render_eval::cycle_state(current, &states_vec);
+                let entity_name = node.entity_name().unwrap_or_else(|| op.entity_name.clone());
+                let row_id = node.row_id()?;
+                return Some(crate::operations::OperationIntent::set_field(
+                    &entity_name,
+                    &op.name,
+                    &row_id,
+                    field,
+                    holon_api::Value::String(next),
+                ));
+            }
+        }
+        for child in node.children() {
+            if let Some(intent) = walk(child, entity_id) {
+                return Some(intent);
+            }
+        }
+        None
+    }
+
+    let panel = find_region_panel(root, region)?;
+    walk(panel, entity_id)
+}
+
 /// True if `entity_id` is rendered anywhere within `region`'s panel subtree.
 ///
 /// Mirrors `find_click_intent_in_region`'s traversal (same panel scope, same

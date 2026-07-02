@@ -402,6 +402,26 @@ pub trait UserDriver: Send + Sync {
         )
     }
 
+    /// Click the `state_toggle` glyph on `entity_id`'s row, advancing its
+    /// task-state cycle by one — the faithful "tap the checkbox" gesture.
+    ///
+    /// A `state_toggle` click is NOT a bound click-INTENT: `cycle_task_state`
+    /// is key-chord-bound (Cmd+Enter), so `click_entity`'s intent resolver
+    /// ignores it, and a plain `click_entity(row)` instead focuses the row
+    /// (cursor placement). Only a real geometry hit on the glyph triggers the
+    /// widget's hardcoded `on_mouse_down` (compute next cycle value → dispatch
+    /// `set_field`).
+    ///
+    /// The default drives it the generic geometry way — a `click_entity` on the
+    /// row's element — which is faithful for window/geometry drivers whose
+    /// hit-test lands on the actual glyph. A headless driver with no geometry
+    /// (`ReactiveEngineDriver`) cannot disambiguate the glyph from the row by a
+    /// coordinate-free `click_entity`, so it overrides this to resolve and
+    /// dispatch the glyph's `set_field` intent from the resolved view tree.
+    async fn cycle_state_toggle(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+        self.click_entity(entity_id, region).await
+    }
+
     /// Whether `send_raw_keystroke` routes through a real input pipeline
     /// that performs key-chord resolution before any keystroke reaches an
     /// editor (TUI / GPUI native drivers). Headless drivers
@@ -549,6 +569,33 @@ impl UserDriver for ReactiveEngineDriver {
         let _ = region;
         self.engine.set_focus(Some(entity_id.clone()));
         Ok(())
+    }
+
+    /// Headless `state_toggle` click. `click_entity` cannot disambiguate the
+    /// glyph from the row without geometry, so resolve the glyph's dispatch
+    /// straight from the resolved view tree — the exact `set_field` intent the
+    /// GPUI `state_toggle` `on_mouse_down` builds (next cycle value) — and
+    /// dispatch it. Fails loud if the target renders no `state_toggle` (a
+    /// caller drove `ToggleState` on a non-task/non-visible row).
+    async fn cycle_state_toggle(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let resolved = self.engine.snapshot_resolved(&root_uri);
+            if let Some(intent) =
+                crate::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
+            {
+                return self.apply_intent(intent).await;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "cycle_state_toggle: no state_toggle glyph for {entity_id} in region \
+                     {region} within 2s — the target rendered no state_toggle (not a visible \
+                     task row?), so its cycle set_field intent could not be resolved."
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Headless expand/collapse: find the `expand_toggle` node in a reactive

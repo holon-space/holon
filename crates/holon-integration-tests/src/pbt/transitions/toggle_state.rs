@@ -170,7 +170,11 @@ impl TransitionFactory<ReferenceState> for ToggleState {
                 b.content_type == holon_api::ContentType::Text
                     && !b.is_page()
                     && !state.domain.layout_blocks.contains(&b.id)
-                    && main_focus_roots.contains(&b.id)
+                    // Visible in Main == focus root OR descendant of one (mirrors
+                    // the widened precondition below), not only the focus root
+                    // itself — otherwise the generator never proposes the child
+                    // task rows a user actually toggles.
+                    && state.is_descendant_of_any(&b.id, &main_focus_roots)
             })
             .map(|b| b.id.clone())
             .collect();
@@ -255,8 +259,17 @@ impl TransitionRef<ReferenceState> for ToggleState {
                 state.current_focus(holon_api::Region::Main).is_some(),
                 Reason::NoFocusInMain,
             ),
+            // The toggled row must be VISIBLE in Main — i.e. the block is a
+            // focus root OR a descendant of one (production renders every row
+            // under the focused page, and a user can click the `state_toggle`
+            // on any such interactive row). Requiring the block to BE a focus
+            // root was stricter than prod (there is no block-zoom gesture that
+            // makes a child block a focus root), which made ToggleState vacuous
+            // (only pages can be focus roots, and pages aren't task rows). The
+            // `is_descendant_of_any` self-or-descendant walk is the same faithful
+            // visibility predicate `main_editable_descendants` uses.
             check(
-                focus_roots.contains(&self.block_id),
+                state.is_descendant_of_any(&self.block_id, &focus_roots),
                 Reason::FocusedNotDescendantOfFocusRoot,
             ),
             // Layout headlines (in `layout_blocks.headline_ids`) define

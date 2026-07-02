@@ -1593,9 +1593,16 @@ impl HeadlessFrontendComponent {
         let id = self.resolve_id(block_id);
         let click_count = self.toggle_click_count(&id, new_state).await;
         for n in 0..click_count {
-            driver.click_entity(&id, "main").await.unwrap_or_else(|e| {
-                panic!("[toggle_state] click #{} failed for {id}: {e:#}", n + 1)
-            });
+            // Click the `state_toggle` GLYPH (not a plain row click, which would
+            // just focus): `cycle_state_toggle` targets the widget's own
+            // `set_field` cycle dispatch — geometry hit-test on a window driver,
+            // resolved-tree intent on the headless driver.
+            driver
+                .cycle_state_toggle(&id, "main")
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("[toggle_state] click #{} failed for {id}: {e:#}", n + 1)
+                });
             // Let CDC propagate so the widget's `current` prop (and its registered
             // bounds) stay warm for the next click.
             tokio::task::yield_now().await;

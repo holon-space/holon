@@ -122,15 +122,14 @@ mod real_sut_teeth {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    use holon_api::Region;
     use holon_pbt_core::TransitionImpl;
     use holon_pbt_core::capabilities::{SutLoroTaskState, SutSqlProjection};
 
     use crate::pbt::composed::seed_primitives::fixed_ids;
     use crate::pbt::composed::wide_e2e::{SETTLE, boot_and_seed_wide, wide_e2e_ref};
     use crate::pbt::op_write_cap::IdResolver;
+    use crate::pbt::transitions::ToggleState;
     use crate::pbt::transitions::toggle_state::CycleTarget;
-    use crate::pbt::transitions::{NavigateFocus, ToggleState};
 
     /// A real `ToggleState(c1 → TODO)` over the composed `full_headless` CapMap must
     /// land in BOTH stores. Before the toggle both read `None` (plain seed block);
@@ -171,18 +170,13 @@ mod real_sut_teeth {
                 "precondition: seeded c1 has no Loro task_state"
             );
 
-            // Focus c1 (the togglable focus root), then cycle it to TODO via the real
-            // `SutMutate::toggle_state` write path (same dispatch the PBT uses).
-            TransitionImpl::apply_to_sut(
-                &NavigateFocus {
-                    region: Region::Main,
-                    block_id: c1.clone(),
-                },
-                &ref_state,
-                &mut caps,
-            )
-            .await;
-            tokio::time::sleep(SETTLE).await;
+            // `boot_and_seed_wide` already focused the page root (`structural-page`),
+            // so c1 — a direct child — is a VISIBLE Main row. Production has no
+            // block-zoom gesture that would make the child block c1 a focus root of
+            // its own (the sidebar only focuses pages), so a click on c1's
+            // `state_toggle` is exactly the faithful user gesture. Cycle it to TODO
+            // via the real `SutMutate::toggle_state` write path (same dispatch the
+            // PBT uses).
             TransitionImpl::apply_to_sut(
                 &ToggleState {
                     block_id: c1.clone(),
