@@ -384,6 +384,10 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // nothing" fails HERE instead of passing vacuously — the same guard
         // `run_windowed_composed_check` enforces, now inside the unified StateMachineTest.
         if sut.caps.get::<dyn SutLayout>().is_some() {
+            // Disclose the windowed ran set (C-5: lets the windowed harness log prove the
+            // `SutFrontendEngine` / `SutFrontendEmissions` invariants SELECT + RUN with real
+            // teeth — grep `[windowed ran]` for their ids).
+            eprintln!("[windowed ran] {:?}", report.ran_ids());
             assert!(
                 report.ran_ids().contains(&"inv-frontend-bounds-rendered"),
                 "windowed non-vacuity: inv-frontend-bounds-rendered must run when a window is \

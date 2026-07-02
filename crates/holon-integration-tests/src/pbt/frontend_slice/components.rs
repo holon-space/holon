@@ -27,11 +27,11 @@ use holon_app::HeadlessBuilderServices;
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine, ReactiveRenderedRows, table_expr};
 use holon_frontend::{FrontendSession, ReactiveEngineDriver, UserDriver};
 use holon_pbt_core::capabilities::{
-    CapRegion, FrontendRootVm, ProviderStabilityReport, SutBackend, SutBlockTreeWrite,
-    SutEditorMirrorRead, SutEditorMirrorWrite, SutErrorLog, SutFocusProjection, SutFocusWrite,
-    SutHistoryWrite, SutMcpEmit, SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender,
-    SutQueryResults, SutRenderer, SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister,
-    SutWatchRows, ViewportHint, WatchRow, WidgetSnapshot,
+    CapRegion, SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutEditorMirrorWrite,
+    SutErrorLog, SutFocusProjection, SutFocusWrite, SutHistoryWrite, SutMcpEmit,
+    SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults, SutRenderer,
+    SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister, SutWatchRows, WatchRow,
+    WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use tempfile::TempDir;
@@ -900,32 +900,17 @@ impl SutViewModel for HeadlessFrontendComponent {
         ))
     }
 
-    // ─── gpui-frontend-engine-specific / unwired methods ────────────────────
-    // This slice has a headless `ReactiveEngine` but no separate gpui *frontend
-    // engine* (no window). The methods below describe that frontend engine or
-    // drive invariants not wired into the shared catalog yet, so they return the
-    // honest "not applicable / nothing to report" value (§5.1) rather than a
-    // fabricated one. Only `headless_error_node_count` is exercised today.
+    // This slice has a headless `ReactiveEngine` but no window, so it does NOT
+    // register the windowed `SutFrontendEngine` / `SutFrontendEmissions` caps
+    // (C-5 split, 2026-07-02) — the root-VM / emission invariants honestly
+    // DESELECT here instead of running vacuously against honest-empty shadows.
+    // `current_view` is real tracked state; `drain_vm_emissions` dies with
+    // `CachingProxy`. Only `headless_error_node_count` carries real teeth today.
     async fn drain_vm_emissions(&mut self) -> Vec<String> {
         Vec::new()
     }
-    async fn frontend_root_is_error(&self) -> bool {
-        false
-    }
     async fn current_view(&self) -> String {
         self.current_view.lock().expect("current_view lock").clone()
-    }
-    async fn frontend_root_vm(&self) -> Option<FrontendRootVm> {
-        None
-    }
-    async fn provider_stability_report(&self, _: ViewportHint) -> Option<ProviderStabilityReport> {
-        None
-    }
-    async fn drain_vm_emission_toggles(&self) -> Vec<(EntityUri, String)> {
-        Vec::new()
-    }
-    async fn live_vs_fresh_tree_diff(&self) -> Option<Vec<String>> {
-        None
     }
 }
 

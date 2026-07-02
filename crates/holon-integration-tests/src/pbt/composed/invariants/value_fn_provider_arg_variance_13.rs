@@ -5,7 +5,7 @@
 //! where a real ViewModel slice is wired (the frontend slice). Teeth run there.
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{RefGlobalFocus, RefLayout, SutViewModel};
+use holon_pbt_core::capabilities::{RefGlobalFocus, RefLayout, SutFrontendEmissions};
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::value_fn_provider_arg_variance_13::InvValueFnProviderArgVariance13;
@@ -15,7 +15,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvValueFnProviderArgVariance13,
         RunMode::Strict,
         Needs {
-            sut_present: vec![CapId::of::<dyn SutViewModel>()],
+            sut_present: vec![CapId::of::<dyn SutFrontendEmissions>()],
             sut_absent: Vec::new(),
             ref_present: vec![
                 CapId::of::<dyn RefLayout>(),

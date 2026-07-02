@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 pub use holon_api::{Block, BlockContent, ContentType, EntityUri};
 use holon_pbt_core::capabilities::{
-    FrontendRootVm, ProviderStabilityReport, SutBackend, SutEditorMirrorRead, SutErrorLog,
-    SutLoroLog, SutLoroTaskState, SutSqlProjection, SutViewModel, ViewportHint,
+    SutBackend, SutEditorMirrorRead, SutErrorLog, SutLoroLog, SutLoroTaskState, SutSqlProjection,
+    SutViewModel,
 };
 pub use holon_pbt_core::composition::{CapMap, run_selected};
 use holon_pbt_core::composition::{CapProvider, Config};
@@ -327,23 +327,8 @@ impl SutViewModel for FixtureViewModel {
     async fn drain_vm_emissions(&mut self) -> Vec<String> {
         Vec::new()
     }
-    async fn frontend_root_is_error(&self) -> bool {
-        false
-    }
     async fn current_view(&self) -> String {
         "all".to_string()
-    }
-    async fn frontend_root_vm(&self) -> Option<FrontendRootVm> {
-        None
-    }
-    async fn provider_stability_report(&self, _: ViewportHint) -> Option<ProviderStabilityReport> {
-        None
-    }
-    async fn drain_vm_emission_toggles(&self) -> Vec<(EntityUri, String)> {
-        Vec::new()
-    }
-    async fn live_vs_fresh_tree_diff(&self) -> Option<Vec<String>> {
-        None
     }
 }
 

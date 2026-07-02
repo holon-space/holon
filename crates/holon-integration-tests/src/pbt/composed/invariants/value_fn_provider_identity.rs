@@ -5,7 +5,7 @@
 //! (the frontend slice). Teeth run there over the real render pipeline.
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{RefBlockTree, RefTaskState, SutViewModel};
+use holon_pbt_core::capabilities::{RefBlockTree, RefTaskState, SutFrontendEmissions};
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::value_fn_provider_identity::InvValueFnProviderIdentity;
@@ -15,7 +15,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvValueFnProviderIdentity,
         RunMode::Strict,
         Needs {
-            sut_present: vec![CapId::of::<dyn SutViewModel>()],
+            sut_present: vec![CapId::of::<dyn SutFrontendEmissions>()],
             sut_absent: Vec::new(),
             ref_present: vec![
                 CapId::of::<dyn RefTaskState>(),

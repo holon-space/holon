@@ -4,7 +4,7 @@
 //!
 //! 1-subsystem invariant — touches only ViewModel.
 
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutFrontendEngine;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvFrontendRootNotError;
@@ -16,7 +16,7 @@ impl InvFrontendRootNotError {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvFrontendRootNotError
 where
-    S: SutViewModel,
+    S: SutFrontendEngine,
 {
     fn id(&self) -> InvariantId {
         Self::ID

@@ -11,22 +11,26 @@ caller greps); one agent claim corrected — see "Dead code" below.
   (`LoroBackendComponent::new_shared_with_sync_handle` + `builder.rs`); pure-Loro stays
   honest-`false` (no controller). Real teeth in the keystone (WIDE_REQUIRED). Stale
   "teeth in the E2E slice" comment fixed.
-- **TIER 1 — the three `SutViewModel` emission methods: DEFERRED (scoped).** The split
-  into a narrow `SutFrontendEmissions` cap + reconstructing `live_vs_fresh_tree_diff` /
-  `drain_vm_emission_toggles` / `provider_stability_report` on the *windowed*
-  `GpuiFrontendEngineComponent` is confirmed RECONSTRUCTIBLE (full `ReactiveEngine`
-  surface map recorded in the C-5 task report), but the real impls land ONLY on the
-  windowed path, which none of the headless gates (`--lib`, keystone, `check`) execute.
-  Shipping unverifiable rendering internals as "teeth" is exactly the cosmetic green the
-  rule forbids, so this is left as a windowed-harness follow-up rather than half-built.
-- **TIER 2 — `inv-frontend-engine` / `inv-frontend-root-not-error`: DEFERRED (scoped).**
-  Correct fix = split `frontend_root_vm`/`frontend_root_is_error` into a windowed-only
-  cap (`SutFrontendEngine`); the existing `required_invariants` cap_set filter then
-  auto-drops them from the headless keystone floor and keeps them on the windowed floor
-  (no `WIDE_REQUIRED` edit needed). The windowed impls already exist on
-  `GpuiFrontendEngineComponent`; only the `SutViewModel` split is pending (shares the
-  Tier-1 emission split's blast radius). Deferred with Tier 1 for one coherent
-  `SutViewModel` refactor.
+- **TIER 1 — the three `SutViewModel` emission methods: RESOLVED (2026-07-02, verified via
+  the windowed loop).** Split into a narrow `SutFrontendEmissions` cap
+  (`live_vs_fresh_tree_diff` / `drain_vm_emission_toggles` / `provider_stability_report`),
+  implemented FOR REAL on the windowed `GpuiFrontendEngineComponent` over its live
+  `ReactiveEngine` (faithful ports of the deleted `E2ESut` bodies — a background emission
+  collector spawned once over `engine.watch`, a persistent `HeadlessLiveTree` cell reused
+  across transitions, and the twice-interpret provider-cache probe; no engine-side changes).
+  Registered on the windowed composition via `overlay_windowed_caps`; the headless
+  `HeadlessFrontendComponent` DROPPED its honest-`None`/`[]` stubs and does NOT register the
+  cap, so the three invariants DESELECT honestly on every headless gate. Verified SELECT + RUN
+  + GREEN on the windowed loop (grep `[windowed ran]` in `gpui_composed_windowed_loop` /
+  `gpui_compose_sut_windowed`), 28 ticks each, zero divergence — real teeth, not cosmetic green.
+- **TIER 2 — `inv-frontend-engine` / `inv-frontend-root-not-error`: RESOLVED (2026-07-02).**
+  `frontend_root_vm`/`frontend_root_is_error` split into a windowed-only `SutFrontendEngine`
+  cap (kept separate from `SutFrontendEmissions`: distinct concern — root-VM resolution, ALSO
+  consumed by `inv-frontend-bounds-rendered`, and `frontend_root_vm` carries the `CachingProxy`
+  memoization). The existing `required_invariants` cap_set filter auto-dropped both from the
+  headless keystone floor with NO `WIDE_REQUIRED_INVARIANTS` edit (the keystone stays green
+  because the filter no longer requires them); the windowed floor keeps them and they run over
+  the live gpui root VM.
 - **TIER 3 — `SutFocusProjection` split: RESOLVED.** `current_focus_rows` /
   `focus_roots_rows` / `nav_history_open_rows` moved off `SutSqlProjection` into a new
   `SutFocusProjection` cap, registered only where navigation is driven (frontend /

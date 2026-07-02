@@ -891,8 +891,8 @@ pub struct ViewportHint {
 /// layout is interpreted. Computed SUT-side (the `ReactiveEngine` /
 /// `interpret_pure` / `ProviderCache` coupling stays there) so
 /// `inv-value-fn-provider-arg-variance-13` can assert purely.
-/// Returned by [`SutViewModel::provider_stability_report`]; `None` from that
-/// method means the root is still initializing (loading/spacer).
+/// Returned by [`SutFrontendEmissions::provider_stability_report`]; `None` from
+/// that method means the root is still initializing (loading/spacer).
 #[derive(Debug, Clone)]
 pub struct ProviderStabilityReport {
     /// The active render_expr mentions `bottom_dock` (inv_bar precondition).
@@ -914,7 +914,7 @@ pub struct ProviderStabilityReport {
 }
 
 /// A resolved snapshot of the frontend engine's root-layout ViewModel.
-/// Returned by [`SutViewModel::frontend_root_vm`]; `None` from that method
+/// Returned by [`SutFrontendEngine::frontend_root_vm`]; `None` from that method
 /// means "no frontend engine / still loading", so any value here is a
 /// settled, non-loading root.
 #[derive(Debug, Clone)]
@@ -936,9 +936,6 @@ pub trait SutViewModel {
     /// Phase 7 `CachingProxy` memoizes this per-tick.
     async fn drain_vm_emissions(&mut self) -> Vec<String>;
 
-    /// True if the frontend root ViewModel is the Error variant.
-    async fn frontend_root_is_error(&self) -> bool;
-
     /// Count Error widget nodes in the headless `ReactiveEngine`'s rendered
     /// ViewModel tree. Returns `None` when the headless engine is not
     /// installed or the tree isn't ready to inspect yet (loading / placeholder
@@ -952,23 +949,56 @@ pub trait SutViewModel {
     /// view-selection state. `inv-view-selection` compares it to the
     /// reference's [`RefRender::current_view`].
     async fn current_view(&self) -> String;
+}
 
+/// Windowed-only root-ViewModel resolution surface (C-5 Tier-2 split off
+/// [`SutViewModel`], 2026-07-02). Kept a SEPARATE cap because a live gpui
+/// `ReactiveEngine` is the only faithful source: the headless keystone has no
+/// window, so [`HeadlessFrontendComponent`] does NOT register this cap and
+/// `inv-frontend-engine` / `inv-frontend-root-not-error` honestly DESELECT
+/// there (auto-dropped from the `WIDE_REQUIRED_INVARIANTS` floor by the
+/// `Needs::selected_against` filter) instead of "running" vacuously against an
+/// honest-`None`/`false` shadow. Registered only where a live window's engine
+/// is present (the windowed composition). `inv-frontend-bounds-rendered` (the
+/// windowed geometry family) also reads `frontend_root_vm` for the entity order
+/// its y-order / contiguity / coverage checks compare against.
+///
+/// [`HeadlessFrontendComponent`]: (test-crate component)
+#[holon_macros::capmap_adapter]
+pub trait SutFrontendEngine {
     /// Resolve the FRONTEND engine's root-layout ViewModel (the gpui window's
-    /// own `ReactiveEngine`, distinct from the headless interpret used by the
-    /// `*_snapshot` renderer methods) and return its root widget kind plus the
-    /// ORDERED entity-id list it surfaces. `None` when no frontend engine is
-    /// installed (headless / SqlOnly) or the root is still loading.
+    /// own `ReactiveEngine`) and return its root widget kind plus the ORDERED
+    /// entity-id list it surfaces. `None` when the root is still loading.
     ///
     /// Read by `inv-frontend-engine` (resolution liveness) and
     /// `inv-frontend-bounds-rendered` (the entity order the geometry y-order /
     /// contiguity / coverage checks compare against).
     async fn frontend_root_vm(&self) -> Option<FrontendRootVm>;
 
+    /// True if the frontend root ViewModel is the Error variant.
+    /// Drives `inv-frontend-root-not-error`.
+    async fn frontend_root_is_error(&self) -> bool;
+}
+
+/// Windowed-only ViewModel streaming-emission observer surface (C-5 Tier-1
+/// split off [`SutViewModel`], 2026-07-02). These three methods reconstruct the
+/// intermediate-emission / provider-cache / live-tree behaviour of the GPUI
+/// frontend directly from a live `ReactiveEngine`; a headless slice with no
+/// window genuinely has no such emission surface, so
+/// [`HeadlessFrontendComponent`] does NOT register this cap and the three
+/// value-fn / live-tree invariants honestly DESELECT there instead of
+/// "running" vacuously against honest-`None`/`[]` shadows. Registered only
+/// where a live window's engine is present (the windowed composition), where
+/// the checks have real teeth over the actual render pipeline.
+///
+/// [`HeadlessFrontendComponent`]: (test-crate component)
+#[holon_macros::capmap_adapter]
+pub trait SutFrontendEmissions {
     /// Force `viewport`, interpret the reactive root layout twice, and report
     /// on the streaming providers (arg variance, identity stability, cache
     /// flicker, bottom_dock presence). `None` when the root is still
-    /// initializing (loading/spacer) or no reactive engine is installed.
-    /// Drives `inv-value-fn-provider-arg-variance-13`.
+    /// initializing (loading/spacer). Drives
+    /// `inv-value-fn-provider-arg-variance-13`.
     async fn provider_stability_report(
         &self,
         viewport: ViewportHint,

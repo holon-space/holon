@@ -5,7 +5,7 @@
 //! frontend ViewModel emitted. Reads [`SutLayout::rendered_elements`] (the
 //! geometry snapshot, with `expected_size`/error verdicts pre-computed
 //! SUT-side), the frontend VM's ordered entity ids
-//! ([`SutViewModel::frontend_root_vm`]), the screenshot
+//! ([`SutFrontendEngine::frontend_root_vm`]), the screenshot
 //! [`SutLayout::visual_content_fraction`], and the reference's
 //! [`RefLayout`]. `Skipped` when the frontend root isn't resolved
 //! (headless / SqlOnly / still loading).
@@ -21,7 +21,7 @@
 //! so they're never in the geometry snapshot and would create false gaps.
 
 use holon_pbt_core::capabilities::{
-    EntityUri, RefLayout, RenderedElement, SutLayout, SutViewModel,
+    EntityUri, RefLayout, RenderedElement, SutFrontendEngine, SutLayout,
 };
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
@@ -46,7 +46,7 @@ fn lookup<'a>(elements: &'a [RenderedElement], eid: &EntityUri) -> Option<&'a Re
 impl<R, S> Invariant<R, S> for InvFrontendBoundsRendered
 where
     R: RefLayout,
-    S: SutLayout + SutViewModel,
+    S: SutLayout + SutFrontendEngine,
 {
     fn id(&self) -> InvariantId {
         Self::ID

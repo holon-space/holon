@@ -6,6 +6,7 @@ use std::sync::Arc;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
+use holon_pbt_core::capabilities::{SutFrontendEmissions, SutFrontendEngine};
 use holon_pbt_core::composition::{CapMap, CapProvider, Config};
 use holon_pbt_core::{Actor, ComponentSet};
 
@@ -165,6 +166,19 @@ pub fn overlay_windowed_caps(
 ) -> CapMap {
     let driver_geometry = geometry.clone_box();
     Arc::new(GpuiWindowComponent::new(geometry)).register(&mut caps);
+
+    // ★ C-5 windowed emission teeth (2026-07-02): the deferred base registered
+    // `SutViewModel` via the headless `HeadlessFrontendComponent`, which does NOT
+    // provide the live-engine root-VM / emission surfaces. Insert them here from a
+    // `GpuiFrontendEngineComponent` over the SAME live window `engine` — the sole
+    // providers of `SutFrontendEngine` / `SutFrontendEmissions` on this path, so the
+    // frontend/emission invariants SELECT + RUN over the real render pipeline (they
+    // deselect on the headless keystone, which never inserts these). Insert-only:
+    // the base never claimed these caps; `CapMap::insert` panics on any duplicate.
+    let frontend_engine = Arc::new(GpuiFrontendEngineComponent::new(engine.clone()));
+    caps.insert(frontend_engine.clone() as Arc<dyn SutFrontendEngine>);
+    caps.insert(frontend_engine as Arc<dyn SutFrontendEmissions>);
+
     Arc::new(DriverInputComponent::with_input(
         engine,
         driver.clone(),

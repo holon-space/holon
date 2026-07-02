@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use crate::capabilities::{
     EntityUri, FrontendRootVm, ProviderStabilityReport, RenderedElement, SutBackend, SutErrorLog,
-    SutFocusProjection, SutLayout, SutLoroLog, SutOrgRead, SutOrgRender, SutRenderer,
-    SutSqlProjection, SutViewModel, SutWatchRows, ViewportHint, WatchRow, WidgetSnapshot,
+    SutFocusProjection, SutFrontendEmissions, SutFrontendEngine, SutLayout, SutLoroLog, SutOrgRead,
+    SutOrgRender, SutRenderer, SutSqlProjection, SutViewModel, SutWatchRows, ViewportHint,
+    WatchRow, WidgetSnapshot,
 };
 
 /// `widget_tree_snapshot()` runs the expensive headless `interpret_pure`
@@ -95,10 +96,6 @@ impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
         self.vm_emissions_cache.clone().unwrap_or_default()
     }
 
-    async fn frontend_root_is_error(&self) -> bool {
-        self.inner.frontend_root_is_error().await
-    }
-
     async fn headless_error_node_count(&self) -> Option<usize> {
         self.inner.headless_error_node_count().await
     }
@@ -106,10 +103,16 @@ impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
     async fn current_view(&self) -> String {
         self.inner.current_view().await
     }
+}
 
+// ─── SutFrontendEngine ────────────────────────────────────────────────
+// The windowed root-VM resolution cap (C-5 Tier-2 split off SutViewModel).
+
+#[async_trait::async_trait(?Send)]
+impl<'a, S: SutFrontendEngine> SutFrontendEngine for CachingProxy<'a, S> {
     /// Memoised — both `inv-frontend-engine` and `inv-frontend-bounds-rendered`
     /// read it in one tick, and resolving it does an
-    /// ensure_watching/snapshot/unwatch cycle on the frontend engine.
+    /// ensure_watching/snapshot cycle on the frontend engine.
     async fn frontend_root_vm(&self) -> Option<FrontendRootVm> {
         {
             let guard = self.frontend_root_vm_cache.borrow();
@@ -122,6 +125,18 @@ impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
         vm
     }
 
+    async fn frontend_root_is_error(&self) -> bool {
+        self.inner.frontend_root_is_error().await
+    }
+}
+
+// ─── SutFrontendEmissions ─────────────────────────────────────────────
+// The windowed ViewModel emission-observer cap (C-5 Tier-1 split off
+// SutViewModel). Uncached: each read at most once per tick, and
+// `drain_vm_emission_toggles` has drain-once semantics.
+
+#[async_trait::async_trait(?Send)]
+impl<'a, S: SutFrontendEmissions> SutFrontendEmissions for CachingProxy<'a, S> {
     async fn provider_stability_report(
         &self,
         viewport: ViewportHint,

@@ -12,7 +12,7 @@
 //! [`RefTaskState`] / [`RefBlockTree`]. Toggles for blocks the reference
 //! doesn't track are skipped.
 
-use holon_pbt_core::capabilities::{RefBlockTree, RefTaskState, SutViewModel};
+use holon_pbt_core::capabilities::{RefBlockTree, RefTaskState, SutFrontendEmissions};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvValueFnProviderIdentity;
@@ -26,7 +26,7 @@ impl InvValueFnProviderIdentity {
 impl<R, S> Invariant<R, S> for InvValueFnProviderIdentity
 where
     R: RefTaskState + RefBlockTree,
-    S: SutViewModel,
+    S: SutFrontendEmissions,
 {
     fn id(&self) -> InvariantId {
         Self::ID

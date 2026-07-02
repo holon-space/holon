@@ -6,16 +6,18 @@
 //! never the window directly). The `!Send` window + frame-pump stay in the test
 //! harness; this component is plain `Send` and hosts on a `CapMap` normally.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_frontend::geometry::{GeometryProvider, ProviderEvalCtx};
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_pbt_core::capabilities::{
-    FrontendRootVm, ProviderStabilityReport, RenderedElement, SutLayout, SutQueryResults,
-    SutRenderer, SutViewModel, ViewportHint, WidgetSnapshot,
+    FrontendRootVm, ProviderStabilityReport, RenderedElement, SutFrontendEmissions,
+    SutFrontendEngine, SutLayout, SutQueryResults, SutRenderer, SutViewModel, ViewportHint,
+    WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 
@@ -176,15 +178,51 @@ impl CapProvider for GpuiWindowComponent {
 /// The engine is both the watch source *and* the [`BuilderServices`] for the
 /// independent re-interpret (the GPUI frontend wires `services = engine.clone()`;
 /// see `TestEnvironment` and `E2ESut::render_builder_services`'s LoroMemory arm).
-/// All methods are plain `Send` `&self` reads — the `!Send` window pump stays in
-/// the harness.
+/// The root-VM reads are plain `&self` reads; the emission surfaces
+/// (`SutFrontendEmissions`) carry the same per-transition state E2ESut did — an
+/// intermediate-emission buffer fed by a background collector, and a persistent
+/// live ViewModel tree — so the value-fn / live-tree invariants have real teeth.
 pub struct GpuiFrontendEngineComponent {
     engine: Arc<ReactiveEngine>,
+    /// Intermediate ViewModel emissions captured across a transition (drain-once
+    /// per tick), fed by a background collector over `engine.watch(root)` spawned
+    /// at construction. Drives `inv-value-fn-provider-identity` — the transient
+    /// emissions a later structural re-render would mask.
+    vm_emissions: Arc<Mutex<Vec<holon_frontend::ViewModel>>>,
+    /// Persistent live ViewModel tree — lazily built, then REUSED across
+    /// transitions (persistence is what lets it catch `set_data`-propagation
+    /// bugs a fresh interpret masks). Drives `inv-live-tree-matches-fresh`.
+    live_tree: RefCell<Option<holon_layout_testing::live_tree::HeadlessLiveTree>>,
 }
 
 impl GpuiFrontendEngineComponent {
     pub fn new(engine: Arc<ReactiveEngine>) -> Self {
-        Self { engine }
+        let vm_emissions: Arc<Mutex<Vec<holon_frontend::ViewModel>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        // Spawn the intermediate-emission collector ONCE (mirrors E2ESut's
+        // `ensure_reactive_engine`): watch the reactive root and buffer every
+        // ViewModel snapshot so `drain_vm_emission_toggles` inspects the transient
+        // emissions a later structural re-render would mask. Uses the engine's own
+        // runtime handle so it runs regardless of which thread constructs us.
+        {
+            use futures::StreamExt;
+            let collector = vm_emissions.clone();
+            let root_id = holon_api::root_layout_block_uri();
+            let mut stream = engine.watch(&root_id);
+            engine.runtime_handle.spawn(async move {
+                while let Some(rvm) = stream.next().await {
+                    collector
+                        .lock()
+                        .expect("vm_emissions lock")
+                        .push(rvm.snapshot());
+                }
+            });
+        }
+        Self {
+            engine,
+            vm_emissions,
+            live_tree: RefCell::new(None),
+        }
     }
 
     /// Resolve a ready (non-loading) watch for `uri`, polling briefly since the
@@ -216,6 +254,41 @@ impl GpuiFrontendEngineComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutViewModel for GpuiFrontendEngineComponent {
+    /// Count `Error` widget nodes in the rendered ViewModel tree (the
+    /// `inv-viewmodel-no-error-widgets` path). `None` while the root is loading /
+    /// a placeholder / interpret panics. Reads the same engine the window paints.
+    async fn headless_error_node_count(&self) -> Option<usize> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let rqr = self.resolve_watch(&root_uri).await?;
+        let (render_expr, data_rows) = rqr.snapshot();
+        if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading" || name == "spacer")
+        {
+            return None;
+        }
+        let services = self.services();
+        let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot()
+        }))
+        .ok()?;
+        Some(holon_layout_testing::display_assertions::count_error_nodes(
+            &tree,
+        ))
+    }
+
+    // The view-mode surface is test-context driver state E2ESut tracked; the
+    // windowed component reads only the engine, so it reports the honest
+    // "nothing tracked here" value (§5.1). `drain_vm_emissions` dies with
+    // `CachingProxy`.
+    async fn current_view(&self) -> String {
+        "all".to_string()
+    }
+    async fn drain_vm_emissions(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutFrontendEngine for GpuiFrontendEngineComponent {
     /// Resolve the frontend engine's root-layout ViewModel — the ordered entity
     /// id list the geometry y-order / contiguity checks compare against. Faithful
     /// port of `E2ESut::frontend_root_vm` (sans the `unwatch`, which the window
@@ -241,53 +314,348 @@ impl SutViewModel for GpuiFrontendEngineComponent {
         })
     }
 
-    /// Count `Error` widget nodes in the rendered ViewModel tree (the
-    /// `inv-viewmodel-no-error-widgets` path). `None` while the root is loading /
-    /// a placeholder / interpret panics. Reads the same engine the window paints.
-    async fn headless_error_node_count(&self) -> Option<usize> {
-        let root_uri = holon_api::root_layout_block_uri();
-        let rqr = self.resolve_watch(&root_uri).await?;
-        let (render_expr, data_rows) = rqr.snapshot();
-        if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading" || name == "spacer")
-        {
-            return None;
-        }
-        let services = self.services();
-        let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot()
-        }))
-        .ok()?;
-        Some(holon_layout_testing::display_assertions::count_error_nodes(
-            &tree,
-        ))
-    }
-
     /// True if the root-layout ViewModel resolved to the `Error` variant.
     async fn frontend_root_is_error(&self) -> bool {
         let root_uri = holon_api::root_layout_block_uri();
         let vm = self.engine.snapshot(&root_uri);
         vm.widget_name() == Some("error")
     }
+}
 
-    // The view-mode / emission-toggle / provider-stability surfaces are
-    // test-context driver state E2ESut tracks; the windowed component reads only
-    // the engine, so these report the honest "nothing tracked here" value (§5.1)
-    // rather than a fabricated one. The invariants that need them aren't selected
-    // by this slice.
-    async fn current_view(&self) -> String {
-        "all".to_string()
+#[async_trait::async_trait(?Send)]
+impl SutFrontendEmissions for GpuiFrontendEngineComponent {
+    /// Force `viewport`, interpret the reactive root layout twice, and report on
+    /// the streaming providers. Faithful port of `E2ESut::provider_stability_report`
+    /// over the live window engine (the root id falls back to the layout root, as
+    /// E2ESut's did). `None` while the root is a loading/spacer placeholder.
+    async fn provider_stability_report(
+        &self,
+        viewport: ViewportHint,
+    ) -> Option<ProviderStabilityReport> {
+        use crate::pbt::value_fn_invariants::{
+            collect_providers, count_bottom_docks, rhai_mentions,
+        };
+        use std::collections::{HashMap, HashSet};
+
+        let reactive = self.engine.clone();
+
+        // The probe viewport is narrow (forces the `if_space`-gated mobile bar), so
+        // save + restore the engine's real viewport around the probe to avoid
+        // perturbing later render observations on the shared engine.
+        let prev_viewport = reactive.ui_state().viewport();
+        reactive
+            .ui_state()
+            .set_viewport(holon_frontend::reactive::ViewportInfo {
+                width_px: viewport.width_px,
+                height_px: viewport.height_px,
+                scale_factor: 1.0,
+            });
+        tokio::task::yield_now().await;
+
+        let root_id = holon_api::root_layout_block_uri();
+        let results = reactive.ensure_watching(&root_id);
+        let (render_expr, data_rows) = results.snapshot();
+        if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading" || name == "spacer")
+        {
+            return None;
+        }
+
+        let services: Arc<dyn BuilderServices> = reactive.clone();
+
+        // Pass 1.
+        let re = render_expr.clone();
+        let dr = data_rows.clone();
+        let svc1 = services.clone();
+        let tree1 = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                holon_frontend::interpret_pure(&re, &dr, &*svc1)
+            }))
+            .ok()
+        })
+        .await
+        .expect("spawn_blocking panicked")?;
+
+        let providers1 = collect_providers(&tree1);
+        let total_providers = providers1.len();
+        let mentions_bottom_dock = rhai_mentions(&render_expr, "bottom_dock");
+        let bottom_dock_count = if mentions_bottom_dock {
+            count_bottom_docks(&tree1)
+        } else {
+            0
+        };
+        let mentions_focus_chain = rhai_mentions(&render_expr, "focus_chain");
+        let any_nonempty = providers1.iter().any(|p| p.rows_snapshot_len > 0);
+
+        // vfn12: provider identity stability within one pass — group by
+        // (template, rows) and require a single cache_identity per group.
+        let mut sites_per_group: HashMap<(String, usize), usize> = HashMap::new();
+        let mut ids_per_group: HashMap<(String, usize), HashSet<u64>> = HashMap::new();
+        for p in &providers1 {
+            let key = (p.item_template_debug.clone(), p.rows_snapshot_len);
+            *sites_per_group.entry(key.clone()).or_default() += 1;
+            ids_per_group
+                .entry(key)
+                .or_default()
+                .insert(p.cache_identity);
+        }
+        let identity_instability = ids_per_group.iter().find_map(|(key, ids)| {
+            (ids.len() > 1).then(|| {
+                let sites = sites_per_group.get(key).copied().unwrap_or(0);
+                format!(
+                    "template={} rows={} → {} distinct cache_identities across {sites} call sites",
+                    key.0,
+                    key.1,
+                    ids.len(),
+                )
+            })
+        });
+
+        // vfn13: cache identity flicker across re-interpret. A pass-2 panic leaves
+        // flicker unmeasured (0) rather than failing the report.
+        let re2 = render_expr.clone();
+        let dr2 = data_rows.clone();
+        let svc2 = services.clone();
+        let tree2 = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                holon_frontend::interpret_pure(&re2, &dr2, &*svc2)
+            }))
+            .ok()
+        })
+        .await
+        .expect("spawn_blocking panicked");
+        let flicker_count = match tree2 {
+            Some(tree2) => {
+                let providers2 = collect_providers(&tree2);
+                let ids1: HashSet<u64> = providers1.iter().map(|p| p.cache_identity).collect();
+                let ids2: HashSet<u64> = providers2.iter().map(|p| p.cache_identity).collect();
+                ids1.difference(&ids2).count()
+            }
+            None => 0,
+        };
+
+        // Restore the engine's real viewport so the narrow probe doesn't leak into
+        // later render observations on the shared engine.
+        if let Some(v) = prev_viewport {
+            reactive.ui_state().set_viewport(v);
+        }
+
+        Some(ProviderStabilityReport {
+            mentions_bottom_dock,
+            bottom_dock_count,
+            mentions_focus_chain,
+            total_providers,
+            any_nonempty,
+            identity_instability,
+            flicker_count,
+        })
     }
-    async fn drain_vm_emissions(&mut self) -> Vec<String> {
-        Vec::new()
-    }
-    async fn provider_stability_report(&self, _: ViewportHint) -> Option<ProviderStabilityReport> {
-        None
-    }
+
+    /// Drain the intermediate ViewModel emissions accumulated during the last
+    /// transition and extract every `StateToggle`'s `(block_id, current)`. Faithful
+    /// port of `E2ESut::drain_vm_emission_toggles` over the background collector's
+    /// buffer (drain-once per tick).
     async fn drain_vm_emission_toggles(&self) -> Vec<(EntityUri, String)> {
-        Vec::new()
+        let emissions: Vec<holon_frontend::ViewModel> =
+            std::mem::take(&mut *self.vm_emissions.lock().expect("vm_emissions lock"));
+        let mut out = Vec::new();
+        for vm in &emissions {
+            for toggle in crate::display_assertions::collect_state_toggle_nodes(vm) {
+                if let holon_frontend::view_model::ViewKind::StateToggle { current, .. } =
+                    &toggle.kind
+                    && let Some(block_id_str) = toggle.row_id()
+                {
+                    // ALLOW(entity_uri_from_raw): toggle.row_id() String from a
+                    // ViewModel StateToggle node.
+                    out.push((EntityUri::from_raw(&block_id_str), current.clone()));
+                }
+            }
+        }
+        out
     }
+
+    /// Compare the persistent live ViewModel tree against a fresh re-interpret of
+    /// the same rows. Faithful port of `E2ESut::live_vs_fresh_tree_diff` over the
+    /// live window engine (drops `ensure_reactive_engine` — the component already
+    /// holds the engine — and keeps the persistent `live_tree` cell, reused across
+    /// transitions). `None` (Skip) while the main panel is loading / empty / has no
+    /// item template.
     async fn live_vs_fresh_tree_diff(&self) -> Option<Vec<String>> {
-        None
+        use futures::StreamExt;
+
+        let reactive = self.engine.clone();
+
+        let main_panel_id = holon_api::EntityUri::block("default-main-panel");
+        let mp_results = reactive.ensure_watching(&main_panel_id);
+
+        // Wait for the main-panel watcher to deliver its first non-loading,
+        // non-empty emission. ToggleState only fires after a sidebar click
+        // populates focus_roots, so the watcher may still be cold on the first
+        // ClickBlock-only transition; give up after 2s.
+        {
+            let mut mp_stream = reactive.watch(&main_panel_id);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let (mp_render, mp_rows) = mp_results.snapshot();
+                let still_loading = matches!(
+                    &mp_render,
+                    holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading"
+                );
+                if !still_loading && !mp_rows.is_empty() {
+                    break;
+                }
+                match tokio::time::timeout_at(deadline, mp_stream.next()).await {
+                    Ok(Some(_)) => continue,
+                    _ => break,
+                }
+            }
+        }
+
+        let (mp_render_expr, mp_data_rows) = mp_results.snapshot();
+        let still_loading = matches!(
+            &mp_render_expr,
+            holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading"
+        );
+        if still_loading || mp_data_rows.is_empty() {
+            return None;
+        }
+
+        let item_template =
+            holon_layout_testing::live_tree::extract_item_template(&mp_render_expr)?;
+
+        // Lazily init the persistent live tree on first use. The layout MUST
+        // mirror prod's main panel (derived from the real render expr): a
+        // hierarchical panel runs `create_tree_driver` + its targeted focus
+        // driver, the path where the focus variant swap can freeze.
+        if self.live_tree.borrow().is_none() {
+            let data_source: Arc<dyn holon_api::ReactiveRowProvider> = mp_results.clone();
+            let services: Arc<dyn BuilderServices> = reactive.clone();
+            let layout =
+                holon_layout_testing::live_tree::extract_collection_variant(&mp_render_expr)
+                    .unwrap_or_else(|| {
+                        holon_frontend::reactive_view_model::CollectionVariant::list(0.0)
+                    });
+            let lt = holon_layout_testing::live_tree::HeadlessLiveTree::new(
+                data_source,
+                item_template.clone(),
+                layout,
+                services,
+                &reactive.runtime_handle,
+            );
+            *self.live_tree.borrow_mut() = Some(lt);
+            // Give the driver time to populate initial items.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Let the driver process pending VecDiff events.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let live_ref = self.live_tree.borrow();
+        let lt = live_ref.as_ref()?;
+        let live_items = lt.items();
+        // Match live↔fresh by ROW ID, not position (a hierarchical live tree
+        // projects rows in DFS order, differing from the matview order
+        // `mp_data_rows` follows). Rows present on only one side are skipped — the
+        // bug caught is a stale VARIANT/props on a row present in both.
+        let row_id_of = |vm: &holon_frontend::ReactiveViewModel| -> Option<String> {
+            vm.data
+                .get_cloned()
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+        };
+        let fresh_by_id: std::collections::HashMap<String, Arc<holon_frontend::ReactiveViewModel>> =
+            mp_data_rows
+                .iter()
+                .filter_map(|row| {
+                    let id = row.get("id").and_then(|v| v.as_string())?.to_string();
+                    let ctx = holon_frontend::RenderContext::default().with_row(row.clone());
+                    Some((id, Arc::new(reactive.interpret(&item_template, &ctx))))
+                })
+                .collect();
+        let mut prop_diffs = Vec::new();
+        // The tree driver wraps each row in a `tree_item`; the fresh side
+        // interprets the bare `item_template`. Unwrap the live `tree_item` to its
+        // content child so we compare like-for-like.
+        let unwrap_tree_item =
+            |vm: &Arc<holon_frontend::ReactiveViewModel>| -> Arc<holon_frontend::ReactiveViewModel> {
+                if vm.widget_name().as_deref() == Some("tree_item") {
+                    if let Some(child) = vm.children.first() {
+                        return child.clone();
+                    }
+                }
+                vm.clone()
+            };
+        for live in &live_items {
+            let Some(row_id) = row_id_of(live) else {
+                continue;
+            };
+            let Some(fresh) = fresh_by_id.get(&row_id) else {
+                continue;
+            };
+            let live_cmp = unwrap_tree_item(live);
+            for d in crate::display_assertions::tree_diff(live_cmp.as_ref(), fresh.as_ref()) {
+                prop_diffs.push(format!("  {row_id}: {d}"));
+            }
+        }
+
+        // ORDER check: the live tree must render each parent's children in
+        // document order (`sort_key`). Compare PER PARENT so legitimate
+        // hierarchy interleaving never false-positives.
+        let parent_of = |id: &str| -> Option<String> {
+            mp_data_rows.iter().find_map(|r| {
+                (r.get("id").and_then(|v| v.as_string()) == Some(id)).then(|| {
+                    r.get("parent_id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default()
+                        .to_string()
+                })
+            })
+        };
+        let sort_key_of = |id: &str| -> Option<String> {
+            mp_data_rows.iter().find_map(|r| {
+                (r.get("id").and_then(|v| v.as_string()) == Some(id)).then(|| {
+                    r.get("sort_key")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default()
+                        .to_string()
+                })
+            })
+        };
+        let live_order: Vec<String> = live_items.iter().filter_map(|v| row_id_of(v)).collect();
+        let mut by_parent: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for id in &live_order {
+            if let Some(parent) = parent_of(id) {
+                by_parent.entry(parent).or_default().push(id.clone());
+            }
+        }
+        for (parent, live_sibs) in &by_parent {
+            if live_sibs.len() < 2 {
+                continue; // a lone child can't be mis-ordered
+            }
+            // `sort_key` is required to know the intended order; if any sibling
+            // lacks one, skip rather than fabricate an order.
+            let keys: Vec<(String, String)> = live_sibs
+                .iter()
+                .map(|id| (sort_key_of(id).unwrap_or_default(), id.clone()))
+                .collect();
+            if keys.iter().any(|(k, _)| k.is_empty()) {
+                continue;
+            }
+            let mut want = keys.clone();
+            want.sort(); // by (sort_key, id)
+            let want_ids: Vec<&String> = want.iter().map(|(_, id)| id).collect();
+            let live_ids: Vec<&String> = live_sibs.iter().collect();
+            if live_ids != want_ids {
+                prop_diffs.push(format!(
+                    "  ORDER under parent {parent}: live renders {live_ids:?} but sort_key \
+                     order is {want_ids:?} — the reactive collection is not ordering by sort_key \
+                     (the fractional-index authority)"
+                ));
+            }
+        }
+
+        Some(prop_diffs)
     }
 }
 
@@ -426,6 +794,13 @@ impl CapProvider for GpuiFrontendEngineComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self.clone() as Arc<dyn SutViewModel>);
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
+        // The windowed live-engine caps (C-5 split off SutViewModel): the root-VM
+        // resolution surface (`SutFrontendEngine`) and the emission-observer surface
+        // (`SutFrontendEmissions`). A live gpui `ReactiveEngine` is the only faithful
+        // source, so only this windowed component registers them; the headless slice
+        // deselects the frontend/emission invariants honestly.
+        caps.insert(self.clone() as Arc<dyn SutFrontendEngine>);
+        caps.insert(self.clone() as Arc<dyn SutFrontendEmissions>);
         // Full-mode query engine (a real Turso-backed `ReactiveEngine` window) — keeps
         // the degraded `inv-viewmodel-shows-source-when-no-query` twin deselected here
         // and `inv-viewmodel-decompiled-rows-match-query` selectable.

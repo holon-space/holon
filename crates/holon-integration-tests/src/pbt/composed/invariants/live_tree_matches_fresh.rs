@@ -6,7 +6,7 @@
 //! `ReactiveEngine`, where the live/fresh diff is meaningful.
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutFrontendEmissions;
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::live_tree_matches_fresh::InvLiveTreeMatchesFresh;
@@ -16,7 +16,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvLiveTreeMatchesFresh,
         RunMode::Strict,
         Needs {
-            sut_present: vec![CapId::of::<dyn SutViewModel>()],
+            sut_present: vec![CapId::of::<dyn SutFrontendEmissions>()],
             sut_absent: Vec::new(),
             ref_present: Vec::new(),
         },

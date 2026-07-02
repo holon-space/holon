@@ -7,7 +7,7 @@
 //! `navigation_focus`/`watch_rows` carry their teeth in the frontend slice.
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutFrontendEngine;
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::frontend_engine::InvFrontendEngine;
@@ -17,7 +17,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvFrontendEngine,
         RunMode::Strict,
         Needs {
-            sut_present: vec![CapId::of::<dyn SutViewModel>()],
+            sut_present: vec![CapId::of::<dyn SutFrontendEngine>()],
             sut_absent: Vec::new(),
             ref_present: Vec::new(),
         },

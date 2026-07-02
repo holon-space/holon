@@ -6,12 +6,12 @@
 //! can't catch bugs where `set_data` fails to propagate updated props to child
 //! widgets (`state_toggle`, `editable_text`, …) — only the live tree can.
 //!
-//! Reads [`SutViewModel::live_vs_fresh_tree_diff`], which keeps the
+//! Reads [`SutFrontendEmissions::live_vs_fresh_tree_diff`], which keeps the
 //! `ReactiveEngine`/`HeadlessLiveTree` coupling SUT-side and returns:
 //! `None` when the comparison can't run yet (Skipped), `Some(vec![])` when the
 //! trees agree, and `Some(diffs)` listing the per-item prop divergences.
 
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutFrontendEmissions;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvLiveTreeMatchesFresh;
@@ -24,7 +24,7 @@ impl InvLiveTreeMatchesFresh {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvLiveTreeMatchesFresh
 where
-    S: SutViewModel,
+    S: SutFrontendEmissions,
 {
     fn id(&self) -> InvariantId {
         Self::ID

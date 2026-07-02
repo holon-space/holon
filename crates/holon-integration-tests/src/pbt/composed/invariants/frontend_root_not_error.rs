@@ -5,7 +5,7 @@
 //! `ReactiveEngine`, where it runs over the actual render pipeline.
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutFrontendEngine;
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::frontend_root_not_error::InvFrontendRootNotError;
@@ -15,7 +15,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvFrontendRootNotError,
         RunMode::Strict,
         Needs {
-            sut_present: vec![CapId::of::<dyn SutViewModel>()],
+            sut_present: vec![CapId::of::<dyn SutFrontendEngine>()],
             sut_absent: Vec::new(),
             ref_present: Vec::new(),
         },

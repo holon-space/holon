@@ -16,7 +16,7 @@
 //! `Skipped` when the reference has no blocks or the root is still
 //! initializing (the report is `None`).
 
-use holon_pbt_core::capabilities::{RefGlobalFocus, RefLayout, SutViewModel, ViewportHint};
+use holon_pbt_core::capabilities::{RefGlobalFocus, RefLayout, SutFrontendEmissions, ViewportHint};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 /// Narrow viewport that forces the `if_space`-gated mobile action bar
@@ -37,7 +37,7 @@ impl InvValueFnProviderArgVariance13 {
 impl<R, S> Invariant<R, S> for InvValueFnProviderArgVariance13
 where
     R: RefLayout + RefGlobalFocus,
-    S: SutViewModel,
+    S: SutFrontendEmissions,
 {
     fn id(&self) -> InvariantId {
         Self::ID

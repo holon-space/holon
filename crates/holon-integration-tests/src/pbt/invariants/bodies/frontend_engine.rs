@@ -10,11 +10,11 @@
 //! an Error widget is `inv-frontend-root-not-error`, nested error widgets are
 //! `inv-frontend-no-error-widgets`, and "expected elements laid out" is
 //! `inv-frontend-bounds-rendered`. So this body asserts only that resolution
-//! itself produced a usable root — reading [`SutViewModel::frontend_root_vm`],
+//! itself produced a usable root — reading [`SutFrontendEngine::frontend_root_vm`],
 //! which returns `None` (→ `Skipped`) when there is no frontend engine
 //! (headless / SqlOnly) or the root is still loading.
 
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutFrontendEngine;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvFrontendEngine;
@@ -27,7 +27,7 @@ impl InvFrontendEngine {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvFrontendEngine
 where
-    S: SutViewModel,
+    S: SutFrontendEngine,
 {
     fn id(&self) -> InvariantId {
         Self::ID

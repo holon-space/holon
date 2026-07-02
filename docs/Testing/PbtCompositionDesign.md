@@ -964,14 +964,30 @@ end state; needs a unification/deletion decision).
       (`LoroBackendComponent::new_shared_with_sync_handle`); pure-Loro stays honest-`false`
       (a standalone CRDT genuinely has no controller). The empty family became a real
       data-carrying method in the config that has the capability.
-  - **DEFERRED (windowed-harness follow-up):** Tier 1's three `SutViewModel` emission methods
-    and Tier 2's `frontend_root_vm`/`frontend_root_is_error` want the same `SutViewModel`
-    cap-split, but their real impls live on the windowed `GpuiFrontendEngineComponent` — a path
-    the headless gates cannot verify. Splitting there without windowed verification would ship a
-    lying/None impl (a "faked cap" anti-pattern) or a coverage-dormant invariant; both are worse
-    than a scoped handoff. The `required_invariants` cap_set filter already gives the split its
-    payoff for free once done: a windowed-only cap auto-drops the invariant from the headless
-    keystone floor and keeps it on the windowed floor, with no `WIDE_REQUIRED_INVARIANTS` edit.
+  - **LANDED (2026-07-02, pbt-target-arch — verified via the windowed loop):** Tier 1's three
+    emission methods and Tier 2's `frontend_root_vm`/`frontend_root_is_error` are split off
+    `SutViewModel` into TWO windowed-only caps:
+    - `SutFrontendEmissions` = `live_vs_fresh_tree_diff` / `drain_vm_emission_toggles` /
+      `provider_stability_report` (the streaming-emission observer surface; no memoization).
+    - `SutFrontendEngine` = `frontend_root_vm` / `frontend_root_is_error` (the root-VM
+      resolution surface, ALSO read by `inv-frontend-bounds-rendered`; `frontend_root_vm` carries
+      the `CachingProxy` memoization). Two cohesive caps, not one grab-bag: the emission methods
+      and the root-VM methods are distinct concerns with distinct consumers/caching.
+
+    Real impls land on `GpuiFrontendEngineComponent` over its live `ReactiveEngine` (faithful
+    ports of the deleted `E2ESut` bodies — emission collector spawned once over `engine.watch`,
+    persistent `HeadlessLiveTree` cell reused across transitions, twice-interpret provider probe;
+    NO engine-side changes needed). Registered on the windowed composition via
+    `overlay_windowed_caps` (the deferred base's headless `HeadlessFrontendComponent` does NOT
+    provide them — it dropped its honest-`None`/`[]` stubs, so the invariants DESELECT on the
+    headless keystone). The `required_invariants` cap_set filter auto-dropped
+    `inv-frontend-engine`/`inv-frontend-root-not-error` from the headless floor with NO
+    `WIDE_REQUIRED_INVARIANTS` edit — the keystone stays green because the filter no longer
+    requires them; the windowed floor keeps them. Verified: all five invariants SELECT + RUN and
+    stay GREEN on the windowed loop (`gpui_composed_windowed_loop` + `gpui_compose_sut_windowed`,
+    grep `[windowed ran]`), 28 ticks each, zero divergence. This retires the "two conventions"
+    debt: the honest convention (don't register the absent half) is now the ONLY one on this
+    family too.
 - **C-6 Write caps are structurally indistinguishable from read caps** — hence the 14×
   "selection-neutral (no invariant `Needs` it)" comment boilerplate in one `register()` fn.
   Cheap fix candidates: a `WriteCap` marker trait or a `register_write_caps` section convention;
