@@ -1879,3 +1879,15 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         ..Default::default()
     }
 }
+
+/// Hook called after an FDW cache table is primed with data.
+/// Implementations can subscribe to resource notifications, update state, etc.
+/// Trait-shaped and storage-agnostic (string table/query identifiers); the
+/// Turso matview manager consumes it, providers (e.g. holon-mcp-client)
+/// implement it without naming the backend.
+#[async_trait]
+pub trait MatviewHook: Send + Sync {
+    /// Called after a successful FDW prime query. `cache_table` is the primed table
+    /// (e.g. `"cc_message"`), `fdw_sql` is the executed query including WHERE clause.
+    async fn on_fdw_primed(&self, cache_table: &str, fdw_sql: &str);
+}

@@ -34,6 +34,12 @@ where
         changes: &[Change<T>],
         sync_token: Option<&SyncTokenUpdate>,
     ) -> Result<()>;
+
+    /// Insert-or-replace a single item (keyed by its primary-key field).
+    async fn upsert(&self, item: &T) -> Result<()>;
+
+    /// Delete a single item by primary key.
+    async fn delete(&self, id: &str) -> Result<()>;
 }
 
 /// Mints [`EntityCache`]s for runtime-described entity types.

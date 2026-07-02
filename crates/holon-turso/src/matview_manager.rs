@@ -86,14 +86,9 @@ pub async fn reconcile_named_view(
     Ok(true)
 }
 
-/// Hook called after an FDW cache table is primed with data.
-/// Implementations can subscribe to resource notifications, update state, etc.
-#[async_trait]
-pub trait MatviewHook: Send + Sync {
-    /// Called after a successful FDW prime query. `cache_table` is the primed table
-    /// (e.g. `"cc_message"`), `fdw_sql` is the executed query including WHERE clause.
-    async fn on_fdw_primed(&self, cache_table: &str, fdw_sql: &str);
-}
+// MatviewHook (the FDW-primed callback) is a storage-agnostic trait; it lives
+// in holon-core so providers implement it without naming the Turso backend.
+use holon_core::MatviewHook;
 
 /// Result of watching a query — initial data + CDC stream.
 pub struct WatchResult {

@@ -250,7 +250,8 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create fake_probe cache: {e}"))?;
 
-    let mut caches: HashMap<String, Arc<QueryableCache<DynamicEntity>>> = HashMap::new();
+    let mut caches: HashMap<String, Arc<dyn holon_core::EntityCache<DynamicEntity>>> =
+        HashMap::new();
     caches.insert(ENTITY_NAME.to_string(), Arc::new(cache));
 
     let mut strategies: HashMap<String, Box<dyn holon_mcp_client::SyncStrategy>> = HashMap::new();

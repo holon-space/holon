@@ -7,12 +7,12 @@ use rmcp::model::SubscribeRequestParam;
 use rmcp::service::Peer;
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use holon::core::queryable_cache::QueryableCache;
 use holon::storage::DbHandle;
-use holon::sync::MatviewHook;
+use holon_core::EntityCache;
+use holon_core::MatviewHook;
 use holon_api::StreamPosition;
 use holon_api::{Change, ChangeOrigin, DynamicEntity, EntityUri, Value};
-use holon_core::{DataSource, Result, SyncTokenStore, SyncableProvider};
+use holon_core::{Result, SyncTokenStore, SyncableProvider};
 
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sync_strategy::{
@@ -51,7 +51,7 @@ pub struct VtableSubscription {
 pub struct McpSyncEngine {
     peer: Peer<RoleClient>,
     strategies: HashMap<String, Box<dyn SyncStrategy>>,
-    caches: HashMap<String, Arc<QueryableCache<DynamicEntity>>>,
+    caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
     token_store: Arc<dyn SyncTokenStore>,
     provider_name: String,
     /// Reverse lookup: subscribe URI → entity name (for sync-based entities)
@@ -69,7 +69,7 @@ impl McpSyncEngine {
     pub fn new(
         peer: Peer<RoleClient>,
         strategies: HashMap<String, Box<dyn SyncStrategy>>,
-        caches: HashMap<String, Arc<QueryableCache<DynamicEntity>>>,
+        caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
         token_store: Arc<dyn SyncTokenStore>,
         provider_name: String,
         sidecar: McpSidecar,
@@ -149,7 +149,7 @@ impl McpSyncEngine {
         &self,
         entity_name: &str,
         strategy: &dyn SyncStrategy,
-        cache: &QueryableCache<DynamicEntity>,
+        cache: &dyn EntityCache<DynamicEntity>,
     ) -> Result<()> {
         let span = info_span!("sync_entity", entity = entity_name, provider = %self.provider_name);
         self.sync_entity_inner(entity_name, strategy, cache)
@@ -161,7 +161,7 @@ impl McpSyncEngine {
         &self,
         entity_name: &str,
         strategy: &dyn SyncStrategy,
-        cache: &QueryableCache<DynamicEntity>,
+        cache: &dyn EntityCache<DynamicEntity>,
     ) -> Result<()> {
         let token_key = format!("{}.{}", self.provider_name, entity_name);
 
@@ -370,7 +370,7 @@ impl McpSyncEngine {
             info!(entity = %entity_name, %uri, "resync_by_uri: starting");
 
             return self
-                .sync_entity(entity_name, strategy.as_ref(), cache)
+                .sync_entity(entity_name, strategy.as_ref(), cache.as_ref())
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"));
         }
@@ -545,7 +545,7 @@ impl SyncableProvider for McpSyncEngine {
                     }
                 };
 
-                self.sync_entity(entity_name, strategy.as_ref(), cache)
+                self.sync_entity(entity_name, strategy.as_ref(), cache.as_ref())
                     .await?;
             }
 

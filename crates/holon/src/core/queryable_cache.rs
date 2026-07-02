@@ -963,6 +963,14 @@ where
     ) -> Result<()> {
         QueryableCache::apply_batch(self, changes, sync_token).await
     }
+
+    async fn upsert(&self, item: &T) -> Result<()> {
+        QueryableCache::upsert_to_cache(self, item).await
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        QueryableCache::delete_from_cache(self, id).await
+    }
 }
 
 #[async_trait]

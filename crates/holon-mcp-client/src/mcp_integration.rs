@@ -6,8 +6,8 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, info, warn};
 
-use holon::core::queryable_cache::QueryableCache;
 use holon::storage::DbHandle;
+use holon_core::{CacheFactory, EntityCache};
 use holon_api::DynamicEntity;
 use holon_core::SyncTokenStore;
 
@@ -122,6 +122,7 @@ struct PendingOAuth {
     uri: String,
     sidecar: McpSidecar,
     db_handle: DbHandle,
+    cache_factory: Arc<dyn CacheFactory>,
     token_store: Arc<dyn SyncTokenStore>,
     provider_name: String,
 }
@@ -184,6 +185,7 @@ impl PendingOAuthFlows {
             service,
             pending.sidecar,
             pending.db_handle,
+            pending.cache_factory,
             pending.token_store,
             pending.provider_name,
             receiver,
@@ -202,6 +204,7 @@ impl PendingOAuthFlows {
 pub async fn build_mcp_integration(
     config: McpIntegrationConfig,
     db_handle: DbHandle,
+    cache_factory: Arc<dyn CacheFactory>,
     token_store: Arc<dyn SyncTokenStore>,
     pending_flows: &PendingOAuthFlows,
 ) -> anyhow::Result<McpConnectionResult> {
@@ -217,6 +220,7 @@ pub async fn build_mcp_integration(
                     service,
                     sidecar,
                     db_handle,
+                    cache_factory,
                     token_store,
                     config.provider_name,
                     receiver,
@@ -233,6 +237,7 @@ pub async fn build_mcp_integration(
                     service,
                     sidecar,
                     db_handle,
+                    cache_factory,
                     token_store,
                     config.provider_name,
                     receiver,
@@ -246,6 +251,7 @@ pub async fn build_mcp_integration(
                     credential_store.clone(),
                     sidecar,
                     db_handle,
+                    cache_factory,
                     token_store,
                     config.provider_name,
                     pending_flows,
@@ -262,6 +268,7 @@ pub async fn build_mcp_integration(
                 service,
                 sidecar,
                 db_handle,
+                cache_factory,
                 token_store,
                 config.provider_name,
                 receiver,
@@ -278,6 +285,7 @@ async fn build_oauth_integration(
     credential_store: Arc<TursoCredentialStore>,
     sidecar: McpSidecar,
     db_handle: DbHandle,
+    cache_factory: Arc<dyn CacheFactory>,
     token_store: Arc<dyn SyncTokenStore>,
     provider_name: String,
     pending_flows: &PendingOAuthFlows,
@@ -303,6 +311,7 @@ async fn build_oauth_integration(
             service,
             sidecar,
             db_handle,
+            cache_factory,
             token_store,
             provider_name,
             receiver,
@@ -339,6 +348,7 @@ async fn build_oauth_integration(
                 uri,
                 sidecar,
                 db_handle,
+                cache_factory,
                 token_store,
                 provider_name: provider_name.clone(),
             },
@@ -357,6 +367,7 @@ async fn finish_integration(
     service: McpRunningService,
     mut sidecar: McpSidecar,
     db_handle: DbHandle,
+    cache_factory: Arc<dyn CacheFactory>,
     token_store: Arc<dyn SyncTokenStore>,
     provider_name: String,
     receiver: ResourceUpdateReceiver,
@@ -430,7 +441,7 @@ async fn finish_integration(
     // Build caches and strategies.
     // Table names and ID schemes use prefixed names (e.g. "cc_session"),
     // but internal keys use original entity names (e.g. "session").
-    let mut caches: HashMap<String, Arc<QueryableCache<DynamicEntity>>> = HashMap::new();
+    let mut caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>> = HashMap::new();
     let mut entity_readers: HashMap<String, Arc<dyn EntityFieldReader>> = HashMap::new();
     let mut strategies: HashMap<String, Box<dyn SyncStrategy>> = HashMap::new();
 
@@ -438,10 +449,10 @@ async fn finish_integration(
         let entity = sidecar.prefixed_name(entity_name);
         let table_name = entity.table_name();
         if let Some(td) = entity_config.to_type_definition(&table_name) {
-            let cache = QueryableCache::<DynamicEntity>::new(db_handle.clone(), td)
+            let cache = cache_factory
+                .create_dynamic_cache(td)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let cache = Arc::new(cache);
             entity_readers.insert(
                 entity_name.clone(),
                 Arc::new(DynamicEntityFieldReader(cache.clone())) as Arc<dyn EntityFieldReader>,
@@ -484,7 +495,7 @@ async fn finish_integration(
 
             // If write_through is enabled, pass the cache table name so the cursor
             // writes fetched rows back for IVM. The cache table is created by
-            // QueryableCache::new() for any entity with a schema — sync is not required.
+            // the CacheFactory for any entity with a schema — sync is not required.
             let cache_table = if vtable_config.write_through {
                 Some(table_name.clone())
             } else {
@@ -599,8 +610,8 @@ pub fn spawn_subscription_listener(
     })
 }
 
-/// EntityFieldReader adapter for QueryableCache<DynamicEntity>.
-struct DynamicEntityFieldReader(Arc<QueryableCache<DynamicEntity>>);
+/// EntityFieldReader adapter for a dynamic-entity cache.
+struct DynamicEntityFieldReader(Arc<dyn EntityCache<DynamicEntity>>);
 
 impl EntityFieldReader for DynamicEntityFieldReader {
     fn get_fields(
@@ -615,7 +626,6 @@ impl EntityFieldReader for DynamicEntityFieldReader {
         >,
     > {
         use holon_api::entity::IntoEntity;
-        use holon_core::DataSource;
 
         let id = id.to_string();
         Box::pin(async move {

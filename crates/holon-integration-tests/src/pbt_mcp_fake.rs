@@ -252,7 +252,8 @@ impl PbtMcpIntegration {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create pbt_probe cache: {e}"))?;
 
-        let mut caches: HashMap<String, Arc<QueryableCache<DynamicEntity>>> = HashMap::new();
+        let mut caches: HashMap<String, Arc<dyn holon_core::EntityCache<DynamicEntity>>> =
+            HashMap::new();
         caches.insert(ENTITY_NAME.to_string(), Arc::new(cache));
 
         // Build sync strategies from sidecar config

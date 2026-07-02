@@ -120,7 +120,7 @@ impl BackendEngine {
     }
 
     /// Set the matview hook called after FDW cache priming.
-    pub async fn set_matview_hook(&self, hook: Arc<dyn crate::sync::MatviewHook>) {
+    pub async fn set_matview_hook(&self, hook: Arc<dyn holon_core::MatviewHook>) {
         self.matview_manager.set_hook(hook).await;
     }
 

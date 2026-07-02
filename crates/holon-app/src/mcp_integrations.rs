@@ -110,6 +110,9 @@ impl Module for McpIntegrationsModule {
                     .resolve_async::<dyn holon::di::DbHandleProvider>()
                     .await
                     .handle();
+                let cache_factory = resolver
+                    .resolve_async::<dyn holon_core::CacheFactory>()
+                    .await;
                 let token_store: Arc<dyn SyncTokenStore> =
                     resolver.resolve_async::<dyn SyncTokenStore>().await;
                 let type_registry = resolver.resolve::<TypeRegistry>();
@@ -169,6 +172,7 @@ impl Module for McpIntegrationsModule {
                     let result = build_mcp_integration(
                         mcp_config,
                         db_handle.clone(),
+                        cache_factory.clone(),
                         token_store.clone(),
                         &pending_flows,
                     )

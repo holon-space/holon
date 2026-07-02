@@ -32,25 +32,6 @@ pub trait EntityFieldReader: Send + Sync {
     fn get_fields(&self, id: &str) -> FieldReadFuture<'_>;
 }
 
-use holon::core::queryable_cache::QueryableCache;
-use holon_api::entity::{IntoEntity, TryFromEntity};
-use holon_core::DataSource;
-
-impl<T: IntoEntity + TryFromEntity + Send + Sync + 'static> EntityFieldReader
-    for QueryableCache<T>
-{
-    fn get_fields(
-        &self,
-        id: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<holon_api::StorageEntity>>> + Send + '_>> {
-        let id = id.to_string();
-        Box::pin(async move {
-            let entity: Option<T> = self.get_by_id(&id).await?;
-            Ok(entity.map(|e| e.to_entity().fields.into_iter().collect()))
-        })
-    }
-}
-
 use rmcp::handler::client::ClientHandler;
 
 /// Connect to an MCP server over Streamable HTTP and return a Peer for making requests.

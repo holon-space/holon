@@ -4,9 +4,11 @@ use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use holon::core::queryable_cache::QueryableCache;
-use holon::storage::DbHandle;
-use holon_core::DataSource;
+use std::sync::Arc;
+
+use holon_api::entity::{IntoEntity, TryFromEntity};
+use holon_api::DynamicEntity;
+use holon_core::{CacheFactory, DataSource, EntityCache};
 
 /// Entity for the mcp_oauth_credentials table.
 #[derive(Debug, Clone, Serialize, Deserialize, Entity)]
@@ -18,22 +20,29 @@ pub struct OAuthCredential {
     pub updated_at: String,
 }
 
-/// Persistent OAuth credential store backed by QueryableCache.
+/// Persistent OAuth credential store backed by the storage-agnostic
+/// [`EntityCache`] seam (a `DynamicEntity` cache over the
+/// `mcp_oauth_credentials` table; rows convert to/from [`OAuthCredential`]
+/// at this boundary).
 ///
 /// Each instance is scoped to a single MCP server URI, but the underlying
 /// cache holds credentials for all servers.
 #[derive(Clone)]
 pub struct TursoCredentialStore {
-    cache: QueryableCache<OAuthCredential>,
+    cache: Arc<dyn EntityCache<DynamicEntity>>,
     server_uri: String,
 }
 
 impl TursoCredentialStore {
     /// Create a credential store for a specific server.
     ///
-    /// The table is created automatically by QueryableCache::for_entity().
-    pub async fn new(db_handle: DbHandle, server_uri: String) -> anyhow::Result<Self> {
-        let cache = QueryableCache::new(db_handle, OAuthCredential::type_definition())
+    /// The backing table is created by the [`CacheFactory`].
+    pub async fn new(
+        cache_factory: &dyn CacheFactory,
+        server_uri: String,
+    ) -> anyhow::Result<Self> {
+        let cache = cache_factory
+            .create_dynamic_cache(OAuthCredential::type_definition())
             .await
             .map_err(|e| {
                 anyhow::anyhow!("Failed to initialize mcp_oauth_credentials table: {e}")
@@ -54,12 +63,15 @@ fn now_utc() -> String {
 #[async_trait]
 impl CredentialStore for TursoCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
-        let credential: Option<OAuthCredential> =
-            DataSource::get_by_id(&self.cache, &self.server_uri)
-                .await
-                .map_err(|e| {
-                    AuthError::InternalError(format!("Failed to query credentials: {e}"))
-                })?;
+        let row: Option<DynamicEntity> = DataSource::get_by_id(&*self.cache, &self.server_uri)
+            .await
+            .map_err(|e| AuthError::InternalError(format!("Failed to query credentials: {e}")))?;
+        let credential: Option<OAuthCredential> = row
+            .map(OAuthCredential::from_entity)
+            .transpose()
+            .map_err(|e| {
+                AuthError::InternalError(format!("Failed to decode stored credentials: {e}"))
+            })?;
 
         match credential {
             Some(c) => {
@@ -85,7 +97,7 @@ impl CredentialStore for TursoCredentialStore {
         };
 
         self.cache
-            .upsert_to_cache(&credential)
+            .upsert(&credential.to_entity())
             .await
             .map_err(|e| AuthError::InternalError(format!("Failed to save credentials: {e}")))?;
 
@@ -98,7 +110,7 @@ impl CredentialStore for TursoCredentialStore {
 
     async fn clear(&self) -> Result<(), AuthError> {
         self.cache
-            .delete_from_cache(&self.server_uri)
+            .delete(&self.server_uri)
             .await
             .map_err(|e| AuthError::InternalError(format!("Failed to clear credentials: {e}")))?;
 

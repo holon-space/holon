@@ -507,7 +507,10 @@ pub enum OrgRerender {
 /// recursive CTE (depth-bounded at 50). Returns `None` when the chain ends
 /// without a `Page` — e.g. an ancestor not yet present in the matview-backed
 /// feed — and the caller falls back to a full re-render.
-fn resolve_doc_for_block(feed: &holon_api::live_data::LiveData<Block>, block: &Block) -> Option<EntityUri> {
+fn resolve_doc_for_block(
+    feed: &holon_api::live_data::LiveData<Block>,
+    block: &Block,
+) -> Option<EntityUri> {
     let map = feed.read();
     let mut current = block.clone();
     for _ in 0..50 {
