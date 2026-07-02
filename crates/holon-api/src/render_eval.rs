@@ -1071,9 +1071,10 @@ mod tests {
 
     #[test]
     fn test_state_display() {
-        assert_eq!(state_display("TODO"), ("TODO", "warning"));
+        assert_eq!(state_display("TODO"), ("TODO", "muted"));
+        assert_eq!(state_display("DOING"), ("DOING", "warning"));
         assert_eq!(state_display("DONE"), ("[x]", "success"));
-        assert_eq!(state_display(""), ("[ ]", "muted"));
+        assert_eq!(state_display(""), ("", "muted"));
         assert_eq!(state_display("CUSTOM"), ("CUSTOM", "primary"));
     }
 

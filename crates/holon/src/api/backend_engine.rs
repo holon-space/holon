@@ -1033,11 +1033,13 @@ mod tests {
             module.with_operation_provider_factory(|backend| {
                 let db_handle =
                     tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+                // entity names normalize `_` -> `-` (EntityName::new, URI-scheme
+                // safety); only the SQL table keeps the underscore.
                 Arc::new(SqlOperationProvider::new(
                     db_handle,
                     "test_item".to_string(),
-                    "test_item".to_string(),
-                    "test_item".to_string(),
+                    "test-item".to_string(),
+                    "test-item".to_string(),
                 ))
             })
         })
@@ -1069,11 +1071,7 @@ mod tests {
         params.insert("value".into(), Value::Boolean(true));
 
         let result = engine
-            .execute_operation(
-                &EntityName::Named("test_item".to_string()),
-                "set_field",
-                params,
-            )
+            .execute_operation(&EntityName::new("test_item"), "set_field", params)
             .await;
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
