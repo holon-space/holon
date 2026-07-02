@@ -17,11 +17,11 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use super::resource::Resource;
-use super::schema_module::{EdgeFieldDescriptor, SchemaModule};
-use super::sql_statements;
-use super::turso::DbHandle;
-use crate::sync::reconcile_named_view;
+use crate::matview_manager::reconcile_named_view;
+use crate::schema_module::{EdgeFieldDescriptor, SchemaModule};
+use crate::sql_utils::sql_statements;
+use crate::turso::DbHandle;
+use holon_core::storage::resource::Resource;
 use holon_core::storage::types::Result;
 use holon_core::storage::types::StorageError;
 
@@ -51,17 +51,17 @@ impl SchemaModule for CoreSchemaModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[CoreSchemaModule] Creating core tables");
 
-        for stmt in sql_statements(include_str!("../../sql/schema/blocks.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/blocks.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[CoreSchemaModule] block_raw table + index created");
 
-        for stmt in sql_statements(include_str!("../../sql/schema/directories.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/directories.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[CoreSchemaModule] directories table + index created");
 
-        for stmt in sql_statements(include_str!("../../sql/schema/files.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/files.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[CoreSchemaModule] files table + indexes created");
@@ -116,12 +116,12 @@ impl SchemaModule for BlockSchemaModule {
             .execute_ddl("DROP TABLE IF EXISTS block_tags")
             .await?;
 
-        for stmt in sql_statements(include_str!("../../sql/schema/block_requires.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/block_requires.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[BlockSchemaModule] block_requires table created");
 
-        for stmt in sql_statements(include_str!("../../sql/schema/block_tags.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/block_tags.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[BlockSchemaModule] block_tags table created");
@@ -183,7 +183,7 @@ impl SchemaModule for BlockMatviewSchemaModule {
         let created = reconcile_named_view(
             db_handle,
             "block",
-            include_str!("../../sql/schema/block_matview.sql"),
+            include_str!("../sql/schema/block_matview.sql"),
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
@@ -227,7 +227,7 @@ impl SchemaModule for BlockRequirementEdgesSchemaModule {
         reconcile_named_view(
             db_handle,
             "block_requirement_edges",
-            include_str!("../../sql/schema/block_requirement_edges_matview.sql"),
+            include_str!("../sql/schema/block_requirement_edges_matview.sql"),
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
@@ -263,7 +263,7 @@ impl SchemaModule for BlockHierarchySchemaModule {
         let created = reconcile_named_view(
             db_handle,
             "block_with_path",
-            include_str!("../../sql/schema/blocks_with_paths.sql"),
+            include_str!("../sql/schema/blocks_with_paths.sql"),
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
@@ -307,7 +307,7 @@ impl SchemaModule for NavigationSchemaModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[NavigationSchemaModule] Creating navigation tables");
 
-        for stmt in sql_statements(include_str!("../../sql/schema/navigation.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/navigation.sql")) {
             match db_handle.execute_ddl(stmt).await {
                 Ok(()) => {}
                 Err(e) if e.to_string().contains("already exists") => {
@@ -324,11 +324,11 @@ impl SchemaModule for NavigationSchemaModule {
         let views: &[(&str, &str)] = &[
             (
                 "current_focus",
-                include_str!("../../sql/schema/matview_current_focus.sql"),
+                include_str!("../sql/schema/matview_current_focus.sql"),
             ),
             (
                 "focus_roots",
-                include_str!("../../sql/schema/matview_focus_roots.sql"),
+                include_str!("../sql/schema/matview_focus_roots.sql"),
             ),
         ];
         for (name, select_sql) in views {
@@ -350,7 +350,7 @@ impl SchemaModule for NavigationSchemaModule {
 
             db_handle
                 .query(
-                    include_str!("../../sql/navigation/init_default_region.sql"),
+                    include_str!("../sql/navigation/init_default_region.sql"),
                     params,
                 )
                 .await?;
@@ -424,7 +424,7 @@ impl SchemaModule for SyncStateSchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[SyncStateSchemaModule] Creating sync_states table");
-        for stmt in sql_statements(include_str!("../../sql/schema/sync_states.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/sync_states.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::info!("[SyncStateSchemaModule] sync_states table created");
@@ -452,7 +452,7 @@ impl SchemaModule for OperationsSchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[OperationsSchemaModule] Creating operation table");
-        for stmt in sql_statements(include_str!("../../sql/schema/operations.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/operations.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::info!("[OperationsSchemaModule] operation table created");
@@ -482,7 +482,7 @@ impl SchemaModule for LinkSchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[LinkSchemaModule] Creating block_link table");
-        for stmt in sql_statements(include_str!("../../sql/schema/block_links.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/block_links.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::info!("[LinkSchemaModule] block_link table created");
@@ -540,10 +540,40 @@ impl SchemaModule for IdentitySchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[IdentitySchemaModule] Creating identity tables");
-        for stmt in sql_statements(include_str!("../../sql/schema/identity.sql")) {
+        for stmt in sql_statements(include_str!("../sql/schema/identity.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::info!("[IdentitySchemaModule] identity tables created");
+        Ok(())
+    }
+}
+
+/// Graph EAV (entity-attribute-value) schema for typed-entity edges.
+///
+/// Faithful transliteration of the former inline DDL loop in holon's
+/// `di/schema_providers.rs` (`DbReady<GraphEavSchema>` provider): same
+/// statements, same `Resource::schema("graph_eav")` availability marker,
+/// same DDL-then-mark ordering (via `run_schema_module`).
+pub struct GraphEavSchemaModule;
+
+#[async_trait]
+impl SchemaModule for GraphEavSchemaModule {
+    fn name(&self) -> &str {
+        "graph_eav"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("graph_eav")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        for stmt in sql_statements(include_str!("../sql/schema/graph_eav.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
         Ok(())
     }
 }

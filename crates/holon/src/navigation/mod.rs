@@ -18,7 +18,7 @@
 //! ## Schema Management
 //!
 //! Navigation schema is managed by `NavigationSchemaModule` via the `SchemaRegistry`.
-//! See `storage/schema_modules.rs` for the schema definition.
+//! See holon-turso `schema_modules.rs` for the schema definition.
 
 mod in_memory_provider;
 mod provider;

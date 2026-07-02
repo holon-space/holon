@@ -955,12 +955,12 @@ mod tests {
     use crate::core::sql_operation_provider::SqlOperationProvider;
     use crate::storage::BLOCK_WRITE_TABLE;
     use crate::storage::schema_module::SchemaModule;
-    use crate::storage::schema_modules::{BlockMatviewSchemaModule, BlockSchemaModule};
     use crate::storage::turso::TursoBackend;
     use holon_api::block::Block;
     use holon_api::entity_uri::EntityUri;
     use holon_core::block_ordering::BlockOrdering;
     use holon_core::{__operations_block_operations, OperationRegistry};
+    use holon_turso::schema_modules::{BlockMatviewSchemaModule, BlockSchemaModule};
     use std::sync::Arc;
 
     /// Sanity check: the macro-generated `block_operations()` descriptor
@@ -1001,7 +1001,7 @@ mod tests {
             .await
             .expect("FK pragma");
         // Minimal schema: block_raw + junction tables + block matview.
-        crate::storage::schema_modules::CoreSchemaModule
+        holon_turso::schema_modules::CoreSchemaModule
             .ensure_schema(&handle)
             .await
             .expect("CoreSchemaModule");

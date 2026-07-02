@@ -16,12 +16,12 @@ use std::marker::PhantomData;
 
 use fluxdi::{Injector, Provider, Shared};
 
-use crate::storage::schema_modules::{
+use crate::storage::turso::DbHandle;
+use holon_turso::schema_modules::{
     BlockHierarchySchemaModule, BlockMatviewSchemaModule, BlockRequirementEdgesSchemaModule,
     BlockSchemaModule, CoreSchemaModule, IdentitySchemaModule, LinkSchemaModule,
     NavigationSchemaModule, OperationsSchemaModule, SyncStateSchemaModule,
 };
-use crate::storage::turso::DbHandle;
 
 use super::DbHandleProvider;
 
@@ -126,8 +126,6 @@ async fn run_schema_module(module: &dyn SchemaModule, db_handle: &DbHandle) -> a
 // ---------------------------------------------------------------------------
 // Provider registration
 // ---------------------------------------------------------------------------
-
-const GRAPH_EAV_SCHEMA_SQL: &str = include_str!("../../sql/schema/graph_eav.sql");
 
 /// Register all core schema providers on the injector.
 ///
@@ -257,16 +255,12 @@ pub fn register_schema_providers(injector: &Injector) {
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
             let db = inj.resolve::<dyn DbHandleProvider>();
-            let handle = db.handle();
-            for stmt in crate::storage::sql_statements(GRAPH_EAV_SCHEMA_SQL) {
-                handle.execute_ddl(stmt).await.expect("GraphEav DDL failed");
-            }
-            handle
-                .mark_available(vec![crate::storage::resource::Resource::schema(
-                    "graph_eav",
-                )])
-                .await
-                .expect("GraphEav mark_available failed");
+            run_schema_module(
+                &holon_turso::schema_modules::GraphEavSchemaModule,
+                &db.handle(),
+            )
+            .await
+            .expect("GraphEavSchema init failed");
             Shared::new(DbReady::<GraphEavSchema>::new())
         })
         .with_dependency::<DbReady<CoreTables>>(),

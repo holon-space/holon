@@ -8,12 +8,12 @@
 use std::collections::{HashMap, HashSet};
 
 use holon::identity::{ENTITY_NAME, IdentityProvider};
-use holon::storage::IdentitySchemaModule;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon_api::{Operation, Value};
 use holon_core::OperationProvider;
 use holon_core::storage::types::StorageEntity;
+use holon_turso::schema_modules::IdentitySchemaModule;
 use proptest::prelude::*;
 use tempfile::TempDir;
 use tokio::sync::broadcast;

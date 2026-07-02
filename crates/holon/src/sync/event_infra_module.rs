@@ -18,7 +18,6 @@ use crate::core::sql_operation_provider::SqlOperationProvider;
 use crate::di::DbHandleProvider;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
-use crate::storage::schema_modules::BlockSchemaModule;
 use crate::storage::turso_block_link_indexer::TursoBlockLinkIndexer;
 use crate::sync::PublishErrorTracker;
 use crate::sync::link_event_subscriber::LinkEventSubscriber;
@@ -28,6 +27,7 @@ use holon_api::capability::SessionCapabilities;
 use holon_api::{EntityName, EntityUri, Value};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::{OperationProvider, OperationRegistry};
+use holon_turso::schema_modules::BlockSchemaModule;
 
 /// Build the SqlOnly cell `set_field` write path over `SqlOperationProvider`.
 ///

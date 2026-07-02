@@ -15,7 +15,6 @@ use fluxdi::{Injector, Module, Provider, Shared};
 
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::schema_module::SchemaModule;
-use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
 use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
@@ -32,6 +31,7 @@ use holon_orgmode::di::{
 };
 use holon_orgmode::OrgModeSyncProvider;
 use holon_profiles::TypeRegistry;
+use holon_turso::schema_modules::BlockSchemaModule;
 use std::path::PathBuf;
 
 /// BlockReader backed by `QueryableCache<Block>`.

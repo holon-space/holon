@@ -28,7 +28,6 @@
 use holon::core::queryable_cache::QueryableCache;
 use holon::core::SqlOperationProvider;
 use holon::storage::schema_module::SchemaModule;
-use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::sync::block_to_params;
@@ -39,6 +38,7 @@ use holon_block_roundtrip_testing::{
 };
 use holon_core::OperationProvider;
 use holon_filesystem::BlockReader;
+use holon_turso::schema_modules::BlockSchemaModule;
 use proptest::prelude::*;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -47,7 +47,7 @@ use uuid::Uuid;
 
 async fn setup_production_schema(handle: &holon::storage::turso::DbHandle) {
     use holon::storage::schema_module::SchemaModule;
-    use holon::storage::schema_modules::{BlockMatviewSchemaModule, CoreSchemaModule};
+    use holon_turso::schema_modules::{BlockMatviewSchemaModule, CoreSchemaModule};
 
     handle
         .execute_ddl("PRAGMA foreign_keys = ON")

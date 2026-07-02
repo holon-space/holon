@@ -105,7 +105,7 @@ Existing narrow PBTs migrate onto `holon-pbt-core` so generators don't drift. Th
 | T1 | seconds | Narrow PBTs sharing `holon-pbt-core` (see below) | Daily-driver discovery; failures name the subsystem |
 | T2 | minutes | `general_e2e_pbt` (headless full stack) | Integration bumper |
 | T3 | slow | `gpui_ui_pbt`, `tui_ui_pbt`, `cross_frontend_pbt` (real UI) | UI/render correctness, cross-frontend convergence |
-| T4 | offline replay | `turso-sql-replay` + `crates/holon/sql/regressions/*.sql` | Frozen regression gates for upstream bugs |
+| T4 | offline replay | `turso-sql-replay` + `crates/holon-turso/sql/regressions/*.sql` | Frozen regression gates for upstream bugs |
 
 ### Six narrow PBTs to add (T1)
 
@@ -139,7 +139,7 @@ Default to delete on refactor; do not preserve a unit test just because it curre
 
 ### What we'd miss / cons
 
-- **Specific-input regression pinning.** When you fix a Turso `json_group_array` bug, you want a `.sql` file that runs in <1s on every CI and never flakes. PBTs are too noisy for that. T4 SQL replay tests fill this gap and are *complementary*, not substitutes — keep investing in `crates/holon/sql/regressions/`.
+- **Specific-input regression pinning.** When you fix a Turso `json_group_array` bug, you want a `.sql` file that runs in <1s on every CI and never flakes. PBTs are too noisy for that. T4 SQL replay tests fill this gap and are *complementary*, not substitutes — keep investing in `crates/holon-turso/sql/regressions/`.
 - **Pathological boundary inputs.** Generators rarely hit weird Unicode, BOM, CRLF, control chars, or malformed input unless explicitly taught to. T0 unit-level proptest with hand-crafted strategies covers this cheaply. "No unit tests" is not dogma — T0 is targeted and small.
 - **Performance regressions.** PBTs check correctness, not latency or memory. A real benchmark suite (none today) is a separate workstream.
 - **Visual snapshots.** `layout_insta` catches things that dump-equivalence PBTs don't — human eyeball on rendered output catches a class of regressions invariants can't express. Keep snapshots at T3.
@@ -162,5 +162,5 @@ Default to delete on refactor; do not preserve a unit test just because it curre
 - UserDriver trait: `crates/holon-frontend/src/user_driver.rs`
 - Driver impls: `frontends/{gpui,tui}/src/user_driver.rs`, `crates/holon-integration-tests/src/pbt/sut.rs` + `phased.rs`
 - Invariants: `crates/holon-integration-tests/src/pbt/sut.rs::check_invariants_async`
-- SQL regression replay: `crates/holon/sql/regressions/`, `turso-sql-replay` binary
+- SQL regression replay: `crates/holon-turso/sql/regressions/`, `turso-sql-replay` binary
 - Architecture lint: `crates/holon-architecture-tests/tests/architecture_rules.rs` (a thin wrapper over `archlint`)

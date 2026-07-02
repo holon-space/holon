@@ -6,9 +6,10 @@
 //! propose_merge, accept_proposal, reject_proposal) land in a follow-up step;
 //! this test pins the schema surface so future operation work can rely on it.
 
+use holon::storage::Resource;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
-use holon::storage::{IdentitySchemaModule, Resource};
+use holon_turso::schema_modules::IdentitySchemaModule;
 use std::collections::HashMap;
 use tempfile::TempDir;
 use tokio::sync::broadcast;

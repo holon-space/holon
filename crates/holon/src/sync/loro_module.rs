@@ -21,12 +21,12 @@ use tracing::{error, info};
 use crate::core::SqlOperationProvider;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
-use crate::storage::schema_modules::BlockSchemaModule;
 use crate::sync::{
     LoroBlockOperations, LoroBlocksDataSource, LoroDocumentStore, LoroSyncController,
     LoroSyncControllerHandle,
 };
 use holon_core::OriginTaggedWrites;
+use holon_turso::schema_modules::BlockSchemaModule;
 
 /// Configuration for standalone Loro CRDT support
 #[derive(Clone, Debug)]

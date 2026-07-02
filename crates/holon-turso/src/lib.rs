@@ -21,6 +21,7 @@ pub mod dynamic_schema_module;
 pub mod graph_schema;
 pub mod matview_manager;
 pub mod schema_module;
+pub mod schema_modules;
 pub mod sql_parser;
 pub mod sql_utils;
 pub mod turso;

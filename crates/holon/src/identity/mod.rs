@@ -4,7 +4,7 @@
 //! canonical-identity surface instead of growing ad-hoc identity columns.
 //!
 //! - **Schema** (already landed): `canonical_entity`, `entity_alias`,
-//!   `proposal_queue`. See [`IdentitySchemaModule`](crate::storage::IdentitySchemaModule).
+//!   `proposal_queue`. See [`IdentitySchemaModule`](holon_turso::schema_modules::IdentitySchemaModule).
 //! - **Operations** (this module): user-facing `merge_entities`,
 //!   `propose_merge`, `accept_proposal`, `reject_proposal`; internal undo
 //!   primitives `restore_canonical_after_merge`, `delete_proposal`,

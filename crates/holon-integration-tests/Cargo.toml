@@ -17,6 +17,7 @@ test-infra = [
     "dep:holon-orgmode",
     "dep:holon-core",
     "dep:holon-profiles",
+    "dep:holon-turso",
     "dep:holon-filesystem",
     "dep:holon-loro",
     "dep:holon-api",
@@ -74,6 +75,7 @@ holon-app = { workspace = true, optional = true }
 holon-orgmode = { workspace = true, optional = true }
 holon-core = { workspace = true, optional = true }
 holon-profiles = { workspace = true, optional = true }
+holon-turso = { workspace = true, optional = true }
 holon-filesystem = { workspace = true, optional = true }
 holon-loro = { workspace = true, optional = true }
 holon-api = { workspace = true, optional = true }

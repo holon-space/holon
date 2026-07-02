@@ -19,7 +19,6 @@ use holon::core::SqlOperationProvider;
 use holon::di::test_helpers::create_test_engine_with_path;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
-use holon::storage::schema_modules::BlockSchemaModule;
 use holon::sync::block_to_params;
 use holon::sync::turso_block_query_source::TursoBlockQuerySource;
 use holon_api::{EntityName, EntityUri, block::Block};
@@ -29,6 +28,7 @@ use holon_block_roundtrip_testing::{
 };
 use holon_core::OperationProvider;
 use holon_core::storage::BlockQuerySource;
+use holon_turso::schema_modules::BlockSchemaModule;
 use proptest::prelude::*;
 use tokio::runtime::Runtime;
 use uuid::Uuid;

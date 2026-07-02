@@ -67,3 +67,40 @@ mod tests {
         assert_eq!(value_to_sql_literal(&val), "'{\"key\":\"val\"}'");
     }
 }
+
+/// Split a semicolon-delimited SQL file into individual statements.
+///
+/// Skips `;` inside `--` line comments — otherwise comments like
+/// `-- closed (omitted); retained for back/forward` truncate the
+/// surrounding CREATE TABLE statement and the parser sees "incomplete input".
+pub fn sql_statements(content: &str) -> impl Iterator<Item = &str> {
+    let bytes = content.as_bytes();
+    let mut splits: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    let mut in_line_comment = false;
+    let mut prev_dash = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            prev_dash = false;
+            continue;
+        }
+        if b == b'-' && prev_dash {
+            in_line_comment = true;
+            prev_dash = false;
+            continue;
+        }
+        prev_dash = b == b'-';
+        if b == b';' {
+            splits.push((start, i));
+            start = i + 1;
+        }
+    }
+    splits.push((start, bytes.len()));
+    splits
+        .into_iter()
+        .map(move |(a, b)| content[a..b].trim())
+        .filter(|s| !s.is_empty())
+}

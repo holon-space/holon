@@ -15,13 +15,13 @@ use crate::identity::IdentityProvider;
 use crate::navigation::NavigationProvider;
 use crate::storage::graph_schema::GraphSchemaRegistry;
 use crate::storage::schema_module::SchemaModule;
-use crate::storage::schema_modules::{BlockSchemaModule, LinkSchemaModule, NavigationSchemaModule};
 use crate::storage::sync_token_store::DatabaseSyncTokenStore;
 use crate::storage::turso::{DbHandle, TursoBackend};
 use crate::storage::{ChangeOriginInjector, JsonAggregationSqlTransformer, SqlTransformer};
 use crate::sync::LiveData;
 use holon_core::{OperationObserver, OperationProvider, SyncTokenStore};
 use holon_profiles::{TypeRegistry, create_default_registry};
+use holon_turso::schema_modules::{BlockSchemaModule, LinkSchemaModule, NavigationSchemaModule};
 
 use super::schema_providers::{
     BlockHierarchyView, CoreTables, DbReady, GraphEavSchema, IdentityTables, LinkTables,

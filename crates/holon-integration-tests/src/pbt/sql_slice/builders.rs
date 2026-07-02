@@ -13,10 +13,10 @@ use holon::di::DbHandleProvider;
 use holon::di::test_helpers::create_test_engine_with_setup;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
-use holon::storage::schema_modules::BlockSchemaModule;
 use holon_api::block::Block;
 use holon_core::OperationProvider;
 use holon_pbt_core::composition::{CapMap, Config};
+use holon_turso::schema_modules::BlockSchemaModule;
 
 use super::components::SqlProjectionComponent;
 
