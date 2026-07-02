@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use holon_api::EntityUri;
-use holon_pbt_core::capabilities::{SutBackend, SutLayout};
+use holon_pbt_core::capabilities::{SutBackend, SutLayout, SutLoroLog};
 use holon_pbt_core::composition::{CapMap, InvariantId, RunReport};
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 
@@ -71,6 +71,21 @@ pub(crate) async fn sut_ids(caps: &CapMap) -> BTreeSet<EntityUri> {
         .into_iter()
         .map(|b| b.id.clone())
         .collect()
+}
+
+/// E-solid clock side-channel: write the SUT's scalar Lamport height into the
+/// oracle's shared `clock_feed` cell. Called after boot and after every
+/// apply+settle, so the value the NEXT ref transition pads the shadow primary
+/// to is exactly the height that transition's SUT write will land at
+/// (proptest-state-machine interleaves ref-apply N → sut-apply N). The height
+/// is the ONLY observable that ever flows SUT→oracle. Keeps the last-known
+/// height when the cap is absent or the doc is not live yet.
+pub(crate) async fn feed_sut_clock(caps: &CapMap, ref_state: &ReferenceState) {
+    if let Some(log) = caps.get::<dyn SutLoroLog>()
+        && let Some(h) = log.loro_lamport_height().await
+    {
+        *ref_state.clock_feed.lock().expect("clock_feed lock") = Some(h);
+    }
 }
 
 /// Inject `scaffold_ids` into the oracle as `block_documents[id]=no_parent` so they
@@ -143,6 +158,15 @@ pub trait ComposedSlice {
         ref_state: &ReferenceState,
         caps: &mut CapMap,
     );
+
+    /// Settle after a transition's write before reading the projections. Default: a flat
+    /// `sleep(SETTLE)` (correct for a synchronous store, ≈0). A slice whose SUT projects
+    /// asynchronously (`WideE2E`: Turso CDC + Loro + org) overrides this to a convergence
+    /// wait over the slice's [`Handle`](Self::Handle) — bounded by `SETTLE`, so it returns
+    /// fast when quiescent but never over-waits vs the flat sleep.
+    async fn settle_after_apply(_: &Self::Handle, _: &CapMap) {
+        tokio::time::sleep(Self::SETTLE).await;
+    }
 
     /// Align SUT-minted ids with the oracle. Called once after `build` (the initial
     /// seed) and after every apply. Default: nothing — the harness's generic per-tick
@@ -261,6 +285,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let (caps, handle, scaffold_ids) = rt.block_on(S::build(&resolver, ref_state));
         S::align_ids(&handle, ref_state);
+        rt.block_on(feed_sut_clock(&caps, ref_state));
         Self {
             caps,
             handle,
@@ -274,11 +299,16 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
 
     fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
         let (before, after) = {
+            // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
+            // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
+            // the `block_on` (both are captured by the `async move`).
             let caps = &mut sut.caps;
+            let handle = &sut.handle;
             sut.rt.block_on(async move {
                 let before = sut_ids(caps).await;
                 S::apply_transition(&transition, ref_state, caps).await;
-                tokio::time::sleep(S::SETTLE).await;
+                S::settle_after_apply(handle, caps).await;
+                feed_sut_clock(caps, ref_state).await;
                 let after = sut_ids(caps).await;
                 (before, after)
             })

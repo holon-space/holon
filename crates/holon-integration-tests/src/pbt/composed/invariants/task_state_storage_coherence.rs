@@ -157,7 +157,7 @@ mod real_sut_teeth {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
 
         rt.block_on(async {
-            let (mut caps, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
+            let (mut caps, _handle, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
 
             // Baseline: the seed block carries no task_state in either projection.
             assert_eq!(

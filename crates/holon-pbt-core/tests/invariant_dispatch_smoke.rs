@@ -46,6 +46,9 @@ impl SutLoroLog for ToySut {
     async fn loro_block_snapshot(&self) -> Option<Vec<holon_api::block::Block>> {
         None
     }
+    async fn loro_lamport_height(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Type-level smoke: this compiling means the where-clause filter works.

@@ -78,11 +78,11 @@ impl TransitionRef<ReferenceState> for MergeFromPeer {
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         use holon_pbt_core::capabilities::RefPeersMut;
-        // recanon_and_rebuild + refresh_peer_baseline are handled
-        // inside `RefPeersMut::peer_merge_into_primary` — the order
-        // matters because newly-created peer blocks default to
-        // sequence=0 and need a recanon pass before the next org
-        // round-trip (see `assertions.rs:117`).
+        // recanon_and_rebuild is handled inside
+        // `RefPeersMut::peer_merge_into_primary` — the order matters
+        // because newly-created peer blocks default to sequence=0 and
+        // need a recanon pass before the next org round-trip (see
+        // `assertions.rs:117`).
         state.peer_merge_into_primary(self.peer_idx);
     }
 }

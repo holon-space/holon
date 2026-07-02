@@ -359,6 +359,18 @@ impl HeadlessFrontendComponent {
             .ok() // ALLOW(ok): optional DI service — absent when Loro/sync is disabled
     }
 
+    /// The file-sync controller's [`OrgSyncIdleSignal`] — advanced (`mark_progress`)
+    /// after every processed file/block change, so a settle can `wait_quiescent` on it
+    /// instead of a flat sleep. `None` when this build has no org file-sync wired.
+    /// Resolved lazily (like [`Self::loro_sync_handle`]): the controller is started on a
+    /// spawned `post_ready_work` task, so callers that settle after a write get the
+    /// resolved signal by then. Mirrors `TestEnvironment`'s `org_sync_idle` latch.
+    pub(crate) fn org_idle_signal(&self) -> Option<Arc<holon_orgmode::OrgSyncIdleSignal>> {
+        self.injector
+            .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+            .ok() // ALLOW(ok): optional DI service — absent when org file-sync is disabled
+    }
+
     /// Share the composed runner's [`IdResolver`] so the id-taking nav/focus caps
     /// translate oracle ids to SUT-real ids (see the `resolver` field). Called once
     /// by the composed builder; the storage-only/fixed-id slices leave it unset

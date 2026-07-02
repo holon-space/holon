@@ -134,6 +134,11 @@ impl SutLoroLog for FixtureLoroLog {
     async fn loro_block_snapshot(&self) -> Option<Vec<Block>> {
         None
     }
+    /// No live doc behind a fixture — honest `None` (the clock-sync seam then
+    /// has nothing to sync, which is correct: fixtures drive no peers).
+    async fn loro_lamport_height(&self) -> Option<u32> {
+        None
+    }
 }
 
 impl CapProvider for FixtureLoroLog {

@@ -106,9 +106,10 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                 .collect();
             // Extended-gen axis 3 (same-block concurrency): text blocks the
             // primary may edit even though a peer has a pending edit on them.
-            // The ref merge already models the both-sides-diverged case
-            // (`merge_peer_blocks_into_primary` → `loro_merge_text`), so the
-            // conflicting fraction is admissible — it just was never generated.
+            // The ref merge already covers the both-sides-diverged case
+            // (`merge_peer_blocks_into_primary` consumes the shadow mesh's
+            // real CRDT merge), so the conflicting fraction is admissible —
+            // it just was never generated.
             // Content-only: Delete/Move on peer-modified blocks stay excluded
             // (no ref merge model for structural conflicts yet).
             let conflict_text_block_ids: Vec<EntityUri> = state
@@ -202,10 +203,10 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
             }
 
             // Axis 3 arm (extended gen): primary content edit on a block a
-            // peer has concurrently modified. On the next merge the ref's
-            // `loro_merge_text` oracle computes the admissible CRDT outcome;
-            // the SUT runs the real Loro merge — divergence here means the
-            // oracle (fixed peer ids 1/2) mis-models production tie-breaking.
+            // peer has concurrently modified. On the next merge the oracle's
+            // shadow mesh predicts the CRDT outcome (clock-padded real Loro
+            // merge); the SUT runs the production merge — divergence here
+            // means the shadow mis-mirrors production op ids.
             {
                 let conflict_ids: Vec<EntityUri> = conflict_text_block_ids
                     .iter()

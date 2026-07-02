@@ -20,6 +20,7 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::composed::harness::{ComposedSut, SettleHook};
 use holon_integration_tests::pbt::composed::wide_e2e::{
     boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E, WideE2EMachine,
+    WideHandle,
 };
 use holon_integration_tests::pbt::fixtures::{replay_steps, NamedFixture};
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
@@ -163,6 +164,9 @@ pub fn with_windowed_wide_sut(
         .frontend
         .clone()
         .expect("full_headless → booted HeadlessFrontendComponent");
+    // Capture the settle handle (engine + frontend) before `bundle.caps` is moved, so the
+    // windowed per-apply settle converges CDC + Loro + org like the headless path.
+    let handle = WideHandle::from_bundle(&bundle);
     let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver);
 
     // The window-settle hook the ComposedSut pumps before each check (mirror sim
@@ -207,7 +211,7 @@ pub fn with_windowed_wide_sut(
 
     // Assemble the windowed SUT (the initial page-root focus is already established on the
     // base by `boot_and_seed_wide_windowed_base` via the engine's `dispatch_intent_sync`).
-    let sut = windowed_composed_sut(overlaid, resolver, scaffold, composed_rt, settle);
+    let sut = windowed_composed_sut(overlaid, handle, resolver, scaffold, composed_rt, settle);
 
     // Hand the live SUT to the caller to drive + check, then take it back for teardown.
     let sut = run(sut, &oracle);

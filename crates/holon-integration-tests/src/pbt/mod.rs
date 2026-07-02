@@ -29,6 +29,7 @@ pub mod reference_capabilities;
 pub mod reference_domain_state;
 pub mod reference_state;
 pub mod retry;
+pub mod shadow_mesh;
 pub mod slice;
 pub mod sql_loro_slice;
 pub mod sql_slice;

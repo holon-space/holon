@@ -16,7 +16,7 @@ pub struct PeerBlock {
 }
 
 /// Read the stable ID from a tree node's metadata.
-fn read_node_stable_id(doc: &LoroDoc, node: TreeID) -> Option<String> {
+pub fn read_node_stable_id(doc: &LoroDoc, node: TreeID) -> Option<String> {
     let tree = doc.get_tree(multi_peer::TREE_NAME);
     let meta = tree.get_meta(node).ok()?;
     meta.get(STABLE_ID).and_then(|v| match v {

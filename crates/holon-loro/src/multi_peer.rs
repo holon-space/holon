@@ -838,3 +838,600 @@ pub fn check_invariants<D: std::fmt::Debug>(ref_state: &GroupState<D>) {
         );
     }
 }
+
+// ─── Lamport clock helpers (E-solid oracle clock-sync seam) ──────────────────
+
+/// A doc's Lamport height: 1 + the max lamport of any applied op, computed
+/// from public API only (frontiers + `ChangeMeta`). This scalar is the ONLY
+/// value the E-solid shadow-mesh oracle reads from the SUT (clock sync at
+/// fork/sync boundaries); see `clock_parity_spike` for the parity proof and
+/// the negative control showing the padding is load-bearing.
+pub fn lamport_height(doc: &LoroDoc) -> u32 {
+    crate::loro_backend::doc_lamport_height(doc)
+}
+
+/// Advance `doc`'s Lamport clock to exactly `target` via 1-atom ops in a
+/// scratch container. Query-driven — no assumption that N ops advance the
+/// clock by N; each step re-reads the height, and overshoot panics loudly
+/// (it would falsify the whole clock-padding approach).
+pub fn pad_to_height(doc: &LoroDoc, target: u32) {
+    let pad = doc.get_text("clock_pad");
+    loop {
+        let h = lamport_height(doc);
+        assert!(h <= target, "shadow clock overshot: {h} > {target}");
+        if h == target {
+            return;
+        }
+        pad.insert(0, "x").unwrap();
+        doc.commit();
+    }
+}
+
+// ─── E-solid de-risk spike: shadow-mesh clock-padding parity ─────────────────
+//
+// Question under test: can a SHADOW peer universe — a fresh primary doc whose
+// Lamport clock is padded to the real universe's observed scalar heights at
+// each fork/sync boundary, with the same logical peer ops applied through the
+// SAME helpers — reproduce the real universe's EXACT tied-sibling order and
+// concurrent-text interleaving, despite the real primary carrying op history
+// (boot seeding, engine writes) the shadow never replays?
+//
+// If yes, a pure-ish oracle (only scalar clock reads cross from the SUT) can
+// PREDICT the CRDT tie-breaks exactly, replacing check-time SUT adoption.
+// These tests double as parity teeth: a loro upgrade that changes op-atom
+// encoding or tie-break semantics fails HERE, deterministically, naming the
+// model — instead of as a misattributed keystone PBT red.
+#[cfg(test)]
+mod clock_parity_spike {
+    use super::*;
+
+    fn stable_id_of(tree: &LoroTree, node: TreeID) -> Option<String> {
+        let meta = tree.get_meta(node).ok()?;
+        match meta.get(STABLE_ID) {
+            Some(ValueOrContainer::Value(v)) => v.as_string().map(|s| s.to_string()),
+            _ => None,
+        }
+    }
+
+    fn node_by_stable_id(doc: &LoroDoc, stable_id: &str) -> TreeID {
+        let tree = doc.get_tree(TREE_NAME);
+        tree.get_nodes(false)
+            .into_iter()
+            .filter(|n| {
+                !matches!(
+                    n.parent,
+                    loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                )
+            })
+            .find(|n| stable_id_of(&tree, n.id).as_deref() == Some(stable_id))
+            .map(|n| n.id)
+            .unwrap_or_else(|| panic!("node {stable_id} not found"))
+    }
+
+    /// Children stable-ids of `parent_sid` in the tree's true order.
+    fn children_order(doc: &LoroDoc, parent_sid: &str) -> Vec<String> {
+        let tree = doc.get_tree(TREE_NAME);
+        let parent = node_by_stable_id(doc, parent_sid);
+        tree.children(parent)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| stable_id_of(&tree, c).expect("child has stable id"))
+            .collect()
+    }
+
+    fn content_of(doc: &LoroDoc, sid: &str) -> String {
+        let tree = doc.get_tree(TREE_NAME);
+        read_text(&tree, node_by_stable_id(doc, sid))
+    }
+
+    /// One peer universe: a primary doc + forked peers, seeded with the same
+    /// parent/c1/c2 working tree. The REAL universe additionally carries
+    /// arbitrary non-shared history (junk ops simulating boot seeding /
+    /// engine writes); the SHADOW universe carries none and is clock-padded.
+    struct Universe {
+        primary: LoroDoc,
+        peers: Vec<LoroDoc>,
+    }
+
+    impl Universe {
+        fn new() -> Self {
+            let primary = init_doc(1);
+            let parent = create_block_with_id(&primary, None, "parent", "parent");
+            create_block_with_id(&primary, Some(parent), "c1", "c1");
+            create_block_with_id(&primary, Some(parent), "c2", "c2");
+            Self {
+                primary,
+                peers: Vec::new(),
+            }
+        }
+
+        /// Simulated non-shared primary history (boot seeding, engine writes):
+        /// ops in a scratch container the peers/oracle never look at.
+        fn junk(&self, n: usize) {
+            let t = self.primary.get_text("boot_junk");
+            for _ in 0..n {
+                t.insert(0, "j").unwrap();
+                self.primary.commit();
+            }
+        }
+
+        fn add_peer(&mut self, peer_id: u64) {
+            let snapshot = self.primary.export(ExportMode::Snapshot).unwrap();
+            let doc = init_doc(peer_id);
+            doc.import(&snapshot).unwrap();
+            self.peers.push(doc);
+        }
+
+        fn peer_create(&self, idx: usize, parent_sid: &str, content: &str, sid: &str) {
+            let parent = node_by_stable_id(&self.peers[idx], parent_sid);
+            create_block_with_id(&self.peers[idx], Some(parent), content, sid);
+        }
+
+        fn peer_update(&self, idx: usize, sid: &str, content: &str) {
+            let node = node_by_stable_id(&self.peers[idx], sid);
+            update_block(&self.peers[idx], node, content);
+        }
+
+        fn sync(&self, idx: usize) {
+            sync_docs_direct(&self.primary, &self.peers[idx]);
+        }
+
+        fn height(&self) -> u32 {
+            lamport_height(&self.primary)
+        }
+    }
+
+    /// Drive the same logical script through a REAL universe (with junk
+    /// history) and a SHADOW universe (clock-padded from the real one's
+    /// scalar heights), then assert EXACT parity of sibling order and text.
+    ///
+    /// `script` receives (universe, is_shadow, &mut clock) where `clock`
+    /// yields the real universe's recorded heights to the shadow run.
+    fn assert_parity(
+        script: impl Fn(&mut Universe, &mut dyn FnMut(&Universe) -> u32, &mut dyn FnMut(&Universe, usize)),
+        parents_to_check: &[&str],
+        texts_to_check: &[&str],
+    ) {
+        // Real run: junk (non-shared history) is applied; heights are read
+        // live off the real primary at each boundary and recorded.
+        let mut recorded: Vec<u32> = Vec::new();
+        let mut real = Universe::new();
+        {
+            let mut clock = |u: &Universe| {
+                let h = u.height();
+                recorded.push(h);
+                h
+            };
+            let mut junk = |u: &Universe, n: usize| u.junk(n);
+            script(&mut real, &mut clock, &mut junk);
+        }
+
+        // Shadow run: junk is a NO-OP (the shadow never sees that history —
+        // exactly the oracle's position); boundary heights are replayed from
+        // the recording and the shadow primary is PADDED to each.
+        let mut replay = recorded.clone().into_iter();
+        let mut shadow = Universe::new();
+        {
+            let mut clock = |u: &Universe| {
+                let target = replay.next().expect("shadow consumed more clock reads");
+                pad_to_height(&u.primary, target);
+                target
+            };
+            let mut junk = |_: &Universe, _: usize| {};
+            script(&mut shadow, &mut clock, &mut junk);
+        }
+
+        for parent in parents_to_check {
+            assert_eq!(
+                children_order(&real.primary, parent),
+                children_order(&shadow.primary, parent),
+                "sibling order diverged under {parent}"
+            );
+        }
+        for sid in texts_to_check {
+            assert_eq!(
+                content_of(&real.primary, sid),
+                content_of(&shadow.primary, sid),
+                "text content diverged for {sid}"
+            );
+        }
+    }
+
+    /// S1 — equal clocks, reversed creation: higher peer id creates FIRST.
+    /// Real tie order must be (lamport, peer id); the shadow must reproduce it.
+    #[test]
+    fn s1_equal_clock_reversed_creation_order() {
+        assert_parity(
+            |u, clock, junk| {
+                junk(u, 37);
+                clock(u);
+                u.add_peer(100);
+                clock(u);
+                u.add_peer(101);
+                u.peer_create(1, "parent", "created-first", "peer-high");
+                u.peer_create(0, "parent", "created-second", "peer-low");
+                clock(u);
+                u.sync(1);
+                clock(u);
+                u.sync(0);
+            },
+            &["parent"],
+            &[],
+        );
+    }
+
+    /// S2 — lamport bump: the LOWER peer id raises its clock with unrelated
+    /// edits before creating; lamport must dominate peer id, shadow included.
+    #[test]
+    fn s2_lamport_bumped_create() {
+        assert_parity(
+            |u, clock, junk| {
+                junk(u, 12);
+                clock(u);
+                u.add_peer(100);
+                clock(u);
+                u.add_peer(101);
+                for _ in 0..5 {
+                    u.peer_update(0, "c2", "bump-bump-bump");
+                }
+                u.peer_create(0, "parent", "low-id-high-lamport", "peer-low");
+                u.peer_create(1, "parent", "high-id-low-lamport", "peer-high");
+                clock(u);
+                u.sync(1);
+                clock(u);
+                u.sync(0);
+            },
+            &["parent"],
+            &["c2"],
+        );
+    }
+
+    /// S3 — staggered forks: the primary advances (junk) BETWEEN AddPeers, so
+    /// the two peers fork at different base heights. This is exactly the case
+    /// an unpadded shadow gets wrong.
+    #[test]
+    fn s3_staggered_fork_heights() {
+        assert_parity(
+            |u, clock, junk| {
+                junk(u, 8);
+                clock(u);
+                u.add_peer(100);
+                junk(u, 9); // primary advances between forks
+                clock(u);
+                u.add_peer(101);
+                u.peer_create(0, "parent", "from-early-fork", "peer-early");
+                u.peer_create(1, "parent", "from-late-fork", "peer-late");
+                clock(u);
+                u.sync(0);
+                clock(u);
+                u.sync(1);
+            },
+            &["parent"],
+            &[],
+        );
+    }
+
+    /// S4 — concurrent text updates: the merged INTERLEAVING (not just the
+    /// multiset) must match exactly.
+    #[test]
+    fn s4_concurrent_text_interleaving() {
+        assert_parity(
+            |u, clock, junk| {
+                junk(u, 23);
+                clock(u);
+                u.add_peer(100);
+                clock(u);
+                u.add_peer(101);
+                u.peer_update(0, "c1", "daaa");
+                u.peer_update(1, "c1", "daab");
+                clock(u);
+                u.sync(1);
+                clock(u);
+                u.sync(0);
+                clock(u);
+                u.sync(1);
+            },
+            &["parent"],
+            &["c1"],
+        );
+    }
+
+    /// S5 — causal (non-concurrent) creates: sanity that padding does not
+    /// disturb the already-modelable case.
+    #[test]
+    fn s5_causal_creates_stay_ordered() {
+        assert_parity(
+            |u, clock, junk| {
+                junk(u, 5);
+                clock(u);
+                u.add_peer(100);
+                u.peer_create(0, "parent", "first", "peer-a");
+                clock(u);
+                u.sync(0);
+                clock(u);
+                u.add_peer(101); // forks AFTER peer-a landed
+                u.peer_create(1, "parent", "second", "peer-b");
+                clock(u);
+                u.sync(1);
+            },
+            &["parent"],
+            &[],
+        );
+    }
+
+    /// S8 — base-shape independence: the REAL universe's seed is built with a
+    /// different primary peer id AND different op granularity (content written
+    /// char-by-char in separate commits) than the shadow's one-shot seed. The
+    /// production global doc's base ops (org-scan boot) likewise differ from
+    /// anything the oracle replays — concurrent-edit ordering must not depend
+    /// on the BASE ops' ids, only on the base string + the peers' own op ids.
+    #[test]
+    fn s8_base_op_shape_independence() {
+        fn seed_weird(primary: &LoroDoc) -> Universe {
+            // parent/c1/c2 with the same STRINGS but different op shapes:
+            // empty create, then per-char text inserts in separate commits.
+            let tree = primary.get_tree(TREE_NAME);
+            for (sid, content, parent_sid) in [
+                ("parent", "parent", None),
+                ("c1", "c1", Some("parent")),
+                ("c2", "c2", Some("parent")),
+            ] {
+                let parent = parent_sid.map(|p| node_by_stable_id(primary, p));
+                let node = tree.create(parent).unwrap();
+                let meta = tree.get_meta(node).unwrap();
+                meta.insert(STABLE_ID, loro::LoroValue::from(sid)).unwrap();
+                let text: LoroText = meta
+                    .insert_container(CONTENT_RAW, LoroText::new())
+                    .unwrap();
+                primary.commit();
+                for (i, ch) in content.chars().enumerate() {
+                    text.insert(i, &ch.to_string()).unwrap();
+                    primary.commit();
+                }
+            }
+            Universe {
+                primary: primary.clone(),
+                peers: Vec::new(),
+            }
+        }
+
+        let script = |u: &mut Universe,
+                      clock: &mut dyn FnMut(&Universe) -> u32,
+                      _junk: &mut dyn FnMut(&Universe, usize)| {
+            clock(u);
+            u.add_peer(100);
+            clock(u);
+            u.add_peer(101);
+            u.peer_update(1, "c1", "daab");
+            u.peer_update(0, "c1", "daaa");
+            u.peer_create(1, "parent", "b-block", "peer-b");
+            u.peer_create(0, "parent", "a-block", "peer-a");
+            clock(u);
+            u.sync(1);
+            clock(u);
+            u.sync(0);
+            clock(u);
+            u.sync(1);
+        };
+
+        // Real: weird seed, different primary peer id (7777).
+        let mut recorded: Vec<u32> = Vec::new();
+        let mut real = seed_weird(&init_doc(7777));
+        {
+            let mut clock = |u: &Universe| {
+                let h = u.height();
+                recorded.push(h);
+                h
+            };
+            let mut junk = |u: &Universe, n: usize| u.junk(n);
+            script(&mut real, &mut clock, &mut junk);
+        }
+
+        // Shadow: standard one-shot seed, primary peer id 1, clock-padded.
+        let mut replay = recorded.into_iter();
+        let mut shadow = Universe::new();
+        {
+            let mut clock = |u: &Universe| {
+                let target = replay.next().expect("clock reads exhausted");
+                pad_to_height(&u.primary, target);
+                target
+            };
+            let mut junk = |_: &Universe, _: usize| {};
+            script(&mut shadow, &mut clock, &mut junk);
+        }
+
+        assert_eq!(
+            children_order(&real.primary, "parent"),
+            children_order(&shadow.primary, "parent"),
+            "sibling order must not depend on base op shapes"
+        );
+        assert_eq!(
+            content_of(&real.primary, "c1"),
+            content_of(&shadow.primary, "c1"),
+            "merged interleaving must not depend on base op shapes"
+        );
+    }
+
+    /// S7 — NEGATIVE CONTROL: without padding, the shadow universe DOES
+    /// diverge on the reversed-stagger shape (higher peer id forks earlier at
+    /// a lower height; real order = lamport order, unpadded shadow collapses
+    /// to equal lamports → peer-id order). Proves the padding is load-bearing
+    /// and the parity assertions above have teeth. If loro ever changes so
+    /// this stops diverging, the whole clock-sync mechanism needs re-review.
+    #[test]
+    fn s7_unpadded_shadow_diverges_negative_control() {
+        let script = |u: &mut Universe,
+                      clock: &mut dyn FnMut(&Universe) -> u32,
+                      junk: &mut dyn FnMut(&Universe, usize)| {
+            clock(u);
+            u.add_peer(101); // HIGHER id forks EARLY (low height)
+            junk(u, 9); //     primary advances…
+            clock(u);
+            u.add_peer(100); // …LOWER id forks LATE (high height)
+            u.peer_create(0, "parent", "from-early-high-id", "peer-early-101");
+            u.peer_create(1, "parent", "from-late-low-id", "peer-late-100");
+            clock(u);
+            u.sync(0);
+            clock(u);
+            u.sync(1);
+        };
+        // Peer index note: peers[0] = id 101 (added first), peers[1] = id 100.
+
+        // Padded shadow must match (same machinery as assert_parity).
+        assert_parity(
+            |u, clock, junk| script(u, clock, junk),
+            &["parent"],
+            &[],
+        );
+
+        // UNPADDED shadow must DIVERGE — otherwise the parity tests are vacuous.
+        let mut real = Universe::new();
+        {
+            let mut clock = |u: &Universe| u.height();
+            let mut junk = |u: &Universe, n: usize| u.junk(n);
+            script(&mut real, &mut clock, &mut junk);
+        }
+        let mut naive = Universe::new();
+        {
+            let mut clock = |_: &Universe| 0; // no read, no padding
+            let mut junk = |_: &Universe, _: usize| {}; // no junk either
+            script(&mut naive, &mut clock, &mut junk);
+        }
+        assert_ne!(
+            children_order(&real.primary, "parent"),
+            children_order(&naive.primary, "parent"),
+            "unpadded shadow agreed with the real universe — the negative \
+             control lost its teeth; re-review the clock-sync mechanism"
+        );
+    }
+
+    /// S6 — the kitchen sink: staggered forks + lamport bumps + reversed
+    /// creation + concurrent text on two blocks + a third peer.
+    #[test]
+    fn s6_combined_scenario() {
+        assert_parity(
+            |u, clock, junk| {
+                junk(u, 31);
+                clock(u);
+                u.add_peer(100);
+                junk(u, 4);
+                clock(u);
+                u.add_peer(101);
+                u.peer_update(1, "c1", "from-b");
+                u.peer_update(0, "c1", "from-a");
+                for _ in 0..3 {
+                    u.peer_update(1, "c2", "bump");
+                }
+                u.peer_create(1, "parent", "b-block", "peer-b");
+                u.peer_create(0, "parent", "a-block", "peer-a");
+                junk(u, 6);
+                clock(u);
+                u.add_peer(102);
+                u.peer_create(2, "parent", "c-block", "peer-c");
+                clock(u);
+                u.sync(2);
+                clock(u);
+                u.sync(0);
+                clock(u);
+                u.sync(1);
+                clock(u);
+                u.sync(2);
+            },
+            &["parent"],
+            &["c1", "c2"],
+        );
+    }
+
+    /// Deep-clone every doc in a universe via `fork()` + `set_peer_id(original)`.
+    /// This is the ShadowDoc `Clone` strategy: fork mints a NEW random peer id,
+    /// so continuing ops under the fork unrestored would change tie-breaks;
+    /// restoring the original id must let op counters continue seamlessly.
+    fn deep_clone(u: &Universe) -> Universe {
+        let clone_doc = |doc: &LoroDoc| {
+            let pid = doc.peer_id();
+            let forked = doc.fork();
+            forked
+                .set_peer_id(pid)
+                .expect("restore original peer id on fork");
+            forked
+        };
+        Universe {
+            primary: clone_doc(&u.primary),
+            peers: u.peers.iter().map(clone_doc).collect(),
+        }
+    }
+
+    /// S9 — ShadowDoc Clone de-risk: fork+set_peer_id mid-script (twice, one
+    /// clone-of-clone, matching proptest's per-step + per-case ref cloning)
+    /// must produce EXACTLY the outcomes of a never-cloned run — including a
+    /// peer-id tie-break minted AFTER the clones — and the clone must be a
+    /// deep copy (post-clone ops on the original must not leak in).
+    #[test]
+    fn s9_fork_set_peer_id_clone_preserves_predictions() {
+        let half1 = |u: &mut Universe| {
+            u.junk(9);
+            u.add_peer(100);
+            u.junk(4);
+            u.add_peer(101);
+            u.peer_create(1, "parent", "pre-clone-high", "pre-high");
+            u.peer_update(0, "c1", "half1-edit");
+        };
+        // Equal-lamport concurrent creates AFTER the clone: order depends on
+        // the ops carrying peer ids 100 vs 101 — a fork-minted random peer id
+        // would scramble this.
+        let half2a = |u: &mut Universe| {
+            u.peer_create(1, "parent", "post-clone-high", "post-high");
+            u.peer_create(0, "parent", "post-clone-low", "post-low");
+        };
+        let half2b = |u: &mut Universe| {
+            u.peer_update(0, "c2", "from-low");
+            u.peer_update(1, "c2", "from-high");
+            u.sync(1);
+            u.sync(0);
+            u.sync(1);
+        };
+
+        let mut baseline = Universe::new();
+        half1(&mut baseline);
+        half2a(&mut baseline);
+        half2b(&mut baseline);
+
+        let mut original = Universe::new();
+        half1(&mut original);
+        let cloned = deep_clone(&original);
+        let h_cloned = lamport_height(&cloned.primary);
+        // Deep-copy independence: ops on the ORIGINAL after cloning must not
+        // reach the clone (an Arc-shared alias would corrupt proptest replays).
+        original.junk(5);
+        original.peer_create(1, "parent", "orig-only", "orig-only");
+        assert_eq!(
+            lamport_height(&cloned.primary),
+            h_cloned,
+            "post-clone ops on the original leaked into the clone — fork is not a deep copy"
+        );
+
+        let mut cloned = cloned;
+        half2a(&mut cloned);
+        let mut clone_of_clone = deep_clone(&cloned);
+        half2b(&mut clone_of_clone);
+
+        assert_eq!(
+            children_order(&baseline.primary, "parent"),
+            children_order(&clone_of_clone.primary, "parent"),
+            "sibling order diverged after fork+set_peer_id cloning"
+        );
+        for sid in ["c1", "c2"] {
+            assert_eq!(
+                content_of(&baseline.primary, sid),
+                content_of(&clone_of_clone.primary, sid),
+                "text diverged for {sid} after fork+set_peer_id cloning"
+            );
+        }
+        assert!(
+            !children_order(&clone_of_clone.primary, "parent")
+                .iter()
+                .any(|s| s == "orig-only"),
+            "original's post-clone create leaked into the clone lineage"
+        );
+    }
+}

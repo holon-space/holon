@@ -841,6 +841,8 @@ pub fn snapshot_blocks_from_doc_settled(
     let tree = doc.get_tree(TREE_NAME);
     let mut blocks: HashMap<String, SnapshotBlock> = HashMap::new();
     let mut settled = true;
+    let mut sibling_keys: HashMap<Option<loro::TreeID>, HashMap<loro::TreeID, String>> =
+        HashMap::new();
     for node in tree.get_nodes(false) {
         if matches!(
             node.parent,
@@ -864,8 +866,21 @@ pub fn snapshot_blocks_from_doc_settled(
         let block = read_block_from_tree(&tree, node.id, parent_tid);
         // The fractional index is the Loro adapter's internal ordering encoding
         // (ADR 0005): captured here for the SQL projection, never on the block.
-        let sort_key = tree
-            .fractional_index(node.id)
+        // Computed per sibling group so concurrently-created siblings whose
+        // peers minted the SAME fi still project DISTINCT keys in Loro's true
+        // child order (see `effective_sibling_sort_keys`).
+        let sort_key = sibling_keys
+            .entry(parent_tid)
+            .or_insert_with(|| {
+                let siblings = match parent_tid {
+                    Some(p) => tree.children(p).unwrap_or_default(),
+                    None => tree.roots(),
+                };
+                let keys = effective_sibling_sort_keys(&tree, &siblings);
+                siblings.into_iter().zip(keys).collect()
+            })
+            .get(&node.id)
+            .cloned()
             .unwrap_or_else(default_sort_key);
         if std::env::var("HOLON_LORO_DUP_DEBUG").is_ok()
             && let Some(prev) = blocks.get(&block.id.to_string())
@@ -880,6 +895,51 @@ pub fn snapshot_blocks_from_doc_settled(
         blocks.insert(block.id.to_string(), SnapshotBlock { block, sort_key });
     }
     (blocks, settled)
+}
+
+/// Effective SQL sort keys for one sibling group, in Loro's true child order
+/// (`tree.children`/`tree.roots`). Normally each key IS the node's fractional
+/// index — but concurrent peer creates at the same position mint the SAME fi
+/// (jitter is 0), and Loro breaks that tie internally by op id, an order the
+/// plain fi string loses. Projecting the tied string would collapse SQL to its
+/// `ORDER BY sort_key, id` fallback — id-string order, random from the user's
+/// PoV and divergent from the Loro authority. Tied runs therefore get a
+/// `.<position>` suffix in child order; `.` (0x2E) sorts below every fi hex
+/// char, so a suffixed key keeps its place relative to every distinctly-keyed
+/// sibling (ties share the exact fi string as a common prefix).
+fn effective_sibling_sort_keys(tree: &loro::LoroTree, siblings: &[loro::TreeID]) -> Vec<String> {
+    let fis: Vec<String> = siblings
+        .iter()
+        .map(|&tid| tree.fractional_index(tid).unwrap_or_else(default_sort_key))
+        .collect();
+    fis.iter()
+        .enumerate()
+        .map(|(i, fi)| {
+            let tied = fis.iter().filter(|f| *f == fi).count() > 1;
+            if tied {
+                let run_pos = fis[..i].iter().filter(|f| *f == fi).count();
+                format!("{fi}.{run_pos:06x}")
+            } else {
+                fi.clone()
+            }
+        })
+        .collect()
+}
+
+/// A doc's Lamport height: 1 + the max lamport of any applied op, computed
+/// from public API only (frontiers + `ChangeMeta`). This scalar is the ONLY
+/// value the E-solid shadow-mesh oracle reads from the SUT (clock sync at
+/// fork/sync boundaries); see `multi_peer::clock_parity_spike` for the parity
+/// proof and the negative control showing the padding is load-bearing.
+pub fn doc_lamport_height(doc: &loro::LoroDoc) -> u32 {
+    doc.oplog_frontiers()
+        .iter()
+        .map(|id| {
+            let c = doc.get_change(id).expect("frontier change present");
+            c.lamport + (id.counter - c.id.counter) as u32 + 1
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Check if a node is alive (not deleted) in the tree.
@@ -2252,15 +2312,39 @@ impl LoroBackend {
             .unwrap_or_default()
     }
 
+    /// The live doc's Lamport height — the E-solid oracle's clock-sync
+    /// scalar (see `multi_peer::lamport_height` / `clock_parity_spike`).
+    pub async fn lamport_height(&self) -> Result<u32, ApiError> {
+        self.collab_doc
+            .with_read(|doc| Ok(doc_lamport_height(doc)))
+            .map_err(|e| ApiError::InternalError {
+                message: format!("lamport_height: {e}"),
+            })
+    }
+
     /// The Loro tree's fractional index for `id` — the adapter's internal
     /// ordering encoding the projector writes to SQL `sort_key` (ADR 0005).
-    /// `None` when the node carries no index yet.
+    /// `None` when the node carries no index yet. Tie-disambiguated the same
+    /// way as the snapshot projection (`effective_sibling_sort_keys`) so the
+    /// org-scan order writeback can never overwrite a disambiguated key with
+    /// the raw tied fi.
     pub async fn block_sort_key(&self, id: &str) -> Result<Option<String>, ApiError> {
         let tree_id = self.require_tree_id(id).await?;
         self.collab_doc
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                Ok(tree.fractional_index(tree_id))
+                if tree.fractional_index(tree_id).is_none() {
+                    return Ok(None);
+                }
+                let siblings = match get_node_parent(&tree, tree_id) {
+                    Some(p) => tree.children(p).unwrap_or_default(),
+                    None => tree.roots(),
+                };
+                let keys = effective_sibling_sort_keys(&tree, &siblings);
+                Ok(siblings
+                    .iter()
+                    .position(|t| *t == tree_id)
+                    .map(|i| keys[i].clone()))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("block_sort_key({id}): {e}"),

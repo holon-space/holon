@@ -123,7 +123,7 @@ where
 {
     // Pin the primary's Loro peer id below the SUT's peer ids (peer_idx+100)
     // so concurrent same-position inserts tie-break the same way as the
-    // reference's `loro_merge_text` oracle (primary=1 < peer=2). With a
+    // oracle's shadow mesh (shadow primary=1 < shadow peers=100+idx). With a
     // random primary id the merge interleaving flips per run — the axis-3
     // conflict fixture caught exactly that.
     crate::pbt::set_loro_peer_id_if_unset("1");

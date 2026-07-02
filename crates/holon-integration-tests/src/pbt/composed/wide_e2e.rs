@@ -36,9 +36,12 @@ use crate::pbt::composed::composed_invariant_catalog;
 use crate::pbt::composed::harness::{ComposedSlice, sut_ids};
 use crate::pbt::composed::seed_primitives::{C1, C2, PARENT, fixed_ids};
 use crate::pbt::composed::subsystem_seed::build_started_ref;
+use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::{E2ETransition, NavigateFocus};
+use crate::test_environment::pbt_quiet_floor;
+use holon::api::BackendEngine;
 
 /// The seed **page** the working blocks sit directly under. It is the focus root (so
 /// its children are the editable candidates) but is itself excluded from candidates
@@ -48,8 +51,110 @@ pub fn page_root() -> EntityUri {
     EntityUri::block("structural-page")
 }
 
-/// Settle window for the headless CDC pump after a write.
+/// Settle window for the headless CDC pump after a write. This is the CAP on the
+/// [`converge_projections`] convergence wait, not a flat sleep: a settled SUT returns in
+/// ~one quiet-floor poll, and a busy one is bounded by this so it never over-waits vs the
+/// old flat `sleep(SETTLE)`.
 pub const SETTLE: Duration = Duration::from_millis(150);
+
+/// The slice handle for [`WideE2E`] — the store handles the post-write settle needs to
+/// prove all three projections (Turso CDC + Loro + org) have drained, instead of a flat
+/// `sleep(SETTLE)`. Absent handles (a Loro-only draw has no Turso engine / frontend org
+/// sync) make the corresponding projection a no-op — those stores are synchronous, so
+/// there is nothing to wait for.
+#[derive(Clone, Default)]
+pub struct WideHandle {
+    /// The canonical Turso `BackendEngine` — its `db_handle().cdc_emitted_watermark()` is
+    /// the CDC drain signal (`None` for a Loro-only draw).
+    engine: Option<Arc<BackendEngine>>,
+    /// The booted frontend component — the lazy accessor for the Loro sync handle /
+    /// doc-store (Loro quiescence) and the `OrgSyncIdleSignal` (org re-render drain).
+    /// `None` for a non-frontend (Loro-only) draw. Queried at settle time, not at boot,
+    /// because the sync controller resolves on a spawned `post_ready_work` task.
+    frontend: Option<Arc<HeadlessFrontendComponent>>,
+}
+
+impl WideHandle {
+    /// Build the settle handle from a booted builder bundle — the windowed harness
+    /// ([`windowed_composed_sut`]) reuses the base session's engine/frontend so its
+    /// per-apply settle converges the same three projections as the headless path.
+    pub fn from_bundle(bundle: &crate::pbt::composed::builder::ComposedSut) -> Self {
+        Self {
+            engine: bundle.engine.clone(),
+            frontend: bundle.frontend.clone(),
+        }
+    }
+}
+
+/// The 3-projection convergence settle that replaces the flat `sleep(SETTLE)` after a
+/// write. Waits — capped at `budget` — for every projection the invariants read to reach
+/// quiescence:
+///
+/// 1. **Turso CDC** — `cdc_emitted_watermark` stable for one quiet floor (the `block_raw`
+///    matview the block invariants query is CDC-fed).
+/// 2. **Loro** — the sync controller's `last_synced_frontiers()` catches up to the
+///    authority doc's `oplog_frontiers()` (a peer/merge write projects async).
+/// 3. **org** — the file-sync controller's `OrgSyncIdleSignal` goes quiescent (the org
+///    re-render `inv-blocks-match-ref/org` reads has drained).
+///
+/// A CDC-only signal (the reverted lever 2) under-settled — Loro/org lagged and the
+/// block/org invariants diverged; this covers all three. Each stage is bounded by the
+/// shared `deadline`, so the whole thing never exceeds `budget`.
+async fn converge_projections(handle: &WideHandle, budget: Duration) {
+    let deadline = tokio::time::Instant::now() + budget;
+    let quiet = pbt_quiet_floor();
+
+    // 1. Turso CDC drain: watermark stable for `quiet`, bounded by `deadline`.
+    if let Some(engine) = &handle.engine {
+        let db = engine.db_handle();
+        let mut last = db.cdc_emitted_watermark();
+        let mut stable_since = tokio::time::Instant::now();
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            let now = db.cdc_emitted_watermark();
+            if now == last {
+                if stable_since.elapsed() >= quiet {
+                    break;
+                }
+            } else {
+                last = now;
+                stable_since = tokio::time::Instant::now();
+            }
+        }
+    }
+
+    // 2. Loro sync controller catches up to the authority doc's frontiers.
+    if let Some(comp) = &handle.frontend {
+        if let (Some(sync), Some(store)) = (comp.loro_sync_handle(), comp.loro_doc_store()) {
+            loop {
+                let current = store
+                    .get_global_doc()
+                    .await
+                    .expect("converge_projections: get_global_doc failed")
+                    .doc()
+                    .oplog_frontiers();
+                if sync.last_synced_frontiers() == current {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    }
+
+    // 3. org re-render drain: the file-sync loop idle for `quiet`, bounded by remaining.
+    if let Some(comp) = &handle.frontend {
+        if let Some(idle) = comp.org_idle_signal() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            idle.wait_quiescent(quiet, remaining).await;
+        }
+    }
+}
 
 /// The working tree AS the boot org (page-rooted leaf siblings, pinned bare `:ID:`),
 /// so the session ingests it into the store AND `SutOrgRead` parses it — store and
@@ -222,7 +327,7 @@ fn wide_seed_tree() -> Vec<NewBlock> {
 pub async fn boot_and_seed_wide(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
-) -> (CapMap, BTreeSet<EntityUri>) {
+) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
     // SUT-side parameterization seam: the booted set follows the oracle's drawn wiring
     // (today fixed to `full_headless` by `wide_e2e_ref`; `init_state` draws
     // `any_valid_wiring()` once the ref-side wiring + required-invariants sub-steps land).
@@ -235,6 +340,13 @@ pub async fn boot_and_seed_wide(
         &wide_seed_tree(),
     )
     .await;
+    // The settle handles — the Turso engine (CDC watermark) and the frontend component
+    // (Loro sync + org idle). Cloned out before `bundle.caps` is moved so the
+    // post-write [`converge_projections`] settle can prove all three projections drained.
+    let handle = WideHandle {
+        engine: bundle.engine.clone(),
+        frontend: bundle.frontend.clone(),
+    };
     let mut caps = bundle.caps;
 
     // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME `MetricsSut`
@@ -300,10 +412,10 @@ pub async fn boot_and_seed_wide(
             &mut caps,
         )
         .await;
-        tokio::time::sleep(SETTLE).await;
+        converge_projections(&handle, SETTLE).await;
     }
 
-    (caps, scaffold)
+    (caps, handle, scaffold)
 }
 
 /// The §Round-5 windowed dual of [`boot_and_seed_wide`]: boot the SAME wide working tree
@@ -397,14 +509,18 @@ pub async fn boot_and_seed_wide_windowed_base(
 /// apply/check futures (the booted backend runs on its own session runtime).
 pub fn windowed_composed_sut(
     caps: CapMap,
+    handle: WideHandle,
     resolver: IdResolver,
     scaffold_ids: BTreeSet<EntityUri>,
     rt: tokio::runtime::Runtime,
     settle: crate::pbt::composed::harness::SettleHook,
 ) -> crate::pbt::composed::harness::ComposedSut<WideE2E> {
+    // The `handle` carries the base session's engine/frontend so the per-apply
+    // [`converge_projections`] settle covers the same three projections as the headless
+    // path. The `settle` hook additionally pumps the gpui window before each check.
     crate::pbt::composed::harness::ComposedSut::<WideE2E>::from_parts(
         caps,
-        (),
+        handle,
         resolver,
         scaffold_ids,
         rt,
@@ -589,11 +705,13 @@ pub struct WideE2E;
 impl ComposedSlice for WideE2E {
     type Transition = E2ETransition;
     type Machine = WideE2EMachine;
-    type Handle = ();
-    // Unused for `WideE2E`: the `required_invariants` override below supersedes the static
-    // list, deriving the per-draw floor from the WHOLE shared catalog (every invariant this
+    // My change (settle): the per-apply convergence settle needs the store handles.
+    type Handle = WideHandle;
+    // Main's change (uvuvnwnn): the per-draw `required_invariants` override below supersedes
+    // the static list, deriving the floor from the WHOLE shared catalog (every invariant this
     // draw's caps select). The cap-level `wide_cap_presence_guard` proves the widest wiring
-    // selects the whole catalog; there is no per-id list to maintain.
+    // selects the whole catalog; there is no per-id list to maintain (`WIDE_REQUIRED_INVARIANTS`
+    // was retired).
     const REQUIRED_INVARIANTS: &'static [&'static str] = &[];
     const SETTLE: Duration = SETTLE;
     const MULTI_THREAD: bool = true;
@@ -601,9 +719,15 @@ impl ComposedSlice for WideE2E {
     async fn build(
         resolver: &IdResolver,
         ref_state: &ReferenceState,
-    ) -> (CapMap, (), BTreeSet<EntityUri>) {
-        let (caps, scaffold) = boot_and_seed_wide(resolver, ref_state).await;
-        (caps, (), scaffold)
+    ) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
+        boot_and_seed_wide(resolver, ref_state).await
+    }
+
+    /// Replace the flat post-apply `sleep(SETTLE)` with the 3-projection convergence
+    /// settle — the CDC-only lever under-settled (Loro/org lagged and the block/org
+    /// invariants diverged). Capped at `SETTLE`, so it never over-waits vs the old sleep.
+    async fn settle_after_apply(handle: &WideHandle, _: &CapMap) {
+        converge_projections(handle, SETTLE).await;
     }
 
     async fn apply_transition(
@@ -792,7 +916,7 @@ mod tests {
             .expect("build multi-thread runtime");
         rt.block_on(async {
             let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-            let (caps, scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
+            let (caps, _handle, scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
             let report =
                 <WideE2E as ComposedSlice>::run_report(&caps, &resolver, &scaffold, &ref_state)
                     .await;
@@ -900,7 +1024,7 @@ mod tests {
             .expect("build multi-thread runtime");
         let sut_caps = rt.block_on(async {
             let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-            let (caps, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
+            let (caps, _handle, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
             caps.cap_set()
         });
         drop(rt);

@@ -35,7 +35,7 @@ use holon_integration_tests::pbt::composed::harness::{ComposedSut, SettleHook};
 use holon_integration_tests::pbt::composed::wide_e2e::{
     boot_and_seed_wide_windowed_base, disclose_excluded, narrow_to_windowed_alphabet,
     set_windowed_cap_set, wide_e2e_ref, windowed_composed_sut, WideE2E, WideE2EMachine,
-    WideE2EWindowedMachine,
+    WideE2EWindowedMachine, WideHandle,
 };
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::ui_harness::{try_start_embedded_mcp, wait_for_geometry_ready};
@@ -184,6 +184,9 @@ pub fn run(label: &'static str) {
         interaction_tx,
     ));
     let geometry_box: Box<dyn GeometryProvider> = Box::new(geometry.clone());
+    // Settle handle (engine + frontend) captured before `bundle.caps` is moved, so the
+    // per-apply settle converges CDC + Loro + org like the headless path.
+    let handle = WideHandle::from_bundle(&bundle);
     let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry_box, reactive, tui_driver);
 
     // Settle hook: the renderer self-drives on the backend runtime, so settling is
@@ -218,7 +221,7 @@ pub fn run(label: &'static str) {
         .enable_all()
         .build()
         .expect("composed runtime");
-    let mut sut = windowed_composed_sut(overlaid, resolver, scaffold, composed_rt, settle);
+    let mut sut = windowed_composed_sut(overlaid, handle, resolver, scaffold, composed_rt, settle);
 
     // ── 5. ONE generated windowed sequence, composed catalog every tick. ──
     let live = sut.cap_set();

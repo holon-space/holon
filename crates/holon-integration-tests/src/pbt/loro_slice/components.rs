@@ -119,6 +119,15 @@ impl SutLoroLog for LoroBackendComponent {
         )
     }
 
+    async fn loro_lamport_height(&self) -> Option<u32> {
+        Some(
+            self.backend
+                .lamport_height()
+                .await
+                .expect("lamport_height must not fail on a live doc"),
+        )
+    }
+
     /// Every block held in the live Loro tree, typed. Always `Some` here (Loro
     /// is, by definition, enabled on this component).
     async fn loro_block_snapshot(&self) -> Option<Vec<holon_api::block::Block>> {

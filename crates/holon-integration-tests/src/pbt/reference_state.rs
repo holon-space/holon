@@ -432,6 +432,23 @@ pub struct ReferenceState {
     /// Loro-only peer instances for multi-instance sync testing.
     pub peers: Vec<PeerRefState>,
 
+    /// E-solid shadow Loro peer mesh — the oracle-side CRDT predictor for
+    /// peer-merge outcomes (tie-break sibling order, concurrent-text
+    /// interleaving). Created lazily at the first `AddPeer`, seeded from the
+    /// ref block map at that moment. `Clone` deep-forks every shadow doc
+    /// (proptest clones per step and per case). See [`super::shadow_mesh`].
+    pub shadow_mesh: Option<super::shadow_mesh::ShadowMesh>,
+
+    /// Clock side-channel (the `IdResolver` pattern): the composed harness
+    /// writes the SUT's scalar Lamport height (`SutLoroLog::loro_lamport_height`)
+    /// here after every apply+settle (and once after build); the ref pads the
+    /// shadow primary to it before boundary ops. `Clone` SHARES the cell — it
+    /// is a harness seam, not model state. Empty/stale during proptest's
+    /// generation phase, which is harmless: generation consumes no
+    /// clock-dependent predictions and execution re-evolves the ref fresh
+    /// (padding is lenient — see `ShadowMesh::pad_primary_to`).
+    pub clock_feed: Arc<std::sync::Mutex<Option<u32>>>,
+
     /// Shadow interpreter resolved from FluxDI — source of truth for widget
     /// names and render DSL parsing.
     pub interpreter: Arc<ShadowInterpreter>,
@@ -456,12 +473,6 @@ pub struct PeerRefState {
     /// blocks the primary may have since deleted must NOT be re-added,
     /// because the actual Loro CRDT keeps primary-side deletes.
     pub created_stable_ids: std::collections::HashSet<String>,
-    /// Snapshot of block content at AddPeer time (or after the last sync).
-    /// Used by `merge_peer_blocks_into_primary` to detect concurrent
-    /// primary+peer edits on the same block: if both `existing.content` and
-    /// `pb.content` diverged from the baseline, Loro's text CRDT keeps both
-    /// insertions, so we need a real CRDT merge instead of naive LWW.
-    pub baseline_contents: HashMap<String, String>,
 }
 
 /// Cursor position within a focused block. Tracks line and column to predict
@@ -724,6 +735,8 @@ impl ReferenceState {
             cap_set: None,
             real_editor: false,
             peers: Vec::new(),
+            shadow_mesh: None,
+            clock_feed: Arc::new(std::sync::Mutex::new(None)),
             interpreter,
         }
     }
@@ -1759,6 +1772,24 @@ impl ReferenceState {
         event.mutation.apply_to(&mut blocks);
         self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
         self.recanon_and_rebuild();
+    }
+
+    /// Pad the shadow primary to the latest fed SUT Lamport height, then
+    /// mirror the ref block map into it (membership/parent/content diff).
+    /// No-op until the mesh exists (first `AddPeer`). Runs after EVERY ref
+    /// transition (the `declare_e2e_transitions!` post-dispatch hook) so a
+    /// primary edit inside a peer-concurrency window lands in the shadow at
+    /// the same Lamport the SUT's edit lands at — which is what makes the
+    /// shadow's concurrent-merge interleaving prediction exact (walking
+    /// skeleton #2, `shadow_mesh_predicts_concurrent_primary_peer_merge`).
+    pub fn shadow_catch_up_primary(&self) {
+        let Some(mesh) = &self.shadow_mesh else {
+            return;
+        };
+        if let Some(h) = *self.clock_feed.lock().expect("clock_feed lock") {
+            mesh.pad_primary_to(h);
+        }
+        mesh.catch_up_primary(&self.domain.block_state.blocks);
     }
 
     /// Re-canonicalize sequences and rebuild profile tracking.

@@ -46,7 +46,29 @@ class Span:
 
 def load_events(path: str) -> list[dict]:
     with open(path) as f:
-        data = json.load(f)
+        text = f.read()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # tracing-chrome leaves the file truncated (no closing `]`) whenever the
+        # process exits without dropping the `FlushGuard` — which is every PASSING
+        # test, since the guard lives in a `OnceLock` (see test_tracing.rs). The
+        # writer emits one JSON object per line after the opening `[`, so recover by
+        # parsing line-by-line and discarding the final partial line.
+        data = []
+        for line in text.splitlines():
+            line = line.strip().rstrip(",")
+            if not line or line in ("[", "]"):
+                continue
+            if line.startswith("["):
+                line = line[1:]
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # trailing partial line
+        print(f"[analyze-chrome-trace] recovered {len(data)} events from truncated "
+              f"trace (unflushed FlushGuard — pass CHROME_TRACE flush or ignore)",
+              file=sys.stderr)
     if isinstance(data, dict):
         return data.get("traceEvents", [])
     return data

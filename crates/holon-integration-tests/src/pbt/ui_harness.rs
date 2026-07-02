@@ -50,18 +50,16 @@ pub fn set_memory_multiplier_if_unset(default: &str) {
 }
 
 /// Pin the primary's Loro peer_id (`HOLON_LORO_PEER_ID=1`) if it isn't
-/// already set, so the PBT reference model's `loro_merge_text`
-/// (`crates/holon-integration-tests/src/pbt/state_machine.rs:58`, which
-/// hardcodes peer_a=1, peer_b=2 when simulating the merge) predicts the
-/// same RGA tiebreak ordering production produces.
+/// already set, so the PBT oracle's shadow mesh (whose shadow primary is
+/// `init_doc(1)`, shadow peers `100 + idx` — see `pbt/shadow_mesh.rs`)
+/// predicts the same RGA/op-id tiebreak ordering production produces.
 ///
 /// Production's `LoroDocument::new` defaults to `rand::random::<u64>()`
-/// for global P2P uniqueness; this override is test-only. Loro RGA
-/// tiebreaks concurrent inserts by lower peer_id, so a large random
-/// primary id can flip merge order relative to the reference's
-/// peer_a=1 < peer_b=2 (= peer_idx+100 in the SUT) assumption — see
-/// `crates/holon/examples/loro_text_update_vs_delete_insert.rs` for
-/// the worked-through repro.
+/// for global P2P uniqueness; this override is test-only. Loro breaks
+/// concurrent-op ties by (lamport, peer id), so a large random primary id
+/// can flip merge order relative to the shadow's primary=1 < peers=100+idx
+/// layout — see `crates/holon/examples/loro_text_update_vs_delete_insert.rs`
+/// for the worked-through repro.
 ///
 /// Call before the PBT thread spawns; the env var is read by
 /// `LoroDocument::new` / `load_from_file` at primary doc creation

@@ -844,7 +844,7 @@ mod teeth {
     async fn wide_frontend_sut_only_navigate_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(structural_ref()); // focused on the page root
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only NavigateFocus to the sidebar-listed `journals` page — DON'T advance the
         // oracle (which stays on the structural-page root).
@@ -886,7 +886,7 @@ mod teeth {
     async fn wide_frontend_toggle_state_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(structural_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let toggle = ToggleState {
             block_id: fixed_ids().c1,
@@ -920,7 +920,7 @@ mod teeth {
     async fn wide_frontend_sut_only_toggle_state_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(structural_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only toggle — DON'T advance the oracle.
         let toggle = ToggleState {
@@ -984,7 +984,7 @@ mod teeth {
     async fn wide_frontend_setup_watch_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(structural_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let watch = all_blocks_watch("query-allblocks");
         watch.apply_to_ref(&mut oracle);
@@ -1018,7 +1018,7 @@ mod teeth {
     async fn wide_frontend_sut_only_watch_rows_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(structural_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // Watch on BOTH sides (so the subscription set agrees) ...
         let watch = all_blocks_watch("query-allblocks");
@@ -1137,7 +1137,7 @@ mod teeth {
     async fn wide_split_then_type_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // Split `c1` at position 1 — the new block (the "1" tail of "c1") becomes the
         // focused, active editor at caret 0 on BOTH sides.
@@ -1251,6 +1251,356 @@ mod teeth {
         );
     }
 
+    /// Peer-merge sibling-order projection guard: two blocks concurrently
+    /// peer-created under one parent must show the SAME order in the SQL
+    /// projection (`sorted_children`, ORDER BY sort_key) as in Loro's tree
+    /// fractional index (insertion order — the canonical order per the
+    /// 2026-07-03 decision). Pre-fix the Loro fi never reached a distinct SQL
+    /// `sort_key` (both rows tied → id-string fallback), so SQL showed
+    /// [aaa, zzz] while Loro held [zzz, aaa]. Cheap deterministic regression
+    /// guard for the projection gap, distinct from the PBT invariant.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_merge_sibling_order_sql_matches_loro() {
+        use holon_pbt_core::capabilities::{SutLoro, SutLoroLog, SutSqlProjection};
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let bundle = compose_sut_seeded(
+            &ComponentSet::full_headless(),
+            &resolver,
+            &[("structural-page.org", WIDE_TREE_ORG)],
+            &[],
+        )
+        .await;
+        let caps = bundle.caps;
+
+        {
+            let loro = caps.expect::<dyn SutLoro>();
+            loro.apply_add_peer().await;
+            loro.apply_peer_create(0, Some("parent"), "created-first", "peer-zzz")
+                .await;
+            loro.apply_add_peer().await;
+            loro.apply_peer_create(1, Some("parent"), "created-second", "peer-aaa")
+                .await;
+            loro.apply_sync_with_peer(1).await;
+            loro.apply_sync_with_peer(0).await;
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let loro_order = caps
+            .expect::<dyn SutLoroLog>()
+            .loro_children_of("block:parent")
+            .await
+            .expect("block:parent must be present in Loro");
+        let sql_order: Vec<String> = caps
+            .expect::<dyn SutSqlProjection>()
+            .sorted_children(&EntityUri::block("parent"))
+            .await
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+
+        assert_eq!(
+            loro_order,
+            vec!["block:peer-zzz".to_string(), "block:peer-aaa".to_string()],
+            "Loro must hold insertion order (peer-zzz created first)"
+        );
+        assert_eq!(
+            sql_order, loro_order,
+            "SQL sorted_children must match Loro insertion order — a tie in \
+             sort_key means the Loro fractional index never reached the SQL \
+             projection for the peer-merge path"
+        );
+    }
+
+    /// E-solid walking skeleton: a SHADOW peer mesh — fresh docs, seeded with
+    /// only the working-tree base strings, clock-padded to the PRODUCTION
+    /// SUT's scalar lamport heights at each fork/sync boundary, driving the
+    /// same logical ops through the same `multi_peer` helpers — must predict
+    /// the production doc's peer-merge outcomes EXACTLY: tied-sibling order
+    /// (op-id tie-break) and concurrent-text interleaving. The only values
+    /// crossing SUT→shadow are lamport heights (clocks, not data).
+    ///
+    /// Mechanism parity is proven pure-loro in
+    /// `holon_loro::multi_peer::clock_parity_spike` (incl. the negative
+    /// control); THIS test proves it against the real production boot, whose
+    /// primary carries org-scan/boot history the shadow never replays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shadow_mesh_predicts_sut_peer_merge_exactly() {
+        use holon::sync::multi_peer::{
+            self, create_block_with_id, pad_to_height, sync_docs_direct,
+        };
+        use holon_pbt_core::capabilities::{SutLoro, SutLoroLog};
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let bundle = compose_sut_seeded(
+            &ComponentSet::full_headless(),
+            &resolver,
+            &[("structural-page.org", WIDE_TREE_ORG)],
+            &[],
+        )
+        .await;
+        let caps = bundle.caps;
+        let sut_loro = caps.expect::<dyn SutLoro>();
+        let log = caps.expect::<dyn SutLoroLog>();
+        let sut_height = || async {
+            log.loro_lamport_height()
+                .await
+                .expect("live Loro doc must report a lamport height")
+        };
+
+        // Shadow universe: primary seeded with ONLY the working tree (same
+        // base strings as WIDE_TREE_ORG), peers forked at clock-padded heights.
+        let shadow_primary = multi_peer::init_doc(1);
+        let page = create_block_with_id(&shadow_primary, None, "structural-page", "structural-page");
+        // parent/c1/c2 are SIBLINGS under the page (WIDE_TREE_ORG is flat).
+        create_block_with_id(&shadow_primary, Some(page), "parent", "parent");
+        create_block_with_id(&shadow_primary, Some(page), "c1", "c1");
+        create_block_with_id(&shadow_primary, Some(page), "c2", "c2");
+        let mut shadow_peers: Vec<loro::LoroDoc> = Vec::new();
+        let shadow_add_peer = |peers: &mut Vec<loro::LoroDoc>, h: u32| {
+            pad_to_height(&shadow_primary, h);
+            let doc = multi_peer::init_doc(100 + peers.len() as u64);
+            doc.import(
+                &shadow_primary
+                    .export(loro::ExportMode::Snapshot)
+                    .expect("shadow snapshot"),
+            )
+            .expect("shadow peer import");
+            peers.push(doc);
+        };
+
+        // ── Script (s6 shape: reversed creation + lamport bumps + concurrent
+        //    text on c1, driven on SUT and shadow in lockstep) ──
+        let h = sut_height().await;
+        shadow_add_peer(&mut shadow_peers, h);
+        sut_loro.apply_add_peer().await;
+
+        let h = sut_height().await;
+        shadow_add_peer(&mut shadow_peers, h);
+        sut_loro.apply_add_peer().await;
+
+        let shadow_update = |idx: usize, sid: &str, content: &str| {
+            let node = crate::pbt::peer_ops::find_node_by_stable_id(&shadow_peers[idx], sid)
+                .unwrap_or_else(|| panic!("shadow peer {idx} lacks {sid}"));
+            multi_peer::update_block(&shadow_peers[idx], node, content);
+        };
+        let shadow_create = |idx: usize, parent_sid: &str, content: &str, sid: &str| {
+            let parent =
+                crate::pbt::peer_ops::find_node_by_stable_id(&shadow_peers[idx], parent_sid)
+                    .unwrap_or_else(|| panic!("shadow peer {idx} lacks {parent_sid}"));
+            create_block_with_id(&shadow_peers[idx], Some(parent), content, sid);
+        };
+
+        shadow_update(1, "c1", "from-b");
+        sut_loro.apply_peer_update(1, "c1", "from-b").await;
+        shadow_update(0, "c1", "from-a");
+        sut_loro.apply_peer_update(0, "c1", "from-a").await;
+        for _ in 0..3 {
+            shadow_update(1, "c2", "bump");
+            sut_loro.apply_peer_update(1, "c2", "bump").await;
+        }
+        // HIGHER peer id creates FIRST — the reversed-creation tie shape.
+        shadow_create(1, "parent", "b-block", "peer-b");
+        sut_loro
+            .apply_peer_create(1, Some("parent"), "b-block", "peer-b")
+            .await;
+        shadow_create(0, "parent", "a-block", "peer-a");
+        sut_loro
+            .apply_peer_create(0, Some("parent"), "a-block", "peer-a")
+            .await;
+
+        let h = sut_height().await;
+        pad_to_height(&shadow_primary, h);
+        sync_docs_direct(&shadow_primary, &shadow_peers[1]);
+        sut_loro.apply_sync_with_peer(1).await;
+
+        let h = sut_height().await;
+        pad_to_height(&shadow_primary, h);
+        sync_docs_direct(&shadow_primary, &shadow_peers[0]);
+        sut_loro.apply_sync_with_peer(0).await;
+
+        // ── Compare: the shadow's PREDICTION vs the production doc ──
+        let strip = |v: Vec<String>| -> Vec<String> {
+            v.into_iter()
+                .map(|s| s.strip_prefix("block:").map(str::to_string).unwrap_or(s))
+                .collect()
+        };
+        let sut_children = strip(
+            log.loro_children_of("block:parent")
+                .await
+                .expect("block:parent present in SUT Loro"),
+        );
+        let shadow_tree = shadow_primary.get_tree(multi_peer::TREE_NAME);
+        let shadow_parent =
+            crate::pbt::peer_ops::find_node_by_stable_id(&shadow_primary, "parent").unwrap();
+        let shadow_children: Vec<String> = shadow_tree
+            .children(shadow_parent)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| {
+                crate::pbt::peer_ops::read_node_stable_id(&shadow_primary, c)
+                    .expect("shadow child stable id")
+            })
+            .collect();
+        assert_eq!(
+            strip(shadow_children),
+            sut_children,
+            "shadow mesh failed to predict the SUT's tied-sibling order"
+        );
+
+        let sut_c1 = log
+            .loro_block_snapshot()
+            .await
+            .expect("loro snapshot")
+            .into_iter()
+            .find(|b| b.id.as_str() == "block:c1")
+            .expect("c1 present")
+            .content;
+        let shadow_c1_node =
+            crate::pbt::peer_ops::find_node_by_stable_id(&shadow_primary, "c1").unwrap();
+        let shadow_c1 = multi_peer::read_text(&shadow_tree, shadow_c1_node);
+        assert_eq!(
+            shadow_c1, sut_c1,
+            "shadow mesh failed to predict the SUT's merged text interleaving"
+        );
+    }
+
+    /// E-solid walking skeleton #2 — CONCURRENT PRIMARY+PEER edit: the primary
+    /// types into `c1` through the real editor path while peer 0 holds an
+    /// unsynced `c1` edit; the sync merges them (the concurrent-merge case).
+    /// The shadow mirrors the primary edit LAMPORT-EXACTLY (pad to the SUT
+    /// height the edit will land at, then apply the same content change), so
+    /// the shadow merge must reproduce the SUT's exact interleaving.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shadow_mesh_predicts_concurrent_primary_peer_merge() {
+        use holon::sync::multi_peer::{
+            self, create_block_with_id, pad_to_height, sync_docs_direct,
+        };
+        use holon_pbt_core::capabilities::{SutLoro, SutLoroLog};
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let bundle = compose_sut_seeded(
+            &ComponentSet::full_headless(),
+            &resolver,
+            &[("structural-page.org", WIDE_TREE_ORG)],
+            &[],
+        )
+        .await;
+        let mut caps = bundle.caps;
+        let mut oracle = frontend_wired(wide_ref());
+
+        // Shadow universe (same flat working tree as WIDE_TREE_ORG).
+        let shadow_primary = multi_peer::init_doc(1);
+        let page = create_block_with_id(&shadow_primary, None, "structural-page", "structural-page");
+        create_block_with_id(&shadow_primary, Some(page), "parent", "parent");
+        create_block_with_id(&shadow_primary, Some(page), "c1", "c1");
+        create_block_with_id(&shadow_primary, Some(page), "c2", "c2");
+
+        let height = |caps: &CapMap| {
+            let log = caps.expect::<dyn SutLoroLog>();
+            async move {
+                log.loro_lamport_height()
+                    .await
+                    .expect("live Loro doc must report a lamport height")
+            }
+        };
+
+        // AddPeer (clock-padded fork on the shadow side).
+        let h = height(&caps).await;
+        pad_to_height(&shadow_primary, h);
+        let shadow_peer = multi_peer::init_doc(100);
+        shadow_peer
+            .import(&shadow_primary.export(loro::ExportMode::Snapshot).unwrap())
+            .unwrap();
+        caps.expect::<dyn SutLoro>().apply_add_peer().await;
+
+        // Peer 0 edits c1 (unsynced) — mirrored on the shadow peer.
+        {
+            let node = crate::pbt::peer_ops::find_node_by_stable_id(&shadow_peer, "c1").unwrap();
+            multi_peer::update_block(&shadow_peer, node, "peer-side");
+        }
+        caps.expect::<dyn SutLoro>()
+            .apply_peer_update(0, "c1", "peer-side")
+            .await;
+
+        // PRIMARY edit through the real editor path: focus c1, type "Z".
+        let ids = fixed_ids();
+        TransitionImpl::apply_to_sut(
+            &NavigateFocus {
+                region: Region::Main,
+                block_id: page_root(),
+            },
+            &oracle,
+            &mut caps,
+        )
+        .await;
+        let focus = FocusEditableText {
+            block_id: ids.c1.clone(),
+        };
+        focus.apply_to_ref(&mut oracle);
+        TransitionImpl::apply_to_sut(&focus, &oracle, &mut caps).await;
+        tokio::time::sleep(SETTLE).await;
+
+        // Pad the shadow to the height the primary edit will land at, THEN
+        // mirror it (lamport-exact), THEN let the SUT type.
+        let h = height(&caps).await;
+        pad_to_height(&shadow_primary, h);
+        let typ = TypeChars {
+            text: "Z".to_string(),
+        };
+        typ.apply_to_ref(&mut oracle);
+        let oracle_c1 = oracle.domain.block_state.blocks[&ids.c1].content_text().to_string();
+        {
+            let node = crate::pbt::peer_ops::find_node_by_stable_id(&shadow_primary, "c1").unwrap();
+            multi_peer::update_block(&shadow_primary, node, &oracle_c1);
+        }
+        TransitionImpl::apply_to_sut(&typ, &oracle, &mut caps).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Guard: the oracle's predicted primary content must match the SUT's
+        // committed content BEFORE the merge — otherwise the mechanism test
+        // below would fail for an unrelated (editor-model) reason.
+        let sut_c1_pre = caps
+            .expect::<dyn SutLoroLog>()
+            .loro_block_snapshot()
+            .await
+            .expect("loro snapshot")
+            .into_iter()
+            .find(|b| b.id.as_str() == "block:c1")
+            .expect("c1 present")
+            .content;
+        assert_eq!(
+            oracle_c1, sut_c1_pre,
+            "pre-merge: oracle editor model diverged from the SUT commit"
+        );
+
+        // Sync peer 0 — the concurrent merge — clock-padded on the shadow.
+        let h = height(&caps).await;
+        pad_to_height(&shadow_primary, h);
+        sync_docs_direct(&shadow_primary, &shadow_peer);
+        caps.expect::<dyn SutLoro>().apply_sync_with_peer(0).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let sut_c1 = caps
+            .expect::<dyn SutLoroLog>()
+            .loro_block_snapshot()
+            .await
+            .expect("loro snapshot")
+            .into_iter()
+            .find(|b| b.id.as_str() == "block:c1")
+            .expect("c1 present")
+            .content;
+        let shadow_tree = shadow_primary.get_tree(multi_peer::TREE_NAME);
+        let shadow_c1_node =
+            crate::pbt::peer_ops::find_node_by_stable_id(&shadow_primary, "c1").unwrap();
+        let shadow_c1 = multi_peer::read_text(&shadow_tree, shadow_c1_node);
+        drop_ref_off_thread(oracle);
+        assert_eq!(
+            shadow_c1, sut_c1,
+            "shadow mesh failed to predict the concurrent primary+peer merge interleaving"
+        );
+    }
+
     /// Seam-rebuild SR-1 teeth (doc-uri-minting reconcile generalization). Drive
     /// `CreateDocument` over the composed frontend CapMap: the real
     /// `SutAppLifecycle::create_document` writes an empty org file, the watcher mints the
@@ -1262,7 +1612,7 @@ mod teeth {
     async fn wide_create_document_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let before = sut_ids(&caps).await;
         let cd = CreateDocument {
@@ -1318,7 +1668,7 @@ mod teeth {
     async fn wide_sut_only_create_document_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only create — DON'T advance the oracle, DON'T reconcile.
         let cd = CreateDocument {
@@ -1352,7 +1702,7 @@ mod teeth {
     async fn wide_pin_block_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let pin = PinBlock {
             region: Region::RightSidebar,
@@ -1386,7 +1736,7 @@ mod teeth {
     async fn wide_sut_only_pin_block_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let pin = PinBlock {
             region: Region::RightSidebar,
@@ -1419,7 +1769,7 @@ mod teeth {
     async fn wide_indent_outdent_roundtrip_lockstep() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         for t in [
             E2ETransition::Indent(Indent {
@@ -1454,7 +1804,7 @@ mod teeth {
     async fn wide_indent_then_split_parent_lockstep() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let indent = E2ETransition::Indent(Indent {
             block_id: fixed_ids().c2,
@@ -1509,7 +1859,7 @@ mod teeth {
     async fn wide_simulate_restart_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let before = sut_ids(&caps).await;
         let restart = SimulateRestart;

@@ -13,10 +13,9 @@ use proptest_state_machine::ReferenceStateMachine;
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
+use holon_orgmode::OrgBlockExt;
 
 use super::reference_state::{ReferenceState, ShadowInterpreter};
-
-use loro::{ExportMode, LoroDoc};
 
 /// Whether the PBT generator may produce mutations that overwrite the root
 /// layout (render-source content, layout headline content). The original
@@ -48,42 +47,6 @@ pub(crate) const LAYOUT_MUTATIONS_ENABLED: bool = true;
 /// widgets to appear and bootstraps the router on first call. inv-editable-text-has-draggable is
 /// a hard panic if any focus-tree text block lacks a Draggable wrapper.
 pub(crate) const DRAG_DROP_ENABLED: bool = true;
-
-/// Simulate Loro CRDT merge for concurrent text updates.
-///
-/// Creates two Loro peers from a common ancestor, applies one update on each,
-/// then merges them. Returns the CRDT-merged content.
-pub(crate) fn loro_merge_text(original: &str, update_a: &str, update_b: &str) -> String {
-    let ancestor = LoroDoc::new();
-    ancestor.set_peer_id(0).unwrap();
-    let text = ancestor.get_text("content");
-    text.update(original, Default::default()).unwrap();
-    ancestor.commit();
-    let snapshot = ancestor.export(ExportMode::Snapshot).unwrap();
-
-    let peer_a = LoroDoc::new();
-    peer_a.set_peer_id(1).unwrap();
-    peer_a.import(&snapshot).unwrap();
-    peer_a
-        .get_text("content")
-        .update(update_a, Default::default())
-        .unwrap();
-    peer_a.commit();
-
-    let peer_b = LoroDoc::new();
-    peer_b.set_peer_id(2).unwrap();
-    peer_b.import(&snapshot).unwrap();
-    peer_b
-        .get_text("content")
-        .update(update_b, Default::default())
-        .unwrap();
-    peer_b.commit();
-
-    let b_updates = peer_b.export(ExportMode::all_updates()).unwrap();
-    peer_a.import(&b_updates).unwrap();
-
-    peer_a.get_text("content").to_string()
-}
 
 /// Build a fresh, constant `ReferenceState` for the given [`Wiring`]. Used by
 /// every reference state machine's `init_state` (the canonical full-coverage
@@ -164,54 +127,42 @@ pub fn storage_selector_for_wiring(wiring: &holon_pbt_core::Wiring) -> holon::di
 #[derive(Debug, Clone)]
 pub struct ReferenceMachine;
 
-/// Reset a peer's baseline tracking to its current `blocks` snapshot.
-///
-/// The baseline drives `merge_peer_blocks_into_primary`'s concurrent-edit
-/// detection: a primary block whose content differs from the baseline (and
-/// whose stable ID is in the peer's `modified_stable_ids`) signals that
-/// both sides edited the same text, so we run a Loro CRDT merge instead of
-/// naive last-writer-wins.
-pub(crate) fn refresh_peer_baseline(peer: &mut super::reference_state::PeerRefState) {
-    peer.baseline_contents = peer
-        .blocks
-        .values()
-        .map(|pb| (pb.stable_id.clone(), pb.content.clone()))
-        .collect();
-}
-
-/// Merge peer blocks into the primary's block state.
+/// Merge peer blocks into the primary's block state, CONSUMING the shadow
+/// mesh (which has already run the REAL CRDT sync on the shadow docs).
 ///
 /// - Blocks the peer created since the last sync (tracked in
 ///   `created_stable_ids`) are added to the primary.
 /// - Existing blocks that the peer explicitly modified (tracked in
-///   `modified_stable_ids`) get their content updated. If the primary
-///   *also* edited that content since the baseline (`AddPeer` / last sync),
-///   we run Loro's text CRDT merge instead of naive LWW — RGA keeps both
-///   concurrent insertions.
+///   `modified_stable_ids`) take the SHADOW primary's converged text — the
+///   actual Loro merge outcome (concurrent-insert interleaving included),
+///   predicted by the shadow instead of modeled or adopted from the SUT.
 /// - Inherited-at-AddPeer blocks the primary may have since deleted are
 ///   NOT re-added — Loro's CRDT keeps primary-side deletes.
+/// - Peer-created blocks are stamped with a `sequence` AFTER the parent's
+///   existing children, modeling Loro's append-at-end create (their tree
+///   fractional index sorts after every sibling the creating peer saw).
+///   Their order WITHIN one merge is CRDT-arbitrary (Loro breaks fi ties by
+///   op id = (lamport, peer id)), so it is stamped from the SHADOW primary's
+///   converged child order — the clock-padded shadow reproduces the op-id
+///   tie-break exactly (`clock_parity_spike`).
 pub(crate) fn merge_peer_blocks_into_primary(
     block_state: &mut super::reference_state::BlockState,
     peer_blocks: &[super::peer_ops::PeerBlock],
     modified_stable_ids: &std::collections::HashSet<String>,
     created_stable_ids: &std::collections::HashSet<String>,
-    baseline_contents: &HashMap<String, String>,
+    shadow: &super::shadow_mesh::ShadowMesh,
 ) {
+    let shadow_text = |stable_id: &str| -> String {
+        shadow.primary_content(stable_id).unwrap_or_else(|| {
+            panic!("shadow primary lacks merged block {stable_id} — shadow mesh desynced")
+        })
+    };
+    let mut created: Vec<&super::peer_ops::PeerBlock> = Vec::new();
     for pb in peer_blocks {
         let block_uri = EntityUri::block(&pb.stable_id);
         if let Some(existing) = block_state.blocks.get_mut(&block_uri) {
             if modified_stable_ids.contains(&pb.stable_id) {
-                let baseline = baseline_contents
-                    .get(&pb.stable_id)
-                    .cloned()
-                    .unwrap_or_default();
-                existing.content = if existing.content != baseline {
-                    // Primary diverged too — Loro's text CRDT keeps both
-                    // concurrent insertions. Compute the merged result.
-                    loro_merge_text(&baseline, &existing.content, &pb.content)
-                } else {
-                    pb.content.clone()
-                };
+                existing.content = shadow_text(&pb.stable_id);
             }
             continue;
         }
@@ -220,6 +171,13 @@ pub(crate) fn merge_peer_blocks_into_primary(
         if !created_stable_ids.contains(&pb.stable_id) {
             continue;
         }
+        created.push(pb);
+    }
+    // Deterministic stamping order (peer_blocks arrives in HashMap order).
+    created.sort_by(|a, b| a.stable_id.cmp(&b.stable_id));
+    let mut next_seq_by_parent: HashMap<EntityUri, i64> = HashMap::new();
+    for pb in &created {
+        let block_uri = EntityUri::block(&pb.stable_id);
         let parent_uri = pb
             .parent_stable_id
             .as_deref()
@@ -228,12 +186,77 @@ pub(crate) fn merge_peer_blocks_into_primary(
         let mut block = Block::from_block_content(
             block_uri.clone(),
             parent_uri.clone(),
-            holon_api::BlockContent::text(pb.content.clone()),
+            holon_api::BlockContent::text(shadow_text(&pb.stable_id)),
         );
         block.created_at = 0;
         block.updated_at = 0;
+        let next_seq = next_seq_by_parent.entry(parent_uri.clone()).or_insert_with(|| {
+            block_state
+                .blocks
+                .values()
+                .filter(|b| b.parent_id == parent_uri)
+                .map(|b| b.sequence())
+                .max()
+                .map_or(0, |m| m + 1)
+        });
+        block.set_sequence(*next_seq);
+        *next_seq += 1;
         block_state.blocks.insert(block_uri.clone(), block);
         block_state.block_documents.insert(block_uri, parent_uri);
+    }
+    // Permute every ≥2-member peer-created sibling group into the shadow's
+    // converged relative order, within the sequence slots they already
+    // occupy — the tie-break prediction replacing
+    // `adopt_observed_peer_sibling_order`. Grouping spans ALL `block:peer-…`
+    // siblings under a parent (not just this merge's creates): concurrent
+    // creates from different peers tie in fractional index yet can arrive
+    // via SEPARATE syncs, so arrival order ≠ op-id order (the keystone
+    // caught exactly this: peer A's lamport-bumped create arrived first but
+    // sorts second).
+    let mut by_parent: HashMap<EntityUri, Vec<EntityUri>> = HashMap::new();
+    for (id, b) in &block_state.blocks {
+        if id.as_str().starts_with("block:peer-") {
+            by_parent
+                .entry(b.parent_id.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    for (parent_uri, mut members) in by_parent {
+        if members.len() < 2 {
+            continue;
+        }
+        let parent_sid = if parent_uri.is_no_parent() || parent_uri.is_sentinel() {
+            None
+        } else {
+            Some(parent_uri.id())
+        };
+        let observed = shadow.primary_children_order(parent_sid);
+        let rank: HashMap<&str, usize> = observed
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), i))
+            .collect();
+        for m in &members {
+            assert!(
+                rank.contains_key(m.id()),
+                "created block {m} missing from the shadow's child order under \
+                 {parent_uri} (observed: {observed:?}) — shadow mesh desynced"
+            );
+        }
+        let mut seqs: Vec<i64> = members
+            .iter()
+            .map(|m| block_state.blocks[m].sequence())
+            .collect();
+        seqs.sort_unstable();
+        members.sort_by_key(|m| rank[m.id()]);
+        for (m, seq) in members.iter().zip(seqs) {
+            block_state
+                .blocks
+                .get_mut(m)
+                .expect("group member present")
+                .set_sequence(seq);
+        }
     }
 }
 

@@ -274,6 +274,10 @@ impl<'a, S: SutLoroLog> SutLoroLog for CachingProxy<'a, S> {
     async fn loro_block_snapshot(&self) -> Option<Vec<holon_api::block::Block>> {
         self.inner.loro_block_snapshot().await
     }
+
+    async fn loro_lamport_height(&self) -> Option<u32> {
+        self.inner.loro_lamport_height().await
+    }
 }
 
 // ─── SutLayout ────────────────────────────────────────────────────────

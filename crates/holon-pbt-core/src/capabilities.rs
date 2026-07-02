@@ -829,6 +829,13 @@ pub trait SutLoroLog {
     /// `None` if the parent isn't represented in Loro.
     async fn loro_children_of(&self, parent_stable_id: &str) -> Option<Vec<String>>;
 
+    /// The live Loro doc's Lamport height. NOT an invariant read: this is
+    /// the E-solid oracle's clock-sync scalar — the shadow peer mesh pads its
+    /// primary to this height at fork/sync boundaries so loro's own op-id
+    /// tie-breaks ((lamport, peer)) reproduce the SUT's exactly. `None` when
+    /// no live Loro doc backs this SUT (fixtures, toy SUTs).
+    async fn loro_lamport_height(&self) -> Option<u32>;
+
     /// Every block held in the live Loro tree as typed `Block` values — the
     /// Loro store's contribution to the `inv-blocks-match-ref/loro` composite.
     /// `None` when Loro isn't enabled on this SUT (e.g. the SqlOnly variant),

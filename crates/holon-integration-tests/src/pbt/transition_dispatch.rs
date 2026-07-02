@@ -355,6 +355,12 @@ macro_rules! declare_e2e_transitions {
                         $crate::pbt::reference_state::ReferenceState,
                     >>::apply_to_ref(v, state), )*
                 }
+                // E-solid shadow-mesh centralized primary catch-up: after every
+                // ref transition, mirror the ref block map into the shadow
+                // primary at the SUT's fed Lamport height. One site covers all
+                // machines dispatching this enum; a variant the mirror misses
+                // self-heals at the next catch-up. No-op until the mesh exists.
+                state.shadow_catch_up_primary();
             }
         }
 

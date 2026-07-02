@@ -28,5 +28,5 @@ prop_state_machine! {
         .. proptest::test_runner::Config::default()
     })]
     #[test]
-    fn general_e2e_composed_pbt(sequential 1..8 => ComposedSut<WideE2E>);
+    fn general_e2e_composed_pbt(sequential 1..40 => ComposedSut<WideE2E>);
 }
