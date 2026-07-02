@@ -72,8 +72,11 @@ Land the missing backings, each deleting a carve-out in
   through the cell. `crates/holon-loro/src/loro_meta_cell_backing.rs`.
 - **2.2** ✅ `LwwScalarBacking<T>` (SqlOnly twin), so both modes present the same
   cell surface. Landed as the backing type + unit tests
-  (`crates/holon-core/src/cell.rs`); SqlOnly registry wiring (entity-cache read
-  + CDC signal) is deferred, exactly as SqlOnly `content` cells are.
+  (`crates/holon-core/src/cell.rs`). Registry wiring landed 2026-07-02:
+  `BlockCellRegistry::sql_only_wired` injects the `LiveData<Block>` entity
+  cache (read + CDC signal) and a `set_field` write path from the composition
+  root (`event_infra_module`); covers scalars AND `content` (LWW), so SqlOnly
+  `live_field` no longer errors.
 - **2.3** `LoroTreeParentCellBacking` / `LoroTreePositionCellBacking` last —
   they overlap the spec-0007 intent-vocabulary work; sequence after its
   Phase 5 flip to avoid building on the `sort_key` fallback.

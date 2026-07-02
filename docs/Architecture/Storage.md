@@ -83,14 +83,14 @@ pub trait TextCellBacking: CellBacking<String> {
 
 **Cell backings (one per protocol)**:
 
-In Full (Loro) mode `block.content` (rich text) and every scalar field are now cell-ified; only the tree-position fields (`parent_id`, `sort_key`) still go through `BlockCellRegistry::write_field`'s non-cell dispatch (Cells plan Phase 2.3, sequenced behind spec 0007's intent-vocabulary flip). SqlOnly cells are not wired yet (they need the entity-cache read + CDC signal injection); `LwwScalarBacking<T>` is the ready backing for that wiring.
+In Full (Loro) mode `block.content` (rich text) and every scalar field are now cell-ified; only the tree-position fields (`parent_id`, `sort_key`) still go through `BlockCellRegistry::write_field`'s non-cell dispatch (Cells plan Phase 2.3, sequenced behind spec 0007's intent-vocabulary flip). SqlOnly cells are now wired too (Cells plan Phase 2.2): `BlockCellRegistry::sql_only_wired` injects the convergent `LiveData<Block>` entity cache (sync `read()` for `current()`, `signal_map()` for the CDC signal) plus a `set_field` write path, so `content` resolves an `LwwTextCellBacking` and scalars an `LwwScalarBacking<T>` — the same cell surface Full mode presents via `LoroTextCellBacking`/`LoroMetaCellBacking<T>`. Construction paths without that seam (`sql_only`, non-DI/synthetic tests) keep erroring loudly rather than faking a no-op backing.
 
 | Backing | Status | Authority for | Read | Write |
 |---------|--------|---------------|------|-------|
 | `LoroTextCellBacking` (`crates/holon-loro/src/loro_text_cell_backing.rs`) | Implemented | block.content (rich text) | `LoroText::to_string()` | `LoroText::insert/delete/update` + commit |
-| `LwwTextCellBacking` (`crates/holon-core/src/cell.rs`) | Implemented | tests / SqlOnly text fields | entity cache | `CrudOperations::set_field` (debounced) |
+| `LwwTextCellBacking` (`crates/holon-core/src/cell.rs`) | Implemented + registry-wired (Phase 2.2) | tests / SqlOnly `block.content` (LWW, no rich-text ops) | entity cache (`LiveData<Block>`) | `CrudOperations::set_field` |
 | `LoroMetaCellBacking<T>` (`crates/holon-loro/src/loro_meta_cell_backing.rs`) | Implemented (Phase 2.1) | block scalar fields (completed, collapsed, block_type, …); T ∈ {bool, i64, String, Value} | typed decode of `meta` per-property map (H3) | per-key `update_block_fields` (only the changed key + `updated_at`) + commit |
-| `LwwScalarBacking<T>` (`crates/holon-core/src/cell.rs`) | Implemented (Phase 2.2); registry wiring deferred | tests / SqlOnly scalar fields | entity cache | `CrudOperations::set_field` (immediate, no debounce) |
+| `LwwScalarBacking<T>` (`crates/holon-core/src/cell.rs`) | Implemented + registry-wired (Phase 2.2) | tests / SqlOnly scalar fields | entity cache (`LiveData<Block>`) | `CrudOperations::set_field` (immediate, no debounce) |
 | `LoroTreeParent/PositionCellBacking` | Planned (Cells plan Phase 2.3) | block.parent_id, block.sort_key | tree-node parent / position | `tree.move_to` / `tree.move_after` |
 
 **Cell lifetime**: cells are `Weak`-keyed in the registry. They live while at least one consumer holds an `Arc<Cell<T>>`; when the last `Arc` drops, the registry's `Weak` upgrade fails on next lookup and a fresh cell is constructed. Chord-op `delete` paths invoke `EntityCellRegistry::on_entity_deleted(uri)` proactively so a same-id re-create can't observe a stale cell wrapping an orphaned Loro container.

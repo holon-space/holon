@@ -18,17 +18,39 @@ use std::any::{Any, TypeId};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use futures::future::BoxFuture;
+use futures::stream::{BoxStream, StreamExt};
 use loro::{LoroDoc, LoroText};
 
+use holon_api::block::Block;
+use holon_api::live_data::LiveData;
 use holon_api::repository::CoreOperations;
 use holon_api::{EntityUri, Tags, Value};
-use holon_core::cell::CellBacking;
+use holon_core::cell::{CellBacking, LwwScalarBacking, LwwTextCellBacking};
 use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
 
 use crate::loro_backend::{CONTENT_RAW, LoroBackend, STABLE_ID, TREE_NAME};
 use crate::loro_document::LoroDocument;
-use crate::loro_meta_cell_backing::LoroMetaCellBacking;
+use crate::loro_meta_cell_backing::{LoroMetaCellBacking, LoroScalarField};
 use crate::loro_text_cell_backing::LoroTextCellBacking;
+
+/// Injected write path for SqlOnly cells: routes a `(uri, field, value)` scalar
+/// write straight to the SQL `set_field` operation (the composition root builds
+/// this in `event_infra_module` over `SqlOperationProvider`, bypassing the
+/// registry's own `write_field` so there is no `Arc` cycle back through
+/// `SqlBlockOperations`, which owns the registry).
+pub type SqlScalarWriteFn =
+    Arc<dyn Fn(EntityUri, String, Value) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
+/// Deps that make SqlOnly cells resolve to a live `LwwScalarBacking` /
+/// `LwwTextCellBacking` instead of erroring: the convergent `LiveData<Block>`
+/// entity cache (sync `read()` for `current()`, `signal_map()` for the CDC
+/// signal) plus the SQL `set_field` write path. Injected via the DI seam so
+/// `holon-loro` never names the `holon`-side `SqlOperationProvider`.
+struct SqlCellWiring {
+    live: Arc<LiveData<Block>>,
+    write: SqlScalarWriteFn,
+}
 
 /// Registry of [`Cell<T>`](holon_core::cell::Cell)s for `block` entity
 /// fields.
@@ -49,7 +71,12 @@ enum BackingSource {
         doc: Arc<LoroDoc>,
         backend: Arc<LoroBackend>,
     },
-    SqlOnly,
+    /// SqlOnly mode. `wiring` is `Some` once the composition root injects the
+    /// entity-cache read + `set_field` write seam (`sql_only_wired`); `None`
+    /// for non-DI / synthetic-test construction (`sql_only`), where
+    /// `live_field` keeps erroring loudly — a fake no-op backing would hide
+    /// a genuinely-unavailable dependency.
+    SqlOnly { wiring: Option<SqlCellWiring> },
 }
 
 impl BlockCellRegistry {
@@ -80,19 +107,37 @@ impl BlockCellRegistry {
         }
     }
 
-    /// Construct a SqlOnly-mode registry. All `live_field_any` calls
-    /// error with a clear message — there's no editor in SqlOnly mode.
+    /// Construct a SqlOnly-mode registry with no injected cell seam. All
+    /// `live_field_any` calls error with a clear message — used by non-DI /
+    /// synthetic-test construction where the entity cache + `set_field` write
+    /// path aren't available. DI callers use [`Self::sql_only_wired`].
     pub fn sql_only() -> Self {
         Self {
             cache: CellCache::new(),
-            backing_source: BackingSource::SqlOnly,
+            backing_source: BackingSource::SqlOnly { wiring: None },
+        }
+    }
+
+    /// Construct a SqlOnly-mode registry wired to the convergent
+    /// `LiveData<Block>` entity cache (read + CDC signal) and the SQL
+    /// `set_field` write path. `live_field` then resolves the same
+    /// `Cell<T>` surface a caller sees in Full (Loro) mode — content via
+    /// [`LwwTextCellBacking`], scalars via [`LwwScalarBacking`] — so the two
+    /// mode surfaces are symmetric. The composition root
+    /// (`event_infra_module`) builds `write` over `SqlOperationProvider`.
+    pub fn sql_only_wired(live: Arc<LiveData<Block>>, write: SqlScalarWriteFn) -> Self {
+        Self {
+            cache: CellCache::new(),
+            backing_source: BackingSource::SqlOnly {
+                wiring: Some(SqlCellWiring { live, write }),
+            },
         }
     }
 
     fn loro_doc(&self) -> Result<Arc<LoroDoc>> {
         match &self.backing_source {
             BackingSource::Loro { doc, .. } => Ok(doc.clone()),
-            BackingSource::SqlOnly => Err(anyhow!(
+            BackingSource::SqlOnly { .. } => Err(anyhow!(
                 "BlockCellRegistry is in SqlOnly mode; no Loro backing is available. \
                  SqlOnly cells are not wired yet (they need the entity-cache read + CDC \
                  signal injection; see LwwScalarBacking / LwwTextCellBacking)."
@@ -170,7 +215,7 @@ impl BlockCellRegistry {
     pub async fn write_field(&self, uri: &EntityUri, field: &str, value: Value) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
-            BackingSource::SqlOnly => return Ok(false),
+            BackingSource::SqlOnly { .. } => return Ok(false),
         };
 
         // Watermark / control fields produced by `LoroSyncController`'s
@@ -333,6 +378,145 @@ impl BlockCellRegistry {
     }
 }
 
+/// Build the wired-SqlOnly `content` cell: an LWW `Cell<String>` reading the
+/// block's text from the entity cache and writing via `set_field("content")`.
+/// The storage-agnostic twin of the Full-mode Loro `content` cell.
+fn build_sql_content_cell(wiring: &SqlCellWiring, uri: &EntityUri) -> Arc<dyn CellBacking<String>> {
+    let live = wiring.live.clone();
+    let key = uri.to_string();
+
+    let read_live = live.clone();
+    let read_key = key.clone();
+    let read = Arc::new(move || -> String {
+        read_live
+            .read()
+            .get(&read_key)
+            .map(|b| b.content_text().to_string())
+            .unwrap_or_default()
+    });
+
+    let write_fn = wiring.write.clone();
+    let write_uri = uri.clone();
+    let write = Arc::new(move |v: String| {
+        let write_fn = write_fn.clone();
+        let uri = write_uri.clone();
+        Box::pin(async move { (write_fn)(uri, "content".to_string(), Value::String(v)).await })
+            as BoxFuture<'static, Result<()>>
+    });
+
+    let sig_live = live;
+    let sig_key = key;
+    let signal_factory = Arc::new(move || -> BoxStream<'static, String> {
+        use futures_signals::signal::SignalExt;
+        use futures_signals::signal_map::SignalMapExt;
+        Box::pin(
+            sig_live
+                .signal_map()
+                .key_cloned(sig_key.clone())
+                .to_stream()
+                .map(|opt: Option<Arc<Block>>| {
+                    opt.map(|b| b.content_text().to_string())
+                        .unwrap_or_default()
+                }),
+        )
+    });
+
+    Arc::new(LwwTextCellBacking::new(read, write, signal_factory)) as Arc<dyn CellBacking<String>>
+}
+
+/// Dispatch a wired-SqlOnly scalar `live_field` to a typed `LwwScalarBacking`.
+/// The type set mirrors the Loro twin's `live_field_any` dispatch so the two
+/// mode surfaces are symmetric: `T ∈ {bool, i64, String, Value}`.
+fn build_sql_scalar_cell(
+    cache: &CellCache,
+    wiring: &SqlCellWiring,
+    uri: &EntityUri,
+    field: &str,
+    type_id: TypeId,
+) -> Result<Arc<dyn Any + Send + Sync>> {
+    if type_id == TypeId::of::<bool>() {
+        cache.get_or_construct::<bool, _>(uri, field, || {
+            Ok(sql_scalar_backing::<bool>(wiring, uri, field))
+        })
+    } else if type_id == TypeId::of::<i64>() {
+        cache.get_or_construct::<i64, _>(uri, field, || {
+            Ok(sql_scalar_backing::<i64>(wiring, uri, field))
+        })
+    } else if type_id == TypeId::of::<String>() {
+        cache.get_or_construct::<String, _>(uri, field, || {
+            Ok(sql_scalar_backing::<String>(wiring, uri, field))
+        })
+    } else if type_id == TypeId::of::<Value>() {
+        cache.get_or_construct::<Value, _>(uri, field, || {
+            Ok(sql_scalar_backing::<Value>(wiring, uri, field))
+        })
+    } else {
+        Err(anyhow!(
+            "BlockCellRegistry::live_field_any: SqlOnly scalar field {field:?} has no cell for \
+             the requested type (supported: bool, i64, String, Value)"
+        ))
+    }
+}
+
+/// One typed wired-SqlOnly scalar backing. `read`/signal decode the field from
+/// the entity cache (a present-but-wrong-shape value is corruption → panic,
+/// exactly as the Loro twin's `read` does); `write` encodes and routes through
+/// the injected `set_field` path.
+fn sql_scalar_backing<T: LoroScalarField>(
+    wiring: &SqlCellWiring,
+    uri: &EntityUri,
+    field: &str,
+) -> Arc<dyn CellBacking<T>> {
+    let live = wiring.live.clone();
+    let key = uri.to_string();
+
+    let read_live = live.clone();
+    let read_key = key.clone();
+    let read_field = field.to_string();
+    let read = Arc::new(move || -> T {
+        let snap = read_live.read();
+        let stored = snap
+            .get(&read_key)
+            .and_then(|b| b.get_property(&read_field));
+        T::decode(stored)
+            .unwrap_or_else(|e| panic!("SqlOnly scalar read ({read_key}, {read_field}): {e:#}"))
+    });
+
+    let write_fn = wiring.write.clone();
+    let write_uri = uri.clone();
+    let write_field = field.to_string();
+    let write = Arc::new(move |v: T| {
+        let write_fn = write_fn.clone();
+        let uri = write_uri.clone();
+        let field = write_field.clone();
+        let value = v.encode();
+        Box::pin(async move { (write_fn)(uri, field, value).await })
+            as BoxFuture<'static, Result<()>>
+    });
+
+    let sig_live = live;
+    let sig_key = key;
+    let sig_field = field.to_string();
+    let signal_factory = Arc::new(move || -> BoxStream<'static, T> {
+        use futures_signals::signal::SignalExt;
+        use futures_signals::signal_map::SignalMapExt;
+        let field = sig_field.clone();
+        Box::pin(
+            sig_live
+                .signal_map()
+                .key_cloned(sig_key.clone())
+                .to_stream()
+                .map(move |opt: Option<Arc<Block>>| {
+                    let stored = opt.and_then(|b| b.get_property(&field));
+                    T::decode(stored)
+                        .unwrap_or_else(|e| panic!("SqlOnly scalar signal ({field}): {e:#}"))
+                }),
+        )
+    });
+
+    Arc::new(LwwScalarBacking::<T>::new(read, write, signal_factory)) as Arc<dyn CellBacking<T>>
+}
+
 #[async_trait::async_trait]
 impl EntityCellRegistry for BlockCellRegistry {
     fn live_field_any(
@@ -352,21 +536,36 @@ impl EntityCellRegistry for BlockCellRegistry {
                 ));
             }
             return self.cache.get_or_construct::<String, _>(uri, field, || {
+                // Wired SqlOnly mode presents the same `content` cell surface as
+                // Full mode, but LWW (no rich-text ops) — the storage-agnostic
+                // twin of the Loro `LoroText` cell.
+                if let BackingSource::SqlOnly {
+                    wiring: Some(wiring),
+                } = &self.backing_source
+                {
+                    return Ok(build_sql_content_cell(wiring, uri));
+                }
                 let (doc, text) = self.resolve_loro_text_container(&block_id_owned)?;
                 let backing = LoroTextCellBacking::new(doc, text)?;
                 Ok(Arc::new(backing) as Arc<dyn CellBacking<String>>)
             });
         }
 
-        // Every other field is a scalar on the node meta map. SqlOnly has no
-        // Loro backing to resolve against; error loudly (its cells are not
-        // wired yet — see `loro_doc`).
+        // Every other field is a scalar. Full mode resolves it on the node meta
+        // map; wired SqlOnly mode resolves an `LwwScalarBacking` over the
+        // entity cache + `set_field`; unwired SqlOnly errors loudly.
         let (doc, backend) = match &self.backing_source {
             BackingSource::Loro { doc, backend } => (doc.clone(), backend.clone()),
-            BackingSource::SqlOnly => {
+            BackingSource::SqlOnly {
+                wiring: Some(wiring),
+            } => {
+                return build_sql_scalar_cell(&self.cache, wiring, uri, field, type_id);
+            }
+            BackingSource::SqlOnly { wiring: None } => {
                 return Err(anyhow!(
                     "BlockCellRegistry::live_field_any: SqlOnly mode has no scalar cell for \
-                     field {field:?}; SqlOnly cells (LwwScalarBacking) are not wired yet."
+                     field {field:?}; the entity-cache read + set_field write seam was not \
+                     injected (use BlockCellRegistry::sql_only_wired)."
                 ));
             }
         };
@@ -444,7 +643,7 @@ impl EntityCellRegistry for BlockCellRegistry {
     ) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
-            BackingSource::SqlOnly => return Ok(false),
+            BackingSource::SqlOnly { .. } => return Ok(false),
         };
         // Synthetic SQL-only blocks (render artifacts like `<parent>::src::0` /
         // `::render::0`) have no Loro node — their order lives only in SQL. Fall
@@ -483,7 +682,7 @@ impl EntityCellRegistry for BlockCellRegistry {
     ) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
-            BackingSource::SqlOnly => return Ok(false),
+            BackingSource::SqlOnly { .. } => return Ok(false),
         };
         // The positional anchor must already be under Loro authority. When
         // the after-block has no tree node (unseeded vault, synthetic
@@ -590,7 +789,7 @@ impl EntityCellRegistry for BlockCellRegistry {
     async fn delete_entity(&self, uri: &EntityUri) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
-            BackingSource::SqlOnly => return Ok(false),
+            BackingSource::SqlOnly { .. } => return Ok(false),
         };
         let in_tree = backend.resolve_to_tree_id(uri.id()).await.is_some();
         if in_tree {
@@ -625,7 +824,7 @@ impl BlockCellRegistry {
     pub async fn live_sort_key(&self, id: &str) -> Result<Option<String>> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
-            BackingSource::SqlOnly => return Ok(None),
+            BackingSource::SqlOnly { .. } => return Ok(None),
         };
         backend
             .block_sort_key(id)
@@ -645,7 +844,7 @@ impl BlockCellRegistry {
     pub async fn live_in_tree(&self, id: &str) -> Result<Option<bool>> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
-            BackingSource::SqlOnly => return Ok(None),
+            BackingSource::SqlOnly { .. } => return Ok(None),
         };
         Ok(Some(backend.resolve_to_tree_id(id).await.is_some()))
     }
@@ -653,7 +852,7 @@ impl BlockCellRegistry {
     pub async fn live_children(&self, parent_id: &str) -> Result<Option<Vec<String>>> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
-            BackingSource::SqlOnly => return Ok(None),
+            BackingSource::SqlOnly { .. } => return Ok(None),
         };
         // Unseeded-vault guard (same family as the `create_entity`
         // after-anchor and `write_field` guards): a parent present in SQL but
@@ -763,6 +962,63 @@ mod tests {
         let uri = EntityUri::block("abc");
         let res = registry.as_ref().live_field::<String>(&uri, "content");
         assert!(res.is_err());
+    }
+
+    /// Spec 0008 §2.2: wired SqlOnly mode presents the same scalar cell surface
+    /// as Full (Loro) mode. The write callback emulates `set_field` → CDC by
+    /// updating the entity cache, proving `live_field::<bool>` round-trips a
+    /// write and observes it via the cell — no Loro doc involved.
+    #[tokio::test]
+    async fn sql_only_wired_scalar_round_trips_via_entity_cache() -> Result<()> {
+        use holon_api::StorageEntity;
+        use holon_api::block::Block;
+        use holon_api::live_data::LiveData;
+
+        let live: Arc<LiveData<Block>> = LiveData::new(
+            Vec::new(),
+            |row: &StorageEntity| {
+                row.get("id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow!("row missing id"))
+            },
+            |row: &StorageEntity| Block::try_from(row.clone()),
+        );
+
+        let uri = EntityUri::block("abc");
+        let key = uri.to_string();
+        let block = Block::new_text(uri.clone(), EntityUri::block("root"), "hello");
+        live.insert(key.clone(), Arc::new(block));
+
+        // set_field write path: emulate the SQL write + CDC reflection by
+        // updating the entity cache with the encoded property.
+        let live_for_write = live.clone();
+        let write: SqlScalarWriteFn =
+            Arc::new(move |uri: EntityUri, field: String, value: Value| {
+                let live = live_for_write.clone();
+                Box::pin(async move {
+                    let key = uri.to_string();
+                    let mut b = live
+                        .read()
+                        .get(&key)
+                        .map(|b| (**b).clone())
+                        .ok_or_else(|| anyhow!("block {key} absent from entity cache"))?;
+                    b.set_property(field, value);
+                    live.insert(key, Arc::new(b));
+                    Ok(())
+                }) as BoxFuture<'static, Result<()>>
+            });
+
+        let registry = BlockCellRegistry::sql_only_wired(live.clone(), write);
+        let cell: Cell<bool> =
+            (&registry as &dyn EntityCellRegistry).live_field::<bool>(&uri, "completed")?;
+        assert!(!cell.current(), "absent property decodes to false");
+        cell.set(true).await?;
+        assert!(
+            cell.current(),
+            "the write is visible through the cell via the entity cache"
+        );
+        Ok(())
     }
 
     /// Splitting a block that has no Loro tree node (unseeded vault, synthetic

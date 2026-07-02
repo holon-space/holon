@@ -12,7 +12,7 @@
 use fluxdi::{Injector, Module, Provider, Shared};
 use std::sync::Arc;
 
-use crate::core::datasource::OperationProvider;
+use crate::core::datasource::{OperationProvider, OperationRegistry};
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_block_operations::SqlBlockOperations;
 use crate::core::sql_operation_provider::SqlOperationProvider;
@@ -26,7 +26,35 @@ use crate::sync::link_event_subscriber::LinkEventSubscriber;
 use crate::sync::live_data::LiveData;
 use holon_api::block::Block;
 use holon_api::capability::SessionCapabilities;
+use holon_api::{EntityName, EntityUri, Value};
 use holon_core::block_ordering::BlockOrdering;
+
+/// Build the SqlOnly cell `set_field` write path over `SqlOperationProvider`.
+///
+/// Routed straight to the SQL `set_field` operation (mirroring the fall-through
+/// branch of `SqlBlockOperations::set_field`, which is where every SqlOnly block
+/// write already lands). Deliberately does NOT go back through
+/// `BlockCellRegistry::write_field` / `SqlBlockOperations`: the registry is owned
+/// by `SqlBlockOperations`, so routing through it would form an `Arc` cycle.
+fn sql_cell_set_field_writer(
+    sql_ops: Arc<SqlOperationProvider>,
+) -> crate::sync::block_cell_registry::SqlScalarWriteFn {
+    Arc::new(move |uri: EntityUri, field: String, value: Value| {
+        let sql_ops = sql_ops.clone();
+        Box::pin(async move {
+            let mut params: crate::storage::types::StorageEntity = std::collections::HashMap::new();
+            params.insert("id".into(), Value::String(uri.to_string()));
+            params.insert("field".into(), Value::String(field));
+            params.insert("value".into(), value);
+            let entity = EntityName::new(Block::entity_name());
+            sql_ops
+                .execute_operation(&entity, "set_field", params)
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("SqlOnly cell set_field: {e}"))
+        }) as futures::future::BoxFuture<'static, anyhow::Result<()>>
+    })
+}
 
 /// Marker type for the LinkEventSubscriber background wiring.
 /// Resolving this from DI triggers the LiveData<Block> → block_link subscription.
@@ -115,9 +143,19 @@ impl Module for EventInfraModule {
                         .await
                     {
                         Some(arc) => arc.clone(),
-                        None => Arc::new(
-                            crate::sync::block_cell_registry::BlockCellRegistry::sql_only(),
-                        ),
+                        None => {
+                            // SqlOnly mode: wire cells to the convergent block
+                            // feed (read + CDC signal) + the SQL set_field write
+                            // path so `live_field` presents the same cell surface
+                            // as Full (Loro) mode instead of erroring.
+                            let live = resolver.resolve_async::<BlockFeed>().await;
+                            Arc::new(
+                                crate::sync::block_cell_registry::BlockCellRegistry::sql_only_wired(
+                                    live.0.clone(),
+                                    sql_cell_set_field_writer(sql_ops.clone()),
+                                ),
+                            )
+                        }
                     };
                 // The composition root knows what's present, so it resolves the
                 // capability role here and injects it — `SqlBlockOperations`
@@ -153,7 +191,13 @@ impl Module for EventInfraModule {
                 {
                     Some(arc) => arc.clone(),
                     None => {
-                        Arc::new(crate::sync::block_cell_registry::BlockCellRegistry::sql_only())
+                        let live = resolver.resolve_async::<BlockFeed>().await;
+                        Arc::new(
+                            crate::sync::block_cell_registry::BlockCellRegistry::sql_only_wired(
+                                live.0.clone(),
+                                sql_cell_set_field_writer(sql_ops.clone()),
+                            ),
+                        )
                     }
                 };
             let caps = SessionCapabilities::detect_and_pin(cell_registry.has_loro_backing());
