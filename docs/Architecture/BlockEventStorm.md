@@ -55,7 +55,7 @@ Org / Markdown ──parse──▶ command bus ──▶ ordering authority (co
 
 Loro is the **write-of-record**; Turso is a **projection**. There are two parallel
 `*_block_query_source.rs` (Loro and Turso) and *which one reads a block depends on
-the wired DI graph* — see 🔴 H10.
+the wired DI graph* — see ✅ H10 (the two arms are now pinned equivalent).
 
 ---
 
@@ -145,11 +145,18 @@ graduates to CONTEXT.md §4 and is deleted here.
 
 ## 4. Hotspots (🔴 the red stickies)
 
-**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H6, H7, H8, H11, H12 · 🟡
+**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H6, H7, H8, H10, H11, H12 · 🟡
 validated (claims pinned, not "fixed" — the doc/impl gap is real and now
-demonstrated): H5 · 🔴 open: H10 · ⚪ by-design constraint: H9. Fixed entries are kept
+demonstrated): H5 · ⚪ by-design constraint: H9. Fixed entries are kept
 (condensed) because their *mechanisms* — lossy serde base, gate/emit mismatch,
 blob-LWW — are recurring failure shapes worth recognizing next time.
+
+**🎉 Track closed (2026-07-02).** Every hotspot on this wall is now resolved or
+re-dated: H1–H4, H6–H8, H10–H12 are ✅ fixed; H5 is 🟡 validated (its doc/impl gap
+is real and now pinned by tests, not silently papered over); H9 is a ⚪ deliberate
+by-design constraint. The BlockEventStorm hotspot track (milestones M0–M7) is done.
+No 🔴 open hotspots remain. The staleness protocol below still applies — statuses
+decay, so re-verify before acting on any single claim.
 
 **H1 — Lossy serde round-trip of edge fields through the projection sidecar.
 ✅ FIXED — residue closed 2026-07-02.**
@@ -334,13 +341,29 @@ A hard Turso/IVM constraint that shapes the entire read path: writes go to
 **invisible coupling** — anyone who "optimizes" by reading the base table breaks
 reactivity silently. Characterized in `cdc_base_vs_matview_repro.rs`.
 
-**H10 — Two block query sources, DI-selected. 🔴 STILL OPEN (verified 2026-07-01).**
+**H10 — Two block query sources, DI-selected. ✅ FIXED (2026-07-02).**
 `crates/holon/src/sync/loro_block_query_source.rs` and
 `.../turso_block_query_source.rs` both exist; "what reads a block" depends on the
-wired graph. The same logical read has two implementations that can drift.
-Partial mitigation exists: `tests/turso_block_query_source_round_trip_pbt.rs`
-exercises the Turso side; an *equivalence* property (same query → both sources →
-same blocks) is the natural composed-catalog invariant here.
+wired graph, so the same logical read has two implementations that could drift.
+**Fix (pinned, not merged):** a query-source *equivalence* PBT now proves the two
+arms agree. `tests/turso_block_query_source_round_trip_pbt.rs::loro_and_turso_query_sources_agree`
+generates one store, writes it through the production Turso create path *and* seeds
+a Turso-free `LoroBackend` with the same blocks, snapshots both via their
+`BlockQuerySource`, and asserts the two `BlockSnapshot`s reproduce the generated
+store field-for-field (id-keyed) **and** in canonical per-parent sibling order.
+This is meaningful now (not earlier) because `requires` hydration (M1) and the
+`BlockWire` edge-field types (M3) are correct — the read arms carry the same fields
+to compare. **Scope — a disclosed asymmetry, not a bug:** the property compares
+BLOCKS only. The Loro arm returns empty `focus_roots` by design (navigation focus
+is a Turso matview with no Loro-native source — see the `snapshot()` note in
+`loro_block_query_source.rs`), so `focus_roots` is a known, documented divergence
+between the two sources and is out of scope for this equivalence. **Route:** hosted
+as a standalone in-crate PBT rather than a composed-catalog invariant, because the
+composed harness wires a *no-Turso* frontend (only the Loro arm is reachable there);
+comparing both arms from one seed would need a new component holding both backends
+plus a new cap — real plumbing, not the cheap wire()+catalog-line the composed
+route is reserved for. Anchor: `loro_and_turso_query_sources_agree`,
+`seed_loro_backend`.
 
 **H11 — Stale ADR contradicts shipped architecture. ✅ FIXED (verified 2026-07-01).**
 `docs/adr/BLOCK_LORODOC_ARCHITECTURE.md` now reads **Status: Superseded** with a
@@ -394,8 +417,11 @@ missing/malformed columns (H8); `ChangeOp` parent refs typed `EntityUri` (H2);
 `doc:`-scheme eliminated and `set_is_document` retired (H7, 2026-07-02).
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
-transition and every 🔴 a candidate invariant. Open candidates: Loro-vs-Turso
-query-source equivalence (H10). Already realized: share/merge-back behaviour (H5 —
+transition and every 🔴 a candidate invariant. No open candidates remain. Realized:
+Loro-vs-Turso query-source equivalence (H10 — now pinned by
+`loro_and_turso_query_sources_agree`, a standalone in-crate PBT; graduates into the
+composed catalog if/when a dual-backend component makes hosting it cheap),
+share/merge-back behaviour (H5 —
 now pinned by `shared_tree::tests::{none_retention_reintegration_fails_loudly,
 share_subtree_payload_is_plaintext_not_encrypted}`, 2026-07-02),
 markdown round-trip identity (H6 — now pinned by an in-crate PBT; graduates into the
