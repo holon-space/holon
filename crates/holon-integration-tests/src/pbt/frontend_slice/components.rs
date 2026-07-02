@@ -992,9 +992,9 @@ impl SutOrgRead for HeadlessFrontendComponent {
 #[async_trait::async_trait(?Send)]
 impl SutOrgRender for HeadlessFrontendComponent {
     async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
+        use holon_app::turso_seams::CacheBlockReader;
         use holon_filesystem::BlockReader;
         use holon_filesystem::FileSystem;
-        use holon_orgmode::di::CacheBlockReader;
         use holon_orgmode::org_renderer::OrgRenderer;
 
         let block_cache = self

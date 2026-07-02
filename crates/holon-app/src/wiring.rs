@@ -186,7 +186,8 @@ impl FrontendInjectorExt for Injector {
         // OrgMode (native-only — holon-orgmode uses tokio::fs + tokio::process)
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(root) = orgmode_root {
-            use holon_orgmode::di::{OrgModeConfig, OrgModeModule};
+            use crate::turso_seams::OrgModeModule;
+            use holon_orgmode::di::OrgModeConfig;
 
             // Ensure the org root exists on the real disk so the config-time
             // canonicalize below resolves. The empty-vault default-document

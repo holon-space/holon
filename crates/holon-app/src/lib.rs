@@ -31,6 +31,7 @@ pub mod no_turso;
 mod no_turso_test;
 pub mod seed;
 pub mod session;
+pub mod turso_seams;
 pub mod wiring;
 
 pub use headless_builder_services::HeadlessBuilderServices;

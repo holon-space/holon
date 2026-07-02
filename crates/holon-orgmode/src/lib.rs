@@ -46,7 +46,7 @@ pub mod orgmode_sync_provider;
 
 // Re-export key types
 #[cfg(feature = "di")]
-pub use di::{FileWatcherReadySignal, OrgModeConfig, OrgModeModule, OrgSyncIdleSignal};
+pub use di::{FileWatcherReadySignal, OrgModeConfig, OrgSyncIdleSignal};
 
 // Core types
 // Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge

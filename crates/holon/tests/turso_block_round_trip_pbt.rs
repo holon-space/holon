@@ -33,12 +33,12 @@ use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon::sync::block_to_params;
 use holon_api::{EntityName, block::Block};
+use holon_app::turso_seams::CacheBlockReader;
 use holon_block_roundtrip_testing::{
     NormalizedDocument, assert_normalized_docs_equal, build_blocks, root_headlines_strategy,
 };
 use holon_core::OperationProvider;
 use holon_filesystem::BlockReader;
-use holon_orgmode::di::CacheBlockReader;
 use proptest::prelude::*;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;

@@ -19,16 +19,17 @@ implementations in holon-app. To suppress: // ALLOW(loro): <reason>
 
 [[smell]]
 id = "turso"
-pattern = '(use\s+turso|turso::|\bTursoBackend)'
+pattern = '(use\s+turso|turso::|\bTursoBackend|\bSchemaModule\b|\bBlockSchemaModule\b|BLOCK_(READ|WRITE)_TABLE|\bMatviewManager\b|\bDbHandle\b)'
 files = "crates/holon-orgmode/src/**/*.rs"
 case_sensitive = true
 message = """
-holon-orgmode must not import Turso directly — neither the raw crate nor \
-holon-mediated paths like holon::storage::turso::TursoBackend or the \
-TursoBackendProvider DI trait (Architecture.md §Crate Responsibilities; \
-spec 0007 Phase 2.5 C3). Use traits from traits.rs; the storage-neutral \
-handle seam (holon::storage::DbHandle) is the permitted SQL-mode entry. \
-To suppress: // ALLOW(turso): <reason>
+holon-orgmode must not import Turso directly — neither the raw crate, nor \
+holon-mediated paths like holon::storage::turso::TursoBackend, nor the \
+Turso-side symbols (SchemaModule / BlockSchemaModule / BLOCK_*_TABLE / \
+MatviewManager / DbHandle) (Architecture.md §Crate Responsibilities; \
+spec 0007 Phase 2.5 C3). Use the BlockReader / DocumentManager / \
+BlockOrdering traits; the Turso seam impls and schema wiring live in \
+holon-app::turso_seams. To suppress: // ALLOW(turso): <reason>
 """
 
 # frontend_crate_no_platform_imports — only crates/holon-frontend/src.
@@ -93,11 +94,10 @@ To suppress: // ALLOW(frontend-raw-sql): <reason>
 id = "orgmode-raw-sql"
 pattern = '"(SELECT|INSERT|UPDATE|DELETE|CREATE) '
 files = "crates/holon-orgmode/src/**/*.rs"
-exclude = ["**/di.rs"]
 case_sensitive = true
 message = """
-No raw SQL strings in holon-orgmode outside the DI assembly. Use the \
-BlockReader / DocumentManager / BlockOrdering traits; SQL lives behind them. \
+No raw SQL strings in holon-orgmode. Use the BlockReader / DocumentManager / \
+BlockOrdering traits; the SQL-backed impls live in holon-app::turso_seams. \
 To suppress: # ALLOW(orgmode-raw-sql): <reason>
 """
 

@@ -5,7 +5,7 @@
 //! adapters implement those seams directly against a [`LoroBackend`] tree — no
 //! Turso, no `QueryableCache`, no cell registry, no command bus. They are the
 //! Loro counterparts of `CacheBlockReader` / `LiveDocumentManager` (Turso) in
-//! holon-orgmode's `di.rs` and of the `Upstream` branch of `impl BlockOrdering
+//! [`crate::turso_seams`] and of the `Upstream` branch of `impl BlockOrdering
 //! for SqlBlockOperations`.
 //!
 //! These are registered as the `dyn BlockReader` / `dyn DocumentManager` /

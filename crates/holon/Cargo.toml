@@ -103,6 +103,7 @@ web-time = "1"
 holon-block-roundtrip-testing.workspace = true
 holon-filesystem.workspace = true
 holon-loro.workspace = true
+holon-app.workspace = true
 holon-orgmode.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
