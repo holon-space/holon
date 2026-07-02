@@ -1,9 +1,11 @@
 //! Compose the combined SQL+Loro slice's SUT `CapMap`. Unlike the single-store
 //! slices this one registers two components, but deliberately *not* through two
 //! `Config::with` calls: both provide `SutBackend` and the typemap keeps one
-//! provider per cap, so a second `with` would silently shadow the first. Instead
-//! SQL registers fully (its `register` provides `SutBackend` + `SutSqlProjection`)
-//! and Loro contributes only `SutLoroTaskState` — see the slice module doc.
+//! provider per cap, so a second `with` would PANIC on the duplicate `SutBackend`
+//! ([`CapMap::insert`] is fail-loud). Instead SQL registers fully (its `register`
+//! provides `SutBackend` + `SutSqlProjection`) and Loro contributes only its
+//! non-overlapping `SutLoroTaskState` — a precedence composition, not a shadow —
+//! see the slice module doc.
 
 use std::sync::Arc;
 

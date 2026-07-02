@@ -119,10 +119,49 @@ impl CapMap {
     /// Register a provider for capability `C`. Typically called by a component's
     /// [`CapProvider::register`]; one `Arc<Concrete>` is cast to `Arc<dyn C>`
     /// per cap it provides.
+    ///
+    /// **Fail-loud on duplicate**: registering a cap that is already present is a
+    /// composition bug (two components both claiming the same cap would silently
+    /// shadow one another, invalidating whichever invariants read the loser).
+    /// Panics naming the cap. To assemble maps whose cap sets legitimately overlap
+    /// with a precedence rule, use [`merge_missing`](Self::merge_missing) (keeps
+    /// the first-registered provider and *discloses* the shadowed caps) rather
+    /// than a second `insert`.
     pub fn insert<C: ?Sized + CapName>(&mut self, provider: Arc<C>) {
         let tid = TypeId::of::<C>();
+        if let Some(existing) = self.names.get(&tid) {
+            panic!(
+                "duplicate capability registration: `{}` is already provided \
+                 (existing provider name `{existing}`, incoming `{}`). Two \
+                 components both claim this cap — one would silently shadow the \
+                 other. Register the precedence-winner first and `merge_missing` \
+                 the rest, or insert only the non-overlapping caps.",
+                C::NAME,
+                C::NAME,
+            );
+        }
         self.names.insert(tid, C::NAME);
         // `Arc<dyn C>` is a concrete, `'static`, `Sized` type → it is `Any`.
+        self.providers.insert(tid, Box::new(provider));
+    }
+
+    /// Deliberately OVERWRITE the provider for a cap that is **already present** —
+    /// the honest counterpart to [`insert`](Self::insert)'s fail-loud-on-duplicate.
+    /// Use this when a builder registers a component's default provider and then
+    /// intentionally swaps in a specialised one under the SAME cap `TypeId` (e.g.
+    /// the composed Turso builder replaces `SqlProjectionComponent`'s fresh-resolver
+    /// block-tree writer with the shared-resolver dispatch-floor writer). Distinct
+    /// from a silent overwrite: replacing a cap that was NOT first registered is a
+    /// composition bug (the precedence assumption is wrong), so this panics on
+    /// absence — `insert` first, `replace` second.
+    pub fn replace<C: ?Sized + CapName>(&mut self, provider: Arc<C>) {
+        let tid = TypeId::of::<C>();
+        assert!(
+            self.names.contains_key(&tid),
+            "replace::<{}> but no provider was registered first — `replace` \
+             overwrites an existing cap; use `insert` for the initial registration",
+            C::NAME,
+        );
         self.providers.insert(tid, Box::new(provider));
     }
 
@@ -181,9 +220,11 @@ impl CapMap {
     /// components whose cap sets overlap (e.g. several backends all provide
     /// `SutBackend`): register the precedence-winning component first, then
     /// `merge_missing` the rest, and each contributes only the caps not already
-    /// supplied. Without it, a later [`insert`](Self::insert) of an
-    /// already-present cap would **silently shadow** the earlier provider (the
-    /// typemap keeps exactly one provider per cap `TypeId`).
+    /// supplied. This is the ONLY way to fold overlapping cap sets: a plain
+    /// [`insert`](Self::insert) of an already-present cap **panics** (the typemap
+    /// keeps exactly one provider per cap `TypeId`, so shadowing is forbidden);
+    /// `merge_missing` instead keeps the first-registered provider and *discloses*
+    /// the skipped caps.
     ///
     /// Returns the names of the caps that were **skipped** because `self` already
     /// had them — so a caller can disclose precedence collisions (log / assert)

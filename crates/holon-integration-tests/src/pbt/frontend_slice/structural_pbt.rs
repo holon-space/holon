@@ -581,7 +581,9 @@ async fn boot_and_seed_editor(
     // select `inv-editor-{text,caret}-matches-ref`. The WRITE cap is already in the
     // component's `register`.
     caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
-    caps.insert(
+    // Intentionally REPLACE register's fresh-resolver `OpDispatchWriter` with the
+    // shared-resolver one (explicit `replace` — plain `insert` fails loud on the dup).
+    caps.replace(
         Arc::new(OpDispatchWriter::with_resolver(engine, resolver.clone()))
             as Arc<dyn SutBlockTreeWrite>,
     );
@@ -681,7 +683,9 @@ mod teeth {
         // `SutQueryResults` (full-mode query engine) — same rationale as the combined
         // boot above: keeps the full decompiled twin selected and the degraded twin off.
         caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
-        caps.insert(Arc::new(OpDispatchWriter::with_resolver(
+        // Intentionally REPLACE register's fresh-resolver writer with the shared-resolver
+        // one (explicit `replace` — plain `insert` fails loud on the duplicate).
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
             engine.clone(),
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);

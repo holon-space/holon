@@ -30,7 +30,7 @@ Think in capabilities, not Rust types.
 
 - **Capability** `c` — a named bundle of operations. These already exist in the code as the `Sut*` traits (what a SUT does/observes) and `Ref*` traits (what the reference model exposes). Let `C` be the full set.
 - **Component** `k` (a sub-SUT or sub-Ref) **provides** `prov(k) ⊆ C` and may **require** `req(k) ⊆ C` (e.g. the Turso projection requires a backend's CDC stream).
-- **Configuration** — a chosen set of components. Provided set `P = ⋃ prov(k)`. **Valid** iff `req(k) ⊆ P` for all `k`. An invalid config (e.g. "Turso without a backend") must **fail loud at construction**, not silently drop invariants. *The current system has no such check; this design adds one.*
+- **Configuration** — a chosen set of components. Provided set `P = ⋃ prov(k)`. **Valid** iff `req(k) ⊆ P` for all `k`. An invalid config (e.g. "Turso without a backend") must **fail loud at construction**, not silently drop invariants. *This is enforced NOT by a declarative `CapProvider::req()` but by the **fail-loud construction path** itself: `CapMap::insert` panics on duplicate cap registration (naming the cap), `CapMap::replace` panics if the overridden cap was never registered, and the handful of composed builders carry fail-loud asserts for their own wiring preconditions (`compose_sut`'s `!has_actor(UI)`, `ComponentSet`'s `Actor::UI ⟹ ViewModel`). C-1 audit (2026-07-02) found no third hand-defended guard site, so `req()` was NOT added — builder asserts + fail-loud `insert`/`replace` ARE the validity mechanism. See §4.2.*
 - **Consumer** — an invariant `i` or a transition `g` declares a **need-set** on two axes: `need_sut` and `need_ref`. (An invariant compares a SUT projection against a Ref projection; a transition needs ref-mutation caps to model the change and sut-apply caps to execute it.)
 
 **Selection rule (positive + negative containment):**
@@ -80,16 +80,28 @@ struct Config { /* … */ }
 impl Config { fn with<P: CapProvider>(self, c: P) -> Self; fn build(self) -> CapMap; }
 ```
 
-A configuration is just a component list. `build` also runs the **validity check** (`req ⊆ P`) and fails loud on an impossible wiring.
+A configuration is just a component list. `build` returns the assembled `CapMap`; validity is not a
+separate declarative pass but is enforced *along the construction path itself* (see the resolution box).
 
-> **Reality check (2026-07-01 audit): the validity check is PROMISED, NOT BUILT.** `Config::build`
-> is literally `self.caps` — `CapProvider` has no `req()` at all, so `req ⊆ P` cannot be evaluated.
-> Validity today is enforced ad hoc: `ComponentSet`'s wiring-validity rules (e.g. `Actor::UI ⟹
-> ViewModel`) plus fail-loud asserts inside individual builders (`compose_sut`'s `!has_actor(UI)`,
-> `overlay_windowed_caps`' no-prior-`SutDriver`). That has been *sufficient* so far because the
-> builders are few and hand-audited, but §2's "the current system has no such check; this design
-> adds one" is still unmet. Either implement `req()` + the build-time check, or amend §2/§4.2 to
-> bless the builder-assert pattern as the mechanism. Tracked in §11 (C-1).
+> **Resolution (2026-07-02, C-1 verdict = "bless the builder asserts"): there is deliberately NO
+> `CapProvider::req()`.** `Config::build` returns `self.caps`; a declarative `req ⊆ P` pass was
+> considered and rejected. The validity mechanism is instead the **fail-loud construction path**:
+> 1. **`CapMap::insert` panics on duplicate cap registration** (C-2, 2026-07-02) — one-provider-per-cap
+>    is now enforced by the type, naming the offending cap. Silent shadowing is unrepresentable.
+> 2. **`CapMap::replace`** is the honest counterpart for a *deliberate* override (a builder registers a
+>    component's default provider, then swaps in a specialised one under the same cap `TypeId`); it
+>    panics if the cap was never registered first, so a stale precedence assumption also fails loud.
+> 3. **Builder-side asserts** guard the remaining wiring preconditions that are not cap-duplication
+>    (`compose_sut`'s `!has_actor(UI)` for the headless/windowed thread-affinity split; `ComponentSet`'s
+>    `Actor::UI ⟹ ViewModel`).
+>
+> The C-1 audit (2026-07-02) searched every composed builder for a *third* hand-defended
+> duplicate-guard site beyond the two known ones (`sql_loro_wide`, `overlay_windowed_caps`) and found
+> none — so no general `req()` abstraction is warranted. `overlay_windowed_caps`' hand-rolled
+> `no-prior-SutDriver` assert was **deleted** (redundant: its `register` calls now trip `insert`'s
+> panic). `sql_loro_wide` keeps its selective single-cap insert (a precedence composition that avoids
+> the collision, not a guard dodging the panic). This closes §2's "the current system has no such
+> check" — the check exists, distributed across `insert`/`replace`/builder asserts. Tracked in §11 (C-1, C-2).
 
 ### 4.3 Single-sourced invariants (`cap_invariant!`)
 
@@ -777,7 +789,8 @@ per-tick hook), but it is **superseded as the target** by the landed windowed `C
 - **Pure-insert overlay:** on the gpui thread, `overlay_windowed_caps(caps, geometry, engine,
   driver)` INSERTS `GpuiWindowComponent` (`SutLayout`) + the window-driver `DriverInputComponent`
   (`SutDriver`/`SutBlockInteract`/…). No cap is registered-then-overridden; fail-loud if the base
-  wasn't deferred.
+  wasn't deferred — via `CapMap::insert`'s own duplicate panic (the old hand-rolled `no-prior-SutDriver`
+  assert was deleted as redundant, C-2 2026-07-02).
 - **Injected-handle harness:** `ComposedSut::from_parts` (skips `init_test`'s tokio boot — the
   window has thread affinity, §8.10) + a `SettleHook` that pumps the window to a fixed point
   before each `check_invariants`; a windowed non-vacuity floor keyed off the ACTUAL `SutLayout`
@@ -811,7 +824,7 @@ obligation. Tracked in §11 (C-3).
 - **Ref coupling.** The omnipotent core is monolithic *by necessity* — do not try to "union" *shared* Ref state from parts. Sub-Refs are projections, not parts. The subtlety (§5.4): "don't union parts" forbids two owners of one shared datum, *not* composing the Ref from disjoint subsystem-private extensions over a shared core. And when a shared datum's value is a genuine merge, the core computes it via a not-under-test merge engine fed from intent (or a convergence relation for the overlapping residue) — never by reading the SUT back, and never by re-implementing Loro. **"Monolithic by necessity" is about *shared data*, not the struct: the Ref may be an *open registry* of per-module private extensions over the coupled core (§5.5) — that is the seam for new-subsystem / git-submodule contribution, and the only thing it forbids is a module silently owning a second copy of a shared datum.**
 - **Degraded twins must be routed through the `CapSet`** on both SUT and Ref, or false divergence (§5.2 soundness rule).
 - **Caching adapter union impl** lives once on `CapMap`; do not let it regress into per-SUT panicking impls (that's the rejected Move B).
-- **`CapMap::insert` silently overwrites (2026-07-01 audit).** One-provider-per-cap is enforced by *nothing*: a second `insert` for the same cap silently shadows the first. Two call sites already defend by hand (`sql_loro_wide` registers Loro for only one cap to dodge the `SutBackend` shadow; `overlay_windowed_caps` asserts no prior `SutDriver`). That is the fail-loud rule inverted — the *default* is silent, the *loudness* is opt-in. Fix direction: `insert` panics on duplicate cap registration (message = both provider names), with an explicit `insert_replacing` if a legitimate override ever appears. Needs a full-suite parity run before flipping (an intentional-override site may exist). Tracked in §11 (C-2).
+- **`CapMap::insert` is fail-loud on duplicate (FIXED 2026-07-02, C-2).** One-provider-per-cap is now enforced by the type: `insert` panics on a duplicate cap registration (naming the cap). The flip surfaced four intentional-override sites that had been relying on silent shadowing — the composed builder's Turso and frontend `SutBlockTreeWrite` swaps (`builder.rs`) and two frontend-slice `structural_pbt` builders — all converted to the explicit `CapMap::replace` (panics if the cap was never registered first). `overlay_windowed_caps`' hand-rolled `no-prior-SutDriver` assert was deleted (redundant with `insert`'s panic); `sql_loro_wide` keeps its selective single-cap insert (precedence composition, not a guard). Full lib parity: identical failure set before/after the flip (17 pre-existing slice-teeth reds unchanged, 0 new); keystone green.
 - **Open → resolving:** exact split of `Subsystem` (coarse, ~9) vs `Sut*` caps (fine, ~23). Recommendation stands: unify on the capability as the single unit for both `prov` and `need`. **The §8.5 audit gives the first concrete instance:** `min_sut` today encodes *realization* (the structural block invariants carry `TursoProjection` because `E2ESut::SutBackend` reads Turso) rather than the *capability* their bodies actually call (`SutBackend`). **But §8.6 shows this is not a free re-label:** there is only one `SutBackend` realization and it *needs* Turso, so the `TursoProjection` in `min_sut` is currently load-bearing — it gates these invariants out of the non-Turso `loro_backend_pbt` slice, where the SQL would fail. The reclassification (realization→capability) must wait until a non-Turso `SutBackend` realization exists; only then does the parity gate hold. The broader `Subsystem`-vs-cap unification follows from there.
 
 ---
@@ -905,10 +918,14 @@ end state; needs a unification/deletion decision).
   the end state has `WideE2EMachine` + genuinely-independent oracles (editor-pure, loro-sync).
 
 **DEBT — no end-state justification; decide, don't drift.**
-- **C-1 `Config`'s missing validity check** (§4.2 reality-check box): implement `req()` + build-time
-  `req ⊆ P`, or bless builder asserts as the mechanism and amend §2. Today `Config` adds nothing
-  over a `Vec<Arc<dyn CapProvider>>`.
-- **C-2 `CapMap::insert` silent overwrite** (§9): flip to fail-loud; run the parity gate.
+- **C-1 `Config`'s missing validity check** (§4.2 reality-check box) — **RESOLVED 2026-07-02: bless
+  builder asserts, no `req()`.** The audit found no third hand-defended duplicate-guard site, so a
+  declarative `req ⊆ P` pass is unwarranted; the validity mechanism is the fail-loud construction path
+  (`insert`/`replace` panics + builder asserts). §2 and §4.2 amended accordingly. (`Config` still adds
+  little over a `Vec<Arc<dyn CapProvider>>`, but that is an ergonomics nit, not a soundness gap.)
+- **C-2 `CapMap::insert` silent overwrite** (§9) — **RESOLVED 2026-07-02: flipped to fail-loud.**
+  Added `CapMap::replace` for the four intentional-override sites; parity gate run (17 pre-existing
+  reds unchanged, 0 new; keystone green).
 - **C-3 Mixed driver rungs in the windowed SUT** (§8.12): re-back the headless-rung write caps
   (`SutFocusWrite`, `SutEditorMirrorWrite`, structural) with the window driver during the harness
   repoint, or disclose per-class exclusions. Includes finishing the `KeystrokeBlockTreeWriter`

@@ -309,12 +309,16 @@ async fn compose_sut_seeded_impl(
         // through `dispatch_intent_sync` → `apply_structural_focus`) — the rebind is
         // incremental (Split first). Reuses the component's OWN `ReactiveEngineDriver`
         // so the single live `HeadlessEditorMirror` is shared with the editor-write caps.
+        // This intentionally REPLACES the plain `OpDispatchWriter` that
+        // `HeadlessFrontendComponent::register` installs under `SutBlockTreeWrite` with the
+        // VM-rung keystroke-driven writer — explicit `replace` (a plain `insert` fails loud
+        // on the duplicate).
         let structural_fallback = OpDispatchWriter::with_resolver_and_focus(
             eng.clone(),
             resolver.clone(),
             comp.reactive(),
         );
-        caps.insert(Arc::new(KeystrokeBlockTreeWriter::new(
+        caps.replace(Arc::new(KeystrokeBlockTreeWriter::new(
             comp.driver(),
             comp.reactive(),
             resolver.clone(),
@@ -397,8 +401,9 @@ async fn compose_sut_seeded_impl(
         // directly to the engine (`synthetic_dispatch` == the old `OpDispatchWriter`
         // no-focus-sink path, behavior-identical), the bottom rung the subsystem
         // bisector descends to. `SqlProjectionComponent::register` installs a
-        // fresh-resolver writer; this replaces it under the same cap `TypeId`.
-        caps.insert(Arc::new(DirectUserDriver::with_resolver(
+        // fresh-resolver writer; this replaces it under the same cap `TypeId`
+        // (explicit `replace` — a plain `insert` would fail loud on the duplicate).
+        caps.replace(Arc::new(DirectUserDriver::with_resolver(
             eng.clone(),
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);
