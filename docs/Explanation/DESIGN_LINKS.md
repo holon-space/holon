@@ -23,8 +23,8 @@ The identity of a linked entity is a **deterministic hash** of its canonical cre
 
 ```
 [[Projects/New thing]]
-→ normalize: "block:projects/new thing"
-→ hash: blake3("block:projects/new thing")
+→ normalize: "projects/new thing"          (scheme is NOT a hash input)
+→ hash: blake3("projects/new thing")
 → format as UUID: 7fc2b308-403a-458e-91a8-0a26fc519320
 → ID: block:7fc2b308-403a-458e-91a8-0a26fc519320
 ```
@@ -108,30 +108,20 @@ For inferred types, the type prefix is stripped from the path before it becomes 
 1. Lowercase the entire string
 2. Trim whitespace
 3. Collapse multiple spaces to single space
-4. Prepend scheme if not present: `"block:projects/new thing"`
+
+The scheme is **not** part of the normalized string — `deterministic_entity_id`
+hashes the normalized path only and applies the scheme afterwards. (This is what
+made the 2026-07-02 `doc:`→`block:` mint switch identity-preserving.)
 
 **Hash**: Blake3 (or any fast hash already in the dependency tree), formatted as UUID-style hex with dashes to match existing block ID format.
 
 **Implementation**: Pure function in `holon-api` (no dependencies on storage):
 
-```rust
-// holon_api::link_parser
-pub fn deterministic_entity_id(scheme: &str, normalized_path: &str) -> EntityUri {
-    let input = format!("{}:{}", scheme, normalized_path.to_lowercase().trim());
-    let hash = blake3::hash(input.as_bytes());
-    let bytes = hash.as_bytes();
-    let uuid_str = format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        u16::from_be_bytes([bytes[4], bytes[5]]),
-        u16::from_be_bytes([bytes[6], bytes[7]]),
-        u16::from_be_bytes([bytes[8], bytes[9]]),
-        // 6 bytes for the last segment
-        u64::from_be_bytes([0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]])
-    );
-    EntityUri::new(scheme, &uuid_str)
-}
-```
+See `deterministic_entity_id` in `crates/holon-api/src/link_parser.rs` — it
+blake3-hashes `normalized_path` alone (the `scheme` parameter only names the
+resulting URI's scheme) and formats the first 16 hash bytes as a UUID-style id.
+An earlier draft of this doc embedded a code sketch that hashed
+`"{scheme}:{path}"`; the shipped implementation never did that.
 
 ## Convergence
 
