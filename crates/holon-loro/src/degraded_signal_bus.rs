@@ -31,6 +31,13 @@ pub enum ShareDegradedReason {
     /// watermark is deliberately NOT advanced on failure, so the next
     /// commit retries the same diff. String carries the underlying error.
     SqlProjectionFailed(String),
+    /// A shared doc tried to project a block whose id collides with a LIVE
+    /// node in the recipient's global tree — i.e. it is trying to shadow a
+    /// LOCAL block id (e.g. a malicious sharer naming a node `block:journals`).
+    /// The projection is refused so it cannot clobber the recipient's own SQL
+    /// row; the watermark is NOT advanced, so an honest later diff still
+    /// projects. String carries the colliding block id.
+    ForeignIdCollision(String),
 }
 
 #[derive(Clone, Debug)]
