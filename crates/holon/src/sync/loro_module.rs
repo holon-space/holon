@@ -67,12 +67,27 @@ impl Module for LoroModule {
             ))))
         }));
 
-        // Register LoroBlockOperations
+        // Register LoroBlockOperations. When the subtree-share machinery is
+        // compiled in, thread the `SharedTreeSyncManager` (the `SharedTreeStore`)
+        // into the block-ops write path so writes to blocks that were pruned
+        // into a shared subtree doc route there instead of silently no-op-ing on
+        // the global doc (B3: mount-aware write routing). The manager provider is
+        // registered by `register_subtree_share` in this same `configure`; both
+        // are lazy factories, so registration order within `configure` is moot.
         injector.provide::<LoroBlockOperations>(Provider::root(|resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
-            Shared::new(LoroBlockOperations::new(Arc::new(RwLock::new(
-                (*doc_store).clone(),
-            ))))
+            let ops = LoroBlockOperations::new(Arc::new(RwLock::new((*doc_store).clone())));
+            #[cfg(all(
+                feature = "iroh-sync",
+                not(all(target_arch = "wasm32", target_os = "unknown"))
+            ))]
+            let ops = {
+                use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
+                use holon_loro::shared_tree::SharedTreeStore;
+                let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
+                ops.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>)
+            };
+            Shared::new(ops)
         }));
 
         // Register a Loro-aware `BlockCellRegistry`. `SqlBlockOperations`

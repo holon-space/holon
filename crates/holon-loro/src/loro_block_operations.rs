@@ -25,6 +25,7 @@ use holon_api::{ContentType, EntityName, EntityUri, Operation, Value};
 
 use crate::LoroDocumentStore;
 use crate::loro_backend::LoroBackend;
+use crate::shared_tree::SharedTreeStore;
 use holon_api::ApiError;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
@@ -44,11 +45,26 @@ use holon_core::{
 /// provider needs no Turso-fed `QueryableCache` and works in no-Turso sessions.
 pub struct LoroBlockOperations {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
+    /// Registry of shared subtree docs. When present, the per-operation write
+    /// backend can route writes for blocks that were pruned into a shared doc
+    /// (mount-aware write routing). `None` in configs without share machinery
+    /// (no-Turso sessions, wasm, iroh-sync off), where no subtree is ever shared.
+    shared_trees: Option<Arc<dyn SharedTreeStore>>,
 }
 
 impl LoroBlockOperations {
     pub fn new(doc_store: Arc<RwLock<LoroDocumentStore>>) -> Self {
-        Self { doc_store }
+        Self {
+            doc_store,
+            shared_trees: None,
+        }
+    }
+
+    /// Attach the shared-tree registry so per-operation write backends can
+    /// route writes into shared subtree docs (see `LoroBackend::with_shared_trees`).
+    pub fn with_shared_trees(mut self, store: Arc<dyn SharedTreeStore>) -> Self {
+        self.shared_trees = Some(store);
+        self
     }
 
     /// Get the shared doc store (same instance used for writes).
@@ -63,7 +79,11 @@ impl LoroBlockOperations {
             .get_global_doc()
             .await
             .map_err(|e| format!("Failed to get global doc: {}", e))?;
-        Ok(LoroBackend::from_document(collab_doc))
+        let mut backend = LoroBackend::from_document(collab_doc);
+        if let Some(store) = &self.shared_trees {
+            backend = backend.with_shared_trees(store.clone());
+        }
+        Ok(backend)
     }
 
     /// Find the backend containing a block (always the global backend).

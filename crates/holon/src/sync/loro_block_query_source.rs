@@ -146,6 +146,26 @@ pub fn register_loro_operation_engine(
     doc_store: Arc<RwLock<LoroDocumentStore>>,
 ) {
     let block_ops = LoroBlockOperations::new(doc_store);
+    // Thread the shared-tree registry into the write path if the container
+    // registered one. No-Turso sessions do not run `register_subtree_share`, so
+    // this is normally `None` (no subtree is ever shared here) — but resolving it
+    // opportunistically keeps this site correct if share machinery is ever added
+    // to a Loro-only container. `None` simply means shared writes don't route,
+    // which is correct when there are no shared subtrees.
+    #[cfg(all(
+        feature = "iroh-sync",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    let block_ops = {
+        use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
+        use holon_loro::shared_tree::SharedTreeStore;
+        match injector.try_resolve::<Arc<SharedTreeSyncManager>>() {
+            Ok(manager) => {
+                block_ops.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>)
+            }
+            Err(_) => block_ops,
+        }
+    };
     // Navigation ops (focus / back / forward / home) have no Turso substrate in
     // a Loro-only session; an in-memory provider keeps per-device focus history
     // so click / arrow / back-forward navigation dispatches succeed.
