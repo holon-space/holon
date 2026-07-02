@@ -196,6 +196,19 @@ async fn accept_loop(
                     return;
                 }
             };
+            // Defence-in-depth ALPN re-check. Each share binds its own
+            // single-ALPN endpoint, so iroh already refuses a mismatched
+            // ALPN at the QUIC layer — but assert the invariant explicitly
+            // in the handler so a future multi-ALPN endpoint can't silently
+            // route a stranger's connection into this share's doc.
+            let expected_alpn = make_alpn(ALPN_PREFIX, &id);
+            if conn.alpn() != expected_alpn.as_slice() {
+                warn!(
+                    "[advertiser:{id}] rejecting connection with unexpected ALPN {:?}",
+                    conn.alpn()
+                );
+                return;
+            }
             // Capture dialer addr BEFORE running the sync protocol —
             // sync reads/writes framed bytes and may drop the
             // connection on errors, at which point `paths()` empties

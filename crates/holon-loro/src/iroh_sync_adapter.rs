@@ -40,10 +40,15 @@ mod adapter {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
-    use tokio::time::sleep;
+    use tokio::time::{sleep, timeout};
     use tracing::{debug, info, warn};
 
     const MAX_MSG_SIZE: usize = 10 * 1024 * 1024;
+
+    /// Upper bound on any single acceptor-side network await. The initiator is
+    /// already bounded by `CONNECT_TIMEOUT` at its call sites; this stops a
+    /// stalled/malicious peer from pinning an accept task forever (slowloris).
+    const ACCEPT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Export the updates the peer is missing (relative to `peer_vv`).
     ///
@@ -91,6 +96,12 @@ mod adapter {
     }
 
     async fn write_framed(stream: &mut iroh::endpoint::SendStream, data: &[u8]) -> Result<()> {
+        if data.len() > MAX_MSG_SIZE {
+            anyhow::bail!(
+                "refusing to send oversize frame: {} bytes (max {MAX_MSG_SIZE})",
+                data.len()
+            );
+        }
         let len = (data.len() as u32).to_be_bytes();
         stream.write_all(&len).await?;
         stream.write_all(data).await?;
@@ -104,7 +115,9 @@ mod adapter {
             .await
             .context("Failed to read frame length")?;
         let len = u32::from_be_bytes(len_buf) as usize;
-        assert!(len <= MAX_MSG_SIZE, "Message too large: {len} bytes");
+        if len > MAX_MSG_SIZE {
+            anyhow::bail!("peer sent oversize frame: {len} bytes (max {MAX_MSG_SIZE})");
+        }
         let mut data = vec![0u8; len];
         stream
             .read_exact(&mut data)
@@ -304,6 +317,18 @@ mod adapter {
         EndpointAddr::from_parts(id, transport_addrs)
     }
 
+    /// Bound an acceptor-side await by `ACCEPT_IO_TIMEOUT`, turning a stall into
+    /// a loud error instead of a task pinned forever by a slowloris peer.
+    async fn with_accept_timeout<F, T>(what: &str, fut: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match timeout(ACCEPT_IO_TIMEOUT, fut).await {
+            Ok(r) => r,
+            Err(_) => anyhow::bail!("[accept] {what} timed out after {ACCEPT_IO_TIMEOUT:?}"),
+        }
+    }
+
     /// Run the VV-based sync handshake against an already-accepted connection.
     /// Factored out of `sync_doc_accept` so the persistent advertiser loop can
     /// reuse it.
@@ -312,15 +337,15 @@ mod adapter {
         doc: &LoroDoc,
     ) -> Result<()> {
         debug!("[accept] connected, accepting bi...");
-        let (mut send, mut recv) = conn
-            .accept_bi()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to accept bi stream: {e}"))?;
+        let (mut send, mut recv) = match timeout(ACCEPT_IO_TIMEOUT, conn.accept_bi()).await {
+            Ok(r) => r.map_err(|e| anyhow::anyhow!("Failed to accept bi stream: {e}"))?,
+            Err(_) => anyhow::bail!("[accept] accept_bi timed out after {ACCEPT_IO_TIMEOUT:?}"),
+        };
         debug!("[accept] bi stream open");
 
         // Receive peer's VV
         debug!("[accept] reading peer VV...");
-        let peer_vv_bytes = read_framed(&mut recv)
+        let peer_vv_bytes = with_accept_timeout("read peer VV", read_framed(&mut recv))
             .await
             .context("[accept] Failed to read peer VV")?;
         debug!("[accept] got peer VV ({} bytes)", peer_vv_bytes.len());
@@ -331,12 +356,14 @@ mod adapter {
         let our_delta = export_delta_or_full_snapshot(doc, &peer_vv, "accept")?;
         let our_vv = doc.oplog_vv();
         debug!("[accept] sending delta ({} bytes) + VV", our_delta.len());
-        write_framed(&mut send, &our_delta).await?;
-        write_framed(&mut send, &our_vv.encode()).await?;
+        // Bound the writes too: a peer that stops reading stalls `write_all`
+        // once QUIC flow control fills the send buffer (a write-side slowloris).
+        with_accept_timeout("send delta", write_framed(&mut send, &our_delta)).await?;
+        with_accept_timeout("send VV", write_framed(&mut send, &our_vv.encode())).await?;
 
         // Receive peer's delta
         debug!("[accept] reading peer delta...");
-        let peer_delta = read_framed(&mut recv)
+        let peer_delta = with_accept_timeout("read peer delta", read_framed(&mut recv))
             .await
             .context("[accept] Failed to read peer delta")?;
         debug!("[accept] got peer delta ({} bytes)", peer_delta.len());
@@ -352,15 +379,21 @@ mod adapter {
         // `send.finish()` AFTER writing its delta, so `Ok(None)` here
         // proves our earlier `read_framed(peer_delta)` got everything.
         // It also delivers the initiator's FIN to our QUIC state.
-        drain_until_eof(&mut recv)
+        with_accept_timeout("drain recv stream", drain_until_eof(&mut recv))
             .await
             .context("[accept] drain recv stream")?;
         // Wait for the initiator to explicitly close the connection
         // (see `sync_doc_initiate`). `conn.closed()` resolves the
         // moment the peer's close packet lands — with no timing guess.
         // We drop conn immediately after, so there's no lingering
-        // reference to trip up the accept loop.
-        let close_reason = conn.closed().await;
+        // reference to trip up the accept loop. A peer that never closes
+        // is misbehaving, so a timeout here is an error, not a clean exit.
+        let close_reason = match timeout(ACCEPT_IO_TIMEOUT, conn.closed()).await {
+            Ok(reason) => reason,
+            Err(_) => anyhow::bail!(
+                "[accept] peer never closed connection (timed out after {ACCEPT_IO_TIMEOUT:?})"
+            ),
+        };
         debug!("[accept] connection closed: {close_reason}");
 
         info!(
@@ -827,6 +860,101 @@ mod adapter {
                 "Block B",
                 "Shared tree 2 should be unaffected"
             );
+            Ok(())
+        }
+
+        /// A peer that sends a length header exceeding `MAX_MSG_SIZE` must
+        /// produce a loud `Err` (not a panic, not a giant allocation).
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn read_framed_rejects_oversize_length_without_panic() -> Result<()> {
+            let alpn = make_alpn("loro-sync", "oversize-test");
+            let ep1 = create_endpoint(vec![alpn.clone()]).await?;
+            let ep2 = create_endpoint(vec![alpn.clone()]).await?;
+            sleep(Duration::from_millis(500)).await;
+            let addr2 = ep2.addr();
+
+            let handle = tokio::spawn(async move {
+                let incoming = ep2
+                    .accept()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("no incoming connection"))?;
+                let conn = incoming
+                    .await
+                    .map_err(|e| anyhow::anyhow!("accept failed: {e}"))?;
+                let (mut _send, mut recv) = conn
+                    .accept_bi()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("accept_bi failed: {e}"))?;
+                read_framed(&mut recv).await
+            });
+
+            sleep(Duration::from_millis(500)).await;
+
+            let conn = ep1.connect(addr2, &alpn).await.context("connect failed")?;
+            let (mut send, mut _recv) = conn
+                .open_bi()
+                .await
+                .map_err(|e| anyhow::anyhow!("open_bi failed: {e}"))?;
+            // Only a raw oversize length header, no body — the reader must
+            // reject on the length alone before allocating.
+            let oversize_len = ((MAX_MSG_SIZE + 1) as u32).to_be_bytes();
+            send.write_all(&oversize_len).await?;
+            send.finish()?;
+
+            let result = handle.await?;
+            let err = result.expect_err("read_framed should reject an oversize length");
+            assert!(
+                err.to_string().contains("oversize"),
+                "expected an oversize error, got: {err}"
+            );
+            // Keep the initiator side alive until the acceptor has read.
+            drop(conn);
+            Ok(())
+        }
+
+        /// A peer that opens a stream, sends a length header, then stalls
+        /// without sending the body must NOT pin the accept task forever:
+        /// `sync_doc_accept` returns a timeout `Err` after `ACCEPT_IO_TIMEOUT`.
+        /// Ignored by default because it waits the full 30s timeout; the fast
+        /// oversize test above covers the framing bound in the default suite.
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial_test::serial]
+        #[ignore = "waits ACCEPT_IO_TIMEOUT (~30s); run with --ignored"]
+        async fn acceptor_times_out_on_stalled_peer() -> Result<()> {
+            let alpn = make_alpn("loro-sync", "slowloris-test");
+            let ep1 = create_endpoint(vec![alpn.clone()]).await?;
+            let ep2 = create_endpoint(vec![alpn.clone()]).await?;
+            sleep(Duration::from_millis(500)).await;
+            let addr2 = ep2.addr();
+
+            let doc = LoroDoc::new();
+            doc.set_peer_id(9).unwrap();
+            let handle = tokio::spawn(async move { sync_doc_accept(&ep2, &doc).await });
+
+            sleep(Duration::from_millis(500)).await;
+
+            let conn = ep1.connect(addr2, &alpn).await.context("connect failed")?;
+            let (mut send, mut _recv) = conn
+                .open_bi()
+                .await
+                .map_err(|e| anyhow::anyhow!("open_bi failed: {e}"))?;
+            // Announce a 16-byte body then stall: never write the body, never
+            // finish. This is the slowloris the acceptor timeout defends against.
+            send.write_all(&16u32.to_be_bytes()).await?;
+
+            let outcome = tokio::time::timeout(ACCEPT_IO_TIMEOUT + Duration::from_secs(5), handle)
+                .await
+                .context("acceptor did not return within ACCEPT_IO_TIMEOUT bound")?;
+            let result = outcome.context("acceptor task panicked")?;
+            let err = result.expect_err("acceptor should error on a stalled peer");
+            assert!(
+                format!("{err:#}").contains("timed out"),
+                "expected a timeout error, got: {err:#}"
+            );
+            // Hold the stalling initiator open until the assertion completes.
+            drop(send);
+            drop(conn);
             Ok(())
         }
     }
