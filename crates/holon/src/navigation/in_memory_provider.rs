@@ -25,9 +25,9 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use super::provider::{ENTITY_NAME, navigation_operation_descriptors};
-use crate::core::datasource::{OperationProvider, OperationResult, Result};
 use holon_api::{EntityName, NavigationOp, OperationDescriptor, Region, Value};
 use holon_core::storage::types::StorageEntity;
+use holon_core::{OperationProvider, OperationResult, Result};
 
 /// Per-region back/forward history for one session. `entries[cursor]` is the
 /// current view; `None` is the home (no-block) view. `focus` truncates any

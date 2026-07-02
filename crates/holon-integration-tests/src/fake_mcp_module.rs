@@ -15,11 +15,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fluxdi::{Injector, Provider, Shared};
-use holon::core::datasource::{OperationProvider, SyncTokenStore, SyncableProvider};
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::DbHandle;
 use holon_api::DynamicEntity;
 use holon_api::entity::FieldSchema;
+use holon_core::{OperationProvider, SyncTokenStore, SyncableProvider};
 use holon_mcp_client::mcp_sidecar::{EntityConfig, McpSidecar, SyncConfig};
 use holon_mcp_client::mcp_sync_engine::McpSyncEngine;
 use rmcp::model::*;
@@ -110,7 +110,7 @@ impl ServerHandler for FakeMcpServer {
 // ── In-memory SyncTokenStore ──────────────────────────────────────
 
 struct InMemorySyncTokenStore {
-    tokens: tokio::sync::Mutex<HashMap<String, holon::core::datasource::StreamPosition>>,
+    tokens: tokio::sync::Mutex<HashMap<String, holon_api::StreamPosition>>,
 }
 
 #[async_trait::async_trait]
@@ -118,18 +118,15 @@ impl SyncTokenStore for InMemorySyncTokenStore {
     async fn save_token(
         &self,
         key: &str,
-        position: holon::core::datasource::StreamPosition,
-    ) -> holon::core::datasource::Result<()> {
+        position: holon_api::StreamPosition,
+    ) -> holon_core::Result<()> {
         self.tokens.lock().await.insert(key.to_string(), position);
         Ok(())
     }
-    async fn load_token(
-        &self,
-        key: &str,
-    ) -> holon::core::datasource::Result<Option<holon::core::datasource::StreamPosition>> {
+    async fn load_token(&self, key: &str) -> holon_core::Result<Option<holon_api::StreamPosition>> {
         Ok(self.tokens.lock().await.get(key).cloned())
     }
-    async fn clear_all_tokens(&self) -> holon::core::datasource::Result<()> {
+    async fn clear_all_tokens(&self) -> holon_core::Result<()> {
         self.tokens.lock().await.clear();
         Ok(())
     }
@@ -160,8 +157,8 @@ impl OperationProvider for FakeOperationProvider {
         &self,
         _: &holon_api::EntityName,
         _: &str,
-        _: holon::storage::types::StorageEntity,
-    ) -> holon::core::traits::Result<holon::core::datasource::OperationResult> {
+        _: holon_core::storage::types::StorageEntity,
+    ) -> holon::core::traits::Result<holon_core::OperationResult> {
         Err("fake MCP provider serves no operations".into())
     }
 }

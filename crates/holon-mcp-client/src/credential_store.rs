@@ -4,9 +4,9 @@ use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use holon::core::datasource::DataSource;
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::DbHandle;
+use holon_core::DataSource;
 
 /// Entity for the mcp_oauth_credentials table.
 #[derive(Debug, Clone, Serialize, Deserialize, Entity)]

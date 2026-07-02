@@ -6,10 +6,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, info, warn};
 
-use holon::core::datasource::SyncTokenStore;
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::DbHandle;
 use holon_api::DynamicEntity;
+use holon_core::SyncTokenStore;
 
 use crate::credential_store::TursoCredentialStore;
 use crate::mcp_notification_handler::{NotifyingClientHandler, ResourceUpdateReceiver};
@@ -99,7 +99,7 @@ pub struct McpIntegration {
 impl McpIntegration {
     /// Register all entity types from the sidecar config into the TypeRegistry.
     /// Called by frontends after building the integration so GQL graph includes MCP entities.
-    pub fn register_entity_types(&self, type_registry: &holon::type_registry::TypeRegistry) {
+    pub fn register_entity_types(&self, type_registry: &holon_profiles::TypeRegistry) {
         let sidecar = self.sync_engine.sidecar();
         for (entity_name, entity_config) in &sidecar.entities {
             let table_name = sidecar.prefixed_name(entity_name).table_name();
@@ -614,8 +614,8 @@ impl EntityFieldReader for DynamicEntityFieldReader {
                 + '_,
         >,
     > {
-        use holon::core::datasource::DataSource;
         use holon_api::entity::IntoEntity;
+        use holon_core::DataSource;
 
         let id = id.to_string();
         Box::pin(async move {

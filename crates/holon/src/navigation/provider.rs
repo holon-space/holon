@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::core::datasource::{OperationProvider, OperationResult, Result};
 use crate::storage::DbHandle;
 use holon_api::{
     EntityName, NavigationOp, OperationDescriptor, OperationParam, Region, TypeHint, Value,
 };
 use holon_core::storage::types::StorageEntity;
+use holon_core::{OperationProvider, OperationResult, Result};
 
 /// Navigation operations entity name
 pub const ENTITY_NAME: &str = "navigation";

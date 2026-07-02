@@ -17,11 +17,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use holon::core::SqlOperationProvider;
-use holon::core::datasource::OperationProvider;
 use holon::storage::schema_module::{EdgeFieldDescriptor, SchemaModule};
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon_api::{EntityName, Value};
+use holon_core::OperationProvider;
 
 const ENTITY: &str = "block";
 const TABLE: &str = "block_raw";

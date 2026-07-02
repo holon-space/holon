@@ -13,12 +13,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use holon::core::datasource::{
-    generate_sync_operation, Change, ChangeOrigin, FieldDelta, OperationDescriptor,
-    OperationProvider, OperationResult, Result, StreamPosition, SyncTokenStore, SyncableProvider,
-};
-use holon::storage::types::StorageEntity;
 use holon_api::{BatchMetadata, EntityName, SyncTokenUpdate, Value, WithMetadata};
+use holon_api::{Change, ChangeOrigin, OperationDescriptor, StreamPosition};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{
+    generate_sync_operation, FieldDelta, OperationProvider, OperationResult, Result,
+    SyncTokenStore, SyncableProvider,
+};
 
 use holon_filesystem::{
     directory::{ChangesWithMetadata, DirectoryChangeProvider},

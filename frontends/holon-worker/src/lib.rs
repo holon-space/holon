@@ -110,7 +110,7 @@ mod backend {
     use holon::api::backend_engine::BackendEngine;
     use holon::api::holon_service::HolonService;
     use holon::di::lifecycle::create_backend_engine;
-    use holon::storage::types::StorageEntity;
+    use holon_core::storage::types::StorageEntity;
     use holon_api::{Change, EntityName, EntityUri, QueryContext, QueryLanguage, Value};
     use holon_frontend::command_provider::CommandProvider;
     use holon_frontend::reactive::{BuilderServices, ReactiveEngine};

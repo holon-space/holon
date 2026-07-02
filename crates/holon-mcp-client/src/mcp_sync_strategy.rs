@@ -7,8 +7,9 @@ use rmcp::model::{CallToolRequestParam, ReadResourceRequestParam, ResourceConten
 use rmcp::service::Peer;
 use tracing::{Instrument, debug, info, info_span};
 
-use holon::core::datasource::{StreamPosition, SyncTokenStore};
+use holon_api::StreamPosition;
 use holon_api::Value;
+use holon_core::SyncTokenStore;
 
 use crate::mcp_sidecar::CursorConfig;
 

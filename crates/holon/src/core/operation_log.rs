@@ -241,7 +241,7 @@ impl OperationLogObserver {
     }
 }
 
-use crate::core::datasource::OperationObserver;
+use holon_core::OperationObserver;
 
 #[async_trait]
 impl OperationObserver for OperationLogObserver {

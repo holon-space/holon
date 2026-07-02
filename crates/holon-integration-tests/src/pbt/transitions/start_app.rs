@@ -116,7 +116,7 @@ impl TransitionRef<ReferenceState> for StartApp {
         // Load the seed entity profile from the TypeRegistry's bundled
         // block_profile.yaml (not from org blocks — the seed index.org
         // doesn't contain entity profile blocks).
-        let registry = holon::type_registry::create_default_registry()
+        let registry = holon_profiles::create_default_registry()
             .expect("default TypeRegistry must initialize");
         let block_type_def = registry
             .get("block")

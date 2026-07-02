@@ -12,14 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use holon::core::datasource::{OperationProvider, OperationResult, Result as DatasourceResult};
 use holon::storage::sql_utils::value_to_sql_literal;
 use holon::storage::turso::{ChangeData, DbHandle};
-use holon::storage::types::StorageEntity;
 use holon::testing::e2e_test_helpers::{
     ChangeType, E2ETestContext, assert_change_sequence, assert_change_type, wait_for_change,
 };
 use holon_api::{EntityName, OperationDescriptor, QueryLanguage, Value};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{OperationProvider, OperationResult, Result as DatasourceResult};
 
 /// Simple SQL-based operation provider for testing
 struct SqlOperationProvider {

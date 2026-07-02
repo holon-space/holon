@@ -173,7 +173,7 @@ impl Default for DebugServices {
 pub struct HolonMcpServer {
     pub engine: Option<Arc<BackendEngine>>,
     pub service: Option<HolonService>,
-    pub type_registry: Option<Arc<holon::type_registry::TypeRegistry>>,
+    pub type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
     pub debug: Arc<DebugServices>,
     pub builder_services: Option<Arc<dyn BuilderServices>>,
     pub watches: Arc<Mutex<HashMap<String, WatchState>>>,
@@ -191,7 +191,7 @@ impl HolonMcpServer {
 
     pub fn with_type_registry(
         engine: Option<Arc<BackendEngine>>,
-        type_registry: Option<Arc<holon::type_registry::TypeRegistry>>,
+        type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
         debug: Arc<DebugServices>,
         builder_services: Option<Arc<dyn BuilderServices>>,
     ) -> Self {

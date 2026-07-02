@@ -24,21 +24,20 @@ use holon_filesystem::File;
 use crate::file_watcher::OrgFileWatcher;
 use crate::org_renderer::OrgRenderer;
 use crate::OrgModeSyncProvider;
-use holon::core::datasource::{
-    OperationProvider, OriginTaggedWrites, SyncTokenStore, SyncableProvider,
-};
-use holon::core::operation_wrapper::OperationWrapper;
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
-use holon::type_registry::TypeRegistry;
 use holon_api::block::{blocks_by_document, Block};
 use holon_api::{EntityName, EntityUri};
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::CrudAuthority;
 use holon_core::EventOrigin;
+use holon_core::{
+    OperationProvider, OperationWrapper, OriginTaggedWrites, SyncTokenStore, SyncableProvider,
+};
 use holon_filesystem::{AliasRegistrar, BlockReader, DocumentManager, FileSyncController};
+use holon_profiles::TypeRegistry;
 
 /// Signal that indicates the FileWatcher is ready to receive file change events.
 ///
@@ -1146,9 +1145,9 @@ impl Module for OrgModeModule {
                 {
                     let sync_provider_clone = sync_provider.clone();
                     tokio::spawn(async move {
-                        use holon::core::datasource::SyncableProvider;
+                        use holon_core::SyncableProvider;
                         if let Err(e) = sync_provider_clone
-                            .sync(holon::core::datasource::StreamPosition::Beginning)
+                            .sync(holon_api::StreamPosition::Beginning)
                             .await
                         {
                             error!("[OrgMode] Initial sync failed: {}", e);

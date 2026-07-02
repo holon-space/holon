@@ -116,6 +116,7 @@ holon.workspace = true
 holon-frontend = { workspace = true, features = ["otel"] }
 holon-app.workspace = true
 holon-api.workspace = true
+holon-core.workspace = true
 holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }
 holon-integration-tests = { path = "../../crates/holon-integration-tests", optional = true }

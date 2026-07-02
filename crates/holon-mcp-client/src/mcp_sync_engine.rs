@@ -7,13 +7,12 @@ use rmcp::model::SubscribeRequestParam;
 use rmcp::service::Peer;
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use holon::core::datasource::{
-    DataSource, Result, StreamPosition, SyncTokenStore, SyncableProvider,
-};
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::DbHandle;
 use holon::sync::MatviewHook;
+use holon_api::StreamPosition;
 use holon_api::{Change, ChangeOrigin, DynamicEntity, EntityUri, Value};
+use holon_core::{DataSource, Result, SyncTokenStore, SyncableProvider};
 
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sync_strategy::{

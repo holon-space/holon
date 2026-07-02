@@ -16,12 +16,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{RwLock, broadcast};
 
-use crate::core::datasource::{CrudOperations, DataSource, OperationResult, Result};
 use crate::storage::backend::StorageBackend;
-use crate::storage::types::StorageEntity;
 use holon_api::Value;
 use holon_api::streaming::ChangeNotifications;
 use holon_api::{ApiError, Change, StreamPosition};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{CrudOperations, DataSource, OperationResult, Result};
 use tokio_stream::{Stream, StreamExt};
 
 /// Helper trait for datasources that implement both ChangeNotifications and CrudOperations
@@ -367,7 +367,7 @@ where
     async fn get_all(&self) -> Result<Vec<T>> {
         let db_guard = self.db.read().await;
         let entities = db_guard
-            .query(&self.table, crate::storage::Filter::And(vec![]))
+            .query(&self.table, holon_core::storage::types::Filter::And(vec![]))
             .await
             .map_err(|e| {
                 Box::new(std::io::Error::other(e.to_string()))

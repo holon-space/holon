@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::cell_registry::EntityCellRegistryExt;
-use holon_api::{EntityName, EntityUri, Operation, OperationDescriptor, Tags, Value};
+use holon_api::{
+    Change, EntityName, EntityUri, Operation, OperationDescriptor, StreamPosition, Tags, Value,
+};
 
 // Define Result type using Send + Sync for error
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -1058,7 +1060,7 @@ where
                 )
             })?;
             let new_sort_key = minter
-                .new_child_anchor(&parent_for_anchor, Some(id))
+                .new_child_anchor(&parent_for_anchor, Some(id)) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam via order_key_minter() above, not minted locally
                 .await?;
 
             let mut new_block_fields = crate::storage::types::StorageEntity::new();
@@ -1733,5 +1735,147 @@ impl OperationRegistry for holon_api::block::Block {
 
     fn short_name() -> Option<&'static str> {
         Some("block")
+    }
+}
+
+/// Observer for operation execution events
+///
+/// Observers are notified after an operation is successfully executed.
+/// This enables cross-cutting concerns like:
+/// - Operation logging for undo/redo
+/// - Audit trails
+/// - Analytics
+/// - Sync queue management
+///
+/// Unlike OperationProvider (which executes operations), observers only
+/// observe the results. They cannot modify or veto operations.
+///
+/// # Entity Filter
+/// Observers specify which entities they're interested in via `entity_filter()`:
+/// - Return `"*"` to observe all operations (e.g., operation log, audit)
+/// - Return a specific entity name to observe only that entity
+#[async_trait]
+/// flutter_rust_bridge:ignore
+pub trait OperationObserver: Send + Sync {
+    /// Entity filter for this observer
+    ///
+    /// Returns `"*"` to observe all entities, or a specific entity name.
+    fn entity_filter(&self) -> &str;
+
+    /// Called after an operation is successfully executed
+    ///
+    /// # Arguments
+    /// * `operation` - The operation that was executed
+    /// * `undo_action` - The undo action returned by the operation (may be Irreversible)
+    ///
+    /// # Note
+    /// This is called only for successful operations. Failed operations are not observed.
+    /// Observers should not perform operations that could fail and block the main flow.
+    async fn on_operation_executed(&self, operation: &Operation, undo_action: &UndoAction);
+}
+
+/// Trait for persisting and loading sync tokens
+///
+/// SyncableProviders use this trait to persist their sync tokens across app restarts.
+/// Implementations typically store tokens in a database or file system.
+/// Trait for storing sync tokens for external providers.
+///
+/// This trait is used internally for dependency injection and should not be exposed to FFI.
+/// flutter_rust_bridge:ignore
+#[async_trait]
+pub trait SyncTokenStore: Send + Sync {
+    /// Load sync token for a provider
+    ///
+    /// Returns None if no token exists (first sync).
+    async fn load_token(&self, provider_name: &str) -> Result<Option<StreamPosition>>;
+
+    /// Save sync token for a provider
+    async fn save_token(&self, provider_name: &str, position: StreamPosition) -> Result<()>;
+
+    /// Clear all sync tokens
+    ///
+    /// Used for full sync operations where all providers need to start from the beginning.
+    async fn clear_all_tokens(&self) -> Result<()>;
+}
+
+/// Type-independent sync trait for providers
+///
+/// Providers that can sync from external systems implement this trait.
+/// Sync operations are generated dynamically when providers are registered,
+/// using the format "{provider_name}.sync" (e.g., "todoist.sync", "jira.sync").
+///
+/// SyncableProviders should:
+/// - Load current token using SyncTokenStore before syncing
+/// - Perform sync operation
+/// - Save new token using SyncTokenStore after syncing
+/// - Return the new token
+#[async_trait]
+pub trait SyncableProvider: Send + Sync {
+    /// Get the provider name (e.g., "todoist", "jira")
+    ///
+    /// This name is used to generate sync operations and identify the provider.
+    fn provider_name(&self) -> &str;
+
+    /// Sync data from the external system
+    ///
+    /// This method should:
+    /// - Load current token using SyncTokenStore
+    /// - Fetch updates from the external system using the stream position
+    /// - Emit changes via streams (if applicable)
+    /// - Save new token using SyncTokenStore
+    /// - Return the new stream position
+    ///
+    /// # Arguments
+    /// * `position` - Current stream position (StreamPosition::Beginning for full sync, StreamPosition::Version(token) for incremental sync)
+    ///
+    /// # Returns
+    /// The new stream position (typically StreamPosition::Version with new token, or StreamPosition::Beginning if no token)
+    async fn sync(&self, position: StreamPosition) -> Result<StreamPosition>;
+
+    /// Sync pending changes after operation execution.
+    ///
+    /// Default implementation performs a full sync.
+    /// Override for targeted sync (e.g., OrgMode syncs only affected files).
+    ///
+    /// # Arguments
+    /// * `changes` - Field-level changes from the operation
+    async fn sync_changes(&self, _: &[FieldDelta]) -> Result<()> {
+        self.sync(StreamPosition::Beginning).await?;
+        Ok(())
+    }
+}
+
+/// Trait for external sync providers that emit typed change streams
+///
+/// This trait allows QueryableCache to register and consume change streams
+/// from external systems (Todoist, etc.) in a type-safe way.
+/// ExternalServiceDiscovery
+pub trait StreamProvider<T>: MaybeSendSync
+where
+    T: MaybeSendSync + 'static,
+{
+    /// Get a receiver for changes of type T
+    ///
+    /// Returns a broadcast receiver that emits batches of changes.
+    /// Multiple QueryableCache instances can subscribe to the same stream.
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<Change<T>>>;
+}
+
+/// Generate a sync operation descriptor for a provider
+///
+/// This is used by OperationDispatcher when registering SyncableProviders
+/// to create operation descriptors with the correct entity_name format.
+pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
+    OperationDescriptor {
+        entity_name: format!("{}.sync", provider_name).into(),
+        entity_short_name: "all".to_string(), // Sync operations affect all entities
+        id_column: String::new(),             // Sync operations don't need an ID column
+        name: "sync".to_string(),
+        display_name: format!("Sync {}", provider_name),
+        description: format!("Sync data from {} provider", provider_name),
+        required_params: vec![],
+        affected_fields: vec![], // Sync operations don't affect specific fields
+        param_mappings: vec![],
+        ..Default::default()
     }
 }

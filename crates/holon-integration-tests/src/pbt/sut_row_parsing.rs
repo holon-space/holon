@@ -34,7 +34,7 @@ pub(super) const BLOCK_RAW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, 
 
 /// Parse a batch of snapshot rows into typed [`Block`]s, fail-loud on any row
 /// that won't parse (a malformed row is a bug, never silently skipped).
-pub(super) fn parse_block_rows(rows: &[holon::storage::types::StorageEntity]) -> Vec<Block> {
+pub(super) fn parse_block_rows(rows: &[holon_core::storage::types::StorageEntity]) -> Vec<Block> {
     rows.iter()
         .map(|r| {
             parse_block_row(r)
@@ -47,7 +47,7 @@ pub(super) fn parse_block_rows(rows: &[holon::storage::types::StorageEntity]) ->
 /// source_language/parent_id/properties (and optionally tags + org fields).
 /// Used both by inv-backend-blocks-match-ref's SQL path and by the LiveData<Block> experiment so
 /// the two stay byte-for-byte equivalent.
-pub(super) fn parse_block_row(row: &holon::storage::types::StorageEntity) -> Option<Block> {
+pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -> Option<Block> {
     let id =
         EntityUri::parse(row.get("id")?.as_string()?).expect("block id from DB must be valid URI");
     // A NULL/missing `parent_id` in `block_raw` is a top-level block — semantically

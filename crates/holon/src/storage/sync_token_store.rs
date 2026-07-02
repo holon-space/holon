@@ -8,9 +8,10 @@ use holon_macros::Entity;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::core::datasource::{DataSource, Result, StreamPosition, SyncTokenStore};
 use crate::core::queryable_cache::QueryableCache;
 use crate::storage::DbHandle;
+use holon_api::StreamPosition;
+use holon_core::{DataSource, Result, SyncTokenStore};
 
 /// Entity for the sync_states table.
 #[derive(Debug, Clone, Serialize, Deserialize, Entity)]

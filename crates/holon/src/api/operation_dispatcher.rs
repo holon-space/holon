@@ -13,11 +13,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{error, info};
 
-use crate::core::datasource::{
+use holon_api::{EntityName, Operation, OperationDescriptor};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{
     OperationObserver, OperationProvider, OperationResult, Result, SyncTokenStore, UndoAction,
 };
-use crate::storage::types::StorageEntity;
-use holon_api::{EntityName, Operation, OperationDescriptor};
 
 /// Composite dispatcher that aggregates multiple OperationProvider instances
 ///

@@ -19,7 +19,6 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::core::SqlOperationProvider;
-use crate::core::datasource::OriginTaggedWrites;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
 use crate::storage::schema_modules::BlockSchemaModule;
@@ -27,6 +26,7 @@ use crate::sync::{
     LoroBlockOperations, LoroBlocksDataSource, LoroDocumentStore, LoroSyncController,
     LoroSyncControllerHandle,
 };
+use holon_core::OriginTaggedWrites;
 
 /// Configuration for standalone Loro CRDT support
 #[derive(Clone, Debug)]
@@ -291,10 +291,10 @@ impl Module for LoroModule {
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 fn register_subtree_share(injector: &Injector) {
-    use crate::core::datasource::OperationProvider;
     use crate::sync::iroh_advertiser::IrohAdvertiser;
     use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
     use crate::sync::loro_share_backend::LoroShareBackend;
+    use holon_core::OperationProvider;
     use iroh::SecretKey;
 
     injector.provide::<Arc<SharedTreeSyncManager>>(Provider::root(|_| {

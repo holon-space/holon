@@ -13,11 +13,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use holon::core::datasource::SyncTokenStore;
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::DbHandle;
 use holon_api::DynamicEntity;
 use holon_api::entity::FieldSchema;
+use holon_core::SyncTokenStore;
 use rmcp::model::*;
 use rmcp::service::{Peer, RequestContext};
 use rmcp::{RoleClient, RoleServer, ServerHandler, ServiceExt};
@@ -109,7 +109,7 @@ impl ServerHandler for TestMcpServer {
 // ── In-memory SyncTokenStore ──────────────────────────────────────
 
 struct InMemorySyncTokenStore {
-    tokens: tokio::sync::Mutex<HashMap<String, holon::core::datasource::StreamPosition>>,
+    tokens: tokio::sync::Mutex<HashMap<String, holon_api::StreamPosition>>,
 }
 
 impl InMemorySyncTokenStore {
@@ -125,20 +125,17 @@ impl SyncTokenStore for InMemorySyncTokenStore {
     async fn save_token(
         &self,
         key: &str,
-        position: holon::core::datasource::StreamPosition,
-    ) -> holon::core::datasource::Result<()> {
+        position: holon_api::StreamPosition,
+    ) -> holon_core::Result<()> {
         self.tokens.lock().await.insert(key.to_string(), position);
         Ok(())
     }
 
-    async fn load_token(
-        &self,
-        key: &str,
-    ) -> holon::core::datasource::Result<Option<holon::core::datasource::StreamPosition>> {
+    async fn load_token(&self, key: &str) -> holon_core::Result<Option<holon_api::StreamPosition>> {
         Ok(self.tokens.lock().await.get(key).cloned())
     }
 
-    async fn clear_all_tokens(&self) -> holon::core::datasource::Result<()> {
+    async fn clear_all_tokens(&self) -> holon_core::Result<()> {
         self.tokens.lock().await.clear();
         Ok(())
     }

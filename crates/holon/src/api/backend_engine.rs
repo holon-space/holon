@@ -10,9 +10,9 @@ use crate::api::operation_dispatcher::OperationDispatcher;
 use crate::api::operation_engine::{DispatchingOperationEngine, OperationEngine as _};
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::{RowChange, RowChangeStream};
-use crate::storage::types::StorageEntity;
 use crate::storage::{DbHandle, SqlTransformer};
 use holon_api::{BatchWithMetadata, OperationDescriptor, QueryContext, QueryLanguage, Value};
+use holon_core::storage::types::StorageEntity;
 
 /// PRQL stdlib defining virtual tables for hierarchical queries
 ///
@@ -544,7 +544,7 @@ impl BackendEngine {
     /// Create a RowChangeStream that emits initial rows as the first `Created` batch,
     /// then forwards CDC updates from the underlying stream.
     fn prepend_initial_data(
-        initial_rows: Vec<crate::storage::types::StorageEntity>,
+        initial_rows: Vec<holon_core::storage::types::StorageEntity>,
         view_name: &str,
         mut cdc_stream: RowChangeStream,
     ) -> RowChangeStream {
@@ -693,7 +693,7 @@ impl BackendEngine {
     /// ```no_run
     /// use std::sync::Arc;
     /// use holon::api::backend_engine::BackendEngine;
-    /// use holon::core::datasource::OperationProvider;
+    /// use holon_core::OperationProvider;
     ///
     /// # async fn example() -> anyhow::Result<()> {
     /// let engine = BackendEngine::new_in_memory().await?;

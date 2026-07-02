@@ -12,7 +12,6 @@
 use fluxdi::{Injector, Module, Provider, Shared};
 use std::sync::Arc;
 
-use crate::core::datasource::{OperationProvider, OperationRegistry};
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_block_operations::SqlBlockOperations;
 use crate::core::sql_operation_provider::SqlOperationProvider;
@@ -28,6 +27,7 @@ use holon_api::block::Block;
 use holon_api::capability::SessionCapabilities;
 use holon_api::{EntityName, EntityUri, Value};
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::{OperationProvider, OperationRegistry};
 
 /// Build the SqlOnly cell `set_field` write path over `SqlOperationProvider`.
 ///
@@ -42,7 +42,8 @@ fn sql_cell_set_field_writer(
     Arc::new(move |uri: EntityUri, field: String, value: Value| {
         let sql_ops = sql_ops.clone();
         Box::pin(async move {
-            let mut params: crate::storage::types::StorageEntity = std::collections::HashMap::new();
+            let mut params: holon_core::storage::types::StorageEntity =
+                std::collections::HashMap::new();
             params.insert("id".into(), Value::String(uri.to_string()));
             params.insert("field".into(), Value::String(field));
             params.insert("value".into(), value);
@@ -96,13 +97,13 @@ impl Module for EventInfraModule {
                 .expect("[EventInfraModule] watch block matview for BlockFeed");
             let live = LiveData::new(
                 watch.initial_rows,
-                |row: &crate::storage::types::StorageEntity| {
+                |row: &holon_core::storage::types::StorageEntity| {
                     row.get("id")
                         .and_then(|v| v.as_string())
                         .map(|s| s.to_string())
                         .ok_or_else(|| anyhow::anyhow!("block matview row missing id"))
                 },
-                |row: &crate::storage::types::StorageEntity| Block::try_from(row.clone()),
+                |row: &holon_core::storage::types::StorageEntity| Block::try_from(row.clone()),
             );
             live.subscribe("block", watch.stream);
             Shared::new(BlockFeed(live))

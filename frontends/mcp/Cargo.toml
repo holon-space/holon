@@ -21,6 +21,8 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 holon = { workspace = true }
 holon-api = { workspace = true }
+holon-core = { workspace = true }
+holon-profiles = { workspace = true }
 holon-frontend = { workspace = true }
 holon-app.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }

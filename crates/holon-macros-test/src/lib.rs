@@ -13,7 +13,7 @@
 #![allow(clippy::manual_range_contains)] // expanded operations_trait macro emits `>=`/`<=` checks
 
 use async_trait::async_trait;
-use holon::core::datasource::{Result, UndoAction};
+use holon_core::{Result, UndoAction};
 use holon_macros::require;
 
 // Test trait with require attributes

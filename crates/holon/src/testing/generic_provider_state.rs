@@ -3,9 +3,9 @@
 //! Tracks which entities exist and generates only valid operations based on
 //! parameter dependencies encoded in operation metadata.
 
-use crate::core::datasource::{OperationProvider, Result};
-use crate::storage::types::StorageEntity;
 use holon_api::{OperationDescriptor, TypeHint, Value};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{OperationProvider, Result};
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -276,8 +276,8 @@ fn combine_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::datasource::{OperationProvider, OperationResult};
     use async_trait::async_trait;
+    use holon_core::{OperationProvider, OperationResult};
 
     // Mock provider for testing
     struct MockProvider {

@@ -51,6 +51,7 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 # `default-features = false` disables `iroh-sync` which depends on QUIC and
 # is native-only.
 holon-api = { path = "../../crates/holon-api" }
+holon-core = { path = "../../crates/holon-core" }
 holon = { path = "../../crates/holon", default-features = false }
 # holon-frontend: wasi-safe subset. default-features = false ensures no
 # heap-profile / chrome-trace / otel features that pull native-only transitive

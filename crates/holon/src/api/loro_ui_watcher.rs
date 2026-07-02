@@ -48,9 +48,8 @@ use crate::entity_profile::{LiveEntities, ProfileResolver, ProfileResolving};
 /// Must be called from within a Tokio runtime: `ProfileResolver::with_type_profiles`
 /// spawns a background actor that watches the (empty) profile source.
 pub fn build_turso_free_profile_resolver() -> Arc<dyn ProfileResolving> {
-    let type_registry =
-        crate::type_registry::create_default_registry().expect("default TypeRegistry");
-    let type_profiles = crate::type_registry::type_profiles_from_registry(&type_registry);
+    let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
+    let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
 
     let empty_profiles = crate::sync::LiveData::new(
         Vec::new(),

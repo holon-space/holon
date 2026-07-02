@@ -17,6 +17,8 @@ use rhai::Engine as RhaiEngine;
 
 use holon_core::util::{expr_references, topo_sort_kahn};
 
+use crate::{EntityProfile, ParsedProfile, VirtualChildConfig, parse_profile_yaml};
+
 /// A compiled computed field: name + pre-compiled Rhai AST.
 /// Stored in topological order (dependencies before dependents).
 pub use holon_api::entity_profile::CompiledComputedField;
@@ -32,9 +34,9 @@ pub struct TypeRegistry {
     /// Per-entity creation defaults declared in profile YAML (the
     /// `virtual_child:` block). Held alongside `types` because
     /// `TypeDefinition` lives in `holon-api` and shouldn't depend on
-    /// `holon`-side types like `VirtualChildConfig`. `apply_parsed_profile`
+    /// profile-side types like `VirtualChildConfig`. `apply_parsed_profile`
     /// inserts here; `profile_from_type_def` callers read here.
-    virtual_children: RwLock<HashMap<String, crate::entity_profile::VirtualChildConfig>>,
+    virtual_children: RwLock<HashMap<String, VirtualChildConfig>>,
 }
 
 impl Default for TypeRegistry {
@@ -54,10 +56,7 @@ impl TypeRegistry {
     /// Look up creation defaults for an entity type. Used by
     /// `BuilderServices::virtual_child_config` to seed the trailing-slot
     /// data row in tree's `creation_slot` path.
-    pub fn virtual_child_config(
-        &self,
-        entity_name: &str,
-    ) -> Option<crate::entity_profile::VirtualChildConfig> {
+    pub fn virtual_child_config(&self, entity_name: &str) -> Option<VirtualChildConfig> {
         self.virtual_children
             .read()
             .expect("TypeRegistry poisoned")
@@ -136,10 +135,7 @@ impl TypeRegistry {
     ///
     /// Adds computed fields and profile variants. Uses the same `ParsedProfile`
     /// produced by both bundled and org-embedded YAML parsing.
-    pub fn apply_parsed_profile(
-        &self,
-        profile: crate::entity_profile::ParsedProfile,
-    ) -> Result<()> {
+    pub fn apply_parsed_profile(&self, profile: ParsedProfile) -> Result<()> {
         let entity_name = profile.entity_name;
         let computed: Vec<(String, String)> = profile.computed.into_iter().collect();
         if !computed.is_empty() {
@@ -200,78 +196,6 @@ impl TypeRegistry {
             .read()
             .expect("TypeRegistry poisoned")
             .contains_key(name)
-    }
-
-    /// Load type definitions from YAML files in a directory.
-    /// Registers each type and creates extension tables via DynamicSchemaModule.
-    pub async fn load_types_from_directory(
-        &self,
-        dir: &std::path::Path,
-        db_handle: &crate::storage::DbHandle,
-    ) -> Result<Vec<String>> {
-        use crate::storage::dynamic_schema_module::DynamicSchemaModule;
-        use crate::storage::schema_module::SchemaModule;
-
-        let mut loaded = Vec::new();
-
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!("Types directory {:?} not found, skipping", dir);
-                return Ok(loaded);
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Failed to read types directory {:?}: {e}",
-                    dir
-                ));
-            }
-        };
-
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
-                continue;
-            }
-
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read type definition {:?}", path))?;
-            let type_def: TypeDefinition = serde_yaml::from_str(&content)
-                .with_context(|| format!("Failed to parse type definition {:?}", path))?;
-
-            let name = type_def.name.clone();
-
-            if self.contains(&name) {
-                tracing::debug!("Type '{}' already registered, skipping YAML load", name);
-                continue;
-            }
-
-            self.register(type_def.clone())
-                .with_context(|| format!("Failed to register type '{}' from {:?}", name, path))?;
-
-            // Create extension table if it has fields
-            if !type_def.fields.is_empty() {
-                let module = DynamicSchemaModule::new(type_def);
-                module.ensure_schema(db_handle).await.map_err(|e| {
-                    anyhow::anyhow!("Failed to create table for type '{}': {e}", name)
-                })?;
-                db_handle
-                    .mark_available(module.provides())
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to mark resources available for type '{}': {e}",
-                            name
-                        )
-                    })?;
-            }
-
-            tracing::info!("Loaded type definition '{}' from {:?}", name, path);
-            loaded.push(name);
-        }
-
-        Ok(loaded)
     }
 }
 
@@ -366,7 +290,7 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
         (PERSON_PROFILE_YAML, false),    // Person already registered above
         (COLLECTION_PROFILE_YAML, true), // standalone, needs its own TypeDefinition
     ] {
-        let profile = crate::entity_profile::parse_profile_yaml(yaml)
+        let profile = parse_profile_yaml(yaml)
             .with_context(|| "Failed to parse bundled profile YAML".to_string())?;
         if create_type {
             registry
@@ -388,18 +312,15 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
 
 /// Build the set of type-defined profiles from a [`TypeRegistry`].
 ///
-/// Bridge function — `profile_from_type_def` lives in `holon-profiles` and
-/// can't see `VirtualChildConfig` (which lives in `holon`'s `TypeRegistry`),
-/// so it's attached here. Single source of truth shared by the Turso DI path
-/// and the no-Turso bundled-only resolver.
-pub fn type_profiles_from_registry(
-    type_registry: &TypeRegistry,
-) -> Vec<holon_profiles::EntityProfile> {
+/// Bridge function — `profile_from_type_def` can't see the registry's
+/// `virtual_children` map, so it's attached here. Single source of truth
+/// shared by the Turso DI path and the no-Turso bundled-only resolver.
+pub fn type_profiles_from_registry(type_registry: &TypeRegistry) -> Vec<EntityProfile> {
     type_registry
         .all()
         .iter()
         .filter_map(|td| {
-            holon_profiles::profile_from_type_def(td).map(|mut p| {
+            crate::profile_from_type_def(td).map(|mut p| {
                 p.virtual_child = type_registry.virtual_child_config(&td.name);
                 p
             })

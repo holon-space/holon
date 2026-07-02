@@ -27,21 +27,23 @@ use async_trait::async_trait;
 use holon_api::block::Block;
 use holon_api::{EntityName, Tags, Value};
 
-use crate::core::datasource::{
-    BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
-    CrudOperations, DataSource, HasCache, OperationDescriptor, OperationProvider,
-    OperationRegistry, OperationResult, OriginTaggedWrites, Result, UnknownOperationError,
-};
+use crate::core::queryable_cache::HasCache;
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_operation_provider::SqlOperationProvider;
-use crate::storage::types::StorageEntity;
 use crate::sync::block_cell_registry::BlockCellRegistry;
 use crate::sync::event_bus::EventOrigin;
 use holon_api::EntityUri;
+use holon_api::OperationDescriptor;
 use holon_api::capability::{Consolidator, SessionCapabilities};
 use holon_core::block_ordering::{BlockOrdering, OrderKeyMinting};
 use holon_core::cell_registry::EntityCellRegistry;
 use holon_core::fractional_index::{default_sort_key, gen_key_between, gen_n_keys};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{
+    BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
+    CrudOperations, DataSource, OperationProvider, OperationRegistry, OperationResult,
+    OriginTaggedWrites, Result, UnknownOperationError,
+};
 
 pub struct SqlBlockOperations {
     sql_ops: Arc<SqlOperationProvider>,
@@ -902,7 +904,7 @@ impl CrudOperations<Block> for SqlBlockOperations {
 #[async_trait]
 impl OperationProvider for SqlBlockOperations {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        use crate::core::datasource::__operations_block_operations;
+        use holon_core::__operations_block_operations;
         let entity_name = Block::entity_name();
         let short_name = Block::short_name().expect("Block must have short_name");
         let id_column = "id";
@@ -920,7 +922,7 @@ impl OperationProvider for SqlBlockOperations {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<OperationResult> {
-        use crate::core::datasource::__operations_block_operations;
+        use holon_core::__operations_block_operations;
 
         if entity_name.as_str() != Block::entity_name() {
             return Err(format!(
@@ -949,7 +951,6 @@ impl OperationProvider for SqlBlockOperations {
 #[cfg(test)]
 mod tests {
     use super::SqlBlockOperations;
-    use crate::core::datasource::{__operations_block_operations, OperationRegistry};
     use crate::core::queryable_cache::QueryableCache;
     use crate::core::sql_operation_provider::SqlOperationProvider;
     use crate::storage::BLOCK_WRITE_TABLE;
@@ -959,6 +960,7 @@ mod tests {
     use holon_api::block::Block;
     use holon_api::entity_uri::EntityUri;
     use holon_core::block_ordering::BlockOrdering;
+    use holon_core::{__operations_block_operations, OperationRegistry};
     use std::sync::Arc;
 
     /// Sanity check: the macro-generated `block_operations()` descriptor

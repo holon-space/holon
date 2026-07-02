@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use fluxdi::Provider;
 use holon::api::BackendEngine;
-use holon::core::datasource::OperationProvider;
 use holon::core::queryable_cache::QueryableCache;
 use holon::core::sql_block_operations::SqlBlockOperations;
 use holon::core::sql_operation_provider::SqlOperationProvider;
@@ -16,6 +15,7 @@ use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::schema_modules::BlockSchemaModule;
 use holon_api::block::Block;
+use holon_core::OperationProvider;
 use holon_pbt_core::composition::{CapMap, Config};
 
 use super::components::SqlProjectionComponent;

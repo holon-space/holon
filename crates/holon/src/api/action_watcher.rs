@@ -30,8 +30,8 @@ use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::api::backend_engine::BackendEngine;
-use crate::storage::types::StorageEntity;
 use holon_api::streaming::Change;
+use holon_core::storage::types::StorageEntity;
 
 const DISCOVERY_SQL: &str = include_str!("../../../../assets/queries/action_discovery.sql");
 

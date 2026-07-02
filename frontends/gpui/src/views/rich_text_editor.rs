@@ -34,8 +34,8 @@ use gpui::{
     UTF16Selection, Window, WrappedLine, WrappedLineLayout,
 };
 
-use holon::core::datasource::{__operations_mark_operations, __operations_text_operations};
 use holon_api::{InlineMark, MarkSpan};
+use holon_core::{__operations_mark_operations, __operations_text_operations};
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::rich_text_selection::RichTextSelection;

@@ -9,13 +9,13 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use crate::core::datasource::{OperationProvider, OperationResult, OriginTaggedWrites, Result};
 use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
-use crate::storage::types::StorageEntity;
 use crate::sync::event_bus::{EventOrigin, POSITION_AFTER_BLOCK_ID_PARAM};
 use holon_api::{EntityName, OperationDescriptor, OperationParam, TypeHint, Value};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{OperationProvider, OperationResult, OriginTaggedWrites, Result};
 
 pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
     match v {

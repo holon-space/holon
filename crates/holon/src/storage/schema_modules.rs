@@ -21,9 +21,9 @@ use super::resource::Resource;
 use super::schema_module::{EdgeFieldDescriptor, SchemaModule};
 use super::sql_statements;
 use super::turso::DbHandle;
-use super::types::Result;
-use super::types::StorageError;
 use crate::sync::reconcile_named_view;
+use holon_core::storage::types::Result;
+use holon_core::storage::types::StorageError;
 
 /// Core schema module providing the fundamental tables: blocks, directories.
 ///

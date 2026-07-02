@@ -6,8 +6,8 @@
 use holon_api::link_parser::Link;
 
 use crate::storage::turso::DbHandle;
-use crate::storage::types::Result;
 use crate::sync::link_event_subscriber::BlockLinkIndexer;
+use holon_core::storage::types::Result;
 
 fn text(s: &str) -> turso::Value {
     turso::Value::Text(s.to_string())

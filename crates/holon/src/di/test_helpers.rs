@@ -12,8 +12,8 @@ use tokio::sync::RwLock;
 use super::TursoBackendProvider;
 use super::lifecycle::{create_backend_engine, create_backend_engine_with_extras};
 use crate::api::backend_engine::BackendEngine;
-use crate::core::datasource::{OperationProvider, SyncableProvider};
 use crate::storage::turso::TursoBackend;
+use holon_core::{OperationProvider, SyncableProvider};
 
 /// Create a BackendEngine for testing using dependency injection
 ///

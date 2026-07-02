@@ -26,7 +26,6 @@
 //!      which Task #1 (drop the SUT join) becomes safe.
 
 use holon::core::SqlOperationProvider;
-use holon::core::datasource::OperationProvider;
 use holon::core::queryable_cache::QueryableCache;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
@@ -37,6 +36,7 @@ use holon_api::{EntityName, block::Block};
 use holon_block_roundtrip_testing::{
     NormalizedDocument, assert_normalized_docs_equal, build_blocks, root_headlines_strategy,
 };
+use holon_core::OperationProvider;
 use holon_filesystem::BlockReader;
 use holon_orgmode::di::CacheBlockReader;
 use proptest::prelude::*;

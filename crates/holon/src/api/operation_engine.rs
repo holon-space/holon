@@ -21,8 +21,8 @@ use tokio::sync::RwLock;
 
 use crate::api::BackendEngine;
 use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::core::datasource::OperationProvider;
-use crate::storage::types::StorageEntity;
+use holon_core::OperationProvider;
+use holon_core::storage::types::StorageEntity;
 
 pub use holon_api::operation_engine::OperationEngine;
 

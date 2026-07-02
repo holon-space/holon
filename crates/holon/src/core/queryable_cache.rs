@@ -5,16 +5,16 @@ use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tracing;
 
-use super::datasource::DataSource;
 use super::traits::{
     IntoEntity, Predicate, Queryable, Result, TryFromEntity, TypeDefinition, value_to_turso,
 };
 use crate::storage::DbHandle;
-use crate::storage::types::StorageEntity;
 use holon_api::DynamicEntity;
 use holon_api::streaming::ChangeNotifications;
 use holon_api::{ApiError, Change, StreamPosition};
 use holon_api::{BatchMetadata, CHANGE_ORIGIN_COLUMN, ChangeOrigin, SyncTokenUpdate, WithMetadata};
+use holon_core::storage::types::StorageEntity;
+use holon_core::{DataSource, MaybeSendSync, UndoAction};
 
 /// A queryable cache backed by DbHandle (SQLite via database actor).
 ///
@@ -1241,6 +1241,41 @@ fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> St
         type_def.name,
         columns.join(",\n  ")
     )
+}
+
+/// Trait for operation providers that have a QueryableCache
+///
+/// This trait provides the `clear_cache` operation that clears all cached data
+/// for an entity type. It's used for full sync operations where all cached data
+/// should be pruned before re-syncing from the external system.
+///
+/// The `#[operations_trait]` macro auto-generates the `clear_cache` operation descriptor.
+///
+/// # Example
+/// ```ignore
+/// impl HasCache<OrgBlock> for OrgBlockOperations {
+///     fn get_cache(&self) -> &QueryableCache<OrgBlock> {
+///         &self.cache
+///     }
+/// }
+/// ```
+#[holon_macros::operations_trait]
+#[async_trait]
+pub trait HasCache<T>: MaybeSendSync
+where
+    T: IntoEntity + TryFromEntity + MaybeSendSync + 'static,
+{
+    /// Get reference to the underlying QueryableCache
+    fn get_cache(&self) -> &QueryableCache<T>;
+
+    /// Clear all cached data for this entity
+    ///
+    /// This method clears the cache table (DELETE FROM table) and is irreversible.
+    /// Used for full sync operations.
+    async fn clear_cache(&self) -> Result<UndoAction> {
+        self.get_cache().clear().await?;
+        Ok(UndoAction::Irreversible)
+    }
 }
 
 #[cfg(test)]

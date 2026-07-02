@@ -11,6 +11,7 @@ di = []
 [dependencies]
 holon-org-format.workspace = true
 holon-core.workspace = true
+holon-profiles.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

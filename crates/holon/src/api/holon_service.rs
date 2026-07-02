@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use crate::api::backend_engine::BackendEngine;
 use crate::storage::turso::RowChangeStream;
-use crate::storage::types::StorageEntity;
 use holon_api::QueryContext;
 use holon_api::{EntityName, EntityUri, OperationDescriptor, QueryLanguage, Value};
+use holon_core::storage::types::StorageEntity;
 
 /// Result of a query execution, including timing.
 pub struct QueryResult {

@@ -17,10 +17,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon::storage::StorageEntity;
 use holon::sync::live_data::LiveData;
 use holon_api::block::Block;
 use holon_api::{Change, EntityUri, Value};
+use holon_core::storage::types::StorageEntity;
 
 fn live_blocks() -> Arc<LiveData<Block>> {
     LiveData::new(

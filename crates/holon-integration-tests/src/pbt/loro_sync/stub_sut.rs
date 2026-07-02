@@ -11,15 +11,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use holon::core::datasource::{
-    OperationDescriptor, OperationProvider, OperationResult, OriginTaggedWrites,
-    Result as DatasourceResult,
-};
-use holon::storage::types::StorageEntity;
 use holon::sync::event_bus::EventOrigin;
 use holon::sync::multi_peer::{GroupState, GroupTransition, sync_docs_direct};
 use holon::sync::{LoroDocumentStore, LoroSyncController, LoroSyncControllerHandle};
 use holon_api::EntityName;
+use holon_api::OperationDescriptor;
+use holon_core::storage::types::StorageEntity;
+use holon_core::{
+    OperationProvider, OperationResult, OriginTaggedWrites, Result as DatasourceResult,
+};
 use loro::Frontiers;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
@@ -94,13 +94,13 @@ impl StubSut {
         let block_live: std::sync::Arc<holon::sync::live_data::LiveData<holon_api::block::Block>> =
             holon::sync::live_data::LiveData::new(
                 Vec::new(),
-                |row: &holon::storage::types::StorageEntity| {
+                |row: &holon_core::storage::types::StorageEntity| {
                     row.get("id")
                         .and_then(|v| v.as_string())
                         .map(|s| s.to_string())
                         .ok_or_else(|| anyhow::anyhow!("block row missing id"))
                 },
-                |_: &holon::storage::types::StorageEntity| {
+                |_: &holon_core::storage::types::StorageEntity| {
                     Err(anyhow::anyhow!("stub block feed is empty; parse_fn unused"))
                 },
             );

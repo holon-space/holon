@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use holon::core::datasource::{StreamPosition, SyncTokenStore};
+use holon_api::StreamPosition;
+use holon_core::SyncTokenStore;
 use holon_mcp_client::{AuthMode, IntegrationFileConfig, McpTransport, connect_mcp};
 
 struct MemTokenStore {
@@ -26,21 +27,14 @@ impl MemTokenStore {
 }
 #[async_trait::async_trait]
 impl SyncTokenStore for MemTokenStore {
-    async fn save_token(
-        &self,
-        key: &str,
-        position: StreamPosition,
-    ) -> holon::core::datasource::Result<()> {
+    async fn save_token(&self, key: &str, position: StreamPosition) -> holon_core::Result<()> {
         self.tokens.lock().await.insert(key.to_string(), position);
         Ok(())
     }
-    async fn load_token(
-        &self,
-        key: &str,
-    ) -> holon::core::datasource::Result<Option<StreamPosition>> {
+    async fn load_token(&self, key: &str) -> holon_core::Result<Option<StreamPosition>> {
         Ok(self.tokens.lock().await.get(key).cloned())
     }
-    async fn clear_all_tokens(&self) -> holon::core::datasource::Result<()> {
+    async fn clear_all_tokens(&self) -> holon_core::Result<()> {
         self.tokens.lock().await.clear();
         Ok(())
     }

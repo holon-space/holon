@@ -14,10 +14,10 @@ use rmcp::{RoleClient, ServiceExt};
 use tokio::process::Command;
 use tracing::info;
 
-use holon::core::datasource::OperationProvider;
-use holon::storage::types::StorageEntity;
 use holon_api::render_types::{Operation, OperationDescriptor, ParamMapping};
 use holon_api::{EntityName, Value};
+use holon_core::OperationProvider;
+use holon_core::storage::types::StorageEntity;
 use holon_core::traits::{OperationResult, Result, UndoAction};
 
 use crate::mcp_schema_mapping::input_schema_to_params;

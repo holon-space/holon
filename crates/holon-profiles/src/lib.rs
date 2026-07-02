@@ -13,6 +13,9 @@
 //! and compiles on-demand during resolution. Compilation is fast for small
 //! expressions (<1µs each).
 
+pub mod type_registry;
+pub use type_registry::{TypeRegistry, create_default_registry, type_profiles_from_registry};
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 

@@ -5,14 +5,14 @@ use std::sync::Arc;
 use fluxdi::{Injector, Module, Provider, Shared};
 use tracing::{info, warn};
 
-use holon::core::datasource::{OperationProvider, SyncTokenStore};
-use holon::type_registry::TypeRegistry;
 use holon_api::EntityName;
+use holon_core::{OperationProvider, SyncTokenStore};
 use holon_mcp_client::integration_config::UnresolvedVar;
 use holon_mcp_client::{
     build_mcp_integration, load_integration_configs, IntegrationFileConfig, McpIntegration,
     PendingOAuthFlows,
 };
+use holon_profiles::TypeRegistry;
 
 /// Normalize a variable/setting name for fuzzy matching: lowercase, with `.`
 /// and `_` treated as the same separator. So the env var `TODOIST_API_KEY` and
@@ -300,7 +300,7 @@ impl OperationProvider for RegistryOperationProxy {
         &self,
         entity_name: &EntityName,
         op_name: &str,
-        params: holon::storage::types::StorageEntity,
+        params: holon_core::storage::types::StorageEntity,
     ) -> holon_core::traits::Result<holon_core::traits::OperationResult> {
         self.integration()
             .operation_provider
@@ -326,7 +326,7 @@ impl OperationProvider for EmptyOperationProvider {
         &self,
         _: &EntityName,
         _: &str,
-        _: holon::storage::types::StorageEntity,
+        _: holon_core::storage::types::StorageEntity,
     ) -> holon_core::traits::Result<holon_core::traits::OperationResult> {
         Err(format!(
             "MCP integration '{}' unavailable — not configured or failed to connect at startup",

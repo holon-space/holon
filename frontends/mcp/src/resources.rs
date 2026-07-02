@@ -1,5 +1,5 @@
 use crate::server::HolonMcpServer;
-use holon::core::datasource::OperationProvider;
+use holon_core::OperationProvider;
 use rmcp::model::*;
 use rmcp::{service::RequestContext, ErrorData as McpError, RoleServer};
 

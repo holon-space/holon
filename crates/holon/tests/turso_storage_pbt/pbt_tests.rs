@@ -59,9 +59,9 @@
 use holon::api::ChangeOrigin;
 use holon::storage::backend::StorageBackend;
 use holon::storage::turso::{ChangeData, RowChange, TursoBackend};
-use holon::storage::types::{Filter, StorageEntity};
 use holon_api::Value;
 use holon_api::{FieldSchema, TypeDefinition};
+use holon_core::storage::types::{Filter, StorageEntity};
 use proptest::prelude::*;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 use std::collections::{HashMap, HashSet};

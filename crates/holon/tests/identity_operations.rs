@@ -7,12 +7,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use holon::core::datasource::OperationProvider;
 use holon::identity::{ENTITY_NAME, IdentityProvider};
 use holon::storage::IdentitySchemaModule;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon_api::{Operation, Value};
+use holon_core::OperationProvider;
 use holon_core::storage::types::StorageEntity;
 use proptest::prelude::*;
 use tempfile::TempDir;

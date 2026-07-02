@@ -1,9 +1,9 @@
 use chrono::Utc;
 use holon::storage::backend::StorageBackend;
 use holon::storage::turso::TursoBackend;
-use holon::storage::types::StorageEntity;
 use holon_api::Value;
 use holon_api::{FieldSchema, TypeDefinition};
+use holon_core::storage::types::StorageEntity;
 use tempfile::tempdir;
 use tokio::sync::broadcast;
 

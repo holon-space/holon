@@ -20,9 +20,9 @@ use crate::di::test_helpers::{create_test_engine, create_test_engine_with_provid
 #[cfg(any(test, feature = "test-helpers"))]
 pub use crate::di::test_helpers::TestProviderModule;
 use crate::storage::turso::{ChangeData, RowChange, RowChangeStream};
-use crate::storage::types::StorageEntity;
 use holon_api::widget_spec::DataRow;
 use holon_api::{BatchWithMetadata, QueryLanguage, Value};
+use holon_core::storage::types::StorageEntity;
 
 /// End-to-end test context for BackendEngine testing.
 ///

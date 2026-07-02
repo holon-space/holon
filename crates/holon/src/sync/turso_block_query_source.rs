@@ -30,8 +30,8 @@ use holon_core::storage::block_query::{
 
 use crate::api::BackendEngine;
 use crate::storage::BLOCK_READ_TABLE;
-use crate::storage::types::StorageEntity;
 use crate::sync::LiveData;
+use holon_core::storage::types::StorageEntity;
 
 /// A parsed block paired with the substrate `sort_key` that orders it among its
 /// siblings. Kept together in the mirror so order stays CDC-consistent with the

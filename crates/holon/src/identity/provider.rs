@@ -18,10 +18,10 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::core::datasource::{OperationProvider, OperationResult, Result};
 use crate::storage::DbHandle;
 use holon_api::{EntityName, Operation, OperationDescriptor, OperationParam, TypeHint, Value};
 use holon_core::storage::types::StorageEntity;
+use holon_core::{OperationProvider, OperationResult, Result};
 
 pub const ENTITY_NAME: &str = "identity";
 pub const SHORT_NAME: &str = "identity";

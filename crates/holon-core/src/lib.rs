@@ -20,6 +20,7 @@ pub mod downstream_projection;
 pub mod file_format;
 pub mod fractional_index;
 pub mod operation_log;
+pub mod operation_wrapper;
 pub mod publish_errors;
 pub mod replica_state;
 pub mod storage;
@@ -36,12 +37,15 @@ pub use publish_errors::PublishErrorTracker;
 mod block_operations_tests;
 
 pub use operation_log::{OperationLogEntry, OperationStatus};
+pub use operation_wrapper::OperationWrapper;
 pub use traits::{
-    BlockDataSourceHelpers, BlockEntity, BlockMaintenanceHelpers, BlockOperations,
-    BlockQueryHelpers, CompletionStateInfo, CrudAuthority, CrudOperations, DataSource, EventOrigin,
-    FieldDelta, MarkOperations, MaybeSendSync, MoveOperations, OperationLogOperations,
-    OperationProvider, OperationRegistry, OperationResult, OriginTaggedWrites, RenameOperations,
-    Result, TaskEntity, TaskOperations, TextOperations, UndoAction, UnknownOperationError,
+    generate_sync_operation, BlockDataSourceHelpers, BlockEntity, BlockMaintenanceHelpers,
+    BlockOperations, BlockQueryHelpers, CompletionStateInfo, CrudAuthority, CrudOperations,
+    DataSource, EventOrigin, FieldDelta, MarkOperations, MaybeSendSync, MoveOperations,
+    OperationLogOperations, OperationObserver, OperationProvider, OperationRegistry,
+    OperationResult, OriginTaggedWrites, RenameOperations, Result, StreamProvider, SyncTokenStore,
+    SyncableProvider, TaskEntity, TaskOperations, TextOperations, UndoAction,
+    UnknownOperationError,
 };
 pub use undo::UndoStack;
 

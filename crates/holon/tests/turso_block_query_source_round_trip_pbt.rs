@@ -16,7 +16,6 @@
 
 use holon::api::backend_engine::BackendEngine;
 use holon::core::SqlOperationProvider;
-use holon::core::datasource::OperationProvider;
 use holon::di::test_helpers::create_test_engine_with_path;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
@@ -28,6 +27,7 @@ use holon_block_roundtrip_testing::{
     NormalizedDocument, assert_normalized_docs_equal, assert_sibling_order_matches, build_blocks,
     root_headlines_strategy,
 };
+use holon_core::OperationProvider;
 use holon_core::storage::BlockQuerySource;
 use proptest::prelude::*;
 use tokio::runtime::Runtime;

@@ -49,7 +49,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
 
     // Detect crate path for Result type and Value types (needed for dispatch function generation)
     let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-    let is_internal = pkg_name == "holon" || pkg_name == "holon-core";
+    // Only holon-core is "internal": the shared traits + Result/UnknownOperationError
+    // live there, and every other crate (including holon) reaches them via holon_core::.
+    let is_internal = pkg_name == "holon-core";
     let crate_path = if is_internal {
         quote! { crate }
     } else {
@@ -805,7 +807,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 if let Some(op) = ops.iter_mut().find(|o| o.name == #op_name) {
                     if let Some(param) = op.required_params.iter_mut().find(|p| p.name == #param_name) {
                         // Convert CompletionStateInfo to Value
-                        // Note: CompletionStateInfo is from holon::core::datasource, accessible via the trait
+                        // Note: CompletionStateInfo is from holon_core, accessible via the trait
                         let values: Vec<holon_api::Value> = ds.#method_ident()
                             .into_iter()
                             .map(|info| {

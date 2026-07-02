@@ -9,7 +9,6 @@ use tokio::sync::RwLock;
 
 use crate::api::backend_engine::BackendEngine;
 use crate::api::operation_dispatcher::{OperationDispatcher, OperationModule};
-use crate::core::datasource::{OperationObserver, OperationProvider, SyncTokenStore};
 use crate::core::operation_log::{OperationLogObserver, OperationLogStore};
 use crate::entity_profile::{LiveEntities, ProfileResolver, parse_entity_profile};
 use crate::identity::IdentityProvider;
@@ -21,7 +20,8 @@ use crate::storage::sync_token_store::DatabaseSyncTokenStore;
 use crate::storage::turso::{DbHandle, TursoBackend};
 use crate::storage::{ChangeOriginInjector, JsonAggregationSqlTransformer, SqlTransformer};
 use crate::sync::LiveData;
-use crate::type_registry::{TypeRegistry, create_default_registry};
+use holon_core::{OperationObserver, OperationProvider, SyncTokenStore};
+use holon_profiles::{TypeRegistry, create_default_registry};
 
 use super::schema_providers::{
     BlockHierarchyView, CoreTables, DbReady, GraphEavSchema, IdentityTables, LinkTables,
@@ -100,7 +100,7 @@ async fn create_initialized_engine(
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
 
-    let type_profiles = crate::type_registry::type_profiles_from_registry(type_registry);
+    let type_profiles = holon_profiles::type_profiles_from_registry(type_registry);
 
     let ddl_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let matview_mgr = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex.clone());
@@ -205,7 +205,7 @@ async fn create_live_data_keyed_by(
     matview_manager: &crate::sync::MatviewManager,
     sql: &str,
     key_column: &'static str,
-) -> Option<Arc<LiveData<crate::storage::types::StorageEntity>>> {
+) -> Option<Arc<LiveData<holon_core::storage::types::StorageEntity>>> {
     match matview_manager.watch(sql).await {
         Ok(result) => {
             let live = LiveData::new(
