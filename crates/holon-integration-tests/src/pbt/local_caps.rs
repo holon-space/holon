@@ -82,6 +82,15 @@ pub trait SutAppLifecycle {
     async fn simulate_restart(&self);
     async fn create_document(&self, file_name: &str);
     async fn concurrent_schema_init(&self);
+    /// Spec 0008 §4.2(b): with the app already running, attempt a SECOND
+    /// in-process boot over the SAME vault/db/config paths but with the
+    /// consolidator flipped (Loro ⇄ SQL). The real `holon-app` wiring guard must
+    /// reject it with Model.md invariant 10's hard error BEFORE any higher store
+    /// opens; the live app and the persisted marker stay untouched. The assertion
+    /// lives in the SUT apply (no separate invariant) — it panics if the flipped
+    /// boot succeeds (the prod bug this transition exists to catch) or if the
+    /// error is not the invariant-10 epoch error.
+    async fn assert_epoch_flip_rejected(&self);
 }
 
 #[holon_macros::capmap_adapter]

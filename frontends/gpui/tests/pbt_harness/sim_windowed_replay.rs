@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AppContext as _, InputEvent, Keystroke, MouseButton, Pixels, Point, TestApp};
+use gpui::{InputEvent, Keystroke, MouseButton, Pixels, Point, TestApp};
 use holon_api::{EntityUri, KeyChord, Region, Value};
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::BuilderServices;

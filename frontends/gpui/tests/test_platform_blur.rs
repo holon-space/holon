@@ -20,7 +20,7 @@ fn blur_commits_pending_text() {
     let cx = TestAppContext::single();
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
-    let mut env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
+    let env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
 
     let org_content = b"* First block\n:PROPERTIES:\n:ID: root-one\n:END:\n\n* Second block\n:PROPERTIES:\n:ID: root-two\n:END:\n";
     let org_path = env.temp_dir.path().join("blur_test.org");

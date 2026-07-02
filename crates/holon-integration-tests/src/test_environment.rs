@@ -526,6 +526,107 @@ pub(crate) fn override_org_fs_bindings(
     ));
 }
 
+/// Spec 0008 §4.2(b) — re-boot the app IN-PROCESS with the consolidator flipped
+/// against the persisted epoch marker and assert Model.md invariant 10's hard
+/// error fires through the REAL boot path (`holon_app::new_from_config_with_di`
+/// → `wiring::add_frontend` → `guard_consolidator_epoch`).
+///
+/// `temp_path` is the config/vault/db root the LIVE app booted from — NOT its
+/// canonicalized `org_root` (the marker was written under the un-canonicalized
+/// path). `currently_loro_enabled` is the consolidator the live app pinned; we
+/// boot the opposite to force the epoch mismatch.
+///
+/// Faithfulness: this drives the exact production entry point (no direct call to
+/// `guard_consolidator_epoch`, which would only re-test the guard fn its own unit
+/// tests already cover — the point is the WIRING ORDER: the guard runs inside the
+/// setup phase and `?`-propagates before EventInfraModule / `BackendEngine`
+/// resolution). The no-op DI closures never run because the guard's `Err`
+/// short-circuits `add_frontend`.
+pub(crate) async fn run_epoch_flip_rejection_check(
+    temp_path: &std::path::Path,
+    currently_loro_enabled: bool,
+) {
+    // A live migrate acknowledgement would make the guard WIPE the running app's
+    // durable state instead of erroring — refuse to run the flip in that case.
+    assert!(
+        std::env::var("HOLON_CONSOLIDATOR_MIGRATE").as_deref() != Ok("1"),
+        "[EpochFlipRejected] HOLON_CONSOLIDATOR_MIGRATE=1 is set — a flipped boot would WIPE the \
+         live app's durable state instead of rejecting. Unset it before running this transition."
+    );
+
+    let db_path = temp_path.join("test.db");
+    // Turso is durable here (real db file), so the first boot recorded the marker.
+    let marker_path = temp_path.join(".holon").join("consolidator");
+    assert!(
+        marker_path.exists(),
+        "[EpochFlipRejected] selected under HasStorage(Turso) but the consolidator-epoch marker \
+         {marker_path:?} is absent. The live boot must have written it (durable Turso db) — the \
+         wiring/selection gate is wrong.",
+    );
+    let marker_before =
+        std::fs::read(&marker_path).expect("[EpochFlipRejected] read marker before flip");
+
+    let flipped_config = holon_frontend::config::HolonConfig {
+        db_path: Some(db_path),
+        vault: holon_frontend::config::VaultConfig {
+            root: Some(temp_path.to_path_buf()),
+        },
+        crdt: holon_frontend::config::CrdtPreferences {
+            // Flip the consolidator: whatever the live app pinned, boot the opposite.
+            enabled: if currently_loro_enabled {
+                None
+            } else {
+                Some(true)
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
+
+    eprintln!(
+        "[EpochFlipRejected] attempting flipped boot (live consolidator loro={currently_loro_enabled} \
+         → flipped) over {temp_path:?}"
+    );
+    let result = holon_app::new_from_config_with_di(
+        flipped_config,
+        session_config,
+        temp_path.to_path_buf(),
+        std::collections::HashSet::new(),
+        |_| Ok(()),
+        |_| (),
+    )
+    .await;
+
+    let err = match result {
+        Ok(_) => panic!(
+            "[EpochFlipRejected] booting with the consolidator flipped against the persisted \
+             epoch marker SUCCEEDED — Model.md invariant 10 is NOT enforced through the real \
+             wiring guard. This is the prod bug this transition exists to catch."
+        ),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("invariant 10"),
+        "[EpochFlipRejected] the flipped boot failed, but not with the invariant-10 epoch error. \
+         Got: {msg}"
+    );
+
+    // The rejected attempt must not have wiped/rewritten the marker (no migrate).
+    let marker_after =
+        std::fs::read(&marker_path).expect("[EpochFlipRejected] read marker after flip");
+    assert_eq!(
+        marker_before, marker_after,
+        "[EpochFlipRejected] the rejected boot mutated the consolidator marker {marker_path:?} — \
+         the guard must reject WITHOUT wiping or rewriting when HOLON_CONSOLIDATOR_MIGRATE is unset."
+    );
+    tracing::info!(
+        marker = %marker_path.display(),
+        "[EpochFlipRejected] invariant-10 hard error fired through the real boot path; live app + marker untouched"
+    );
+}
+
 impl TestEnvironment {
     /// Create a new test environment (app not started yet).
     ///
@@ -2474,6 +2575,14 @@ impl TestEnvironment {
 
     /// Simulate app restart by touching all org files to trigger re-parsing.
     /// This tests that re-parsing doesn't create orphan blocks.
+    /// Spec 0008 §4.2(b) — see [`run_epoch_flip_rejection_check`]. Delegates with
+    /// this env's boot paths: the un-canonicalized `temp_dir` (where the marker
+    /// was written) and the pinned `enable_loro`. Named to match the
+    /// `SutAppLifecycle` cap method so the `E2ESut` impl reaches it via `deref()`.
+    pub async fn assert_epoch_flip_rejected(&self) {
+        run_epoch_flip_rejection_check(self.temp_dir.path(), self.enable_loro.get()).await;
+    }
+
     pub async fn simulate_restart(&self, expected_ids: &HashSet<EntityUri>) -> Result<()> {
         use std::time::Duration;
 

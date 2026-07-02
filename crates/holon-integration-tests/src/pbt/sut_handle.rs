@@ -235,6 +235,13 @@ impl crate::pbt::local_caps::SutAppLifecycle for E2ESut {
             .unwrap_or_else(|e| panic!("Failed to create document: {e}"));
     }
 
+    async fn assert_epoch_flip_rejected(&self) {
+        use std::ops::Deref;
+        // `deref()` forces `TestEnvironment::assert_epoch_flip_rejected` — a bare
+        // `self.assert_epoch_flip_rejected` would re-dispatch to this cap method.
+        self.deref().assert_epoch_flip_rejected().await;
+    }
+
     async fn concurrent_schema_init(&self) {
         tracing::trace!(
             "[apply] ConcurrentSchemaInit: testing sequential operations don't cause database lock"

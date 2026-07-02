@@ -39,7 +39,7 @@ fn loro_memory_start_app_paints_and_tracks_churn() {
 }
 
 async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
-    let mut env = TestEnvironment::new_with_backend(runtime, StorageSelector::LoroMemory)
+    let env = TestEnvironment::new_with_backend(runtime, StorageSelector::LoroMemory)
         .expect("new_with_backend(LoroMemory)");
     assert_eq!(env.storage(), StorageSelector::LoroMemory);
 
@@ -127,7 +127,7 @@ fn loro_memory_operation_engine_mutates_shared_doc() {
 }
 
 async fn run_operation_engine_test(runtime: Arc<tokio::runtime::Runtime>) {
-    let mut env = TestEnvironment::new_with_backend(runtime, StorageSelector::LoroMemory)
+    let env = TestEnvironment::new_with_backend(runtime, StorageSelector::LoroMemory)
         .expect("new_with_backend(LoroMemory)");
     env.start_app(false).await.expect("start_app (LoroMemory)");
 

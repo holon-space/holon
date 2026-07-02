@@ -72,7 +72,7 @@ fn holon_renders_under_test_platform() {
 
     // Create a real Turso backend (temp dir + in-memory org FS).
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
-    let mut env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
+    let env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
     runtime.block_on(async { env.start_app(true).await.expect("start_app") });
 
     let session = env.session_arc();

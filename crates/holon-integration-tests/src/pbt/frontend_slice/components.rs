@@ -1053,7 +1053,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
 /// the `#[capmap_adapter]`-generated `impl SutFocusWrite for CapMap`.
 #[async_trait::async_trait(?Send)]
 impl SutFocusWrite for HeadlessFrontendComponent {
-    async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
+    async fn apply_navigate_focus(&self, _: CapRegion, id: &EntityUri) {
         // Focus is set by CLICKING the LeftSidebar entry through the production
         // `ReactiveEngineDriver` — the SAME way a real user (and E2ESut, and this cap's sibling
         // `apply_focus_editable_text` below) does it, NOT a synthesized `navigation.focus`
@@ -1748,6 +1748,18 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
             "[SutAppLifecycle::concurrent_schema_init] not yet ported — not in any composed \
              alphabet"
         );
+    }
+
+    async fn assert_epoch_flip_rejected(&self) {
+        // Spec 0008 §4.2(b). This component boots a REAL windowless session over a
+        // durable on-disk Turso db (`new_with_loro`, un-canonicalized `_temp`), so
+        // its `.holon/consolidator` marker really exists. Loro-on iff a doc store
+        // was resolved. See `run_epoch_flip_rejection_check` for the rejection logic.
+        crate::test_environment::run_epoch_flip_rejection_check(
+            self._temp.path(),
+            self.loro_doc_store().is_some(),
+        )
+        .await;
     }
 }
 

@@ -115,7 +115,7 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     let mut app = TestApp::with_text_system_and_assets(text_system, assets);
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
-    let mut env = runtime
+    let env = runtime
         .block_on(async { TestEnvironment::new(runtime.clone()) })
         .expect("test environment");
     runtime.block_on(async { env.start_app(true).await.expect("start_app") });

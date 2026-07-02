@@ -89,6 +89,7 @@ mod create_stale_loro;
 pub mod delete_backward;
 mod drag_drop_block;
 mod emit_mcp_data;
+mod epoch_flip_rejected;
 mod expand_toggle;
 pub mod focus_editable_text;
 mod git_init;
@@ -143,6 +144,7 @@ pub use create_stale_loro::CreateStaleLoro;
 pub use delete_backward::DeleteBackward;
 pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
+pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
 pub use focus_editable_text::FocusEditableText;
 pub use git_init::GitInit;
@@ -233,6 +235,7 @@ crate::declare_e2e_transitions! {
         DeleteBackward(DeleteBackward),
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
+        EpochFlipRejected(EpochFlipRejected),
         ExpandToggle(ExpandToggle),
         FocusEditableText(FocusEditableText),
         GitInit(GitInit),
@@ -539,6 +542,7 @@ mod required_caps_guard {
         // AppLifecycle (test-local)
         one!(ConcurrentSchemaInit, lc::SutAppLifecycle);
         one!(CreateDocument, lc::SutAppLifecycle);
+        one!(EpochFlipRejected, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);
 
