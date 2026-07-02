@@ -280,7 +280,7 @@ impl E2ESut {
                     if self.doc_uri_map.lock().unwrap().contains_key(synthetic_uri) {
                         continue;
                     }
-                    if let Ok(resolved) = self.ctx.resolve_doc_uri_by_name(filename).await {
+                    if let Ok(resolved) = self.ctx.resolve_page_uri_by_name(filename).await {
                         self.doc_uri_map
                             .lock()
                             .unwrap()
@@ -313,12 +313,12 @@ impl E2ESut {
                 // Synthetic→uuid reconcile relocated here from
                 // `apply_create_document` (SutAppLifecycle peel): the action mints
                 // the real doc on disk (no `ref_state`); this seam re-derives the
-                // minted uri via `resolve_doc_uri_by_name` (the variant carries
+                // minted uri via `resolve_page_uri_by_name` (the variant carries
                 // `file_name`) and binds it to the ref's synthetic uri so later
                 // transitions resolve the new doc.
                 let uuid_uri = self
                     .ctx
-                    .resolve_doc_uri_by_name(&cd.file_name)
+                    .resolve_page_uri_by_name(&cd.file_name)
                     .await
                     .expect("CreateDocument post-action: minted doc URI not resolvable");
                 let synthetic_uri = ref_state

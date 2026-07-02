@@ -228,7 +228,7 @@ impl crate::pbt::local_caps::SutAppLifecycle for E2ESut {
         tracing::trace!("[apply] Creating document: {}", file_name);
         // The synthetic→uuid `doc_uri_map` reconcile moved to the seam's
         // `CreateDocument` arm (it re-derives the minted uri via
-        // `resolve_doc_uri_by_name`), so the action is a pure create.
+        // `resolve_page_uri_by_name`), so the action is a pure create.
         self.deref()
             .create_document(file_name)
             .await
@@ -975,7 +975,7 @@ impl crate::pbt::local_caps::SutFixtureFs for E2ESut {
         // that resolve the doc via `resolve_uri` (which checks doc_uri_map)
         // and then `ctx.documents.get(&resolved)` will miss because docs
         // added post-startup never got re-keyed. Backend-agnostic now:
-        // `resolve_doc_uri_by_name` reads Turso's `block_raw` or the Loro
+        // `resolve_page_uri_by_name` reads Turso's `block_raw` or the Loro
         // snapshot per the active storage (the no-Turso org→Loro ingest runs
         // through the Loro-wired `FileSyncController`).
         if !self.ctx.is_running() {
@@ -983,7 +983,7 @@ impl crate::pbt::local_caps::SutFixtureFs for E2ESut {
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            match self.ctx.resolve_doc_uri_by_name(filename).await {
+            match self.ctx.resolve_page_uri_by_name(filename).await {
                 Ok(resolved) => {
                     let file_key = holon_api::EntityUri::file(filename);
                     let removed = self.ctx.documents.borrow_mut().remove(&file_key);

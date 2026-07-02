@@ -137,7 +137,7 @@ else should converge or die. These are the named hotspots from the Event Storm.
 
 | Concept | Canonical | Deprecated / dialect still in tree | Action | Storm ref |
 |---|---|---|---|---|
-| a block is a page | **`"Page"` tag** / `is_page()` | `is_document()`; `doc:` URI scheme (still in `holon-markdown`, `link_parser`, `backend_engine`, `prql_stdlib.prql`, PBT); `set_is_document` op | finish `doc:` elimination; collapse to the tag | H7 |
+| a block is a page | **`"Page"` tag** / `is_page()` | ~~`is_document()`; `doc:` URI scheme; `set_is_document` op~~ — all deleted 2026-07-02; `doc:` survives only in frozen turso repros (`examples/turso_ivm_*`, `tests/turso_storage_repros/`) | done — the tag is the only encoding | H7 ✅ |
 | block mutation | **`ChangeOp`** (typed) | stringly `op_name`; `Operation`; `OperationIntent`; `BlockDiff` | tighten toward typed; document the rest as boundary forms | H2 |
 | sibling order | **ordered child list** (ADR 0005) | fractional index (Loro materialization); `sort_key` column (Turso materialization); `SnapshotBlock.sort_key`; `sequence` (legacy) | treat index/`sort_key` as per-system materializations of the ordered list; retire `sequence` | — |
 | the rendered unit | **Block** + **row** (distinct) | conflating "block" and "row" | keep distinct: block = entity, row = projection | — |

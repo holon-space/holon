@@ -76,7 +76,7 @@ mod tests {
     async fn no_errors_catches_logged_error() {
         let sut = error_log_map(FixtureErrorLog {
             error_count: 2,
-            context: vec!["doc:demo".to_string()],
+            context: vec!["block:demo".to_string()],
         });
         let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
 

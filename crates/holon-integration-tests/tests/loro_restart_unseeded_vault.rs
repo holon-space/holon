@@ -77,7 +77,7 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let doc_root = env
-        .resolve_doc_uri_by_name("vault.org")
+        .resolve_page_uri_by_name("vault.org")
         .await
         .expect("resolve vault.org root");
     let target_id = phase1_rows

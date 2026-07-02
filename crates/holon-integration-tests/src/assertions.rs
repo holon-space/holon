@@ -9,9 +9,9 @@ use crate::org_utils::INTERNAL_PROPS;
 
 /// Normalize a block for comparison by zeroing out timestamps and trimming content.
 ///
-/// Document URIs in parent_id are normalized to a canonical form so that
-/// file-based URIs (doc:test.org) and UUID-based URIs (doc:{uuid})
-/// for the same document compare equal.
+/// Page URIs in parent_id are normalized to a canonical form so that
+/// file-based URIs (file:test.org) and UUID-based URIs (block:{uuid})
+/// for the same page compare equal.
 pub fn normalize_block(block: &Block) -> Block {
     let mut normalized = block.clone();
     normalized.created_at = 0;

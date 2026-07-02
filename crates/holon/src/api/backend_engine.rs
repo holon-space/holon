@@ -19,9 +19,6 @@ use holon_core::storage::types::StorageEntity;
 /// Note: When $context_id is NULL, PRQL generates `parent_id = NULL` which is always false in SQL.
 /// The `children` virtual table should be used with QueryContext::for_block() which sets a non-NULL context_id.
 ///
-/// The `roots` virtual table returns top-level blocks (blocks whose parent is a document, not another block).
-/// In the Holon data model, document-level blocks have parent_id starting with "doc:".
-///
 /// The `descendants` virtual table uses `block_with_path` materialized
 /// view with path prefix matching. This enables efficient tree traversal using precomputed
 /// hierarchical paths.

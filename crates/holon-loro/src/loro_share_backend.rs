@@ -1640,7 +1640,7 @@ mod tests {
         // a well-formed `block:` URI for the parent. Hit the scheme gate.
         let (backend, _dir) = make_backend();
         let err = backend
-            .accept_shared_subtree("doc:something", "ignored".into())
+            .accept_shared_subtree("file:something", "ignored".into())
             .await
             .unwrap_err();
         assert!(
@@ -1670,7 +1670,7 @@ mod tests {
         // Parse-don't-validate boundary: `share_subtree` requires a `block:` URI.
         let (backend, _dir) = make_backend();
         let err = backend
-            .share_subtree("doc:foo", "full".into())
+            .share_subtree("file:foo", "full".into())
             .await
             .unwrap_err();
         assert!(

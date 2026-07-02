@@ -1,5 +1,4 @@
 let children = (from block | filter parent_id == $context_id | filter content_type != 'source')
-let roots = (from block | filter (parent_id | text.starts_with "doc:") | filter content_type != 'source')
 let siblings = (from block | filter parent_id == $context_parent_id | filter content_type != 'source')
 let descendants = (
   from block_with_path

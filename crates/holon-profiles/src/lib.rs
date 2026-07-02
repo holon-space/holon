@@ -445,7 +445,7 @@ fn topo_sort_computed_fields(
 /// Register per-entity lookup functions on a Rhai engine.
 ///
 /// For each entry in `live_entities`, registers a function named after the entity
-/// (e.g. `document("doc:index.org")`) that returns the entity's properties as a Rhai map.
+/// (e.g. `document("block:<uuid>")`) that returns the entity's properties as a Rhai map.
 fn register_entity_lookups(engine: &mut RhaiEngine, live_entities: &LiveEntities) {
     for (entity_name, live_data) in live_entities {
         let data = Arc::clone(live_data);

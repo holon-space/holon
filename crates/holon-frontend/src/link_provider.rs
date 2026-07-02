@@ -132,7 +132,7 @@ mod tests {
         // We can't construct a real FrontendSession in unit tests,
         // but we can test on_select directly since it's pure.
         let item = PopupItem {
-            id: "doc:abc123".into(),
+            id: "block:abc123".into(),
             label: "My Document".into(),
             icon: None,
         };
@@ -142,7 +142,7 @@ mod tests {
         } else {
             format!("[[{}][{}]]", item.id, item.label)
         };
-        assert_eq!(replacement, "[[doc:abc123][My Document]]");
+        assert_eq!(replacement, "[[block:abc123][My Document]]");
     }
 
     #[test]

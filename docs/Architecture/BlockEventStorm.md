@@ -138,7 +138,6 @@ graduates to CONTEXT.md §4 and is deleted here.
 
 | One concept | Names in the wild | Risk |
 |---|---|---|
-| **"this block is a page"** | `PAGE_TAG = "Page"` via `Block::is_page()` (canonical) · `doc:` URI scheme (deprecated, still in ~15 files) · `set_is_document` op name | 🔴 H7 — `is_document()` deleted ✅, but two legacy encodings remain |
 | **a block mutation** | `Operation` (descriptor) · op-name string · `OperationIntent` · `ChangeOp` (the only typed enum, parent refs now `EntityUri`) · `BlockDiff` | H2 fixed ✅; the non-`ChangeOp` forms remain boundary dialects |
 | **edge fields** | `tags`/`requires` as `Block` fields · `block_tags`/`block_requires` junction rows · Loro meta keys · `EdgeField` enum (closed, iterated at all projection sites) | H1/H12 fixed ✅; `Block` is now serde-free — edge fields carried explicitly by `BlockWire` on every wire path |
 
@@ -146,8 +145,8 @@ graduates to CONTEXT.md §4 and is deleted here.
 
 ## 4. Hotspots (🔴 the red stickies)
 
-**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H8, H11, H12 · 🔴 open:
-H5, H6, H7 (narrowed), H10 · ⚪ by-design constraint: H9. Fixed entries are kept
+**Status board (2026-07-02):** ✅ fixed: H1, H2, H3, H4, H7, H8, H11, H12 · 🔴 open:
+H5, H6, H10 · ⚪ by-design constraint: H9. Fixed entries are kept
 (condensed) because their *mechanisms* — lossy serde base, gate/emit mismatch,
 blob-LWW — are recurring failure shapes worth recognizing next time.
 
@@ -243,16 +242,18 @@ paragraph bodies are folded into the heading block — only headings/fences/imag
 addressable. This is a textbook round-trip-identity PBT target. Anchor: the charset
 comment in `holon-markdown/src/renderer.rs` (~line 185) and `parser.rs`.
 
-**H7 — "Page" has multiple coexisting encodings. 🔴 STILL OPEN, but narrower
-(verified 2026-07-01).**
-Progress since 2026-06-28: `Block::is_document()` is **deleted** — the canonical
-representation is now `PAGE_TAG = "Page"` via `Block::is_page()`/`set_page()`.
-Still live: the `doc:` URI scheme (`#[deprecated]` in `entity_uri.rs` yet
-referenced in ~15 files: `link_parser`, `link_provider`, `focus_path`,
-`backend_engine`, `prql_stdlib.prql`, `holon-profiles`, PBT/test harnesses) and
-the `set_is_document` op name (`holon-core/src/traits.rs`). Migration is
-half-done; new code can still pick the wrong encoding. Anchors: `PAGE_TAG`,
-`set_is_document`, `deprecated` in `entity_uri.rs`.
+**H7 — "Page" has multiple coexisting encodings. ✅ FIXED (2026-07-02).**
+The canonical (and now only) representation is `PAGE_TAG = "Page"` via
+`Block::is_page()`/`set_page()`. Deleted: `Block::is_document()` (2026-06-28),
+and — 2026-07-02 — the entire `doc:` URI scheme (`as_document_id`, the `from_raw`
+`doc` acceptance, `classify_link`'s `doc:` arm; `link_parser` mints `block:` for
+creation intents, name-hash unchanged since the scheme was never a hash input),
+the `set_is_document` op (`holon-core/src/traits.rs`, zero callers), and the
+silently-empty `roots` PRQL stdlib relation that filtered on `doc:` parents.
+`doc:` survives only in frozen turso repros (`crates/holon/examples/turso_ivm_*`,
+`tests/turso_storage_repros/`) and in `link_parser`'s negative tooth
+(`test_doc_scheme_no_longer_resolved`). Anchors: `PAGE_TAG`, `classify_link`,
+ADR: `docs/adr/0014-doc-scheme-retirement.md`.
 
 **H8 — `block_raw` columns silently dropped on read. ✅ FIXED (2026-07-02).**
 `impl TryFrom<crate::StorageEntity> for Block` is now strict, three ways per
@@ -335,13 +336,13 @@ against that line — the failure mode is a field that is collaborative in inten
 but SQL-only in implementation, which is exactly what H4 was.
 
 **The cheap, high-value cleanups still open** (language, not architecture):
-finish the `doc:`-scheme elimination and
-retire the `set_is_document` op name (H7); a type-level marker for
+a type-level marker for
 "intentionally not round-tripped" columns (`depth`, `sort_key`, `collapsed`, …);
 the `StoredBlock` newtype so a serde-path `Block` can't impersonate a
 matview-hydrated one (H1 residue). Done since first writing: BLOCK_LORODOC
 marked superseded (H11); `TryFrom<StorageEntity>` fails loud on
-missing/malformed columns (H8); `ChangeOp` parent refs typed `EntityUri` (H2).
+missing/malformed columns (H8); `ChangeOp` parent refs typed `EntityUri` (H2);
+`doc:`-scheme eliminated and `set_is_document` retired (H7, 2026-07-02).
 
 **These hotspots are also PBT targets.** Every 🟠 event is a candidate state-machine
 transition and every 🔴 a candidate invariant. Open candidates: markdown round-trip

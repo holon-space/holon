@@ -1173,7 +1173,7 @@ mod tests {
 
         // Sidebar-shaped tree: list → selectable(row(text(...))) per item.
         // Each selectable carries a click-bound `navigation.focus` op.
-        let mut sidebar_item = make_row("doc:foo");
+        let mut sidebar_item = make_row("block:page-foo");
         sidebar_item.operations.push(OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
@@ -1184,29 +1184,29 @@ mod tests {
                 }),
                 bound_params: StdHashMap::from([
                     ("region".into(), Value::String("main".into())),
-                    ("block_id".into(), Value::String("doc:foo".into())),
+                    ("block_id".into(), Value::String("block:page-foo".into())),
                 ]),
                 ..Default::default()
             },
         });
 
-        let tree = list(vec![sidebar_item, make_row("doc:bar")]);
+        let tree = list(vec![sidebar_item, make_row("block:page-bar")]);
 
         // Click on the item with a bound action → returns the navigation.focus intent.
-        let intent = find_click_intent_oneshot(&tree, &uri("doc:foo"))
-            .expect("doc:foo should yield a click intent");
+        let intent = find_click_intent_oneshot(&tree, &uri("block:page-foo"))
+            .expect("block:page-foo should yield a click intent");
         assert_eq!(intent.entity_name.as_str(), "navigation");
         assert_eq!(intent.op_name, "focus");
         assert_eq!(
             intent.params.get("block_id").and_then(|v| v.as_string()),
-            Some("doc:foo")
+            Some("block:page-foo")
         );
 
         // Click on the item without a bound action → None (driver falls back).
-        assert!(find_click_intent_oneshot(&tree, &uri("doc:bar")).is_none());
+        assert!(find_click_intent_oneshot(&tree, &uri("block:page-bar")).is_none());
 
         // Click on a non-existent entity → None.
-        assert!(find_click_intent_oneshot(&tree, &uri("doc:nope")).is_none());
+        assert!(find_click_intent_oneshot(&tree, &uri("block:page-nope")).is_none());
     }
 
     #[test]

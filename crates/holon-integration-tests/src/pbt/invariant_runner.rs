@@ -66,7 +66,7 @@ impl E2ESut {
         }
         // Resolve synthetic doc URIs by walking the `BlockQuerySource` snapshot:
         // a document is a `Page`-tagged block whose first content line is the
-        // file stem (the same rule as `resolve_doc_uri_by_name`, but backend-
+        // file stem (the same rule as `resolve_page_uri_by_name`, but backend-
         // agnostic — both wirings expose the capability). Documents are created
         // asynchronously, so retry the snapshot for a bounded window.
         let source = self.session().block_query().clone();

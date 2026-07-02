@@ -61,8 +61,8 @@ fn doc_link_controller() -> EditorViewModel {
 #[test]
 fn doc_link_round_trip_emits_resolved_insert() {
     let services = TestServices::with_popup_results(vec![
-        row("doc:proj-alpha", "Project Alpha"),
-        row("doc:proj-beta", "Project Beta"),
+        row("block:proj-alpha", "Project Alpha"),
+        row("block:proj-beta", "Project Beta"),
     ]);
     let handle = services.runtime_handle();
 
@@ -111,8 +111,8 @@ fn doc_link_round_trip_emits_resolved_insert() {
     // `on_key(Enter)` find a selected item to forward to
     // `LinkProvider::on_select`.
     assert!(
-        items.iter().any(|i| i.id == "doc:proj-alpha"),
-        "canned row `doc:proj-alpha` not in popup items: {items:?}"
+        items.iter().any(|i| i.id == "block:proj-alpha"),
+        "canned row `block:proj-alpha` not in popup items: {items:?}"
     );
     assert!(
         items.iter().any(|i| i.id.starts_with("__create_new__")),
@@ -127,7 +127,7 @@ fn doc_link_round_trip_emits_resolved_insert() {
             replacement,
             prefix_start,
         } => {
-            assert_eq!(replacement, "[[doc:proj-alpha][Project Alpha]]");
+            assert_eq!(replacement, "[[block:proj-alpha][Project Alpha]]");
             // `prefix_start` is the column where `[[` began in the line;
             // `on_text_changed("see [[Proj", 10)` puts `[[` at column 4.
             assert_eq!(prefix_start, 4);

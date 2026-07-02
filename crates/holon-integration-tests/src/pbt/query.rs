@@ -595,7 +595,7 @@ pub fn all_block_columns() -> Vec<String> {
 }
 
 /// Depth of `id` below its top-most ancestor within `blocks`: a block whose
-/// parent is absent / `no_parent` / a `doc:`/sentinel root is depth 0; each
+/// parent is absent / `no_parent` / a sentinel root is depth 0; each
 /// further hop up adds 1. Walks the parent chain (bounded to 50 hops to match
 /// `ReferenceState::is_descendant_of_any`).
 fn depth_from_some_root(blocks: &BTreeMap<EntityUri, Block>, id: &EntityUri) -> u32 {

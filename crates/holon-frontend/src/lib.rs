@@ -491,7 +491,7 @@ impl<T> FrontendSession<T> {
     ///
     /// On fresh installations (no org directory), the app needs a root layout
     /// to render the 3-column UI. This parses the bundled `index.org` and
-    /// creates blocks under a well-known `doc:__default__` document.
+    /// creates blocks under the well-known `block:__default__` page.
     ///
     /// When a real `index.org` is later synced, the next startup detects the
     /// real layout and cleans up the seeded blocks.

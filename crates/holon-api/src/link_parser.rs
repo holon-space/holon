@@ -12,7 +12,7 @@ use crate::entity_uri::EntityUri;
 /// Classification of a link target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
-    /// Already resolved: `[[doc:uuid]]` or `[[block:uuid]]`
+    /// Already resolved: `[[block:uuid]]`
     Resolved(EntityUri),
     /// Creation intent: `[[Projects/New thing]]` → computed deterministic ID
     CreationIntent {
@@ -40,7 +40,7 @@ impl LinkTarget {
 /// Represents a link found in org-mode content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
-    /// Target URI or page name (e.g., "doc:uuid", "Projects/New thing")
+    /// Target URI or page name (e.g., "block:uuid", "Projects/New thing")
     pub target: String,
     /// Display text (equals target for bare `[[target]]` links)
     pub text: String,
@@ -102,7 +102,7 @@ pub fn deterministic_entity_id(scheme: &str, normalized_path: &str) -> EntityUri
 fn infer_scheme(first_segment: &str) -> Option<&'static str> {
     match first_segment.to_lowercase().as_str() {
         "person" => Some("person"),
-        _ => None, // default to "doc"
+        _ => None, // default to "block" (pages are blocks tagged `Page`)
     }
 }
 
@@ -116,9 +116,9 @@ pub fn classify_link(target: &str) -> LinkTarget {
         return LinkTarget::External(target.to_string());
     }
 
-    // Already resolved: starts with known entity scheme followed by ':'
-    if target.starts_with("doc:") || target.starts_with("block:") {
-        // ALLOW(entity_uri_from_raw): raw org-file wiki-link target string (doc:/block: prefixed)
+    // Already resolved: starts with the entity scheme followed by ':'
+    if target.starts_with("block:") {
+        // ALLOW(entity_uri_from_raw): raw org-file wiki-link target string (block: prefixed)
         let uri = EntityUri::from_raw(target);
         return LinkTarget::Resolved(uri);
     }
@@ -135,7 +135,7 @@ pub fn classify_link(target: &str) -> LinkTarget {
     let scheme = segments
         .first()
         .and_then(|s| infer_scheme(s))
-        .unwrap_or("doc");
+        .unwrap_or("block");
 
     let normalized = normalize_for_hash(target);
     let target_id = deterministic_entity_id(scheme, &normalized);
@@ -224,14 +224,14 @@ mod tests {
 
     #[test]
     fn test_extract_described_link() {
-        let content = "This is a [[doc:uuid-123][link to block]] in text.";
+        let content = "This is a [[block:uuid-123][link to block]] in text.";
         let links = extract_links(content);
 
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].target, "doc:uuid-123");
+        assert_eq!(links[0].target, "block:uuid-123");
         assert_eq!(links[0].text, "link to block");
         assert!(
-            matches!(&links[0].classified, LinkTarget::Resolved(uri) if uri.as_str() == "doc:uuid-123")
+            matches!(&links[0].classified, LinkTarget::Resolved(uri) if uri.as_str() == "block:uuid-123")
         );
     }
 
@@ -244,19 +244,19 @@ mod tests {
         assert_eq!(links[0].target, "ProjectNotes");
         assert_eq!(links[0].text, "ProjectNotes");
         assert!(
-            matches!(&links[0].classified, LinkTarget::CreationIntent { scheme, name, .. } if scheme == "doc" && name == "ProjectNotes")
+            matches!(&links[0].classified, LinkTarget::CreationIntent { scheme, name, .. } if scheme == "block" && name == "ProjectNotes")
         );
     }
 
     #[test]
     fn test_extract_mixed_links() {
-        let content = "A [[PageOne]] then [[doc:2][described]] then [[PageThree]].";
+        let content = "A [[PageOne]] then [[block:2][described]] then [[PageThree]].";
         let links = extract_links(content);
 
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].target, "PageOne");
         assert_eq!(links[0].text, "PageOne");
-        assert_eq!(links[1].target, "doc:2");
+        assert_eq!(links[1].target, "block:2");
         assert_eq!(links[1].text, "described");
         assert_eq!(links[2].target, "PageThree");
         assert_eq!(links[2].text, "PageThree");
@@ -274,27 +274,27 @@ mod tests {
 
     #[test]
     fn test_extract_multiple_described_links() {
-        let content = "First [[doc:1][one]] and second [[doc:2][two]].";
+        let content = "First [[block:1][one]] and second [[block:2][two]].";
         let links = extract_links(content);
 
         assert_eq!(links.len(), 2);
-        assert_eq!(links[0].target, "doc:1");
-        assert_eq!(links[1].target, "doc:2");
+        assert_eq!(links[0].target, "block:1");
+        assert_eq!(links[1].target, "block:2");
     }
 
     #[test]
     fn test_extract_link_targets() {
-        let content = "[[doc:a][A]] and [[PageB]] and [[doc:a][A again]].";
+        let content = "[[block:a][A]] and [[PageB]] and [[block:a][A again]].";
         let targets = extract_link_targets(content);
 
         assert_eq!(targets.len(), 2);
-        assert!(targets.contains("doc:a"));
+        assert!(targets.contains("block:a"));
         assert!(targets.contains("PageB"));
     }
 
     #[test]
     fn test_strip_links() {
-        let content = "See [[doc:123][this block]] and [[PageName]] for details.";
+        let content = "See [[block:123][this block]] and [[PageName]] for details.";
         let stripped = strip_links(content);
 
         assert_eq!(stripped, "See this block and PageName for details.");
@@ -318,10 +318,16 @@ mod tests {
 
     // --- New tests for classification + deterministic IDs ---
 
+    /// The `doc:` scheme is retired (H7, 2026-07-02): a `doc:`-prefixed target
+    /// is no longer accepted as Resolved — it falls through to the
+    /// name-hashing creation-intent path like any other page name.
     #[test]
-    fn test_classify_resolved_doc() {
+    fn test_doc_scheme_no_longer_resolved() {
         let target = classify_link("doc:existing-uuid");
-        assert!(matches!(target, LinkTarget::Resolved(uri) if uri.as_str() == "doc:existing-uuid"));
+        assert!(
+            matches!(&target, LinkTarget::CreationIntent { scheme, .. } if scheme == "block"),
+            "doc: must not classify as Resolved anymore, got {target:?}"
+        );
     }
 
     #[test]
@@ -353,11 +359,11 @@ mod tests {
                 parent_path,
                 target_id,
             } => {
-                assert_eq!(scheme, "doc");
+                assert_eq!(scheme, "block");
                 assert_eq!(path, "ProjectNotes");
                 assert_eq!(name, "ProjectNotes");
                 assert!(parent_path.is_none());
-                assert!(target_id.as_str().starts_with("doc:"));
+                assert!(target_id.as_str().starts_with("block:"));
             }
             _ => panic!("Expected CreationIntent, got {:?}", target),
         }
@@ -374,7 +380,7 @@ mod tests {
                 parent_path,
                 ..
             } => {
-                assert_eq!(scheme, "doc");
+                assert_eq!(scheme, "block");
                 assert_eq!(path, "Projects/New thing");
                 assert_eq!(name, "New thing");
                 assert_eq!(parent_path.as_deref(), Some("Projects"));
@@ -397,14 +403,14 @@ mod tests {
 
     #[test]
     fn test_deterministic_id_stability() {
-        let id1 = deterministic_entity_id("doc", "projects/new thing");
-        let id2 = deterministic_entity_id("doc", "projects/new thing");
+        let id1 = deterministic_entity_id("block", "projects/new thing");
+        let id2 = deterministic_entity_id("block", "projects/new thing");
         assert_eq!(id1, id2);
     }
 
     #[test]
     fn test_deterministic_id_uuid_format() {
-        let id = deterministic_entity_id("doc", "test");
+        let id = deterministic_entity_id("block", "test");
         let path = id.id();
         // UUID format: 8-4-4-4-12
         assert_eq!(path.len(), 36);

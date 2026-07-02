@@ -2,8 +2,13 @@
 
 ## Bare IDs in Org Files
 
-Org files store IDs **without** scheme prefixes (`block:`, `doc:`, `sentinel:`).
+Org files store IDs **without** scheme prefixes (`block:`, `sentinel:`).
 The parser adds the correct `EntityUri` scheme when reading; the renderer strips it when writing.
+
+Link targets (`[[target]]` / `[[target][text]]`) resolve to the `block:` scheme only —
+the `doc:` scheme is retired (H7, 2026-07-02). A `block:`-prefixed target is already
+resolved; any other non-URL target is a creation intent hashed to a deterministic
+`block:` UUID. Pages are ordinary blocks tagged `Page`.
 
 ### Heading blocks
 

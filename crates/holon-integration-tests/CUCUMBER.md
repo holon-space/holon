@@ -44,7 +44,6 @@ All core infrastructure is implemented and all tests passing:
 - **File sync**: Writing org files triggers automatic sync to Loro → LoroProjection/BlockConsolidator → `block_raw` table (CDC then drives the block matview + `LiveData<Block>`)
 - **`initial_widget`**: Returns the root layout widget with query results populated and CDC stream for real-time updates
 - **`from children` virtual table**: Queries children of a context block correctly
-- **`from roots` virtual table**: Queries blocks with `parent_id IS NULL`
 - **`from siblings` virtual table**: Queries siblings of the current block
 - **`from grandchildren` virtual table**: ✅ NOW ENABLED - Uses JOIN with children CTE (recursive CTEs now supported in Turso MatViews)
 - **Block operations**: `execute_operation("blocks", "create/update/delete", params)` work without requiring `doc_id`
@@ -225,7 +224,6 @@ params.insert("id", Value::String(block_id));
 ```prql
 -- Available in all queries (injected automatically)
 let children = (from blocks | filter parent_id == $context_id)
-let roots = (from blocks | filter parent_id == null)
 let siblings = (from blocks | filter parent_id == $context_parent_id)
 
 -- $context_id is set via QueryContext::for_block(block_id, parent_id)

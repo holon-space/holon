@@ -1381,13 +1381,13 @@ impl TestEnvironment {
         }
 
         // Wait for FileSyncController to create the document entity with a UUID.
-        // `resolve_doc_uri_by_name` is backend-agnostic (Turso `block_raw` or
+        // `resolve_page_uri_by_name` is backend-agnostic (Turso `block_raw` or
         // the Loro `BlockQuerySource` snapshot), so this poll covers both
         // wirings as the controller's watcher ingests the new file.
         let timeout = std::time::Duration::from_secs(5);
         let start = std::time::Instant::now();
         let doc_uri = loop {
-            if let Ok(uri) = self.resolve_doc_uri_by_name(file_name).await {
+            if let Ok(uri) = self.resolve_page_uri_by_name(file_name).await {
                 break uri;
             }
             assert!(
@@ -1430,9 +1430,9 @@ impl TestEnvironment {
             .await
     }
 
-    /// Resolve a file-based document URI (e.g. "doc:doc_0.org") to the real
+    /// Resolve a file-based page URI (e.g. "file:doc_0.org") to the real
     /// UUID-based URI used by the system.
-    pub async fn resolve_doc_uri(&self, file_uri: &EntityUri) -> Result<EntityUri> {
+    pub async fn resolve_page_uri(&self, file_uri: &EntityUri) -> Result<EntityUri> {
         let path_part = file_uri.id();
 
         let name = std::path::Path::new(path_part)
@@ -1461,7 +1461,7 @@ impl TestEnvironment {
     }
 
     /// Resolve a document by filename (e.g. "index.org") to its `block:uuid` URI.
-    pub async fn resolve_doc_uri_by_name(&self, filename: &str) -> Result<EntityUri> {
+    pub async fn resolve_page_uri_by_name(&self, filename: &str) -> Result<EntityUri> {
         let name = std::path::Path::new(filename)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1477,7 +1477,7 @@ impl TestEnvironment {
             let session = self
                 .session
                 .get()
-                .ok_or_else(|| anyhow::anyhow!("resolve_doc_uri_by_name: app not started"))?;
+                .ok_or_else(|| anyhow::anyhow!("resolve_page_uri_by_name: app not started"))?;
             let snapshot = session
                 .block_query()
                 .snapshot()

@@ -29,7 +29,7 @@ pub fn generate_directory_id(path: &Path, root_directory: &Path) -> String {
 /// - `file:projects/todo.org` for nested files
 ///
 /// File URIs are transient identifiers used during parsing. They are resolved
-/// to permanent `doc:<uuid>` URIs at startup via FileSyncController.
+/// to the page's permanent `block:<uuid>` URI at startup via FileSyncController.
 /// Generate a file URI from a file path relative to a root directory.
 ///
 /// Both `path` and `root` must already be canonicalized by the caller when

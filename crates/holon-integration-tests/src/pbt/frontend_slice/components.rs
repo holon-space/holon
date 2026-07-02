@@ -1629,7 +1629,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
 /// minted page is one new `block_raw` id paired 1:1 with the oracle's one new
 /// synthetic `block:ref-doc-N`). The action only WAITS until that page actually
 /// lands so the harness's post-apply id snapshot observes it (mirrors
-/// `TestContext`'s `resolve_doc_uri_by_name` poll). `start_app`/`simulate_restart`/
+/// `TestContext`'s `resolve_page_uri_by_name` poll). `start_app`/`simulate_restart`/
 /// `concurrent_schema_init` are not part of any composed alphabet yet (lifecycle is
 /// the deferred-boot increment) — fail loud if ever dispatched.
 #[async_trait::async_trait(?Send)]
@@ -1701,7 +1701,7 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
         // Wait for the production `FileSyncController` watcher to ingest the new file and
         // mint the doc block in `block_raw` (the convergence `TestContext::create_document`
-        // polls for via `resolve_doc_uri_by_name`). The doc block's title is the file stem
+        // polls for via `resolve_page_uri_by_name`). The doc block's title is the file stem
         // — exactly what `CreateDocument::apply_to_ref` sets the oracle page's content to —
         // so poll the `block_raw` snapshot for a block with that title. (NB: `is_page()` is
         // false on these projected rows — page-ness is a `block_tags` Page tag, not a

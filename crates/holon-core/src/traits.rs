@@ -1402,49 +1402,6 @@ where
             ),
         ))
     }
-
-    /// Set whether this block is a page (org file root).
-    ///
-    /// Promoting (`is_document=true`) adds the literal tag `"Page"` to the
-    /// block's `tags` list. Demoting removes it. The block's title is the
-    /// first line of `content`, so no separate name field is written.
-    #[holon_macros::affects("tags")]
-    async fn set_is_document(&self, id: &EntityUri, is_document: bool) -> Result<OperationResult> {
-        let block = self
-            .get_by_id(id.as_str())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-
-        let old_value = block.is_page();
-        let mut changes = Vec::new();
-
-        let mut new_tags = block.tags().to_vec();
-        let already = new_tags.iter().any(|t| t == holon_api::PAGE_TAG);
-        if is_document && !already {
-            new_tags.push(holon_api::PAGE_TAG.to_string());
-        } else if !is_document && already {
-            new_tags.retain(|t| t != holon_api::PAGE_TAG);
-        } else {
-            // No change required.
-            use crate::__operations_block_operations;
-            return Ok(OperationResult::new(
-                Vec::new(),
-                __operations_block_operations::set_is_document_op("placeholder", id, old_value),
-            ));
-        }
-
-        let arr: Vec<Value> = new_tags.iter().map(|t| Value::String(t.clone())).collect();
-        let tags_result = self
-            .set_field(id.as_str(), "tags", Value::Array(arr))
-            .await?;
-        changes.extend(tags_result.changes);
-
-        use crate::__operations_block_operations;
-        Ok(OperationResult::new(
-            changes,
-            __operations_block_operations::set_is_document_op("placeholder", id, old_value),
-        ))
-    }
 }
 
 /// Rename operations (for entities with a name field)

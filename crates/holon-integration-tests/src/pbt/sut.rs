@@ -27,7 +27,7 @@ use super::state_machine::ReferenceMachine;
 pub struct E2ESut {
     pub ctx: TestContext,
     /// Maps file-based doc URIs ("file:doc_0.org") to UUID-based URIs
-    /// ("doc:<uuid>") assigned by the real system. Shared (cloned) into the
+    /// ("block:<uuid>") assigned by the real system. Shared (cloned) into the
     /// owned `LoroSut` for peer-sync stable-id resolution.
     pub doc_uri_map: super::types::DocUriMap,
     /// How UI mutations are dispatched. Empty before `start_app` creates the
@@ -1056,7 +1056,7 @@ impl E2ESut {
     }
 
     /// Resolve a reference URI to its real backend URI via `doc_uri_map`.
-    /// Handles file:→doc: (documents), block::split-N→block:uuid (split-created blocks),
+    /// Handles file:→block: (pages), block::split-N→block:uuid (split-created blocks),
     /// and passes through any URI not in the map unchanged.
     pub fn resolve_uri(&self, parent_id: &EntityUri) -> EntityUri {
         self.doc_uri_map
