@@ -248,12 +248,16 @@ fn relabel_order(ordered_ids: &[&str], cur_keys: &[String]) -> Result<Vec<String
 #[async_trait]
 impl OrderKeyMinting for SqlBlockOperations {
     /// Returns the SQL `block.sort_key` value to persist for a new block
-    /// placed under `parent_id` after `after_id`. Computed unconditionally
-    /// via `gen_key_between` against the neighbor sort_keys in the cache —
-    /// in Loro mode this value is silently overwritten by `apply_create`
-    /// after `Event::position_after_block_id` drives `tree.mov_after`,
-    /// so the unused compute is the price of avoiding a separate Loro
-    /// vs SqlOnly conditional here.
+    /// placed under `parent_id` after `after_id`. Real minting happens only
+    /// when this store is the `Store` consolidator (SqlOnly); in Upstream
+    /// (Loro) mode the body short-circuits to `default_sort_key()` because the
+    /// tree owns the fractional index — `apply_create` overwrites the value
+    /// after `Event::position_after_block_id` drives `tree.mov_after`. That
+    /// residual Upstream reachability exists because this hybrid store's
+    /// `place()` falls through to minting for blocks not yet in the Loro tree
+    /// (the disclosed SQL-path carve-out for blocks absent from the tree); the
+    /// pure Loro ordering seam has no minting method at all (`OrderKeyMinting`,
+    /// Replication.md §5).
     ///
     /// Tied-key rebalance: if any two siblings under `parent_id` already
     /// share a `sort_key` (e.g. parser-default `"A0"` after a bulk file

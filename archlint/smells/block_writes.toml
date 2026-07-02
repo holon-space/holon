@@ -11,20 +11,23 @@ pattern = '(INSERT\s+(OR\s+[A-Z]+\s+)?INTO|UPDATE|DELETE\s+FROM)\s+"?block(_raw)
 case_sensitive = true
 files = "**/*.rs"
 exclude = [
+    # `**/` prefix: the hook also lints files inside git worktrees
+    # (.claude/worktrees/<name>/crates/...), where a bare crates/ prefix
+    # would not match and the sanctioned writers would false-positive.
     # The two sanctioned writers (Loro projection sink + SqlOnly provider):
-    "crates/holon/src/core/sql_block_operations.rs",
-    "crates/holon/src/core/sql_operation_provider.rs",
-    "crates/holon-loro/src/consolidator.rs",
-    "crates/holon-loro/src/loro_sync_controller.rs",
+    "**/crates/holon/src/core/sql_block_operations.rs",
+    "**/crates/holon/src/core/sql_operation_provider.rs",
+    "**/crates/holon-loro/src/consolidator.rs",
+    "**/crates/holon-loro/src/loro_sync_controller.rs",
     # Turso IVM bug repros / examples / tests exercise raw SQL on purpose:
-    "crates/holon/examples/**",
-    "crates/holon/src/storage/*repro*.rs",
-    "crates/holon/src/storage/*_test*.rs",
-    "crates/holon/src/storage/turso_ivm_*.rs",
-    "crates/holon/src/core/*_test*.rs",
+    "**/crates/holon/examples/**",
+    "**/crates/holon/src/storage/*repro*.rs",
+    "**/crates/holon/src/storage/*_test*.rs",
+    "**/crates/holon/src/storage/turso_ivm_*.rs",
+    "**/crates/holon/src/core/*_test*.rs",
     "**/tests/**",
-    "crates/holon-integration-tests/**",
-    "tools/**",
+    "**/crates/holon-integration-tests/**",
+    "**/tools/**",
 ]
 message = """
 Raw SQL write to the `block`/`block_raw` table outside the sanctioned single \
