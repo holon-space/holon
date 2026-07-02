@@ -22,7 +22,9 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use holon_pbt_core::capabilities::{
+    RefLifecycle, RefNavHistory, RefNavHistoryMut, SutNavHistoryDrive,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -79,34 +81,33 @@ impl TransitionFactory<ReferenceState> for UnpinBlock {
     }
 }
 
+fn unpin_block_preconditions<R: RefLifecycle + RefNavHistory>(
+    history_id: i64,
+    state: &R,
+) -> Validated<(), Reason> {
+    let checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(state.is_unpinnable(history_id), Reason::NoPinsToRemove),
+    ];
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+fn unpin_block_apply_to_ref<R: RefNavHistoryMut>(history_id: i64, state: &mut R) {
+    state.remove_pin(history_id);
+}
+
 impl TransitionRef<ReferenceState> for UnpinBlock {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(
-                state.ui.user.open_pins.iter().any(|(region, pins)| {
-                    let focus = state.current_focus(*region);
-                    pins.iter().any(|p| {
-                        p.history_id == self.history_id
-                            && p.block_id.is_some()
-                            && p.block_id != focus
-                    })
-                }),
-                Reason::NoPinsToRemove,
-            ),
-        ];
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        unpin_block_preconditions(self.history_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        for pins in state.ui.user.open_pins.values_mut() {
-            pins.retain(|p| p.history_id != self.history_id);
-        }
+        unpin_block_apply_to_ref(self.history_id, state);
     }
 }
 

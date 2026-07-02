@@ -13,7 +13,9 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use holon_pbt_core::capabilities::{
+    RefFocusMut, RefLifecycle, RefNavHistory, RefNavHistoryMut, SutNavHistoryDrive,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -49,34 +51,37 @@ impl TransitionFactory<ReferenceState> for NavigateForward {
     }
 }
 
+fn navigate_forward_preconditions<R: RefLifecycle + RefNavHistory>(
+    region: Region,
+    state: &R,
+) -> Validated<(), Reason> {
+    let checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(state.can_go_forward(region), Reason::NoNavigationHistory),
+    ];
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+fn navigate_forward_apply_to_ref<R: RefNavHistoryMut + RefFocusMut>(region: Region, state: &mut R) {
+    state.nav_history_forward(region);
+    state.clear_region_focus(region);
+
+    // Blur on nav: see `navigate_focus.rs` for verification.
+    state.blur_active_editor();
+}
+
 impl TransitionRef<ReferenceState> for NavigateForward {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(
-                state.can_go_forward(self.region),
-                Reason::NoNavigationHistory,
-            ),
-        ];
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        navigate_forward_preconditions(self.region, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        if let Some(history) = state.ui.tab.navigation_history.get_mut(&self.region)
-            && history.cursor < history.entries.len() - 1
-        {
-            history.cursor += 1;
-        }
-        state.ui.tab.focused_entity_id.remove(&self.region);
-        state.ui.tab.focused_cursor.remove(&self.region);
-
-        // Blur on nav: see `navigate_focus.rs` for verification.
-        state.blur_active_editor();
+        navigate_forward_apply_to_ref(self.region, state);
     }
 }
 

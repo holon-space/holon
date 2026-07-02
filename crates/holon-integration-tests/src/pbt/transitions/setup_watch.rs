@@ -11,9 +11,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::query::WatchSpec;
+use crate::pbt::reference_capabilities::RefWatchesMut;
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutWatchRegister;
+use holon_pbt_core::capabilities::{RefLifecycle, SutWatchRegister};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -75,12 +75,12 @@ impl TransitionFactory<ReferenceState> for SetupWatch {
     }
 }
 
-impl TransitionRef<ReferenceState> for SetupWatch {
+impl<R: RefLifecycle + RefWatchesMut> TransitionRef<R> for SetupWatch {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
         ];
 
@@ -90,14 +90,8 @@ impl TransitionRef<ReferenceState> for SetupWatch {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.mcp.active_watches.insert(
-            self.query_id.clone(),
-            WatchSpec {
-                query: self.query.clone(),
-                language: self.language,
-            },
-        );
+    fn apply_to_ref(&self, state: &mut R) {
+        state.register_watch(self.query_id.clone(), self.query.clone(), self.language);
     }
 }
 

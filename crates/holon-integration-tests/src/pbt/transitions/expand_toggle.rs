@@ -26,7 +26,7 @@ use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::value_fn_invariants::rhai_mentions;
-use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::capabilities::{RefLifecycle, RefRender, RefTogglesMut, SutBlockInteract};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -68,25 +68,25 @@ impl TransitionFactory<ReferenceState> for ExpandToggle {
     }
 }
 
-impl TransitionRef<ReferenceState> for ExpandToggle {
+impl<R: RefLifecycle + RefRender + RefTogglesMut> TransitionRef<R> for ExpandToggle {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                state.domain.render_expressions.contains_key(&self.block_id),
+                state.has_block_render_expr(&self.block_id),
                 Reason::FocusedBlockMissing,
             ),
         ];
-        if let Some(expr) = state.domain.render_expressions.get(&self.block_id) {
+        if state.has_block_render_expr(&self.block_id) {
             checks.push(check(
-                rhai_mentions(expr, "expand_toggle"),
+                state.block_render_mentions(&self.block_id, "expand_toggle"),
                 Reason::PreconditionFailed,
             ));
         }
         checks.push(check(
-            !state.ui.tab.expanded_toggles.contains(&self.block_id),
+            !state.is_expanded(&self.block_id),
             Reason::ToggleAlreadyExpanded,
         ));
         checks
@@ -95,8 +95,8 @@ impl TransitionRef<ReferenceState> for ExpandToggle {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.ui.tab.expanded_toggles.insert(self.block_id.clone());
+    fn apply_to_ref(&self, state: &mut R) {
+        state.set_expanded(&self.block_id, true);
     }
 }
 

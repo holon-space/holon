@@ -12,7 +12,7 @@ use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::capabilities::{RefBlockTreeMut, SutBlockInteract};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -194,12 +194,20 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.push_undo_snapshot();
-        // Production's drop_zone dispatches `move_block(id=source,
-        // parent_id=target, after_block_id=None)` which inserts at
-        // the beginning of the target's children.
-        state.move_block(&self.source, self.target.clone(), None);
+        drag_drop_block_apply_to_ref(&self.source, &self.target, state)
     }
+}
+
+pub fn drag_drop_block_apply_to_ref<R: RefBlockTreeMut>(
+    source: &EntityUri,
+    target: &EntityUri,
+    state: &mut R,
+) {
+    state.push_undo_snapshot();
+    // Production's drop_zone dispatches `move_block(id=source,
+    // parent_id=target, after_block_id=None)` which inserts at
+    // the beginning of the target's children.
+    state.move_block(source, target.clone(), None);
 }
 
 #[allow(async_fn_in_trait)]

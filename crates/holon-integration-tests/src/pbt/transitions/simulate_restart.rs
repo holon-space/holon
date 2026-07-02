@@ -13,6 +13,7 @@ use validated::Validated;
 use crate::pbt::local_caps::SutAppLifecycle;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::capabilities::{RefLayout, RefLifecycle};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -44,16 +45,13 @@ impl TransitionFactory<ReferenceState> for SimulateRestart {
     }
 }
 
-impl TransitionRef<ReferenceState> for SimulateRestart {
+impl<R: RefLifecycle + RefLayout> TransitionRef<R> for SimulateRestart {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(
-                !state.domain.block_state.blocks.is_empty(),
-                Reason::BlockStateEmpty,
-            ),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(!state.all_block_ids().is_empty(), Reason::BlockStateEmpty),
         ];
         checks
             .into_iter()
@@ -61,7 +59,7 @@ impl TransitionRef<ReferenceState> for SimulateRestart {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // SimulateRestart doesn't change reference state - blocks should be preserved.
         // The SUT will clear last_projection and trigger file re-processing.
     }

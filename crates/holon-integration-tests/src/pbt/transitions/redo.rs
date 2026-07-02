@@ -11,8 +11,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::{CursorPosition, ReferenceState};
-use holon_pbt_core::capabilities::SutHistoryWrite;
+use crate::pbt::reference_state::ReferenceState;
+use holon_pbt_core::capabilities::{RefFocusMut, RefHistoryMut, RefLifecycle, SutHistoryWrite};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -41,13 +41,13 @@ impl TransitionFactory<ReferenceState> for Redo {
     }
 }
 
-impl TransitionRef<ReferenceState> for Redo {
+impl<R: RefLifecycle + RefHistoryMut + RefFocusMut> TransitionRef<R> for Redo {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(!state.action.redo_stack.is_empty(), Reason::NoRedoHistory),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(state.has_redo(), Reason::NoRedoHistory),
         ];
 
         checks
@@ -56,22 +56,9 @@ impl TransitionRef<ReferenceState> for Redo {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.pop_redo_to_undo();
-        for region in state
-            .ui
-            .tab
-            .focused_entity_id
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            state
-                .ui
-                .tab
-                .focused_cursor
-                .insert(region, CursorPosition::start());
-        }
+    fn apply_to_ref(&self, state: &mut R) {
+        state.redo();
+        state.reset_focused_cursors_to_start();
     }
 }
 

@@ -14,6 +14,7 @@ use validated::Validated;
 use crate::LoroCorruptionType;
 use crate::pbt::local_caps::SutFixtureFs;
 use crate::pbt::reference_state::ReferenceState;
+use holon_pbt_core::capabilities::{RefDocuments, RefLifecycle};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -90,19 +91,18 @@ impl TransitionFactory<ReferenceState> for CreateStaleLoro {
     }
 }
 
-impl TransitionRef<ReferenceState> for CreateStaleLoro {
+impl<R: RefLifecycle + RefDocuments> TransitionRef<R> for CreateStaleLoro {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.action.app_started, Reason::AppAlreadyStarted),
+            check(!state.app_started(), Reason::AppAlreadyStarted),
             check(state.enable_loro(), Reason::LoroDisabledForCorruption),
             check(
                 state
-                    .files
-                    .documents
-                    .values()
-                    .any(|f| f == &self.org_filename),
+                    .document_uris()
+                    .iter()
+                    .any(|uri| state.document_filename(uri).as_deref() == Some(&self.org_filename)),
                 Reason::NoDocumentsAvailable,
             ),
         ];
@@ -112,7 +112,7 @@ impl TransitionRef<ReferenceState> for CreateStaleLoro {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // CreateStaleLoro doesn't change reference state - the blocks from the
         // corresponding org file should still exist after startup. The system
         // should detect the corrupted .loro file and recover from the .org file.

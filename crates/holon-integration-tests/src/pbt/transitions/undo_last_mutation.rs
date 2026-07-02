@@ -11,8 +11,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::{CursorPosition, ReferenceState};
-use holon_pbt_core::capabilities::SutHistoryWrite;
+use crate::pbt::reference_state::ReferenceState;
+use holon_pbt_core::capabilities::{RefFocusMut, RefHistoryMut, RefLifecycle, SutHistoryWrite};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -43,13 +43,13 @@ impl TransitionFactory<ReferenceState> for UndoLastMutation {
     }
 }
 
-impl TransitionRef<ReferenceState> for UndoLastMutation {
+impl<R: RefLifecycle + RefHistoryMut + RefFocusMut> TransitionRef<R> for UndoLastMutation {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(!state.action.undo_stack.is_empty(), Reason::NoUndoHistory),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(state.has_undo(), Reason::NoUndoHistory),
         ];
 
         checks
@@ -58,23 +58,10 @@ impl TransitionRef<ReferenceState> for UndoLastMutation {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.pop_undo_to_redo();
+    fn apply_to_ref(&self, state: &mut R) {
         // Undo may restore different content — reset all cursors
-        for region in state
-            .ui
-            .tab
-            .focused_entity_id
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            state
-                .ui
-                .tab
-                .focused_cursor
-                .insert(region, CursorPosition::start());
-        }
+        state.undo();
+        state.reset_focused_cursors_to_start();
     }
 }
 

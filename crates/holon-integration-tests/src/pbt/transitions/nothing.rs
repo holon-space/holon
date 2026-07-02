@@ -31,14 +31,14 @@ impl TransitionFactory<ReferenceState> for Nothing {
     }
 }
 
-impl TransitionRef<ReferenceState> for Nothing {
+impl<R> TransitionRef<R> for Nothing {
     type Reason = Reason;
 
-    fn preconditions(&self, _: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, _: &R) -> Validated<(), Reason> {
         Validated::Good(())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // No-op: reference state is unchanged
     }
 }

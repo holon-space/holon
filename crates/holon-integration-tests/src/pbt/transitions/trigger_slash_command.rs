@@ -12,15 +12,19 @@ use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
+use crate::pbt::reference_capabilities::RefMutation;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::capabilities::{
+    CapRegion, RefBlockTree, RefBlockTreeMut, RefFocusMut, RefFocusRoots, RefLayout, RefLifecycle,
+    SutBlockInteract,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
 
-use holon_api::{ContentType, EntityUri};
+use holon_api::EntityUri;
 
 // ── Capability-bound free function (Phase C, Option A — real user input) ──
 //
@@ -128,79 +132,84 @@ impl TransitionFactory<ReferenceState> for TriggerSlashCommand {
     }
 }
 
+pub fn trigger_slash_command_preconditions<
+    R: RefLifecycle + RefBlockTree + RefFocusRoots + RefLayout,
+>(
+    block_id: &EntityUri,
+    state: &R,
+) -> Validated<(), Reason> {
+    let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+    let mut checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(state.is_properly_setup(), Reason::NotProperlySetup),
+        // Block-interaction transitions need the block to render as an
+        // interactive widget (ops/draggable) reactively over the navigated
+        // focus. Only the default layout does; custom `index.org` query
+        // layouts don't (see RefLifecycle::renders_block_interactively).
+        check(
+            RefLifecycle::renders_block_interactively(state, block_id),
+            Reason::BlocksNotInteractiveUnderLayout,
+        ),
+        // Slash-command input is character typing through the editor's
+        // `on_text_changed` pipeline, which is Loro/MutableText-backed.
+        // SqlOnly has no MutableText, so gate this out exactly like the
+        // other atomic-editor transitions (TypeChars, DeleteBackward, …).
+        check(state.enable_loro(), Reason::LoroRequiredForAtomicEditor),
+    ];
+
+    checks.push(check(
+        state.block_exists(block_id),
+        Reason::FocusedBlockMissing,
+    ));
+    checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
+    checks.push(check(
+        !state.is_layout_block(block_id),
+        Reason::FocusedInLayoutBlocks,
+    ));
+    checks.push(check(
+        !block_id.as_str().contains("default-"),
+        Reason::BlockIsDefaultLayout,
+    ));
+    checks.push(check(
+        state.all_block_ids().len() > 2,
+        Reason::InsufficientBlocksForDelete,
+    ));
+    checks.push(check(
+        state.is_descendant_of_any(block_id, &focus_roots),
+        Reason::FocusedNotDescendantOfFocusRoot,
+    ));
+
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+pub fn trigger_slash_command_apply_to_ref<R: RefBlockTreeMut + RefMutation + RefFocusMut>(
+    block_id: &EntityUri,
+    state: &mut R,
+) {
+    use crate::pbt::types::{Mutation, MutationEvent, MutationSource};
+    state.push_undo_snapshot();
+    state.apply_mutation_event(&MutationEvent {
+        source: MutationSource::UI,
+        mutation: Mutation::Delete {
+            entity: "block".to_string(),
+            id: block_id.clone(),
+        },
+    });
+    state.clear_focus_if_deleted(block_id);
+}
+
 impl TransitionRef<ReferenceState> for TriggerSlashCommand {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(state.is_properly_setup(), Reason::NotProperlySetup),
-            // Block-interaction transitions need the block to render as an
-            // interactive widget (ops/draggable) reactively over the navigated
-            // focus. Only the default layout does; custom `index.org` query
-            // layouts don't (see RefLifecycle::renders_block_interactively).
-            check(
-                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
-                    state,
-                    &self.block_id,
-                ),
-                Reason::BlocksNotInteractiveUnderLayout,
-            ),
-            // Slash-command input is character typing through the editor's
-            // `on_text_changed` pipeline, which is Loro/MutableText-backed.
-            // SqlOnly has no MutableText, so gate this out exactly like the
-            // other atomic-editor transitions (TypeChars, DeleteBackward, …).
-            check(state.enable_loro(), Reason::LoroRequiredForAtomicEditor),
-        ];
-
-        checks.push(check(
-            state.domain.block_state.blocks.contains_key(&self.block_id),
-            Reason::FocusedBlockMissing,
-        ));
-        checks.push(check(
-            state
-                .domain
-                .block_state
-                .blocks
-                .get(&self.block_id)
-                .is_some_and(|b| b.content_type == ContentType::Text),
-            Reason::FocusedNotText,
-        ));
-        checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
-            Reason::FocusedInLayoutBlocks,
-        ));
-        checks.push(check(
-            !self.block_id.as_str().contains("default-"),
-            Reason::BlockIsDefaultLayout,
-        ));
-        checks.push(check(
-            state.domain.block_state.blocks.len() > 2,
-            Reason::InsufficientBlocksForDelete,
-        ));
-        checks.push(check(
-            state.is_descendant_of_any(&self.block_id, &focus_roots),
-            Reason::FocusedNotDescendantOfFocusRoot,
-        ));
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        trigger_slash_command_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use crate::pbt::types::{Mutation, MutationEvent, MutationSource};
-        state.push_undo_snapshot();
-        state.apply_mutation(&MutationEvent {
-            source: MutationSource::UI,
-            mutation: Mutation::Delete {
-                entity: "block".to_string(),
-                id: self.block_id.clone(),
-            },
-        });
-        state.clear_focus_if_deleted(&self.block_id);
+        trigger_slash_command_apply_to_ref(&self.block_id, state)
     }
 }
 

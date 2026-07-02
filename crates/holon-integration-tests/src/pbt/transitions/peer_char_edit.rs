@@ -17,6 +17,7 @@ use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::transitions::TextOp;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::capabilities::{RefLifecycle, RefPeers};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -46,24 +47,24 @@ impl TransitionFactory<ReferenceState> for PeerCharEdit {
     }
 }
 
-impl TransitionRef<ReferenceState> for PeerCharEdit {
+impl<R: RefLifecycle + RefPeers> TransitionRef<R> for PeerCharEdit {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
             check(ReferenceState::mutable_text_enabled(), Reason::Unmigrated),
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                self.peer_idx < state.peers.len(),
+                self.peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ),
         ];
 
-        if self.peer_idx < state.peers.len() {
+        if self.peer_idx < state.peers_len() {
             checks.push(check(
-                state.peers[self.peer_idx]
-                    .blocks
-                    .contains_key(&self.block_id),
+                state
+                    .peer_block_stable_ids(self.peer_idx)
+                    .contains(&self.block_id),
                 Reason::PeerBlockMissing,
             ));
         }
@@ -74,7 +75,7 @@ impl TransitionRef<ReferenceState> for PeerCharEdit {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // Reference model: PeerCharEdit doesn't change block-level
         // content (it operates at the LoroText character level).
         // The block content in the reference model stays the same;

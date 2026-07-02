@@ -19,7 +19,7 @@
 //! plus the `/matview` invariant that observes the `requires` re-projection.
 
 use holon_api::{EdgeFieldUpdate, EntityUri, Tags};
-use holon_pbt_core::capabilities::SutEdgeFieldWrite;
+use holon_pbt_core::capabilities::{RefBlockTreeMut, SutEdgeFieldWrite};
 use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
@@ -174,20 +174,19 @@ impl TransitionRef<ReferenceState> for SetEdgeField {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        let block = state
-            .domain
-            .block_state
-            .blocks
-            .get_mut(&self.block_id)
-            .expect("SetEdgeField: subject block must exist (precondition)");
-        // Direct field assignment (both are public edge-field columns):
-        // `is_page` is computed from `tags` on read, so there is no cached
-        // state to keep in sync.
-        match &self.update {
-            EdgeFieldUpdate::Tags(tags) => block.tags = tags.clone(),
-            EdgeFieldUpdate::Requires(reqs) => block.requires = reqs.clone(),
-        }
+        set_edge_field_apply_to_ref(&self.block_id, &self.update, state)
     }
+}
+
+pub fn set_edge_field_apply_to_ref<R: RefBlockTreeMut>(
+    block_id: &EntityUri,
+    update: &EdgeFieldUpdate,
+    state: &mut R,
+) {
+    // Direct field assignment (both are public edge-field columns):
+    // `is_page` is computed from `tags` on read, so there is no cached
+    // state to keep in sync. The cap owns the fail-loud "block must exist".
+    state.set_edge_field(block_id, update);
 }
 
 crate::cap_transition! {

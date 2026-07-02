@@ -11,8 +11,9 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::reference_capabilities::RefWatchesMut;
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutWatchRegister;
+use holon_pbt_core::capabilities::{RefLifecycle, RefWatches, SutWatchRegister};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -64,14 +65,14 @@ impl TransitionFactory<ReferenceState> for RemoveWatch {
     }
 }
 
-impl TransitionRef<ReferenceState> for RemoveWatch {
+impl<R: RefLifecycle + RefWatches + RefWatchesMut> TransitionRef<R> for RemoveWatch {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                state.mcp.active_watches.contains_key(&self.query_id),
+                state.active_watch_ids().contains(&self.query_id),
                 Reason::NoActiveWatches,
             ),
         ];
@@ -82,8 +83,8 @@ impl TransitionRef<ReferenceState> for RemoveWatch {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.mcp.active_watches.remove(&self.query_id);
+    fn apply_to_ref(&self, state: &mut R) {
+        state.remove_watch(&self.query_id);
     }
 }
 

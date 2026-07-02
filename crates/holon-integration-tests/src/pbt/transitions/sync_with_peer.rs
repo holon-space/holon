@@ -10,6 +10,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use holon_pbt_core::capabilities::{RefLifecycle, RefPeers, RefPeersMut};
+
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
@@ -57,15 +59,15 @@ impl TransitionFactory<ReferenceState> for SyncWithPeer {
     }
 }
 
-impl TransitionRef<ReferenceState> for SyncWithPeer {
+impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for SyncWithPeer {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.enable_loro(), Reason::LoroRequiredForPeers),
             check(
-                self.peer_idx < state.peers.len(),
+                self.peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ),
         ];
@@ -75,8 +77,7 @@ impl TransitionRef<ReferenceState> for SyncWithPeer {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use holon_pbt_core::capabilities::RefPeersMut;
+    fn apply_to_ref(&self, state: &mut R) {
         // Known gap: peer deletes aren't propagated to primary — see
         // the original comment block in git history. Mirror logic now
         // lives in `RefPeersMut::peer_sync_from_primary`.

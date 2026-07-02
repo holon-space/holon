@@ -1770,6 +1770,240 @@ impl ReferenceState {
         self.domain.block_state.next_id += 1;
     }
 
+    /// Apply a NON-peer (UI / external) `MutationEvent` to the block tree, the
+    /// richer sibling of [`Self::apply_mutation`]: it also snapshots undo on a
+    /// UI mutation, tracks `block_documents` ownership for a Create, refreshes
+    /// the render expression when a render-source block's content changes, and
+    /// follows up focus/cursor. The LoroPeer mutation path is NOT handled here
+    /// (it routes through the peer caps). The one honest compound behind
+    /// `RefMutation::apply_external_mutation` (ApplyMutation transition).
+    pub fn apply_external_mutation(&mut self, event: &super::types::MutationEvent) {
+        use super::types::{Mutation, MutationSource};
+
+        if event.source == MutationSource::UI {
+            self.push_undo_snapshot();
+        }
+        if let Mutation::Create { id, parent_id, .. } = &event.mutation {
+            let doc_uri = if parent_id.is_no_parent() || parent_id.is_sentinel() {
+                parent_id.clone()
+            } else {
+                match self.domain.block_state.block_documents.get(parent_id) {
+                    Some(doc) if !doc.is_no_parent() && !doc.is_sentinel() => doc.clone(),
+                    _ => parent_id.clone(),
+                }
+            };
+            self.domain
+                .block_state
+                .block_documents
+                .insert(id.clone(), doc_uri);
+        }
+
+        let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
+        event.mutation.apply_to(&mut blocks);
+        crate::assign_reference_sequences_canonical(&mut blocks);
+        self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        self.rebuild_profile_tracking();
+
+        if let Mutation::Update { id, fields, .. } = &event.mutation
+            && self.domain.layout_blocks.render_source_ids.contains(id)
+            && fields.contains_key("content")
+            && let Some(block) = self.domain.block_state.blocks.get(id)
+            && let Some(expr) = render_expr_from_rhai(block.content.as_str())
+        {
+            self.domain.render_expressions.insert(id.clone(), expr);
+        }
+
+        self.domain.block_state.next_id += 1;
+
+        match &event.mutation {
+            Mutation::Update { id, fields, .. } if fields.contains_key("content") => {
+                self.reset_cursor_if_focused(id);
+            }
+            Mutation::Delete { id, .. } => {
+                self.clear_focus_if_deleted(id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Insert externally-authored `blocks` into `doc_uri`, normalizing each
+    /// block's content for the org round trip, then re-canonicalize sequences
+    /// and rebuild profiles. The one honest compound behind
+    /// `RefMutation::add_external_blocks` (BulkExternalAdd transition).
+    pub fn add_external_blocks(&mut self, blocks: &[Block], doc_uri: &EntityUri) {
+        for block in blocks {
+            let mut block = block.clone();
+            block.content = super::types::normalize_content_for_org_roundtrip(
+                &block.content,
+                block.content_type,
+            );
+            super::types::apply_org_headline_tag_split(&mut block);
+            let id = block.id.clone();
+            self.domain.block_state.blocks.insert(id.clone(), block);
+            self.domain
+                .block_state
+                .block_documents
+                .insert(id, doc_uri.clone());
+        }
+        let mut all_blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
+        crate::assign_reference_sequences_canonical(&mut all_blocks);
+        self.domain.block_state.blocks =
+            all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        self.rebuild_profile_tracking();
+        self.domain.block_state.next_id += blocks.len();
+    }
+
+    /// Create a new empty document named `file_name`: mint its uri, register
+    /// the filename, and insert its page block (tagged `Page`). Returns the new
+    /// document uri. The one honest compound behind
+    /// `RefDocumentsMut::create_document` (CreateDocument transition).
+    pub fn create_document_ref(&mut self, file_name: String) -> EntityUri {
+        let doc_uri = self.next_synthetic_doc_uri();
+        self.files
+            .documents
+            .insert(doc_uri.clone(), file_name.clone());
+
+        let doc_name = std::path::Path::new(file_name.as_str())
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&file_name)
+            .to_string();
+        let mut doc_block = Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name);
+        doc_block.set_page(true);
+        self.domain
+            .block_state
+            .blocks
+            .insert(doc_uri.clone(), doc_block);
+        self.domain
+            .block_state
+            .block_documents
+            .insert(doc_uri.clone(), doc_uri.clone());
+        doc_uri
+    }
+
+    /// Re-materialize an org document into the reference model: register the
+    /// filename (reusing an existing doc uri by name, else minting one), drop
+    /// the document's prior content blocks, re-insert its page block and the
+    /// generated `blocks` (remapping the `gen-placeholder` parent to the doc
+    /// uri, normalizing content, and classifying index.org layout/source blocks
+    /// + render expressions), then re-canonicalize and rebuild profiles. The
+    /// one honest compound behind `RefMutation::write_org_document`
+    /// (WriteOrgFile transition — its heaviest write body).
+    pub fn write_org_document(
+        &mut self,
+        filename: &str,
+        blocks: &[Block],
+        keyword_set: Option<&super::generators::TodoKeywordSet>,
+    ) {
+        use holon_orgmode::models::{OrgBlockExt, OrgDocumentExt};
+
+        // Mirror of `write_org_file.rs`'s `GEN_PLACEHOLDER` const.
+        const GEN_PLACEHOLDER: &str = "gen-placeholder";
+
+        let doc_name = std::path::Path::new(filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(filename)
+            .to_string();
+        let doc_uri = self
+            .doc_uri_by_name(&doc_name)
+            .unwrap_or_else(|| self.next_synthetic_doc_uri());
+        self.files
+            .documents
+            .insert(doc_uri.clone(), filename.to_string());
+
+        let old_block_ids: Vec<EntityUri> = self
+            .domain
+            .block_state
+            .block_documents
+            .iter()
+            .filter(|(_, uri)| **uri == doc_uri)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &old_block_ids {
+            self.domain.block_state.blocks.remove(id);
+            self.domain.block_state.block_documents.remove(id);
+            self.domain.layout_blocks.remove(id);
+            self.domain.render_expressions.remove(id);
+        }
+
+        let mut doc_block =
+            Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name.clone());
+        doc_block.set_page(true);
+        if let Some(ks) = keyword_set {
+            doc_block.set_todo_keywords(Some(ks.0.clone()));
+        }
+        self.domain
+            .block_state
+            .blocks
+            .insert(doc_uri.clone(), doc_block);
+        self.domain
+            .block_state
+            .block_documents
+            .insert(doc_uri.clone(), doc_uri.clone());
+
+        let placeholder = EntityUri::block(GEN_PLACEHOLDER);
+        let is_index = filename == "index.org";
+        for (seq, generated) in blocks.iter().enumerate() {
+            let mut block = generated.clone();
+            if block.parent_id == placeholder {
+                block.parent_id = doc_uri.clone();
+            }
+            block.properties.remove("ID");
+            block.content = super::types::normalize_content_for_org_roundtrip(
+                &block.content,
+                block.content_type,
+            );
+            super::types::apply_org_headline_tag_split(&mut block);
+            block.set_sequence(seq as i64);
+            let block_uri = block.id.clone();
+
+            if is_index
+                && block.content_type == ContentType::Source
+                && let Some(sl) = block.source_language.as_ref()
+            {
+                if sl.as_query().is_some() {
+                    self.domain
+                        .layout_blocks
+                        .headline_ids
+                        .insert(block.parent_id.clone());
+                    self.domain
+                        .layout_blocks
+                        .query_source_ids
+                        .insert(block_uri.clone());
+                } else if matches!(sl, holon_api::SourceLanguage::Render) {
+                    self.domain
+                        .layout_blocks
+                        .headline_ids
+                        .insert(block.parent_id.clone());
+                    self.domain
+                        .layout_blocks
+                        .render_source_ids
+                        .insert(block_uri.clone());
+                    if let Ok(expr) = self.interpreter.parse_dsl(block.content.as_str()) {
+                        self.domain
+                            .render_expressions
+                            .insert(block_uri.clone(), expr);
+                    }
+                }
+            }
+
+            self.domain
+                .block_state
+                .block_documents
+                .insert(block_uri.clone(), doc_uri.clone());
+            self.domain.block_state.blocks.insert(block_uri, block);
+        }
+
+        let mut all_blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
+        crate::assign_reference_sequences_canonical(&mut all_blocks);
+        self.domain.block_state.blocks =
+            all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+
+        self.rebuild_profile_tracking();
+        self.pre_startup_file_count += 1;
+    }
+
     /// Returns the set of block IDs that should appear in `focus_roots` for a region.
     /// Mirrors `schema/matview_focus_roots.sql`: a flat projection of
     /// `navigation_history WHERE closed_at IS NULL`, excluding home rows

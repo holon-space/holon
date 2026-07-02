@@ -13,8 +13,12 @@ use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
+use crate::pbt::reference_capabilities::RefModelPredict;
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::capabilities::{
+    CapCursor, RefBlockTree, RefEditorMirror, RefFocusMut, RefLifecycle, RefNavHistoryMut,
+    SutBlockInteract,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -22,7 +26,7 @@ use crate::pbt::transition_budgets::{
     ExpectedSql, JOURNAL_READS, NAV_DML_READS, REACTIVE_BASE, docs_tolerance,
 };
 
-use holon_api::{ContentType, EntityUri, Region};
+use holon_api::{EntityUri, Region};
 
 // ── Capability-bound free function (Phase C) ──────────────────────
 
@@ -128,117 +132,94 @@ impl TransitionFactory<ReferenceState> for ClickBlock {
     }
 }
 
+fn click_block_preconditions<R: RefLifecycle + RefBlockTree>(
+    block_id: &EntityUri,
+    state: &R,
+) -> Validated<(), Reason> {
+    // Visibility / rendered-set membership is no longer a precondition.
+    // The driver's wait-for-bounds with scroll-into-view (sut.rs)
+    // covers "must be reachable on screen"; a real bug surfaces as
+    // the wait timeout, not as a precondition rejection. `is_focusable`
+    // / `!is_page` / `!layout_blocks` stay ref-state model facts.
+    let exists = state.block_exists(block_id);
+    let mut checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(exists, Reason::FocusedBlockMissing),
+    ];
+    if exists {
+        checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
+    }
+    checks.push(check(
+        !state.is_layout_block(block_id),
+        Reason::FocusedInLayoutBlocks,
+    ));
+    checks.push(check(
+        state.is_focusable(block_id),
+        Reason::FocusedNotFocusable,
+    ));
+    checks.push(check(
+        exists && !state.is_page_block(block_id),
+        Reason::FocusedIsPage,
+    ));
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+fn click_block_apply_to_ref<
+    R: RefEditorMirror + RefModelPredict + RefFocusMut + RefNavHistoryMut,
+>(
+    region: Region,
+    block_id: &EntityUri,
+    state: &mut R,
+) {
+    // A real click anywhere outside the active editor blurs it, and the
+    // editor's `on_blur` → `set_field("content")` commits pending text
+    // (real-editor runs only — `blur_active_editor` carries the gate).
+    // Same-block clicks don't blur (the driver skips click-when-focused),
+    // so leave those untouched.
+    if state.active_editor_block().is_some_and(|b| &b != block_id) {
+        state.blur_active_editor();
+    }
+    // The default LeftSidebar wraps each doc in a `selectable` whose
+    // bound action is `navigation.focus(region: "main", block_id: col("id"))`.
+    // Clicking it dispatches that intent, which the production
+    // navigation provider maps to a navigation-history push for
+    // region=Main. Mirror that here so `focus_roots` / `current_focus`
+    // checks line up with the real backend after the click.
+    //
+    // Other regions (Main, RightSidebar), AND sidebar clicks on
+    // entities the default sidebar PRQL does NOT render (so prod
+    // has no selectable bound), fall through to editor focus.
+    if state.predicts_navigation_focus(block_id, region) {
+        // Same close-then-insert as NavigateFocus — see navigate_focus.rs
+        // for rationale. The sidebar selectable always targets region=Main.
+        state.nav_focus_push(Region::Main, Some(block_id.clone()));
+        state.clear_region_focus(Region::Main);
+        state.set_global_focus(Some(block_id.clone()));
+    } else {
+        // Clicking sets editor focus but does NOT change the navigation cursor.
+        // The user is still viewing the same document; only the focused editor
+        // changes. Arrow keys will now navigate among the clicked block's siblings.
+        // The global `focused_block` mirror also follows the click — production
+        // GPUI's `render_entity` / `rendered_text` click handlers call
+        // `services.set_focus(Some(id))` directly (focus is in-memory state,
+        // ADR 0010; no `editor_focus` dispatch).
+        state.set_global_focus(Some(block_id.clone()));
+        state.set_region_focus(region, block_id.clone(), CapCursor::default());
+    }
+}
+
 impl TransitionRef<ReferenceState> for ClickBlock {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        // Visibility / rendered-set membership is no longer a precondition.
-        // The driver's wait-for-bounds with scroll-into-view (sut.rs)
-        // covers "must be reachable on screen"; a real bug surfaces as
-        // the wait timeout, not as a precondition rejection. `is_focusable`
-        // / `!is_page` / `!layout_blocks` stay ref-state model facts.
-        let block = state.domain.block_state.blocks.get(&self.block_id);
-        let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(block.is_some(), Reason::FocusedBlockMissing),
-        ];
-        if let Some(b) = block {
-            checks.push(check(
-                b.content_type == ContentType::Text,
-                Reason::FocusedNotText,
-            ));
-        }
-        checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
-            Reason::FocusedInLayoutBlocks,
-        ));
-        checks.push(check(
-            state.domain.layout_blocks.is_focusable(&self.block_id),
-            Reason::FocusedNotFocusable,
-        ));
-        checks.push(check(
-            block.is_some_and(|b| !b.is_page()),
-            Reason::FocusedIsPage,
-        ));
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        click_block_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use crate::pbt::reference_state::OpenPinEntry;
-        // A real click anywhere outside the active editor blurs it, and the
-        // editor's `on_blur` → `set_field("content")` commits pending text
-        // (real-editor runs only — `blur_active_editor` carries the gate).
-        // Same-block clicks don't blur (the driver skips click-when-focused),
-        // so leave those untouched.
-        if state
-            .ui
-            .tab
-            .active_editor
-            .as_ref()
-            .is_some_and(|e| e.block_id != self.block_id)
-        {
-            state.blur_active_editor();
-        }
-        // The default LeftSidebar wraps each doc in a `selectable` whose
-        // bound action is `navigation.focus(region: "main", block_id: col("id"))`.
-        // Clicking it dispatches that intent, which the production
-        // navigation provider maps to a navigation-history push for
-        // region=Main. Mirror that here so `focus_roots` / `current_focus`
-        // checks line up with the real backend after the click.
-        //
-        // Other regions (Main, RightSidebar), AND sidebar clicks on
-        // entities the default sidebar PRQL does NOT render (so prod
-        // has no selectable bound), fall through to editor focus.
-        if state.predicts_navigation_focus(&self.block_id, self.region) {
-            let history = state
-                .ui
-                .tab
-                .navigation_history
-                .entry(Region::Main)
-                .or_default();
-            history.entries.truncate(history.cursor + 1);
-            history.entries.push(Some(self.block_id.clone()));
-            history.cursor = history.entries.len() - 1;
-
-            // Same close-then-insert as NavigateFocus — see navigate_focus.rs
-            // for rationale.
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            let added_ts_logical = state.ui.user.next_pin_ts;
-            state.ui.user.next_pin_ts += 1;
-            let pins = state.ui.user.open_pins.entry(Region::Main).or_default();
-            pins.clear();
-            pins.push(OpenPinEntry {
-                history_id,
-                block_id: Some(self.block_id.clone()),
-                added_ts_logical,
-            });
-
-            state.ui.tab.focused_entity_id.remove(&Region::Main);
-            state.ui.tab.focused_cursor.remove(&Region::Main);
-            state.ui.tab.focused_block = Some(self.block_id.clone());
-        } else {
-            // Clicking sets editor focus but does NOT change the navigation cursor.
-            // The user is still viewing the same document; only the focused editor
-            // changes. Arrow keys will now navigate among the clicked block's siblings.
-            // The global `focused_block` mirror also follows the click — production
-            // GPUI's `render_entity` / `rendered_text` click handlers call
-            // `services.set_focus(Some(id))` directly (focus is in-memory state,
-            // ADR 0010; no `editor_focus` dispatch).
-            state.ui.tab.focused_block = Some(self.block_id.clone());
-            state
-                .ui
-                .tab
-                .focused_entity_id
-                .insert(self.region, self.block_id.clone());
-            state.ui.tab.focused_cursor.insert(
-                self.region,
-                crate::pbt::reference_state::CursorPosition::start(),
-            );
-        }
+        click_block_apply_to_ref(self.region, &self.block_id, state);
     }
 }
 

@@ -11,17 +11,16 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
+use crate::pbt::reference_capabilities::RefMutation;
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutLoro;
+use holon_pbt_core::capabilities::{RefPeersMut, SutLoro};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, expected_mutation_sql};
 
-use holon_api::block::Block;
 use holon_api::{ContentType, EntityUri, QueryLanguage, Value};
 
-use crate::assign_reference_sequences_canonical;
 use crate::pbt::generators::{
     generate_layout_headline_mutation, generate_mutation, generate_profile_content_mutation,
     generate_render_source_mutation,
@@ -557,100 +556,59 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // LoroPeer mutations apply to the peer's reference state only — they do
-        // NOT touch the primary block map until a `SyncWithPeer`/`MergeFromPeer`
-        // converges them. Mirrors `PeerEdit::apply_to_ref` (peer_apply_*),
-        // keyed off the mutation's bare ids.
-        if let MutationSource::LoroPeer { peer_idx } = self.event.source {
-            use holon_pbt_core::capabilities::RefPeersMut;
-            match &self.event.mutation {
-                Mutation::Create {
-                    id,
-                    parent_id,
-                    fields,
-                    ..
-                } => {
-                    let parent_stable = if parent_id.is_no_parent() || parent_id.is_sentinel() {
-                        None
-                    } else {
-                        Some(parent_id.id().to_string())
-                    };
-                    let content = fields
-                        .get("content")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or_default();
-                    state.peer_apply_create(peer_idx, parent_stable.as_deref(), content, id.id());
-                }
-                Mutation::Update { id, fields, .. } => {
-                    let content = fields
-                        .get("content")
-                        .and_then(|v| v.as_string())
-                        .expect("LoroPeer Update must carry a `content` field");
-                    state.peer_apply_update(peer_idx, id.id(), content);
-                }
-                Mutation::Delete { id, .. } => {
-                    state.peer_apply_delete(peer_idx, id.id());
-                }
-                Mutation::Move { .. } | Mutation::RestartApp => {
-                    panic!("LoroPeer mutation has no ref mapping for Move/RestartApp")
-                }
+        apply_mutation_apply_to_ref(&self.event, state)
+    }
+}
+
+pub fn apply_mutation_apply_to_ref<R: RefPeersMut + RefMutation>(
+    event: &MutationEvent,
+    state: &mut R,
+) {
+    // LoroPeer mutations apply to the peer's reference state only — they do
+    // NOT touch the primary block map until a `SyncWithPeer`/`MergeFromPeer`
+    // converges them. Mirrors `PeerEdit::apply_to_ref` (peer_apply_*),
+    // keyed off the mutation's bare ids.
+    if let MutationSource::LoroPeer { peer_idx } = event.source {
+        match &event.mutation {
+            Mutation::Create {
+                id,
+                parent_id,
+                fields,
+                ..
+            } => {
+                let parent_stable = if parent_id.is_no_parent() || parent_id.is_sentinel() {
+                    None
+                } else {
+                    Some(parent_id.id().to_string())
+                };
+                let content = fields
+                    .get("content")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                state.peer_apply_create(peer_idx, parent_stable.as_deref(), content, id.id());
             }
-            return;
-        }
-
-        if self.event.source == MutationSource::UI {
-            state.push_undo_snapshot();
-        }
-        if let Mutation::Create { id, parent_id, .. } = &self.event.mutation {
-            let doc_uri = if parent_id.is_no_parent() || parent_id.is_sentinel() {
-                parent_id.clone()
-            } else {
-                // The new block belongs to its parent's document. But when the
-                // parent is itself a top-level page (its own `block_documents`
-                // entry is `no_parent`/`sentinel`), the page IS the document —
-                // the child lives in the page's org file, not in the page's
-                // (sentinel) document. Inheriting the sentinel would misclassify
-                // the child as a seed block and drop it from the `/org` view.
-                match state.domain.block_state.block_documents.get(parent_id) {
-                    Some(doc) if !doc.is_no_parent() && !doc.is_sentinel() => doc.clone(),
-                    _ => parent_id.clone(),
-                }
-            };
-            state
-                .domain
-                .block_state
-                .block_documents
-                .insert(id.clone(), doc_uri);
-        }
-
-        let mut blocks: Vec<Block> = state.domain.block_state.blocks.values().cloned().collect();
-        self.event.mutation.apply_to(&mut blocks);
-        assign_reference_sequences_canonical(&mut blocks);
-        state.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
-        state.rebuild_profile_tracking();
-
-        if let Mutation::Update { id, fields, .. } = &self.event.mutation
-            && state.domain.layout_blocks.render_source_ids.contains(id)
-            && fields.contains_key("content")
-            && let Some(block) = state.domain.block_state.blocks.get(id)
-            && let Some(expr) =
-                super::super::reference_state::render_expr_from_rhai(block.content.as_str())
-        {
-            state.domain.render_expressions.insert(id.clone(), expr);
-        }
-
-        state.domain.block_state.next_id += 1;
-
-        match &self.event.mutation {
-            Mutation::Update { id, fields, .. } if fields.contains_key("content") => {
-                state.reset_cursor_if_focused(id);
+            Mutation::Update { id, fields, .. } => {
+                let content = fields
+                    .get("content")
+                    .and_then(|v| v.as_string())
+                    .expect("LoroPeer Update must carry a `content` field");
+                state.peer_apply_update(peer_idx, id.id(), content);
             }
             Mutation::Delete { id, .. } => {
-                state.clear_focus_if_deleted(id);
+                state.peer_apply_delete(peer_idx, id.id());
             }
-            _ => {}
+            Mutation::Move { .. } | Mutation::RestartApp => {
+                panic!("LoroPeer mutation has no ref mapping for Move/RestartApp")
+            }
         }
+        return;
     }
+
+    // Non-peer path: one honest compound (UI undo snapshot + `block_documents`
+    // classification + canonical re-sequence + render-expr + focus follow-up).
+    // The whole-map read-then-replace is owned inside the cap, never a borrow
+    // held across a mutation.
+    state.apply_external_mutation(event);
 }
 
 /// SUT-side dispatch for [`ApplyMutation`], routed by the mutation's `source`.

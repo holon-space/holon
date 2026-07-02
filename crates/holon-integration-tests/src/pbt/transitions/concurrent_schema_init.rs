@@ -13,6 +13,7 @@ use validated::Validated;
 
 use crate::pbt::local_caps::SutAppLifecycle;
 use crate::pbt::reference_state::ReferenceState;
+use holon_pbt_core::capabilities::{RefLayout, RefLifecycle, RefWatches};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -42,18 +43,15 @@ impl TransitionFactory<ReferenceState> for ConcurrentSchemaInit {
     }
 }
 
-impl TransitionRef<ReferenceState> for ConcurrentSchemaInit {
+impl<R: RefLifecycle + RefLayout + RefWatches> TransitionRef<R> for ConcurrentSchemaInit {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(!state.all_block_ids().is_empty(), Reason::BlockStateEmpty),
             check(
-                !state.domain.block_state.blocks.is_empty(),
-                Reason::BlockStateEmpty,
-            ),
-            check(
-                !state.mcp.active_watches.is_empty(),
+                !state.active_watch_ids().is_empty(),
                 Reason::NoWatchesActive,
             ),
         ];
@@ -64,7 +62,7 @@ impl TransitionRef<ReferenceState> for ConcurrentSchemaInit {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // ConcurrentSchemaInit doesn't change reference state - it only tests
         // that the database doesn't get locked when schema init runs concurrently.
     }

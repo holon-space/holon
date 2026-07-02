@@ -19,6 +19,7 @@ use validated::Validated;
 use crate::pbt::local_caps::SutAppLifecycle;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -51,15 +52,15 @@ impl TransitionFactory<ReferenceState> for EpochFlipRejected {
     }
 }
 
-impl TransitionRef<ReferenceState> for EpochFlipRejected {
+impl<R: RefLifecycle> TransitionRef<R> for EpochFlipRejected {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         // App must be running: the flip re-boots over the live app's own paths.
-        check(state.action.app_started, Reason::AppNotStarted)
+        check(state.app_started(), Reason::AppNotStarted)
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // A REJECTED boot changes nothing: the live app and its durable state are
         // untouched, so the reference state is unchanged.
     }

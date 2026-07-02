@@ -13,8 +13,9 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
-use crate::pbt::reference_state::{CursorPosition, ReferenceState};
-use holon_pbt_core::capabilities::CapRegion;
+use crate::pbt::reference_capabilities::RefModelPredict;
+use crate::pbt::reference_state::ReferenceState;
+use holon_pbt_core::capabilities::{CapCursor, CapRegion, RefBlockTree, RefFocusMut, RefLifecycle};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -84,16 +85,15 @@ impl TransitionFactory<ReferenceState> for ArrowNavigate {
     }
 }
 
-impl TransitionRef<ReferenceState> for ArrowNavigate {
+impl<R: RefLifecycle + RefFocusMut + RefBlockTree + RefModelPredict> TransitionRef<R>
+    for ArrowNavigate
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(
-                state.ui.tab.focused_entity_id.contains_key(&self.region),
-                Reason::MainFocusNotSet,
-            ),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(state.has_region_focus(self.region), Reason::MainFocusNotSet),
         ];
         checks
             .into_iter()
@@ -101,35 +101,21 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         use holon_frontend::navigation::{Boundary, CursorHint};
 
         let mut current_id = state
-            .ui
-            .tab
-            .focused_entity_id
-            .get(&self.region)
-            .expect("ArrowNavigate requires focused entity")
-            .clone();
+            .current_focus_region(self.region)
+            .expect("ArrowNavigate requires focused entity");
         let mut cursor = state
-            .ui
-            .tab
-            .focused_cursor
-            .get(&self.region)
-            .copied()
-            .unwrap_or(CursorPosition::start());
+            .focused_cursor_region(self.region)
+            .unwrap_or(CapCursor { line: 0, column: 0 });
 
         let navigator = state.build_reference_navigator(self.region);
 
         for _ in 0..self.steps {
             // Get the content of the currently focused block
-            let content = state
-                .domain
-                .block_state
-                .blocks
-                .get(&current_id)
-                .map(|b| b.content.as_str())
-                .unwrap_or("");
+            let content = state.block_content(&current_id).unwrap_or("");
             let line_count = if content.is_empty() {
                 1
             } else {
@@ -167,20 +153,14 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
                     if let Some(target) = nav.navigate(&current_id, self.direction, &hint) {
                         current_id = target.block_id.clone();
                         // Update cursor from placement
-                        let target_content = state
-                            .domain
-                            .block_state
-                            .blocks
-                            .get(&current_id)
-                            .map(|b| b.content.as_str())
-                            .unwrap_or("");
+                        let target_content = state.block_content(&current_id).unwrap_or("");
                         let offset = holon_frontend::navigation::placement_to_offset(
                             target_content,
                             target.placement,
                         );
                         let (line, col) =
                             holon_frontend::navigation::offset_to_line_col(target_content, offset);
-                        cursor = CursorPosition { line, column: col };
+                        cursor = CapCursor { line, column: col };
                     }
                     // else: at boundary of collection, stay put
                 }
@@ -230,13 +210,8 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
         // new target (mirroring what a click would do), so the
         // engine's `UiState.focused_block` follows the per-region
         // pointer.
-        state.ui.tab.focused_block = Some(current_id.clone());
-        state
-            .ui
-            .tab
-            .focused_entity_id
-            .insert(self.region, current_id);
-        state.ui.tab.focused_cursor.insert(self.region, cursor);
+        state.set_global_focus(Some(current_id.clone()));
+        state.set_region_focus(self.region, current_id, cursor);
     }
 }
 

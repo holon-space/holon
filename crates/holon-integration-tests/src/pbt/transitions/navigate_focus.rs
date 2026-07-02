@@ -14,10 +14,12 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::OpenPinEntry;
+use crate::pbt::reference_capabilities::RefModelPredict;
 use crate::pbt::reference_state::ReferenceState;
-use holon_layout_testing::LayoutRefState;
-use holon_pbt_core::capabilities::{CapRegion, SutFocusWrite};
+use holon_pbt_core::capabilities::{
+    CapRegion, RefBlockTree, RefFocus, RefFocusMut, RefLifecycle, RefNavHistoryMut, RefToggles,
+    SutFocusWrite,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 /// Canonical block id of the default LeftSidebar panel — the drawer whose
@@ -106,131 +108,121 @@ impl TransitionFactory<ReferenceState> for NavigateFocus {
     }
 }
 
+fn navigate_focus_preconditions<R: RefLifecycle + RefModelPredict + RefToggles + RefBlockTree>(
+    block_id: &EntityUri,
+    state: &R,
+) -> Validated<(), Reason> {
+    let mut checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(block_id.scheme() == "block", Reason::FocusedBlockMissing),
+    ];
+
+    // Production binds `navigation.focus(region=main)` only on the
+    // default sidebar's rendered doc list — `predicts_navigation_focus`
+    // is the pure-ref-state predicate for that set. Without this
+    // gate the transition could fire on a sidebar entity prod treats
+    // as a plain editor-focus click and `apply_to_ref` would push
+    // a navigation-history entry prod never produced.
+    checks.push(check(
+        state.predicts_navigation_focus(block_id, Region::LeftSidebar),
+        Reason::SidebarFocusNotRendered,
+    ));
+
+    // A sidebar click-to-focus only works when the LeftSidebar drawer is
+    // OPEN. When collapsed (via `ToggleDrawer`), production `columns.rs`
+    // drops the panel from the layout and keeps only the toggle widget —
+    // so the page entry is never rendered/laid-out and cannot be clicked.
+    // Without this gate the SUT click falls through to a plain `set_focus`
+    // (focus only, no nav-history write) while the ref records a focus move
+    // → divergence that surfaces ~1000 lines later. A real user would re-open the
+    // drawer first; that's a separate `ToggleDrawer` transition.
+    checks.push(check(
+        state.is_drawer_open(LEFT_SIDEBAR_PANEL),
+        Reason::LeftSidebarDrawerClosed,
+    ));
+
+    // Block must be text-typed and not a layout block
+    let exists = state.block_exists(block_id);
+    checks.push(check(exists, Reason::FocusedBlockMissing));
+    if exists {
+        checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
+    }
+    checks.push(check(
+        !state.is_layout_block(block_id),
+        Reason::FocusedInLayoutBlocks,
+    ));
+
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+fn navigate_focus_apply_to_ref<R: RefFocus + RefFocusMut + RefNavHistoryMut>(
+    region: Region,
+    block_id: EntityUri,
+    state: &mut R,
+) {
+    // Re-focusing the block that is already this region's current focus is
+    // idempotent in prod: `navigation.focus` on the active target writes no
+    // new `navigation_history` row (the SUT stays at exactly one row, id and
+    // cursor unmoved — confirmed across ~15 consecutive same-block focuses).
+    // Pushing a new back-stack entry / bumping `next_history_id` here would
+    // let the ref accumulate duplicate entries and walk back through them on
+    // NavigateBack while prod goes to home — an inv-navigation-focus divergence.
+    let already_focused = state.current_focus(region_to_cap(region)).as_ref() == Some(&block_id);
+
+    // Budget model: the first navigation to a root renders it for the
+    // first time and creates its watch matviews; `expected_sql` grants
+    // the creation allowance off this flag (recorded pre-insert because
+    // the budget invariant only sees the post-apply state).
+    state.mark_navigation_visit(&block_id);
+
+    if !already_focused {
+        // Mirror provider.rs `focus`: push a back-stack entry, close all open
+        // rows in the region, then insert a new open row. `next_history_id`
+        // matches SQLite's AUTOINCREMENT, monotonic across INSERTs and
+        // unaffected by UPDATE (closed_at flip) or DELETE. A same-block
+        // re-focus inserts no row, so the counter must not advance either.
+        state.nav_focus_push(region, Some(block_id.clone()));
+    }
+
+    // NavigateFocus changes what's displayed but clears editor focus —
+    // the previously-focused block may no longer be visible.
+    state.clear_region_focus(region);
+
+    // Mirror `UiState::set_focus`: the navigation target becomes the
+    // globally focused block. `focus_chain()` and `chain_ops()` read
+    // from this — inv-value-fn-provider-arg-variance asserts they reflect the predicted URI.
+    state.set_global_focus(Some(block_id));
+
+    // Production blurs the editor on this click — empirically verified
+    // by seed 8 of the post-Blur-deletion PBT run, where leaving
+    // `active_editor` set let TypeChars fire and panic with
+    // "GPUI keystroke not consumed: keystroke=\"d\"" (devlog
+    // 2026-05-08-133241). `blur_active_editor` commits the pending text
+    // on blur ONLY under a real editor (`real_editor_enabled`), mirroring
+    // prod's `on_blur` → `set_field("content")`; the headless slices (no
+    // real editor) keep the prior "don't pre-bake the commit" behaviour.
+    state.blur_active_editor();
+}
+
+fn region_to_cap(region: Region) -> CapRegion {
+    match region {
+        Region::Main => CapRegion::Main,
+        Region::LeftSidebar | Region::RightSidebar => CapRegion::Sidebar,
+    }
+}
+
 impl TransitionRef<ReferenceState> for NavigateFocus {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(
-                self.block_id.scheme() == "block",
-                Reason::FocusedBlockMissing,
-            ),
-        ];
-
-        // Production binds `navigation.focus(region=main)` only on the
-        // default sidebar's rendered doc list — `predicts_navigation_focus`
-        // is the pure-ref-state predicate for that set. Without this
-        // gate the transition could fire on a sidebar entity prod treats
-        // as a plain editor-focus click and `apply_to_ref` would push
-        // a navigation-history entry prod never produced.
-        checks.push(check(
-            state.predicts_navigation_focus(&self.block_id, Region::LeftSidebar),
-            Reason::SidebarFocusNotRendered,
-        ));
-
-        // A sidebar click-to-focus only works when the LeftSidebar drawer is
-        // OPEN. When collapsed (via `ToggleDrawer`), production `columns.rs`
-        // drops the panel from the layout and keeps only the toggle widget —
-        // so the page entry is never rendered/laid-out and cannot be clicked.
-        // Without this gate the SUT click falls through to a plain `set_focus`
-        // (focus only, no nav-history write) while the ref records a focus move
-        // → divergence that surfaces ~1000 lines later. A real user would re-open the
-        // drawer first; that's a separate `ToggleDrawer` transition.
-        checks.push(check(
-            state.drawer_is_open(LEFT_SIDEBAR_PANEL),
-            Reason::LeftSidebarDrawerClosed,
-        ));
-
-        // Block must be text-typed and not a layout block
-        let block = state.domain.block_state.blocks.get(&self.block_id);
-        checks.push(check(block.is_some(), Reason::FocusedBlockMissing));
-        if let Some(b) = block {
-            checks.push(check(
-                b.content_type == ContentType::Text,
-                Reason::FocusedNotText,
-            ));
-        }
-        checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
-            Reason::FocusedInLayoutBlocks,
-        ));
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        navigate_focus_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Re-focusing the block that is already this region's current focus is
-        // idempotent in prod: `navigation.focus` on the active target writes no
-        // new `navigation_history` row (the SUT stays at exactly one row, id and
-        // cursor unmoved — confirmed across ~15 consecutive same-block focuses).
-        // Pushing a new back-stack entry / bumping `next_history_id` here would
-        // let the ref accumulate duplicate entries and walk back through them on
-        // NavigateBack while prod goes to home — an inv-navigation-focus divergence.
-        let already_focused = state.current_focus(self.region).as_ref() == Some(&self.block_id);
-
-        // Budget model: the first navigation to a root renders it for the
-        // first time and creates its watch matviews; `expected_sql` grants
-        // the creation allowance off this flag (recorded pre-insert because
-        // the budget invariant only sees the post-apply state).
-        state.ui.tab.last_navigate_first_visit = state
-            .ui
-            .tab
-            .seen_focus_targets
-            .insert(self.block_id.clone());
-
-        if !already_focused {
-            let history = state
-                .ui
-                .tab
-                .navigation_history
-                .entry(self.region)
-                .or_default();
-
-            history.entries.truncate(history.cursor + 1);
-            history.entries.push(Some(self.block_id.clone()));
-            history.cursor = history.entries.len() - 1;
-
-            // Mirror provider.rs `focus`: close all open rows in the region,
-            // then insert a new open row. `next_history_id` matches SQLite's
-            // AUTOINCREMENT, which monotonically increases across INSERTs and
-            // is unaffected by UPDATE (closed_at flip) or DELETE. A same-block
-            // re-focus inserts no row, so the counter must not advance either.
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            let added_ts_logical = state.ui.user.next_pin_ts;
-            state.ui.user.next_pin_ts += 1;
-            let pins = state.ui.user.open_pins.entry(self.region).or_default();
-            pins.clear();
-            pins.push(OpenPinEntry {
-                history_id,
-                block_id: Some(self.block_id.clone()),
-                added_ts_logical,
-            });
-        }
-
-        // NavigateFocus changes what's displayed but clears editor focus —
-        // the previously-focused block may no longer be visible.
-        state.ui.tab.focused_entity_id.remove(&self.region);
-        state.ui.tab.focused_cursor.remove(&self.region);
-
-        // Mirror `UiState::set_focus`: the navigation target becomes the
-        // globally focused block. `focus_chain()` and `chain_ops()` read
-        // from this — inv-value-fn-provider-arg-variance asserts they reflect the predicted URI.
-        state.ui.tab.focused_block = Some(self.block_id.clone());
-
-        // Production blurs the editor on this click — empirically verified
-        // by seed 8 of the post-Blur-deletion PBT run, where leaving
-        // `active_editor` set let TypeChars fire and panic with
-        // "GPUI keystroke not consumed: keystroke=\"d\"" (devlog
-        // 2026-05-08-133241). `blur_active_editor` commits the pending text
-        // on blur ONLY under a real editor (`real_editor_enabled`), mirroring
-        // prod's `on_blur` → `set_field("content")`; the headless slices (no
-        // real editor) keep the prior "don't pre-bake the commit" behaviour.
-        state.blur_active_editor();
+        navigate_focus_apply_to_ref(self.region, self.block_id.clone(), state);
     }
 }
 

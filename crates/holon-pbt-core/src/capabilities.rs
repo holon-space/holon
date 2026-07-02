@@ -151,6 +151,28 @@ pub trait RefBlockTree {
     fn is_order_exempt_sibling(&self, _: &EntityUri) -> bool {
         false
     }
+
+    /// True if a block with `id` is tracked by the reference model at all
+    /// (any content type, including source/render/seed blocks). Distinct from
+    /// [`Self::block_content`] which is `None` for non-text blocks and from
+    /// [`Self::all_non_seed_block_ids`] which excludes seeds. Wide PBT:
+    /// `block_state.blocks.contains_key(id)`.
+    ///
+    /// Default derives from `block_content` presence — adequate for pure text
+    /// slices whose only blocks are content-bearing.
+    fn block_exists(&self, id: &EntityUri) -> bool {
+        self.block_content(id).is_some()
+    }
+
+    /// True if `id` is a layout block whose content must NEVER be mutated —
+    /// query source blocks in the active layout. Finer than
+    /// [`Self::is_layout_block`] (which includes focusable headlines) and than
+    /// [`Self::is_no_content_update`] (which also covers profile blocks). Wide
+    /// PBT: `layout_blocks.is_immutable(id)`. Default `false` (pure slices have
+    /// no immutable layout scaffolding).
+    fn is_immutable(&self, _: &EntityUri) -> bool {
+        false
+    }
 }
 
 /// Block-tree mutations. Concrete impls maintain whatever bookkeeping
@@ -189,6 +211,17 @@ pub trait RefBlockTreeMut: RefBlockTree {
 
     /// Swap two siblings (used by MoveUp / MoveDown).
     fn swap_siblings(&mut self, a: &EntityUri, b: &EntityUri);
+
+    /// Write a set-valued **edge field** (`tags` / `requires`) on an EXISTING
+    /// block, parameterized over which field via [`EdgeFieldUpdate`] so neither
+    /// is special-cased. Mirrors [`SutEdgeFieldWrite::apply_set_edge_field`] on
+    /// the ref side. Wide PBT: assigns `block.tags` / `block.requires` directly
+    /// (`is_page` is computed from `tags` on read, so there is no cached state
+    /// to keep in sync). Default fail-loud for slices without an edge-field
+    /// surface — they never generate `SetEdgeField`.
+    fn set_edge_field(&mut self, _: &EntityUri, _: &EdgeFieldUpdate) {
+        unimplemented!("RefBlockTreeMut::set_edge_field not supported by this reference machine")
+    }
 }
 
 // ─── Reference-side: EditorMirror ────────────────────────────────────
@@ -267,6 +300,26 @@ pub trait RefFocus {
 
     /// Cursor position of the focused block's editor (if known).
     fn focused_cursor(&self, region: CapRegion) -> Option<CapCursor>;
+
+    /// Currently focused block in `region` with full `holon_api::Region`
+    /// fidelity (unlike lossy [`CapRegion`]-keyed [`Self::current_focus`], which
+    /// collapses Left/RightSidebar). Wide PBT: `focused_entity_id.get(region)`.
+    /// Default `None` for region-less refs.
+    fn current_focus_region(&self, _: holon_api::Region) -> Option<EntityUri> {
+        None
+    }
+
+    /// Cursor of the per-region focused editor for `region`, full sidebar
+    /// fidelity. Wide PBT: `focused_cursor.get(region)`. Default `None`.
+    fn focused_cursor_region(&self, _: holon_api::Region) -> Option<CapCursor> {
+        None
+    }
+
+    /// Whether `region` currently holds an editor focus. Wide PBT:
+    /// `focused_entity_id.contains_key(region)`. Default `false`.
+    fn has_region_focus(&self, _: holon_api::Region) -> bool {
+        false
+    }
 }
 
 /// Focus mutations.
@@ -293,6 +346,186 @@ pub trait RefFocusMut: RefFocus {
     /// edited block — prod closes that block's editor). Counterpart of
     /// [`Self::open_active_editor`]; default no-op for editor-less refs.
     fn close_active_editor(&mut self) {}
+
+    /// Set the globally-focused block (the engine's `UiState.focused_block`
+    /// mirror, distinct from per-region navigation focus). `None` clears it.
+    /// Wide PBT: `ui.tab.focused_block = id`. Default no-op for refs without a
+    /// global-focus mirror.
+    fn set_global_focus(&mut self, _: Option<EntityUri>) {}
+
+    /// Set the per-region editor focus to `id` with caret at `cursor`, WITHOUT
+    /// touching global focus or navigation history (a plain click/arrow focus
+    /// move). Uses `holon_api::Region` for full sidebar fidelity (unlike the
+    /// lossy [`CapRegion`]). Wide PBT: `focused_entity_id.insert` +
+    /// `focused_cursor.insert`. Default no-op for region-less refs.
+    fn set_region_focus(&mut self, _: holon_api::Region, _: EntityUri, _: CapCursor) {}
+
+    /// Clear the per-region editor focus (`focused_entity_id` + `focused_cursor`)
+    /// for `region` — what NavigateFocus / NavigateHome / NavigateBack /
+    /// NavigateForward do before letting engine focus drift. Default no-op.
+    fn clear_region_focus(&mut self, _: holon_api::Region) {}
+
+    /// Reset every currently-focused region's cursor to the block start —
+    /// what Undo / Redo do after restoring block content (the real editor
+    /// repositions the caret via a blur/refocus cycle). Default no-op.
+    fn reset_focused_cursors_to_start(&mut self) {}
+
+    /// Blur the active editor, committing its pending (dirty) text to block
+    /// content first when a real editor drives the SUT, then closing it.
+    /// Idempotent and a no-op when no editor is active. Wide PBT:
+    /// `ReferenceState::blur_active_editor`. Default just closes the editor
+    /// (per-keystroke Loro writes already committed the content).
+    fn blur_active_editor(&mut self) {
+        self.close_active_editor();
+    }
+}
+
+// ─── Reference-side: Documents (block↔doc + document registry) ────────
+//
+// Not `#[capmap_adapter]`: consumed by transition `preconditions`/`apply_to_ref`
+// on the concrete `ReferenceState`, never selected by an invariant off a
+// composed `CapMap` (same rationale as `RefLifecycle` / `RefFocusRoots`).
+
+/// Read-side document registry: the block→document map and the
+/// doc_uri→filename registry the doc-lifecycle transitions consult.
+pub trait RefDocuments {
+    /// The document a block belongs to (`block_documents.get(id)`), or `None`
+    /// if the block has no recorded document ownership.
+    fn document_of(&self, id: &EntityUri) -> Option<EntityUri>;
+
+    /// Every block id currently owned by `doc` (`block_documents` entries
+    /// whose value is `doc`). Used by WriteOrgFile's delete cascade.
+    fn blocks_in_document(&self, doc: &EntityUri) -> Vec<EntityUri>;
+
+    /// All registered document uris (`files.documents` keys).
+    fn document_uris(&self) -> Vec<EntityUri>;
+
+    /// On-disk filename for a document uri, or `None` if unregistered.
+    fn document_filename(&self, uri: &EntityUri) -> Option<String>;
+
+    /// Document uri whose page block's title (first content line) is `name`,
+    /// or `None`. Wide PBT: `ReferenceState::doc_uri_by_name`.
+    fn doc_uri_by_name(&self, name: &str) -> Option<EntityUri>;
+
+    /// Number of registered documents (`files.documents.len()`).
+    fn document_count(&self) -> usize;
+}
+
+/// Write-side document lifecycle.
+pub trait RefDocumentsMut: RefDocuments {
+    /// Mint a fresh synthetic document uri (`block:ref-doc-N`) and bump the
+    /// counter. Wide PBT: `ReferenceState::next_synthetic_doc_uri`.
+    fn mint_document_uri(&mut self) -> EntityUri;
+
+    /// Create a new empty document named `file_name`: mint its uri, register
+    /// the filename, and insert its page block (tagged `Page`) into the block
+    /// tree. Returns the new document uri. One honest compound so the raw
+    /// `files.documents` / `blocks` / `block_documents` maps stay encapsulated.
+    fn create_document(&mut self, file_name: String) -> EntityUri;
+}
+
+// ─── Reference-side: Navigation history + pins ───────────────────────
+//
+// `holon_api::Region` (not the lossy [`CapRegion`]) so LeftSidebar/RightSidebar
+// pins stay distinct. The `next_history_id` / `next_pin_ts` counters are MODEL
+// state (their values surface in invariants as pin/history ids), so every
+// mutation that mints one lives inside these methods.
+
+/// Read-side navigation-history queries.
+pub trait RefNavHistory {
+    /// Whether the region's back-stack cursor can move back.
+    fn can_go_back(&self, region: holon_api::Region) -> bool;
+
+    /// Whether the region's back-stack cursor can move forward.
+    fn can_go_forward(&self, region: holon_api::Region) -> bool;
+
+    /// Whether the open `navigation_history` row `history_id` is an unpinnable
+    /// pin: it exists, carries a non-NULL `block_id`, and is NOT its region's
+    /// current cursor focus (the active focus is closed by navigating away, not
+    /// by the X button). Encapsulates UnpinBlock's precondition so the lossy
+    /// region↔pin scan stays inside the concrete model.
+    fn is_unpinnable(&self, history_id: i64) -> bool;
+}
+
+/// Write-side navigation-history + pins mutations.
+pub trait RefNavHistoryMut: RefNavHistory {
+    /// Push a focus onto `region`'s back-stack and open a single new pin row,
+    /// closing the region's prior open rows (the `navigation.focus(region, id)`
+    /// shape). `block_id = None` is the go-home row. Mints a fresh
+    /// `next_history_id` + `next_pin_ts`. Unconditional — callers apply their
+    /// own idempotency guard (a same-target refocus writes no row).
+    fn nav_focus_push(&mut self, region: holon_api::Region, block_id: Option<EntityUri>);
+
+    /// Move `region`'s back-stack cursor back one entry (NavigateBack).
+    fn nav_history_back(&mut self, region: holon_api::Region);
+
+    /// Move `region`'s back-stack cursor forward one entry (NavigateForward).
+    fn nav_history_forward(&mut self, region: holon_api::Region);
+
+    /// Pin `block_id` into `region` with move-to-top dedup: bump an existing
+    /// open pin's timestamp, else open a new pin row (minting a history id).
+    /// Mirrors `provider.rs::focus_pin`.
+    fn add_pin(&mut self, region: holon_api::Region, block_id: EntityUri);
+
+    /// Close (remove) every open pin whose `history_id` matches, across all
+    /// regions (UnpinBlock).
+    fn remove_pin(&mut self, history_id: i64);
+
+    /// Record that `block_id` was navigated to and report whether this is its
+    /// first visit (the `seen_focus_targets` insert result, also stored as
+    /// `last_navigate_first_visit` for the SQL-budget model). NavigateFocus.
+    fn mark_navigation_visit(&mut self, block_id: &EntityUri) -> bool;
+}
+
+// ─── Reference-side: Toggles + drawers ───────────────────────────────
+
+/// Read-side expand/collapse + drawer open-state.
+pub trait RefToggles {
+    /// Whether `id` is in the expanded-toggles set (ExpandToggle precondition).
+    fn is_expanded(&self, id: &EntityUri) -> bool;
+
+    /// Whether the drawer keyed by `block_id` is open. Untracked drawers
+    /// default open, matching production's boot layout.
+    fn is_drawer_open(&self, block_id: &str) -> bool;
+}
+
+/// Write-side expand/collapse + drawer open-state.
+pub trait RefTogglesMut: RefToggles {
+    /// Insert (`true`) or remove (`false`) `id` from the expanded-toggles set.
+    /// ExpandToggle / ToggleCollapse.
+    fn set_expanded(&mut self, id: &EntityUri, expanded: bool);
+
+    /// Record the drawer `block_id`'s open/closed bit (ToggleDrawer).
+    fn set_drawer_open(&mut self, block_id: &str, open: bool);
+}
+
+// ─── Reference-side: Undo/redo history stacks ────────────────────────
+
+/// Read-side undo/redo availability.
+pub trait RefHistory {
+    /// Whether the undo stack is non-empty (UndoLastMutation precondition).
+    fn has_undo(&self) -> bool;
+
+    /// Whether the redo stack is non-empty (Redo precondition).
+    fn has_redo(&self) -> bool;
+}
+
+/// Write-side undo/redo. The focus-cursor reset that follows a restore lives
+/// on [`RefFocusMut::reset_focused_cursors_to_start`], not here.
+pub trait RefHistoryMut: RefHistory {
+    /// Pop the undo stack onto the redo stack and restore it (UndoLastMutation).
+    fn undo(&mut self);
+
+    /// Pop the redo stack onto the undo stack and restore it (Redo).
+    fn redo(&mut self);
+}
+
+// ─── Reference-side: Render mutation ─────────────────────────────────
+
+/// Write-side view selection. Read side is [`RefRender`].
+pub trait RefRenderMut: RefRender {
+    /// Set the currently-selected view mode name (SwitchView).
+    fn set_current_view(&mut self, name: String);
 }
 
 // ─── Reference-side: Lifecycle (admin gates) ─────────────────────────
@@ -1538,6 +1771,26 @@ pub trait RefRender {
     /// `ReferenceState::main_panel_render_expr().or(root_render_expr())`'s
     /// `FunctionCall { name, .. }`.
     fn main_panel_render_expr_name(&self) -> Option<String>;
+
+    /// True if the render expression tracked for `id` mentions the value
+    /// function `fn_name` (e.g. `"expand_toggle"`) anywhere in its Rhai body —
+    /// the precondition for ExpandToggle. Wide PBT: `rhai_mentions` over
+    /// `domain.render_expressions.get(id)`. Default `false` (a ref with no
+    /// tracked render expression for `id` mentions nothing).
+    fn block_render_mentions(&self, _: &EntityUri, _: &str) -> bool {
+        false
+    }
+
+    /// True if the reference tracks a render expression for `id` at all,
+    /// regardless of what it mentions — lets ExpandToggle distinguish
+    /// "no render expr" (FocusedBlockMissing) from "render expr present but
+    /// doesn't mention expand_toggle" (PreconditionFailed), a distinction
+    /// [`Self::block_render_mentions`] collapses into one bool. Wide PBT:
+    /// `domain.render_expressions.contains_key(id)`. Default `false` (a ref
+    /// with no tracked render expression for `id`).
+    fn has_block_render_expr(&self, _: &EntityUri) -> bool {
+        false
+    }
 }
 
 /// A single watch-result row, field name → stringified value. `None`

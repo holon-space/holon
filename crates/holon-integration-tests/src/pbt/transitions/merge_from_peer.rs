@@ -10,6 +10,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use holon_pbt_core::capabilities::{RefLifecycle, RefPeers, RefPeersMut};
+
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::validation::{Reason, check};
@@ -58,15 +60,15 @@ impl TransitionFactory<ReferenceState> for MergeFromPeer {
     }
 }
 
-impl TransitionRef<ReferenceState> for MergeFromPeer {
+impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for MergeFromPeer {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.enable_loro(), Reason::LoroRequiredForPeers),
             check(
-                self.peer_idx < state.peers.len(),
+                self.peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ),
         ];
@@ -76,8 +78,7 @@ impl TransitionRef<ReferenceState> for MergeFromPeer {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use holon_pbt_core::capabilities::RefPeersMut;
+    fn apply_to_ref(&self, state: &mut R) {
         // recanon_and_rebuild + refresh_peer_baseline are handled
         // inside `RefPeersMut::peer_merge_into_primary` — the order
         // matters because newly-created peer blocks default to

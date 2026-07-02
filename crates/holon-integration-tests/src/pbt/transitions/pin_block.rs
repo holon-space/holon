@@ -13,13 +13,15 @@
 //! main panel — the user can only shift-click on a rendered bullet).
 
 use crate::pbt::validation::{Reason, check};
-use holon_api::{ContentType, EntityUri, Region};
+use holon_api::{EntityUri, Region};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::{OpenPinEntry, ReferenceState};
-use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use crate::pbt::reference_state::ReferenceState;
+use holon_pbt_core::capabilities::{
+    RefBlockTree, RefLifecycle, RefNavHistoryMut, SutNavHistoryDrive,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -79,66 +81,54 @@ impl TransitionFactory<ReferenceState> for PinBlock {
     }
 }
 
+fn pin_block_preconditions<R: RefLifecycle + RefBlockTree>(
+    block_id: &EntityUri,
+    state: &R,
+) -> Validated<(), Reason> {
+    let exists = state.block_exists(block_id);
+    let mut checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(exists, Reason::FocusedBlockMissing),
+    ];
+    if exists {
+        checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
+        checks.push(check(
+            !state.is_page_block(block_id),
+            Reason::PreconditionFailed,
+        ));
+    }
+    checks.push(check(
+        !state.is_layout_block(block_id),
+        Reason::FocusedInLayoutBlocks,
+    ));
+    checks.push(check(
+        state.is_focusable(block_id),
+        Reason::FocusedNotFocusable,
+    ));
+
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+fn pin_block_apply_to_ref<R: RefNavHistoryMut>(region: Region, block_id: EntityUri, state: &mut R) {
+    // Move-to-top dedup, mirroring `provider.rs::focus_pin`:
+    // SELECT existing open `(region, block_id)`; UPDATE timestamp if
+    // found, else INSERT. Bumping `next_pin_ts` (not `next_history_id`)
+    // matches the no-INSERT path of `update_pin_timestamp.sql`.
+    state.add_pin(region, block_id);
+}
+
 impl TransitionRef<ReferenceState> for PinBlock {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let block = state.domain.block_state.blocks.get(&self.block_id);
-        let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(block.is_some(), Reason::FocusedBlockMissing),
-        ];
-        if let Some(b) = block {
-            checks.push(check(
-                b.content_type == ContentType::Text,
-                Reason::FocusedNotText,
-            ));
-            checks.push(check(!b.is_page(), Reason::PreconditionFailed));
-        }
-        checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
-            Reason::FocusedInLayoutBlocks,
-        ));
-        checks.push(check(
-            state.domain.layout_blocks.is_focusable(&self.block_id),
-            Reason::FocusedNotFocusable,
-        ));
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        pin_block_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Move-to-top dedup, mirroring `provider.rs::focus_pin`:
-        // SELECT existing open `(region, block_id)`; UPDATE timestamp if
-        // found, else INSERT. Bumping `next_pin_ts` (not `next_history_id`)
-        // matches the no-INSERT path of `update_pin_timestamp.sql`.
-        let added_ts_logical = state.ui.user.next_pin_ts;
-        state.ui.user.next_pin_ts += 1;
-
-        let pins = state.ui.user.open_pins.entry(self.region).or_default();
-        if let Some(existing) = pins
-            .iter_mut()
-            .find(|p| p.block_id.as_ref() == Some(&self.block_id))
-        {
-            existing.added_ts_logical = added_ts_logical;
-        } else {
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            state
-                .ui
-                .user
-                .open_pins
-                .entry(self.region)
-                .or_default()
-                .push(OpenPinEntry {
-                    history_id,
-                    block_id: Some(self.block_id.clone()),
-                    added_ts_logical,
-                });
-        }
+        pin_block_apply_to_ref(self.region, self.block_id.clone(), state);
     }
 }
 

@@ -24,9 +24,11 @@ use std::sync::Arc;
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapCursor, CapRegion, RefBackend, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
-    RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
-    RefLifecycle, RefPeers, RefPeersMut, RefRender, RefTaskState, RefWatches, WatchRow,
+    CapCursor, CapRegion, RefBackend, RefBlockTree, RefBlockTreeMut, RefDocuments, RefDocumentsMut,
+    RefEditorMirror, RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus,
+    RefHistory, RefHistoryMut, RefLayout, RefLifecycle, RefNavHistory, RefNavHistoryMut, RefPeers,
+    RefPeersMut, RefRender, RefRenderMut, RefTaskState, RefToggles, RefTogglesMut, RefWatches,
+    WatchRow,
 };
 
 use super::peer_ops::PeerBlock;
@@ -237,6 +239,20 @@ impl RefBlockTree for ReferenceState {
             .map(cap_id)
             .collect()
     }
+
+    fn block_exists(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.domain.block_state.blocks.contains_key(&uri)
+    }
+
+    fn is_immutable(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.domain.layout_blocks.is_immutable(&uri)
+    }
 }
 
 // ─── RefBlockTreeMut ──────────────────────────────────────────────────
@@ -299,6 +315,22 @@ impl RefBlockTreeMut for ReferenceState {
         let a_uri = parse_id_must(a);
         let b_uri = parse_id_must(b);
         ReferenceState::swap_sequence(self, &a_uri, &b_uri);
+    }
+
+    fn set_edge_field(&mut self, id: &EntityUri, update: &holon_api::EdgeFieldUpdate) {
+        let uri = parse_id_must(id);
+        let block = self
+            .domain
+            .block_state
+            .blocks
+            .get_mut(&uri)
+            .expect("SetEdgeField: subject block must exist (precondition)");
+        // `is_page` is computed from `tags` on read, so there is no cached
+        // state to keep in sync.
+        match update {
+            holon_api::EdgeFieldUpdate::Tags(tags) => block.tags = tags.clone(),
+            holon_api::EdgeFieldUpdate::Requires(reqs) => block.requires = reqs.clone(),
+        }
     }
 }
 
@@ -402,6 +434,21 @@ impl RefFocus for ReferenceState {
             column: cp.column,
         })
     }
+
+    fn current_focus_region(&self, region: Region) -> Option<EntityUri> {
+        self.ui.tab.focused_entity_id.get(&region).map(cap_id)
+    }
+
+    fn focused_cursor_region(&self, region: Region) -> Option<CapCursor> {
+        self.ui.tab.focused_cursor.get(&region).map(|cp| CapCursor {
+            line: cp.line,
+            column: cp.column,
+        })
+    }
+
+    fn has_region_focus(&self, region: Region) -> bool {
+        self.ui.tab.focused_entity_id.contains_key(&region)
+    }
 }
 
 // ─── RefFocusMut ──────────────────────────────────────────────────────
@@ -439,6 +486,46 @@ impl RefFocusMut for ReferenceState {
 
     fn close_active_editor(&mut self) {
         self.ui.tab.active_editor = None;
+    }
+
+    fn set_global_focus(&mut self, id: Option<EntityUri>) {
+        self.ui.tab.focused_block = id;
+    }
+
+    fn set_region_focus(&mut self, region: Region, id: EntityUri, cursor: CapCursor) {
+        self.ui.tab.focused_entity_id.insert(region, id);
+        self.ui.tab.focused_cursor.insert(
+            region,
+            CursorPosition {
+                line: cursor.line,
+                column: cursor.column,
+            },
+        );
+    }
+
+    fn clear_region_focus(&mut self, region: Region) {
+        self.ui.tab.focused_entity_id.remove(&region);
+        self.ui.tab.focused_cursor.remove(&region);
+    }
+
+    fn reset_focused_cursors_to_start(&mut self) {
+        for region in self
+            .ui
+            .tab
+            .focused_entity_id
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.ui
+                .tab
+                .focused_cursor
+                .insert(region, CursorPosition::start());
+        }
+    }
+
+    fn blur_active_editor(&mut self) {
+        ReferenceState::blur_active_editor(self);
     }
 }
 
@@ -814,6 +901,20 @@ impl RefRender for ReferenceState {
             _ => None,
         }
     }
+
+    fn block_render_mentions(&self, id: &EntityUri, fn_name: &str) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.domain
+            .render_expressions
+            .get(&uri)
+            .is_some_and(|expr| super::value_fn_invariants::rhai_mentions(expr, fn_name))
+    }
+
+    fn has_block_render_expr(&self, id: &EntityUri) -> bool {
+        self.domain.render_expressions.contains_key(id)
+    }
 }
 
 impl RefWatches for ReferenceState {
@@ -872,6 +973,357 @@ impl RefTaskState for ReferenceState {
             .properties
             .get("task_state")
             .and_then(|v| v.as_string().map(str::to_owned))
+    }
+}
+
+// ─── Documents (block↔doc + document registry) ───────────────────────
+
+impl RefDocuments for ReferenceState {
+    fn document_of(&self, id: &EntityUri) -> Option<EntityUri> {
+        self.domain.block_state.block_documents.get(id).cloned()
+    }
+
+    fn blocks_in_document(&self, doc: &EntityUri) -> Vec<EntityUri> {
+        self.domain
+            .block_state
+            .block_documents
+            .iter()
+            .filter(|(_, uri)| *uri == doc)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn document_uris(&self) -> Vec<EntityUri> {
+        self.files.documents.keys().cloned().collect()
+    }
+
+    fn document_filename(&self, uri: &EntityUri) -> Option<String> {
+        self.files.documents.get(uri).cloned()
+    }
+
+    fn doc_uri_by_name(&self, name: &str) -> Option<EntityUri> {
+        ReferenceState::doc_uri_by_name(self, name)
+    }
+
+    fn document_count(&self) -> usize {
+        self.files.documents.len()
+    }
+}
+
+impl RefDocumentsMut for ReferenceState {
+    fn mint_document_uri(&mut self) -> EntityUri {
+        self.next_synthetic_doc_uri()
+    }
+
+    fn create_document(&mut self, file_name: String) -> EntityUri {
+        self.create_document_ref(file_name)
+    }
+}
+
+// ─── Navigation history + pins ───────────────────────────────────────
+
+impl RefNavHistory for ReferenceState {
+    fn can_go_back(&self, region: Region) -> bool {
+        ReferenceState::can_go_back(self, region)
+    }
+
+    fn can_go_forward(&self, region: Region) -> bool {
+        ReferenceState::can_go_forward(self, region)
+    }
+
+    fn is_unpinnable(&self, history_id: i64) -> bool {
+        self.ui.user.open_pins.iter().any(|(region, pins)| {
+            let focus = self.current_focus(*region);
+            pins.iter()
+                .any(|p| p.history_id == history_id && p.block_id.is_some() && p.block_id != focus)
+        })
+    }
+}
+
+impl RefNavHistoryMut for ReferenceState {
+    fn nav_focus_push(&mut self, region: Region, block_id: Option<EntityUri>) {
+        let history = self.ui.tab.navigation_history.entry(region).or_default();
+        history.entries.truncate(history.cursor + 1);
+        history.entries.push(block_id.clone());
+        history.cursor = history.entries.len() - 1;
+
+        // Close all open rows in the region, then insert a new open row.
+        // `next_history_id` mirrors SQLite AUTOINCREMENT (monotonic across
+        // INSERTs); `next_pin_ts` is the logical pin timestamp. Both are MODEL
+        // state observed by the focus/nav invariants.
+        let history_id = self.ui.tab.next_history_id;
+        self.ui.tab.next_history_id += 1;
+        let added_ts_logical = self.ui.user.next_pin_ts;
+        self.ui.user.next_pin_ts += 1;
+        let pins = self.ui.user.open_pins.entry(region).or_default();
+        pins.clear();
+        pins.push(super::reference_state::OpenPinEntry {
+            history_id,
+            block_id,
+            added_ts_logical,
+        });
+    }
+
+    fn nav_history_back(&mut self, region: Region) {
+        if let Some(history) = self.ui.tab.navigation_history.get_mut(&region)
+            && history.cursor > 0
+        {
+            history.cursor -= 1;
+        }
+    }
+
+    fn nav_history_forward(&mut self, region: Region) {
+        if let Some(history) = self.ui.tab.navigation_history.get_mut(&region)
+            && history.cursor < history.entries.len() - 1
+        {
+            history.cursor += 1;
+        }
+    }
+
+    fn add_pin(&mut self, region: Region, block_id: EntityUri) {
+        // Move-to-top dedup (`provider.rs::focus_pin`): bump an existing open
+        // pin's timestamp, else INSERT (minting a history id).
+        let added_ts_logical = self.ui.user.next_pin_ts;
+        self.ui.user.next_pin_ts += 1;
+
+        let pins = self.ui.user.open_pins.entry(region).or_default();
+        if let Some(existing) = pins
+            .iter_mut()
+            .find(|p| p.block_id.as_ref() == Some(&block_id))
+        {
+            existing.added_ts_logical = added_ts_logical;
+        } else {
+            let history_id = self.ui.tab.next_history_id;
+            self.ui.tab.next_history_id += 1;
+            self.ui.user.open_pins.entry(region).or_default().push(
+                super::reference_state::OpenPinEntry {
+                    history_id,
+                    block_id: Some(block_id),
+                    added_ts_logical,
+                },
+            );
+        }
+    }
+
+    fn remove_pin(&mut self, history_id: i64) {
+        for pins in self.ui.user.open_pins.values_mut() {
+            pins.retain(|p| p.history_id != history_id);
+        }
+    }
+
+    fn mark_navigation_visit(&mut self, block_id: &EntityUri) -> bool {
+        let first_visit = self.ui.tab.seen_focus_targets.insert(block_id.clone());
+        self.ui.tab.last_navigate_first_visit = first_visit;
+        first_visit
+    }
+}
+
+// ─── Toggles + drawers ───────────────────────────────────────────────
+
+impl RefToggles for ReferenceState {
+    fn is_expanded(&self, id: &EntityUri) -> bool {
+        self.ui.tab.expanded_toggles.contains(id)
+    }
+
+    fn is_drawer_open(&self, block_id: &str) -> bool {
+        // Default open: production default layout boots both sidebars open.
+        self.ui
+            .tab
+            .drawer_open
+            .get(block_id)
+            .copied()
+            .unwrap_or(true)
+    }
+}
+
+impl RefTogglesMut for ReferenceState {
+    fn set_expanded(&mut self, id: &EntityUri, expanded: bool) {
+        if expanded {
+            self.ui.tab.expanded_toggles.insert(id.clone());
+        } else {
+            self.ui.tab.expanded_toggles.remove(id);
+        }
+    }
+
+    fn set_drawer_open(&mut self, block_id: &str, open: bool) {
+        self.ui.tab.drawer_open.insert(block_id.to_string(), open);
+    }
+}
+
+// ─── Undo/redo history stacks ────────────────────────────────────────
+
+impl RefHistory for ReferenceState {
+    fn has_undo(&self) -> bool {
+        !self.action.undo_stack.is_empty()
+    }
+
+    fn has_redo(&self) -> bool {
+        !self.action.redo_stack.is_empty()
+    }
+}
+
+impl RefHistoryMut for ReferenceState {
+    fn undo(&mut self) {
+        ReferenceState::pop_undo_to_redo(self);
+    }
+
+    fn redo(&mut self) {
+        ReferenceState::pop_redo_to_undo(self);
+    }
+}
+
+// ─── Render mutation ─────────────────────────────────────────────────
+
+impl RefRenderMut for ReferenceState {
+    fn set_current_view(&mut self, name: String) {
+        self.ui.user.current_view = name;
+    }
+}
+
+// ─── Local Ref caps (crate-typed) ────────────────────────────────────
+//
+// These traits name crate-local (`MutationEvent`, `TestQuery`, `WatchSpec`,
+// `TodoKeywordSet`) or `holon_frontend` (`CollectionNavigator`) types, so they
+// cannot live in `holon-pbt-core` (which depends only on `holon-api`). They are
+// the reference-side siblings of the pbt-core `Ref*` caps for the transitions
+// whose data crosses that dependency boundary. Not `#[capmap_adapter]`
+// (transition-consumed, not invariant-selected), matching the pbt-core
+// `Ref*Mut` convention.
+
+/// Compound reference-model block/document writes that carry crate-local
+/// mutation/generator types. One honest compound per transition (the raw
+/// block/document maps stay encapsulated on `ReferenceState`).
+pub trait RefMutation {
+    /// Apply a `MutationEvent` via the plain path (ToggleState / TriggerSlash).
+    fn apply_mutation_event(&mut self, event: &super::types::MutationEvent);
+
+    /// Apply a NON-peer `MutationEvent` via the richer ApplyMutation path
+    /// (undo snapshot + `block_documents` + render-expr + focus follow-up).
+    fn apply_external_mutation(&mut self, event: &super::types::MutationEvent);
+
+    /// Bulk-insert externally-authored blocks into a document (BulkExternalAdd).
+    fn add_external_blocks(&mut self, blocks: &[holon_api::block::Block], doc_uri: &EntityUri);
+
+    /// Re-materialize an org document into the reference model (WriteOrgFile).
+    fn write_org_document(
+        &mut self,
+        filename: &str,
+        blocks: &[holon_api::block::Block],
+        keyword_set: Option<&super::generators::TodoKeywordSet>,
+    );
+}
+
+impl RefMutation for ReferenceState {
+    fn apply_mutation_event(&mut self, event: &super::types::MutationEvent) {
+        ReferenceState::apply_mutation(self, event);
+    }
+
+    fn apply_external_mutation(&mut self, event: &super::types::MutationEvent) {
+        ReferenceState::apply_external_mutation(self, event);
+    }
+
+    fn add_external_blocks(&mut self, blocks: &[holon_api::block::Block], doc_uri: &EntityUri) {
+        ReferenceState::add_external_blocks(self, blocks, doc_uri);
+    }
+
+    fn write_org_document(
+        &mut self,
+        filename: &str,
+        blocks: &[holon_api::block::Block],
+        keyword_set: Option<&super::generators::TodoKeywordSet>,
+    ) {
+        ReferenceState::write_org_document(self, filename, blocks, keyword_set);
+    }
+}
+
+/// Model-computed navigation / render predicates — heavy shadow-interpreter and
+/// navigator computations only the wide-PBT reference can honestly answer (pure
+/// slices have no render interpreter). `build_reference_navigator` returns a
+/// `holon_frontend` navigator, which forces this trait crate-local.
+pub trait RefModelPredict {
+    /// Whether a click on `uri` in `region` dispatches `navigation.focus`.
+    fn predicts_navigation_focus(&self, uri: &EntityUri, region: Region) -> bool;
+
+    /// Block ids in the predicted LeftSidebar render set.
+    fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri>;
+
+    /// Whether the user has written an index.org with query+render blocks.
+    fn has_user_index_org(&self) -> bool;
+
+    /// Whether the active main-panel layout renders `id` as a `draggable`.
+    fn block_renders_draggable(&self, id: &EntityUri) -> bool;
+
+    /// Block ids the active main-panel layout renders (its query's rendered set).
+    fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// A reference-state navigator mirroring production's arrow-key handler for
+    /// `region`. Owned (`Box`) so the caller holds no borrow across the
+    /// navigation loop's block mutations.
+    fn build_reference_navigator(
+        &self,
+        region: Region,
+    ) -> Option<Box<dyn holon_frontend::navigation::CollectionNavigator>>;
+}
+
+impl RefModelPredict for ReferenceState {
+    fn predicts_navigation_focus(&self, uri: &EntityUri, region: Region) -> bool {
+        ReferenceState::predicts_navigation_focus(self, uri, region)
+    }
+
+    fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri> {
+        ReferenceState::predicted_sidebar_navigation_targets(self)
+    }
+
+    fn has_user_index_org(&self) -> bool {
+        ReferenceState::has_user_index_org(self)
+    }
+
+    fn block_renders_draggable(&self, id: &EntityUri) -> bool {
+        ReferenceState::block_renders_draggable(self, id)
+    }
+
+    fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri> {
+        ReferenceState::main_rendered_block_ids(self)
+    }
+
+    fn build_reference_navigator(
+        &self,
+        region: Region,
+    ) -> Option<Box<dyn holon_frontend::navigation::CollectionNavigator>> {
+        ReferenceState::build_reference_navigator(self, region)
+    }
+}
+
+/// Write-side watch registration carrying the crate-local `TestQuery`. Read side
+/// is the pbt-core [`RefWatches`].
+pub trait RefWatchesMut {
+    /// Register (or replace) a watch by id with its compiled query + language
+    /// (SetupWatch).
+    fn register_watch(
+        &mut self,
+        query_id: String,
+        query: super::query::TestQuery,
+        language: holon_api::QueryLanguage,
+    );
+
+    /// Remove a previously-registered watch by id (RemoveWatch).
+    fn remove_watch(&mut self, query_id: &str);
+}
+
+impl RefWatchesMut for ReferenceState {
+    fn register_watch(
+        &mut self,
+        query_id: String,
+        query: super::query::TestQuery,
+        language: holon_api::QueryLanguage,
+    ) {
+        self.mcp
+            .active_watches
+            .insert(query_id, super::query::WatchSpec { query, language });
+    }
+
+    fn remove_watch(&mut self, query_id: &str) {
+        self.mcp.active_watches.remove(query_id);
     }
 }
 

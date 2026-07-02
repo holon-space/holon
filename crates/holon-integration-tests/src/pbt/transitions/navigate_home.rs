@@ -12,9 +12,10 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::OpenPinEntry;
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::{CapRegion, SutNavHistoryWrite};
+use holon_pbt_core::capabilities::{
+    CapRegion, RefFocus, RefFocusMut, RefLifecycle, RefNavHistoryMut, SutNavHistoryWrite,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -54,70 +55,66 @@ impl TransitionFactory<ReferenceState> for NavigateHome {
     }
 }
 
+fn navigate_home_preconditions<R: RefLifecycle>(state: &R) -> Validated<(), Reason> {
+    let checks: Vec<Validated<(), Reason>> =
+        vec![check(state.app_started(), Reason::AppNotStarted)];
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+fn navigate_home_apply_to_ref<R: RefFocus + RefFocusMut + RefNavHistoryMut>(
+    region: Region,
+    state: &mut R,
+) {
+    // Idempotent like `navigate_focus`'s same-target focus: when already home
+    // (current focus is `None`), production's `focus(region, None)` writes NO new
+    // `navigation_history` row and NO new `open_pins` row — confirmed by
+    // `headless_go_home_idempotency_probe` (go_home×3 → a single NULL home row).
+    // Pushing a duplicate `None` / bumping `next_history_id` on a repeat `go_home`
+    // would let `NavigateBack` walk back through phantom home entries the SUT never
+    // created — the `NavigateHome→NavigateBack` divergence. This is the exact
+    // back-stack-accumulation hazard `navigate_focus.rs`'s `already_focused` guard
+    // documents.
+    let already_home = state.current_focus(region_to_cap(region)).is_none();
+    if !already_home {
+        // `go_home` is `focus(region, None)`: push a NULL home entry, close all
+        // open rows in the region, then insert a new open row with block_id NULL.
+        // The home row is kept in `open_pins` so `next_history_id` aligns with
+        // SQLite's AUTOINCREMENT, but it's filtered out of `expected_focus_root_ids`.
+        state.nav_focus_push(region, None);
+    }
+
+    state.clear_region_focus(region);
+
+    // Mirror production: `maybe_mirror_navigation_focus` clears
+    // UiState.focused_block globally on "go_home", regardless of
+    // which region triggered it. See reactive.rs:1824.
+    state.set_global_focus(None);
+
+    // Same blur-on-click rationale as `navigate_focus.rs`: clear
+    // `active_editor` (verified); `blur_active_editor` commits the pending
+    // text only under a real editor (matching prod's `on_blur`).
+    state.blur_active_editor();
+}
+
+fn region_to_cap(region: Region) -> CapRegion {
+    match region {
+        Region::Main => CapRegion::Main,
+        Region::LeftSidebar | Region::RightSidebar => CapRegion::Sidebar,
+    }
+}
+
 impl TransitionRef<ReferenceState> for NavigateHome {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        navigate_home_preconditions(state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Idempotent like `navigate_focus`'s same-target focus: when already home
-        // (current focus is `None`), production's `focus(region, None)` writes NO new
-        // `navigation_history` row and NO new `open_pins` row — confirmed by
-        // `headless_go_home_idempotency_probe` (go_home×3 → a single NULL home row).
-        // Pushing a duplicate `None` / bumping `next_history_id` on a repeat `go_home`
-        // would let `NavigateBack` walk back through phantom home entries the SUT never
-        // created — the `NavigateHome→NavigateBack` divergence. This is the exact
-        // back-stack-accumulation hazard `navigate_focus.rs`'s `already_focused` guard
-        // documents.
-        let already_home = state.current_focus(self.region).is_none();
-        if !already_home {
-            let history = state
-                .ui
-                .tab
-                .navigation_history
-                .entry(self.region)
-                .or_default();
-
-            history.entries.truncate(history.cursor + 1);
-            history.entries.push(None);
-            history.cursor = history.entries.len() - 1;
-
-            // `go_home` is `focus(region, None)`: close all open in region, then
-            // insert a new open row with block_id NULL. The home row is kept in
-            // `open_pins` so `next_history_id` aligns with SQLite's AUTOINCREMENT,
-            // but it's filtered out of `expected_focus_root_ids` (None block_id).
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            let added_ts_logical = state.ui.user.next_pin_ts;
-            state.ui.user.next_pin_ts += 1;
-            let pins = state.ui.user.open_pins.entry(self.region).or_default();
-            pins.clear();
-            pins.push(OpenPinEntry {
-                history_id,
-                block_id: None,
-                added_ts_logical,
-            });
-        }
-
-        state.ui.tab.focused_entity_id.remove(&self.region);
-        state.ui.tab.focused_cursor.remove(&self.region);
-
-        // Mirror production: `maybe_mirror_navigation_focus` clears
-        // UiState.focused_block globally on "go_home", regardless of
-        // which region triggered it. See reactive.rs:1824.
-        state.ui.tab.focused_block = None;
-
-        // Same blur-on-click rationale as `navigate_focus.rs`: clear
-        // `active_editor` (verified); `blur_active_editor` commits the pending
-        // text only under a real editor (matching prod's `on_blur`).
-        state.blur_active_editor();
+        navigate_home_apply_to_ref(self.region, state);
     }
 }
 

@@ -12,7 +12,9 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::local_caps::SutSeamMutate;
+use crate::pbt::reference_capabilities::RefMutation;
 use crate::pbt::reference_state::ReferenceState;
+use holon_pbt_core::capabilities::{RefDocuments, RefLifecycle};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -25,9 +27,7 @@ use holon_api::EntityUri;
 use holon_api::QueryLanguage;
 use holon_api::block::Block;
 
-use crate::assign_reference_sequences_canonical;
 use crate::pbt::sut::E2ESut;
-use crate::pbt::types::{apply_org_headline_tag_split, normalize_content_for_org_roundtrip};
 use crate::{serialize_blocks_to_org_with_doc, wait_for_file_condition};
 
 use std::collections::HashMap;
@@ -133,56 +133,44 @@ impl TransitionFactory<ReferenceState> for BulkExternalAdd {
     }
 }
 
+pub fn bulk_external_add_preconditions<R: RefLifecycle + RefDocuments>(
+    doc_uri: &EntityUri,
+    state: &R,
+) -> Validated<(), Reason> {
+    let checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        check(
+            state.document_uris().contains(doc_uri),
+            Reason::NoDocumentsAvailable,
+        ),
+    ];
+
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+pub fn bulk_external_add_apply_to_ref<R: RefMutation>(
+    doc_uri: &EntityUri,
+    blocks: &[Block],
+    state: &mut R,
+) {
+    // One honest compound: normalize each block's content, split trailing
+    // `:tag:` groups, register doc ownership, then re-canonicalize sequences and
+    // rebuild profile tracking. Owns the whole-map read-then-replace internally.
+    state.add_external_blocks(blocks, doc_uri);
+}
+
 impl TransitionRef<ReferenceState> for BulkExternalAdd {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(
-                state.files.documents.contains_key(&self.doc_uri),
-                Reason::NoDocumentsAvailable,
-            ),
-        ];
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        bulk_external_add_preconditions(&self.doc_uri, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Add all blocks to the reference state, normalizing each
-        // block's content the same way `Mutation::apply_to` does for
-        // Create. The org renderer round-trips through the parser
-        // (which `.trim()`s headlines and `.trim_end()`s content),
-        // so the ref must mirror that normalization or `text(col(...))`
-        // displays diverge by the trailing-whitespace the parser
-        // strips. Without this, `inv-displayed-text` panics on bulk
-        // blocks whose generator-produced content ends in a space.
-        for block in &self.blocks {
-            let mut block = block.clone();
-            block.content = normalize_content_for_org_roundtrip(&block.content, block.content_type);
-            // A trailing `:tag:` group on the title line re-parses as org TAGS.
-            apply_org_headline_tag_split(&mut block);
-            let id = block.id.clone();
-            state.domain.block_state.blocks.insert(id.clone(), block);
-            // Register doc ownership so WriteOrgFile::apply_to_ref's delete
-            // cascade can find these on a subsequent file rewrite.
-            state
-                .domain
-                .block_state
-                .block_documents
-                .insert(id, self.doc_uri.clone());
-        }
-        // BulkExternalAdd serializes via serialize_blocks_to_org (canonical order)
-        let mut all_blocks: Vec<Block> =
-            state.domain.block_state.blocks.values().cloned().collect();
-        assign_reference_sequences_canonical(&mut all_blocks);
-        state.domain.block_state.blocks =
-            all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
-        state.rebuild_profile_tracking();
-        state.domain.block_state.next_id += self.blocks.len();
+        bulk_external_add_apply_to_ref(&self.doc_uri, &self.blocks, state)
     }
 }
 

@@ -12,7 +12,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutMcpEmit;
+use holon_pbt_core::capabilities::{RefLifecycle, SutMcpEmit};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -45,12 +45,12 @@ impl TransitionFactory<ReferenceState> for EmitMcpData {
     }
 }
 
-impl TransitionRef<ReferenceState> for EmitMcpData {
+impl<R: RefLifecycle> TransitionRef<R> for EmitMcpData {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
+            vec![check(state.app_started(), Reason::AppNotStarted)];
 
         checks
             .into_iter()
@@ -58,7 +58,7 @@ impl TransitionRef<ReferenceState> for EmitMcpData {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // No reference state change — just triggers IVM re-evaluation.
     }
 }

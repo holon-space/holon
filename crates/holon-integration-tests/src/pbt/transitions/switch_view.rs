@@ -12,7 +12,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutViewControl;
+use holon_pbt_core::capabilities::{RefLifecycle, RefRenderMut, SutViewControl};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -55,20 +55,20 @@ impl TransitionFactory<ReferenceState> for SwitchView {
     }
 }
 
-impl TransitionRef<ReferenceState> for SwitchView {
+impl<R: RefLifecycle + RefRenderMut> TransitionRef<R> for SwitchView {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
+            vec![check(state.app_started(), Reason::AppNotStarted)];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.ui.user.current_view = self.view_name.clone();
+    fn apply_to_ref(&self, state: &mut R) {
+        state.set_current_view(self.view_name.clone());
     }
 }
 

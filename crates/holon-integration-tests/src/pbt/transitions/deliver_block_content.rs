@@ -24,6 +24,9 @@ impl TransitionFactory<ReferenceState> for DeliverBlockContent {
     }
 }
 
+// NOTE: `DeliverBlockContent` is re-exported from `holon_pbt_core` (a foreign
+// type), so `impl<R> TransitionRef<R>` would violate the orphan rule — this
+// impl must stay concrete on the local `ReferenceState`.
 impl TransitionRef<ReferenceState> for DeliverBlockContent {
     type Reason = Reason;
 

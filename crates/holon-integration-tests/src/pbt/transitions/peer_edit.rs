@@ -10,6 +10,8 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
+use holon_pbt_core::capabilities::{RefLifecycle, RefPeers, RefPeersMut};
+
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transition_dispatch::SutHandle;
 use crate::pbt::transitions::{PeerEditOp, deterministic_peer_block_id};
@@ -139,28 +141,26 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
     }
 }
 
-impl TransitionRef<ReferenceState> for PeerEdit {
+impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for PeerEdit {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                self.peer_idx < state.peers.len(),
+                self.peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ),
         ];
 
-        if self.peer_idx < state.peers.len() {
-            let peer = &state.peers[self.peer_idx];
+        if self.peer_idx < state.peers_len() {
+            let contains = |sid: &str| state.peer_block_content(self.peer_idx, sid).is_some();
             let valid_op = match &self.op {
                 PeerEditOp::Create {
                     parent_stable_id, ..
-                } => parent_stable_id
-                    .as_ref()
-                    .is_none_or(|pid| peer.blocks.contains_key(pid)),
-                PeerEditOp::Update { stable_id, .. } => peer.blocks.contains_key(stable_id),
-                PeerEditOp::Delete { stable_id } => peer.blocks.contains_key(stable_id),
+                } => parent_stable_id.as_deref().is_none_or(contains),
+                PeerEditOp::Update { stable_id, .. } => contains(stable_id),
+                PeerEditOp::Delete { stable_id } => contains(stable_id),
             };
 
             // Use PeerEditSourceBlockViolation for source-block exclusions if needed
@@ -173,8 +173,7 @@ impl TransitionRef<ReferenceState> for PeerEdit {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use holon_pbt_core::capabilities::RefPeersMut;
+    fn apply_to_ref(&self, state: &mut R) {
         match &self.op {
             PeerEditOp::Create {
                 parent_stable_id,

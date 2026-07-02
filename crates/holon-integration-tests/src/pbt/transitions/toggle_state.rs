@@ -6,13 +6,17 @@
 //! `sut.rs:2176-2359` (SUT apply), and
 //! `transition_budgets.rs:279-281` (expected SQL).
 
-use holon_pbt_core::capabilities::{SutDriver, SutLayout};
+use holon_pbt_core::capabilities::{
+    CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefFocusRoots, RefLayout, RefLifecycle,
+    SutDriver, SutLayout,
+};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
 use validated::Validated;
 
 use crate::pbt::local_caps::SutMutate;
+use crate::pbt::reference_capabilities::RefMutation;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
@@ -238,84 +242,98 @@ impl TransitionFactory<ReferenceState> for ToggleState {
     }
 }
 
+pub fn toggle_state_preconditions<
+    R: RefLifecycle + RefFocus + RefFocusRoots + RefBlockTree + RefLayout,
+>(
+    block_id: &EntityUri,
+    state: &R,
+) -> Validated<(), Reason> {
+    let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+    let checks: Vec<Validated<(), Reason>> = vec![
+        check(state.app_started(), Reason::AppNotStarted),
+        // `state_toggle` only exists when the block renders interactively
+        // (default layout); a custom `index.org` layout can omit it. See
+        // RefLifecycle::renders_block_interactively.
+        check(
+            RefLifecycle::renders_block_interactively(state, block_id),
+            Reason::BlocksNotInteractiveUnderLayout,
+        ),
+        check(
+            state.current_focus(CapRegion::Main).is_some(),
+            Reason::NoFocusInMain,
+        ),
+        // The toggled row must be VISIBLE in Main — i.e. the block is a
+        // focus root OR a descendant of one (production renders every row
+        // under the focused page, and a user can click the `state_toggle`
+        // on any such interactive row). Requiring the block to BE a focus
+        // root was stricter than prod (there is no block-zoom gesture that
+        // makes a child block a focus root), which made ToggleState vacuous
+        // (only pages can be focus roots, and pages aren't task rows). The
+        // `is_descendant_of_any` self-or-descendant walk is the same faithful
+        // visibility predicate `main_editable_descendants` uses.
+        check(
+            state.is_descendant_of_any(block_id, &focus_roots),
+            Reason::FocusedNotDescendantOfFocusRoot,
+        ),
+        // Layout headlines (in `layout_blocks.headline_ids`) define
+        // their own render expression via a child render source.
+        // Production renders the headline through that custom
+        // layout, which can omit `state_toggle` entirely. The
+        // headline never appears as a state_toggle entity in the
+        // resolved ViewModel, so ToggleState would time out.
+        // EditViaViewModel/Indent/MoveUp etc. already exclude
+        // layout blocks for the same reason.
+        check(
+            !state.is_layout_block(block_id),
+            Reason::FocusedInLayoutBlocks,
+        ),
+        // A custom entity profile for `block` can replace the
+        // default render with anything (e.g. just an
+        // `editable_text`) — losing the state_toggle widget.
+        // The reference state doesn't introspect the active
+        // variant's widget set, so conservatively skip
+        // ToggleState whenever a custom block profile is loaded.
+        check(
+            !state.has_blocks_profile(),
+            Reason::StateToggleNotApplicable,
+        ),
+    ];
+
+    checks
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
+}
+
+pub fn toggle_state_apply_to_ref<R: RefBlockTreeMut + RefMutation>(
+    block_id: &EntityUri,
+    new_state: CycleTarget,
+    state: &mut R,
+) {
+    state.push_undo_snapshot();
+    state.apply_mutation_event(&crate::pbt::types::MutationEvent {
+        source: crate::pbt::types::MutationSource::UI,
+        mutation: crate::pbt::types::Mutation::Update {
+            entity: "block".to_string(),
+            id: block_id.clone(),
+            fields: [(
+                "task_state".to_string(),
+                holon_api::Value::String(new_state.keyword().to_string()),
+            )]
+            .into(),
+        },
+    });
+}
+
 impl TransitionRef<ReferenceState> for ToggleState {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            // `state_toggle` only exists when the block renders interactively
-            // (default layout); a custom `index.org` layout can omit it. See
-            // RefLifecycle::renders_block_interactively.
-            check(
-                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
-                    state,
-                    &self.block_id,
-                ),
-                Reason::BlocksNotInteractiveUnderLayout,
-            ),
-            check(
-                state.current_focus(holon_api::Region::Main).is_some(),
-                Reason::NoFocusInMain,
-            ),
-            // The toggled row must be VISIBLE in Main — i.e. the block is a
-            // focus root OR a descendant of one (production renders every row
-            // under the focused page, and a user can click the `state_toggle`
-            // on any such interactive row). Requiring the block to BE a focus
-            // root was stricter than prod (there is no block-zoom gesture that
-            // makes a child block a focus root), which made ToggleState vacuous
-            // (only pages can be focus roots, and pages aren't task rows). The
-            // `is_descendant_of_any` self-or-descendant walk is the same faithful
-            // visibility predicate `main_editable_descendants` uses.
-            check(
-                state.is_descendant_of_any(&self.block_id, &focus_roots),
-                Reason::FocusedNotDescendantOfFocusRoot,
-            ),
-            // Layout headlines (in `layout_blocks.headline_ids`) define
-            // their own render expression via a child render source.
-            // Production renders the headline through that custom
-            // layout, which can omit `state_toggle` entirely. The
-            // headline never appears as a state_toggle entity in the
-            // resolved ViewModel, so ToggleState would time out.
-            // EditViaViewModel/Indent/MoveUp etc. already exclude
-            // layout blocks for the same reason.
-            check(
-                !state.domain.layout_blocks.contains(&self.block_id),
-                Reason::FocusedInLayoutBlocks,
-            ),
-            // A custom entity profile for `block` can replace the
-            // default render with anything (e.g. just an
-            // `editable_text`) — losing the state_toggle widget.
-            // The reference state doesn't introspect the active
-            // variant's widget set, so conservatively skip
-            // ToggleState whenever a custom block profile is loaded.
-            check(
-                !state.has_blocks_profile(),
-                Reason::StateToggleNotApplicable,
-            ),
-        ];
-
-        checks
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        toggle_state_preconditions(&self.block_id, state)
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.push_undo_snapshot();
-        state.apply_mutation(&crate::pbt::types::MutationEvent {
-            source: crate::pbt::types::MutationSource::UI,
-            mutation: crate::pbt::types::Mutation::Update {
-                entity: "block".to_string(),
-                id: self.block_id.clone(),
-                fields: [(
-                    "task_state".to_string(),
-                    holon_api::Value::String(self.new_state.keyword().to_string()),
-                )]
-                .into(),
-            },
-        });
+        toggle_state_apply_to_ref(&self.block_id, self.new_state, state)
     }
 }
 
