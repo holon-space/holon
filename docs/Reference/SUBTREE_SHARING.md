@@ -21,6 +21,14 @@ unavailable and docs are local-only).
 > for real vaults. The design below is otherwise sound; the blockers are
 > fixable without redesign.
 
+> ✅ **Status (PR `senior-review-loro-iroh-sharing`):** B1, B2, B3, and B4 are
+> **fixed** in this branch; B5 is **partially fixed** (acceptor timeouts + ALPN
+> re-check landed; the ticket-v2 PSK authorization handshake is deliberately
+> deferred — see [Known gaps](#known-gaps-lower-severity-previously-tracked)).
+> The blocker sections below are preserved as the review record; each notes its
+> resolution inline. Sharing is still **not** enabled for real vaults until the
+> B5 authz handshake lands.
+
 ## Ticket format
 
 JSON, wrapped in URL-safe base64 (no padding). Schema v1:
@@ -150,7 +158,7 @@ in-person QR scan). UIs that generate a ticket **must** surface a warning that
 the ticket should not be posted publicly — **and**, until B1 is fixed, that the
 recipient can read the sharer's entire vault history.
 
-### Integrity: SQL projection has no id namespacing
+### Integrity: SQL projection id collision ✅FIXED
 
 An accepted shared doc is projected into the recipient's SQL `block` table
 (`project_descendants_to_sql` + `spawn_projection_worker`), keyed by the
@@ -159,12 +167,25 @@ share one id space in one table, distinguished only by a `shared-tree-id`
 property. Initial projection uses `create` (INSERT OR IGNORE), so a colliding
 id is dropped on accept — but the **ongoing** worker emits `update`/`delete`
 via `diff_snapshots_to_ops`. A sharer who knows/guesses a recipient id (e.g. a
-well-known seed like `block:journals`) can later mutate a node with that id in
-the shared doc and the diff will `update`/`delete` the recipient's own row.
-Ids are random UUIDs, so accidental collision is negligible; the risk is a
-*deliberate* one. **Recommended:** namespace projected ids by
-`shared_tree_id`, or reject any projected op whose target already exists as a
-non-shared block.
+well-known seed like `block:journals`) could later mutate a node with that id in
+the shared doc and the diff would `update`/`delete` the recipient's own row.
+Ids are random UUIDs, so accidental collision is negligible; the risk was a
+*deliberate* one.
+
+**Fix (this PR):** rather than the recommended id-namespacing (which would
+ripple into the B3 write-routing/rendering that keys off the raw stable id),
+both projection paths now enforce an **ownership guard** via
+`first_local_collision`. The recipient's global Loro tree is the authority for
+local block identity (SQL is projected from it), and a shared subtree's
+descendants are pruned from the global tree on share — so under honest
+operation no projected id is alive in the global tree. Any projected op whose
+id **is** alive in the global tree is therefore a shadow attempt: the initial
+projection **rejects the whole accept** loudly, and the ongoing worker
+**refuses the op**, emits `ShareDegraded::ForeignIdCollision` (red banner), and
+freezes the projection watermark so no clobbering write reaches SQL. Covered by
+`projection_worker_refuses_local_id_collision`. Residual (deferred): collisions
+between two *different* shared docs' ids are not yet guarded (both are foreign);
+only shared-vs-local shadowing is closed here.
 
 ## Peer-id derivation
 

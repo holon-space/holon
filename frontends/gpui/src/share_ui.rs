@@ -90,6 +90,12 @@ pub enum DegradedKind {
     SnapshotSaveFailed,
     /// Yellow — rehydration hiccup at startup, share may lag.
     RehydrationFailed,
+    /// Yellow — a shared doc edit failed to project into SQL; the UI (which
+    /// reads SQL) is stale until the next successful projection.
+    SqlProjectionFailed,
+    /// Red — a shared doc tried to shadow a LOCAL block id; the projection was
+    /// refused to protect the recipient's own content.
+    ForeignIdCollision,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -171,6 +177,20 @@ impl ShareUiState {
                     kind: DegradedKind::RehydrationFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                });
+            }
+            ShareDegradedReason::SqlProjectionFailed(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SqlProjectionFailed,
+                    shared_tree_id: event.shared_tree_id,
+                    detail,
+                });
+            }
+            ShareDegradedReason::ForeignIdCollision(block_id) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::ForeignIdCollision,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: block_id,
                 });
             }
             ShareDegradedReason::SnapshotLoadFailed(path) => {
@@ -871,6 +891,14 @@ fn render_toast_stack(
                 (gpui::rgba(0xfbbf24ff), "⚠", "Snapshot save failed")
             }
             DegradedKind::RehydrationFailed => (gpui::rgba(0xfbbf24ff), "↻", "Rehydration failed"),
+            DegradedKind::SqlProjectionFailed => {
+                (gpui::rgba(0xfbbf24ff), "⚠", "Shared edit not shown")
+            }
+            DegradedKind::ForeignIdCollision => (
+                gpui::rgba(0xef4444ff),
+                "⛔",
+                "Blocked shared write (id collision)",
+            ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
         let close_state = share_state.clone();

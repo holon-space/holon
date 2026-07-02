@@ -292,6 +292,7 @@ fn spawn_projection_worker(
     bus: Arc<DegradedSignalBus>,
     mount_block_uri: String,
     shared_tree_id: String,
+    global_doc: Arc<crate::loro_document::LoroDocument>,
 ) -> ProjectionWorker {
     use crate::loro_backend::snapshot_blocks_from_doc;
     use crate::loro_sync_controller::{diff_snapshots_to_ops, is_empty_frontiers};
@@ -312,6 +313,7 @@ fn spawn_projection_worker(
             let mount_uri = mount_uri.clone();
             let stid = shared_tree_id.clone();
             let watermark = watermark.clone();
+            let global_doc = global_doc.clone();
             async move {
                 let current = doc.oplog_frontiers();
                 let last = watermark.lock().unwrap().clone();
@@ -350,6 +352,28 @@ fn spawn_projection_worker(
 
                 let ops = diff_snapshots_to_ops(&before, &after);
                 if !ops.is_empty() {
+                    // Integrity guard (see `first_local_collision`): a synced-in
+                    // remote edit must never project a block whose id shadows a
+                    // LIVE local block. Refuse loudly (banner + `Err` freezes the
+                    // watermark) instead of letting the remote clobber the
+                    // recipient's own SQL row.
+                    if let Some(bad) = global_doc
+                        .with_read(|d| Ok(first_local_collision(d, &ops)))
+                        .map_err(|e| {
+                            Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                                "shared doc {stid}: global-doc collision-guard read failed: {e:#}"
+                            ))
+                        })?
+                    {
+                        bus.emit(ShareDegraded {
+                            shared_tree_id: stid.clone(),
+                            reason: ShareDegradedReason::ForeignIdCollision(bad.clone()),
+                        });
+                        return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                            "shared doc {stid} projection refused: block id {bad:?} collides \
+                             with a live local block — refusing to clobber local content"
+                        )));
+                    }
                     let entity = EntityName::new("block");
                     if let Err(e) = sql_ops
                         .execute_batch_with_origin(
@@ -489,21 +513,24 @@ impl LoroShareBackend {
         shared_tree_id: String,
         doc: Arc<LoroDoc>,
         mount_block_uri: String,
-    ) {
+    ) -> Result<()> {
         let Some(sql_ops) = self.sql_ops.as_ref() else {
-            return;
+            return Ok(());
         };
+        let global_doc = self.global_doc().await?;
         let worker = spawn_projection_worker(
             doc,
             sql_ops.clone(),
             self.degraded_bus.clone(),
             mount_block_uri,
             shared_tree_id.clone(),
+            global_doc,
         );
         self.projection_workers
             .write()
             .await
             .insert(shared_tree_id, worker);
+        Ok(())
     }
 
     /// Persist every shared doc currently registered. Called on
@@ -636,6 +663,21 @@ impl LoroShareBackend {
         });
         if ops.is_empty() {
             return Ok(());
+        }
+        // Integrity guard (see `first_local_collision`): a shared doc must never
+        // project a block whose id shadows a LIVE local block. This runs at
+        // accept/re-project time; a collision means a hostile or corrupt shared
+        // doc, so reject the whole projection loudly rather than clobber local
+        // SQL rows.
+        let global = self.global_doc().await?;
+        if let Some(bad) = global
+            .with_read(|d| Ok(first_local_collision(d, &ops)))
+            .map_err(|e| err(format!("global-doc read for collision guard: {e:#}")))?
+        {
+            return Err(err(format!(
+                "shared doc {shared_tree_id} projection refused: block id {bad:?} \
+                 collides with a live local block — refusing to shadow local content"
+            )));
         }
         let entity = EntityName::new("block");
         for (op_name, params) in ops {
@@ -905,6 +947,31 @@ fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<Tre
     None
 }
 
+/// Return the first projected op id that collides with a LIVE node in the
+/// recipient's global tree, if any.
+///
+/// A shared subtree's descendants are pruned from the global tree when the
+/// subtree is shared, so under honest operation NO projected id is alive in the
+/// global tree. A collision therefore means the shared doc is trying to
+/// *shadow* a LOCAL block id — e.g. a hostile sharer naming a node
+/// `block:journals`. Because SQL `block` rows are keyed by these ids, projecting
+/// such an op would let the remote peer's `update`/`delete` clobber the
+/// recipient's own row (the UI reads SQL). The global tree is the authority for
+/// local block identity (SQL is projected from it), so it is the correct place
+/// to detect the shadow. Callers fail loud instead of clobbering.
+fn first_local_collision(global: &LoroDoc, ops: &[(String, StorageEntity)]) -> Option<String> {
+    for (_op, params) in ops {
+        if let Some(Value::String(id)) = params.get("id") {
+            // ALLOW(entity_uri_from_raw): op id is a canonical block URI string built by block_to_params for the SQL op batch
+            let uri = EntityUri::from_raw(id);
+            if find_tree_id_by_stable_id(global, &uri).is_some() {
+                return Some(id.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Find an existing mount node for a given `shared_tree_id`. Returns the
 /// mount's `TreeID` and its `STABLE_ID` if found.
 fn find_mount_by_shared_tree_id(doc: &LoroDoc, shared_tree_id: &str) -> Option<(TreeID, String)> {
@@ -1125,7 +1192,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         self.attach_sync_worker(shared_tree_id.clone(), shared_arc.clone())
             .await;
         self.attach_projection_worker(shared_tree_id.clone(), shared_arc, mount_stable_id.clone())
-            .await;
+            .await?;
 
         let alpn = format!("{ALPN_PREFIX}/{shared_tree_id}");
         let ticket = Ticket::new(shared_tree_id.clone(), addr, alpn)
@@ -1314,7 +1381,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             shared_arc.clone(),
             mount_stable_id.clone(),
         )
-        .await;
+        .await?;
         self.attach_save_worker(shared_tree_id.clone(), shared_arc)
             .await;
 
@@ -1789,9 +1856,16 @@ pub async fn rehydrate_shared_trees(
                         "[share] project_descendants_to_sql during rehydrate failed"
                     );
                 }
-                backend
+                if let Err(e) = backend
                     .attach_projection_worker(shared_tree_id.clone(), arc.clone(), mount_uri)
-                    .await;
+                    .await
+                {
+                    warn!(
+                        shared_tree_id = %shared_tree_id,
+                        error = %e,
+                        "[share] attach_projection_worker during rehydrate failed"
+                    );
+                }
             }
             _ => {
                 warn!(
@@ -3172,6 +3246,12 @@ mod tests {
         let doc = Arc::new(LoroDoc::new());
         let mut rx = bus.subscribe();
 
+        // Empty global doc — `proj-child` is not a local block, so the
+        // collision guard passes and the op reaches the failing sink.
+        let global = Arc::new(
+            crate::loro_document::LoroDocument::new("proj-global".to_string()).unwrap(),
+        );
+
         // Spawn BEFORE the commit so the watermark starts empty and the commit
         // produces a create op the failing sink rejects.
         let _worker = spawn_projection_worker(
@@ -3180,6 +3260,7 @@ mod tests {
             bus.clone(),
             "block:mount".to_string(),
             "proj-share".to_string(),
+            global,
         );
 
         {
@@ -3206,6 +3287,92 @@ mod tests {
             matches!(ev.reason, ShareDegradedReason::SqlProjectionFailed(_)),
             "expected SqlProjectionFailed, got {:?}",
             ev.reason
+        );
+    }
+
+    /// Integrity (B-integrity): a synced-in shared-doc edit whose block id
+    /// collides with a LIVE local block id (e.g. a hostile sharer naming a node
+    /// `journals` to shadow the recipient's `block:journals`) must be REFUSED —
+    /// the projection worker emits `ForeignIdCollision` and never writes the
+    /// clobbering op, so the recipient's own SQL row survives intact.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn projection_worker_refuses_local_id_collision() {
+        use crate::loro_backend::TREE_NAME;
+
+        let bus = Arc::new(DegradedSignalBus::new());
+        let sql = Arc::new(RecordingSqlOps::default());
+        let mut rx = bus.subscribe();
+
+        // The recipient already owns a local `block:journals` row (the UI reads
+        // this). A hostile share must not be able to overwrite it.
+        {
+            let mut local = StorageEntity::new();
+            local.insert("id".into(), Value::String("block:journals".into()));
+            local.insert("content".into(), Value::String("MY PRIVATE JOURNAL".into()));
+            sql.apply("create", local);
+        }
+
+        // Global tree holds a LIVE node with stable id `journals` — the
+        // authority that says "this id is a local block".
+        let global = Arc::new(
+            crate::loro_document::LoroDocument::new("collide-global".to_string()).unwrap(),
+        );
+        {
+            let gdoc = global.doc();
+            let tree = gdoc.get_tree(TREE_NAME);
+            let node = tree.create(None::<TreeID>).unwrap();
+            let meta = tree.get_meta(node).unwrap();
+            meta.insert(STABLE_ID, loro::LoroValue::from("journals"))
+                .unwrap();
+            gdoc.commit();
+        }
+
+        // Malicious shared doc: a node reusing the well-known id `journals`.
+        let doc = Arc::new(LoroDoc::new());
+        let _worker = spawn_projection_worker(
+            doc.clone(),
+            sql.clone() as Arc<dyn OriginTaggedWrites>,
+            bus.clone(),
+            "block:mount".to_string(),
+            "hostile-share".to_string(),
+            global,
+        );
+
+        {
+            let tree = doc.get_tree(TREE_NAME);
+            let node = tree.create(None::<TreeID>).unwrap();
+            let meta = tree.get_meta(node).unwrap();
+            meta.insert(STABLE_ID, loro::LoroValue::from("journals"))
+                .unwrap();
+            let text: loro::LoroText = meta
+                .insert_container("content_raw", loro::LoroText::new())
+                .unwrap();
+            text.insert(0, "PWNED").unwrap();
+            doc.commit();
+        }
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(ev)) => ev,
+            Ok(Err(_)) => panic!("bus closed unexpectedly"),
+            Err(_) => panic!("no ShareDegraded event within 2s"),
+        };
+        assert_eq!(ev.shared_tree_id, "hostile-share");
+        assert!(
+            matches!(
+                &ev.reason,
+                ShareDegradedReason::ForeignIdCollision(id) if id == "block:journals"
+            ),
+            "expected ForeignIdCollision(block:journals), got {:?}",
+            ev.reason
+        );
+
+        // The recipient's local row is untouched — no clobbering op ran.
+        let row = sql.get("block:journals").expect("local journal row must survive");
+        assert_eq!(
+            row.get("content").and_then(|v| v.as_string()),
+            Some("MY PRIVATE JOURNAL"),
+            "hostile share must NOT overwrite the recipient's local journal"
         );
     }
 
