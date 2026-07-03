@@ -17,8 +17,6 @@
 use holon_pbt_core::capabilities::{EngineFocus, RefEditorMirror, RefGlobalFocus, SutDriver};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
-use crate::pbt::retry::retry_until_ok;
-
 pub struct InvFocusMatchesRef;
 
 impl InvFocusMatchesRef {
@@ -48,43 +46,26 @@ where
 
         let resolved_ref = sut.resolve_ref_block_id(&ref_focused);
 
-        // No frontend engine (SqlOnly headless): focus is unobservable —
-        // a visible Skip, not a silent Ok. Checked once up front; engine
-        // presence cannot change mid-poll.
-        if sut.engine_focused_block().await == EngineFocus::NoEngine {
-            return InvariantResult::Skipped("no frontend engine (SqlOnly)".into());
-        }
-
-        // Poll up to 1 s: chord ops (SplitBlock, JoinBlock) move focus to the
-        // new block via their op response, applied in-process (ADR 0010);
-        // window focus then follows the `focused_block` signal. The new
-        // block's EditorView may not have mounted yet. `Unfocused` keeps
-        // polling and FAILS on timeout — the ref expects focus here, so a
-        // focus-less engine is the steal-back/lost-focus bug, not a skip.
-        let result = retry_until_ok(
-            std::time::Duration::from_millis(1000),
-            std::time::Duration::from_millis(20),
-            async || match sut.engine_focused_block().await {
-                EngineFocus::NoEngine => {
-                    unreachable!("engine presence cannot change mid-poll")
-                }
-                EngineFocus::Focused(actual_id) if actual_id == resolved_ref => Ok(()),
-                EngineFocus::Focused(actual_id) => Err(Some(actual_id)),
-                EngineFocus::Unfocused => Err(None),
-            },
-        )
-        .await;
-        match result {
-            Ok(()) => InvariantResult::Ok,
-            Err(Some(actual_id)) => InvariantResult::Fail(format!(
+        // One strict read+compare. The harness convergence settle (landed after
+        // this body's original 1s retry poll was written) already quiesces the
+        // in-process focus signal by check time, so the poll is obsolete. No
+        // frontend engine (SqlOnly headless) is a visible Skip, not a silent Ok;
+        // `Unfocused` FAILS — the ref expects focus here, so a focus-less engine
+        // is the steal-back/lost-focus bug, not a skip.
+        match sut.engine_focused_block().await {
+            EngineFocus::NoEngine => {
+                InvariantResult::Skipped("no frontend engine (SqlOnly)".into())
+            }
+            EngineFocus::Focused(actual_id) if actual_id == resolved_ref => InvariantResult::Ok,
+            EngineFocus::Focused(actual_id) => InvariantResult::Fail(format!(
                 "[inv-focus-matches-ref] Global focus mismatch: \
                  reference model has {ref_focused} (resolved: {resolved_ref}), \
-                 but engine.focused_block() has {actual_id} (polled 1s)"
+                 but engine.focused_block() has {actual_id}"
             )),
-            Err(None) => InvariantResult::Fail(format!(
+            EngineFocus::Unfocused => InvariantResult::Fail(format!(
                 "[inv-focus-matches-ref] Global focus LOST: \
                  reference model has {ref_focused} (resolved: {resolved_ref}), \
-                 but engine.focused_block() is None (polled 1s)"
+                 but engine.focused_block() is None"
             )),
         }
     }
