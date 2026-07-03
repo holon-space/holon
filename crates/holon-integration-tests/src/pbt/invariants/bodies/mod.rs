@@ -37,7 +37,6 @@ pub mod sql_budget;
 pub mod task_state_storage_coherence;
 pub mod value_fn_provider_arg_variance_13;
 pub mod value_fn_provider_identity;
-pub mod view_selection;
 pub mod viewmodel_decompiled_rows_match_query;
 pub mod viewmodel_editable_text_triggers;
 pub mod viewmodel_entity_ids_subset_of_data;

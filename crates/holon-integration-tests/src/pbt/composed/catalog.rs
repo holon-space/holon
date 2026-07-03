@@ -72,7 +72,10 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         invariants::frontend_engine::wire(),
         invariants::frontend_root_not_error::wire(),
         invariants::live_tree_matches_fresh::wire(),
-        invariants::view_selection::wire(),
+        // Auto-derived by `capability_pair! { pub trait ViewSelection … }` in
+        // holon-pbt-core (the `#[compare] fn current_view` method): replaces the
+        // hand-written `invariants::view_selection::wire()` + its two files.
+        holon_pbt_core::capabilities::inv_pair_view_selection_current_view(),
         // ViewModel value-fn provider invariants (Bundle C-remainder batch 2):
         // `SutViewModel` + ref task-state/block-tree (`identity`) or layout/global-focus
         // (`arg_variance_13`). Completes `SutViewModel`'s native-consumer coverage.

@@ -929,26 +929,105 @@ pub struct FrontendRootVm {
     pub entity_ids: Vec<EntityUri>,
 }
 
-#[holon_macros::capmap_adapter]
-pub trait SutViewModel {
-    /// Drain pending ViewModel emissions. Drain-once semantics —
-    /// after drain, subsequent calls return `Vec::new` until next emit.
-    /// Phase 7 `CachingProxy` memoizes this per-tick.
-    async fn drain_vm_emissions(&mut self) -> Vec<String>;
-
-    /// Count Error widget nodes in the headless `ReactiveEngine`'s rendered
-    /// ViewModel tree. Returns `None` when the headless engine is not
-    /// installed or the tree isn't ready to inspect yet (loading / placeholder
-    /// / shadow-interpretation panicked). Returns `Some(n)` otherwise.
+// ─── ViewSelection: SUT ViewModel × reference render, single-sourced ──
+//
+// `capability_pair!` emits BOTH read traits from one declaration:
+//   - `SutViewModel` (async, owned returns) — the SUT-side ViewModel surface
+//   - `RefRender`    (sync, verbatim)       — the reference render-expr surface
+// plus the CapMap hosting glue for each, plus (for the `#[compare]` method)
+// the auto-derived `inv-pair-view-selection-current-view` equality invariant
+// (constructor `inv_pair_view_selection_current_view()`). The `#[pair(..)]`
+// attribute KEEPS the existing public trait names so no impl/call site renames.
+//
+// Methods are written ONCE, sync; the macro adds `async` for the SUT side.
+// `drain_vm_emissions` keeps `&mut self` (a drain, not a snapshot): the CapMap
+// forwarder fail-louds on it, exactly as the hand-written `#[capmap_adapter]`
+// did — the concrete SUT provides it in the apply phase.
+holon_macros::capability_pair! {
+    #[pair(sut_name = SutViewModel, ref_name = RefRender)]
+    /// Render-expression / view-selection metadata, SUT ViewModel vs reference.
     ///
-    /// `Some(0)` means "the rendered tree has no Error widgets"; the
-    /// `inv-viewmodel-no-error-widgets` body asserts on that.
-    async fn headless_error_node_count(&self) -> Option<usize>;
+    /// The SUT side (`SutViewModel`) is the headless `ReactiveEngine`'s rendered
+    /// ViewModel surface; the reference side (`RefRender`) is the production
+    /// `ReferenceState`. `#[capmap_adapter]`-equivalent glue hosts both on
+    /// `CapMap` (the SUT trait async → `#[async_trait(?Send)]`; the reference
+    /// trait fully sync/owned → plain trait, existing `impl … for ReferenceState`
+    /// untouched).
+    pub trait ViewSelection {
+        /// The currently selected view mode (e.g. `"all"`, `"today"`) — UI
+        /// view-selection state. Auto-compared SUT-vs-reference by
+        /// `inv-pair-view-selection-current-view`.
+        #[compare]
+        fn current_view(&self) -> String;
 
-    /// The currently selected view mode (e.g. `"all"`, `"today"`) — UI
-    /// view-selection state. `inv-view-selection` compares it to the
-    /// reference's [`RefRender::current_view`].
-    async fn current_view(&self) -> String;
+        /// Drain pending ViewModel emissions. Drain-once semantics —
+        /// after drain, subsequent calls return `Vec::new` until next emit.
+        /// Phase 7 `CachingProxy` memoizes this per-tick. `&mut self`, so the
+        /// CapMap forwarder fail-louds — use the concrete SUT in the apply phase.
+        #[sut_only]
+        fn drain_vm_emissions(&mut self) -> Vec<String>;
+
+        /// Count Error widget nodes in the headless `ReactiveEngine`'s rendered
+        /// ViewModel tree. Returns `None` when the headless engine is not
+        /// installed or the tree isn't ready to inspect yet (loading / placeholder
+        /// / shadow-interpretation panicked). Returns `Some(n)` otherwise.
+        ///
+        /// `Some(0)` means "the rendered tree has no Error widgets"; the
+        /// `inv-viewmodel-no-error-widgets` body asserts on that.
+        #[sut_only]
+        fn headless_error_node_count(&self) -> Option<usize>;
+
+        /// Name of the active render expression for `region` (e.g. "tree",
+        /// "list"). `None` when no render source block is set up yet.
+        /// Wide PBT: `ReferenceState::active_render_expr_name(region)`.
+        ///
+        /// NOTE: this is *main-panel-preferring* — wide PBT returns
+        /// `main_panel_render_expr().or(root_render_expr())`. For the
+        /// `inv-viewmodel-root-matches-render-expr` check, which compares the
+        /// SUT *root* widget, use `root_render_expr_name()` instead — the two
+        /// diverge when a distinct main-panel render expr is set.
+        #[ref_only]
+        fn active_render_expr_name(&self, region: CapRegion) -> Option<String>;
+
+        /// Function-call name of the ROOT layout's render expression
+        /// specifically (NOT main-panel-preferring). `None` when no root
+        /// render source block is set up, OR when the root render expr is not
+        /// a `FunctionCall`. Callers distinguish those two cases via
+        /// `has_root_render_expr()`. Wide PBT: the `FunctionCall { name, .. }`
+        /// of `ReferenceState::root_render_expr()`.
+        #[ref_only]
+        fn root_render_expr_name(&self) -> Option<String>;
+
+        /// True if the reference model has a root render expression at all.
+        /// Invariants gate on this before inspecting ViewModel structure.
+        #[ref_only]
+        fn has_root_render_expr(&self) -> bool;
+
+        /// Visible column names of the ROOT render expression — the column set
+        /// `inv-viewmodel-decompiled-rows-match-query` filters data rows to.
+        /// Wide PBT: `root_render_expr().map(|e| e.visible_columns()).unwrap_or_default()`.
+        /// Empty when there's no root render expr.
+        #[ref_only]
+        fn root_visible_columns(&self) -> Vec<String>;
+
+        /// Semantic id of the layout's main-panel container block, when the
+        /// active layout is a multi-region layout (e.g. the 3-column layout).
+        /// `None` in layout-less mode. Used by
+        /// `inv-viewmodel-root-matches-render-expr` to locate the main-panel
+        /// subtree in the SUT widget snapshot without hard-coding the layout's
+        /// container id. Wide PBT: `ReferenceState::main_panel_block_id()`.
+        #[ref_only]
+        fn main_panel_block_id(&self) -> Option<EntityUri>;
+
+        /// Function-call name of the MAIN PANEL's render expression — the content
+        /// the main panel should render in a multi-region layout. Falls back to
+        /// the root render expr when no distinct main-panel render expr is set.
+        /// `None` when neither resolves to a `FunctionCall`. Wide PBT:
+        /// `ReferenceState::main_panel_render_expr().or(root_render_expr())`'s
+        /// `FunctionCall { name, .. }`.
+        #[ref_only]
+        fn main_panel_render_expr_name(&self) -> Option<String>;
+    }
 }
 
 /// Windowed-only root-ViewModel resolution surface (C-5 Tier-2 split off
@@ -1480,64 +1559,6 @@ pub trait RefLayout {
     /// `ReferenceState::focused_entity_id.contains_key(region)`; pure slice:
     /// `false`.
     fn region_entity_focused(&self, region: CapRegion) -> bool;
-}
-
-/// Render-expression metadata exposed for ViewModel invariants.
-///
-/// `#[capmap_adapter]` hosts this on `CapMap` (fully sync, owned returns → no
-/// `#[async_trait]`, emits `CapName` + `impl RefRender for CapMap`). The
-/// production `ReferenceState` provides it; the composed ref `CapMap` forwards.
-#[holon_macros::capmap_adapter]
-pub trait RefRender {
-    /// Name of the active render expression for `region` (e.g. "tree",
-    /// "list"). `None` when no render source block is set up yet.
-    /// Wide PBT: `ReferenceState::active_render_expr_name(region)`.
-    ///
-    /// NOTE: this is *main-panel-preferring* — wide PBT returns
-    /// `main_panel_render_expr().or(root_render_expr())`. For the
-    /// `inv-viewmodel-root-matches-render-expr` check, which compares the
-    /// SUT *root* widget, use `root_render_expr_name()` instead — the two
-    /// diverge when a distinct main-panel render expr is set.
-    fn active_render_expr_name(&self, region: CapRegion) -> Option<String>;
-
-    /// Function-call name of the ROOT layout's render expression
-    /// specifically (NOT main-panel-preferring). `None` when no root
-    /// render source block is set up, OR when the root render expr is not
-    /// a `FunctionCall`. Callers distinguish those two cases via
-    /// `has_root_render_expr()`. Wide PBT: the `FunctionCall { name, .. }`
-    /// of `ReferenceState::root_render_expr()`.
-    fn root_render_expr_name(&self) -> Option<String>;
-
-    /// The currently selected view mode (e.g. `"all"`, `"today"`) — the
-    /// reference side of `inv-view-selection`. Wide PBT:
-    /// `ReferenceState::current_view()`.
-    fn current_view(&self) -> String;
-
-    /// True if the reference model has a root render expression at all.
-    /// Invariants gate on this before inspecting ViewModel structure.
-    fn has_root_render_expr(&self) -> bool;
-
-    /// Visible column names of the ROOT render expression — the column set
-    /// `inv-viewmodel-decompiled-rows-match-query` filters data rows to.
-    /// Wide PBT: `root_render_expr().map(|e| e.visible_columns()).unwrap_or_default()`.
-    /// Empty when there's no root render expr.
-    fn root_visible_columns(&self) -> Vec<String>;
-
-    /// Semantic id of the layout's main-panel container block, when the
-    /// active layout is a multi-region layout (e.g. the 3-column layout).
-    /// `None` in layout-less mode. Used by
-    /// `inv-viewmodel-root-matches-render-expr` to locate the main-panel
-    /// subtree in the SUT widget snapshot without hard-coding the layout's
-    /// container id. Wide PBT: `ReferenceState::main_panel_block_id()`.
-    fn main_panel_block_id(&self) -> Option<EntityUri>;
-
-    /// Function-call name of the MAIN PANEL's render expression — the content
-    /// the main panel should render in a multi-region layout. Falls back to
-    /// the root render expr when no distinct main-panel render expr is set.
-    /// `None` when neither resolves to a `FunctionCall`. Wide PBT:
-    /// `ReferenceState::main_panel_render_expr().or(root_render_expr())`'s
-    /// `FunctionCall { name, .. }`.
-    fn main_panel_render_expr_name(&self) -> Option<String>;
 }
 
 /// A single watch-result row, field name → stringified value. `None`
