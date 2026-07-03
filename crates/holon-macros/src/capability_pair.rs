@@ -72,7 +72,7 @@
 //! `inv-active-watches-match-ref` (Watch), all converted, plus
 //! `inv-blocks-match-ref/org`, deliberately NOT converted (its ref side is the
 //! `RefBackend` hub). Everything beyond a clean 1:1 two-value edge belongs to
-//! the Correspondence registry (`holon-pbt-core/src/correspondence.rs`), not
+//! the Correspondence registry (`holon-integration-tests/src/pbt/correspondence.rs`), not
 //! this macro.
 
 use proc_macro2::{Span, TokenStream};

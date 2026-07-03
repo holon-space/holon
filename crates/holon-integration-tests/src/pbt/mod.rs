@@ -6,6 +6,7 @@
 pub mod action_actor_state;
 pub mod bisect_driver;
 pub mod composed;
+pub mod correspondence;
 pub mod driver_input;
 pub mod file_adapter_state;
 pub mod fixtures;

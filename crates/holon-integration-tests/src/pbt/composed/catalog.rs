@@ -14,13 +14,12 @@
 
 use holon_pbt_core::composition::CapInvariant;
 
-use super::invariants;
+use super::{correspondences, invariants};
 
 pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
-    vec![
+    let mut catalog: Vec<Box<dyn CapInvariant>> = vec![
         invariants::no_parent_cycles::wire(),
         invariants::source_language::wire(),
-        invariants::blocks_match::wire(),
         invariants::blocks_match::wire_org(),
         // Org render fixed point (E1): needs `SutOrgRender`, no ref. Only the
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
@@ -104,12 +103,10 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         invariants::viewmodel_entity_ids_subset_of_data::wire(),
         invariants::viewmodel_state_toggle_correct::wire(),
         invariants::viewmodel_editable_text_triggers::wire(),
-        // Storage-projection cluster (Bundle C-remainder batch 3): the `/loro` +
-        // `/matview` store-variants of `blocks_match` (caps `SutLoroLog` /
-        // `SutBackend`+`SutSqlProjection`) and `live_children_match_ref`
-        // (`SutSqlProjection + SutLoroLog + RefBlockTree`). All caps already hosted.
-        invariants::blocks_match::wire_loro(),
-        invariants::blocks_match::wire_matview(),
+        // Storage-projection cluster (Bundle C-remainder batch 3):
+        // `live_children_match_ref` (`SutSqlProjection + SutLoroLog +
+        // RefBlockTree`). The `blocks_match` `/block_raw`+`/matview`+`/loro`
+        // store family moved to the correspondence registry (spliced below).
         invariants::live_children_match_ref::wire(),
         // Per-transition SQL/wall/RSS budget (`otel-testing`-gated, like its body):
         // needs the composed `ComposedBudget` cap (a span-metrics provider that
@@ -117,5 +114,10 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // registers `ComposedSpanMetrics`; storage/pure slices deselect it.
         #[cfg(feature = "otel-testing")]
         invariants::sql_budget::wire(),
-    ]
+    ];
+    // Correspondence-registry entries (one CapInvariant per store projection;
+    // see `pbt::correspondence`). The `inv-blocks-match-ref/{block_raw,matview,
+    // loro}` family lives in `correspondences::non_seed_blocks`.
+    catalog.extend(correspondences::non_seed_blocks().wire());
+    catalog
 }

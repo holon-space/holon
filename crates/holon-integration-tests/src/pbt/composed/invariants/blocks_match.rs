@@ -1,29 +1,14 @@
-//! `inv-blocks-match-ref/block_raw` wired into the memory slice — `SutBackend`
-//! + `RefBackend`, so it runs only when a reference map is also wired (§5.1);
-//! absent a ref it is *deselected*, not faked.
+//! The `/org` store of the block-equivalence composite. Its siblings —
+//! `inv-blocks-match-ref/{block_raw,matview,loro}` — moved to the
+//! correspondence registry (`composed::correspondences::non_seed_blocks`);
+//! `/org` stays hand-written until Phase 3 (distinct observable facet: it also
+//! checks renderer-canonical sibling ORDER).
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{
-    RefBackend, SutBackend, SutLoroLog, SutOrgRead, SutSqlProjection,
-};
+use holon_pbt_core::capabilities::{RefBackend, SutOrgRead};
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
-use crate::pbt::invariants::bodies::blocks_match_ref::{
-    InvBlocksMatchRefBlockRaw, InvBlocksMatchRefLoro, InvBlocksMatchRefMatview,
-    InvBlocksMatchRefOrg,
-};
-
-pub fn wire() -> Box<dyn CapInvariant> {
-    Box::new(BridgedInvariant::new(
-        InvBlocksMatchRefBlockRaw,
-        RunMode::Strict,
-        Needs {
-            sut_present: vec![CapId::of::<dyn SutBackend>()],
-            sut_absent: Vec::new(),
-            ref_present: vec![CapId::of::<dyn RefBackend>()],
-        },
-    ))
-}
+use crate::pbt::invariants::bodies::blocks_match_ref::InvBlocksMatchRefOrg;
 
 /// `inv-blocks-match-ref/org` — the blocks parsed back off the on-disk org files
 /// (`SutOrgRead`) vs the reference's org view (`RefBackend::org_blocks`). Selected
@@ -35,39 +20,6 @@ pub fn wire_org() -> Box<dyn CapInvariant> {
         RunMode::Strict,
         Needs {
             sut_present: vec![CapId::of::<dyn SutOrgRead>()],
-            sut_absent: Vec::new(),
-            ref_present: vec![CapId::of::<dyn RefBackend>()],
-        },
-    ))
-}
-
-/// `inv-blocks-match-ref/loro` — the blocks read from the live Loro tree
-/// (`SutLoroLog`) vs the reference (`RefBackend`). Selected by a slice supplying
-/// `SutLoroLog` — the Loro / combined / frontend slices.
-pub fn wire_loro() -> Box<dyn CapInvariant> {
-    Box::new(BridgedInvariant::new(
-        InvBlocksMatchRefLoro,
-        RunMode::Strict,
-        Needs {
-            sut_present: vec![CapId::of::<dyn SutLoroLog>()],
-            sut_absent: Vec::new(),
-            ref_present: vec![CapId::of::<dyn RefBackend>()],
-        },
-    ))
-}
-
-/// `inv-blocks-match-ref/matview` — the blocks read from the `block` materialized
-/// view (`SutBackend` + `SutSqlProjection`) vs the reference (`RefBackend`).
-/// Selected by a slice supplying both SQL caps — the SQL / frontend slices.
-pub fn wire_matview() -> Box<dyn CapInvariant> {
-    Box::new(BridgedInvariant::new(
-        InvBlocksMatchRefMatview,
-        RunMode::Strict,
-        Needs {
-            sut_present: vec![
-                CapId::of::<dyn SutBackend>(),
-                CapId::of::<dyn SutSqlProjection>(),
-            ],
             sut_absent: Vec::new(),
             ref_present: vec![CapId::of::<dyn RefBackend>()],
         },

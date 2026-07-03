@@ -27,6 +27,7 @@
 
 pub mod builder;
 pub mod catalog;
+pub mod correspondences;
 pub mod invariants;
 
 /// The composed-slice host for the `inv-sql-budget` span-metrics cap
