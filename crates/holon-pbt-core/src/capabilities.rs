@@ -238,35 +238,139 @@ pub trait RefEditorMirrorMut: RefEditorMirror {
 
 // ─── Reference-side: Focus ───────────────────────────────────────────
 
-/// Read-side focus queries.
+/// `inv-navigation-focus`'s comparator, extracted verbatim from the former
+/// hand-written invariant body so `capability_pair!`'s `#[compare(with = ..)]`
+/// can auto-derive the wiring. The `current_focus` matview's per-region focus
+/// (SUT) must match the reference's navigation focus.
 ///
-/// `#[capmap_adapter]` hosts this on `CapMap` (fully sync, owned returns → no
-/// `#[async_trait]` wrapper; the existing `impl RefFocus for ReferenceState` is
-/// untouched). Needed so `inv-navigation-focus` / `inv-focus-roots` can select
-/// on `CapId::of::<dyn RefFocus>()` from a composed ref `CapMap`.
-#[holon_macros::capmap_adapter]
-pub trait RefFocus {
-    /// Expected focus-root ids per region as `(region_string, [root_id])`, for
-    /// `inv-focus-roots`. Region strings match the `focus_roots` matview;
-    /// already resolved into SUT id space by `with_resolved_doc_uris` (the
-    /// `open_pins` block_ids it derives from are remapped there).
-    fn expected_focus_root_rows(&self) -> Vec<(String, Vec<String>)>;
+/// A pure two-value function of the SUT rows and reference rows (no auxiliary
+/// cap reads) — a faithful 1:1 move of the old
+/// `bodies/navigation_focus::InvNavigationFocus::check` compare step. Both are
+/// `(region, block_id)` where `block_id` is `None` for a region navigated home;
+/// the ref rows are pre-resolved into SUT id space by `with_resolved_doc_uris`.
+pub fn compare_navigation_focus(
+    sut_rows: &[(String, Option<String>)],
+    ref_rows: &[(String, Option<String>)],
+) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet};
 
-    /// Per-region navigation focus as `(region_string, block_id_string)` for
-    /// the regions the reference has navigation history for, keyed by the SQL
-    /// region strings (matching the `current_focus` matview). `block_id` is
-    /// `None` for a region navigated home. Already resolved into SUT id space
-    /// by `with_resolved_doc_uris`. Used by `inv-navigation-focus`, which needs
-    /// LeftSidebar/RightSidebar granularity that [`CapRegion`] collapses, so it
-    /// keys by string rather than `CapRegion`.
-    fn navigation_focus_rows(&self) -> Vec<(String, Option<String>)>;
+    // region -> block_id (None = NULL/home). Presence of the key = the matview
+    // has a row for that region.
+    let sut_map: HashMap<String, Option<String>> = sut_rows.iter().cloned().collect();
 
-    /// Currently focused block in `region`. Wide PBT: per-region map;
-    /// pure slice: returns from a single field.
-    fn current_focus(&self, region: CapRegion) -> Option<EntityUri>;
+    for (region, expected) in ref_rows {
+        let has_row = sut_map.contains_key(region);
+        let row_block_id = sut_map.get(region).cloned().flatten();
+        match (has_row, expected) {
+            (true, Some(exp)) => {
+                if row_block_id.as_deref() != Some(exp.as_str()) {
+                    return Err(format!(
+                        "[inv-navigation-focus] region '{region}': expected focus {exp:?}, \
+                         matview has {row_block_id:?}"
+                    ));
+                }
+            }
+            (true, None) => {
+                if row_block_id.is_some() {
+                    return Err(format!(
+                        "[inv-navigation-focus] region '{region}': expected home (no focus), \
+                         matview has {row_block_id:?}"
+                    ));
+                }
+            }
+            (false, None) => {}
+            (false, Some(exp)) => {
+                return Err(format!(
+                    "[inv-navigation-focus] region '{region}' should have focus on {exp:?} \
+                     but has no row in the current_focus matview"
+                ));
+            }
+        }
+    }
 
-    /// Cursor position of the focused block's editor (if known).
-    fn focused_cursor(&self, region: CapRegion) -> Option<CapCursor>;
+    // Reverse direction: matview regions must be ⊆ ref regions — a focused row
+    // for a region the reference never navigated is a ghost. NULL rows (focus
+    // cleared / home) for an untracked region carry no focus and are tolerated.
+    let ref_regions: HashSet<&String> = ref_rows.iter().map(|(region, _)| region).collect();
+    for (region, block_id) in &sut_map {
+        if let Some(ghost) = block_id {
+            if !ref_regions.contains(region) {
+                return Err(format!(
+                    "[inv-navigation-focus] ghost row: current_focus matview has region \
+                     '{region}' focused on {ghost:?}, but the reference has no navigation \
+                     history for that region"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// `capability_pair!` single-sources the focus read duality: the SUT-side
+// `current_focus`/`focus_roots` matview projection ([`SutFocusProjection`],
+// async, CDC-quiesced) and the reference navigation-focus model ([`RefFocus`],
+// sync, owned). The `#[compare]` method auto-derives `inv-navigation-focus`
+// (id preserved — it is a `WIDE_REQUIRED` invariant asserted by id in the
+// slice teeth) via [`compare_navigation_focus`]; `focus_roots` fan-out stays a
+// hand-written invariant (it reads three SUT sources + a ref source, so it is
+// not a two-value compare) but its cap methods live here as `#[sut_only]` /
+// `#[ref_only]`. `#[pair(..)]` keeps both public trait names, so every existing
+// `impl SutFocusProjection` / `impl RefFocus` and call site is untouched.
+holon_macros::capability_pair! {
+    #[pair(sut_name = SutFocusProjection, ref_name = RefFocus)]
+    /// Focus read surface: SUT `current_focus`/`focus_roots`/`navigation_history`
+    /// projection (Turso, post-CDC-quiescence) vs the reference navigation-focus
+    /// model. `#[capmap_adapter]`-equivalent glue hosts both on `CapMap` (the SUT
+    /// trait async → `#[async_trait(?Send)]`; the reference trait fully sync/owned
+    /// → plain trait). SUT registered only where navigation is actually driven
+    /// through a `current_focus`/`focus_roots` projection (the frontend slice /
+    /// `full_headless`); a storage-only slice does NOT register it, so the focus
+    /// invariants honestly DESELECT there instead of passing vacuously.
+    pub trait Focus {
+        /// Rows of the `current_focus` matview as `(region, block_id)` (SUT) /
+        /// per-region navigation focus (reference). `block_id` is `None` for a
+        /// region navigated home (NULL in SQL). The reference keys by the SQL
+        /// region strings — LeftSidebar/RightSidebar granularity that
+        /// [`CapRegion`] collapses. Auto-compared by `inv-navigation-focus` via
+        /// [`compare_navigation_focus`].
+        #[compare(
+            sut = current_focus_rows,
+            ref = navigation_focus_rows,
+            id = "inv-navigation-focus",
+            with = crate::capabilities::compare_navigation_focus
+        )]
+        fn current_focus_rows(&self) -> Vec<(String, Option<String>)>;
+
+        /// Rows of the `focus_roots` matview as `(region, root_id)` — the
+        /// convergent truth-check for `inv-focus-roots`' CDC-lag downgrade.
+        #[sut_only]
+        fn focus_roots_rows(&self) -> Vec<(String, String)>;
+
+        /// Open rows of the BASE `navigation_history` table as `(region, block_id)`
+        /// — exactly the set the `focus_roots` matview projects from
+        /// (`WHERE closed_at IS NULL AND block_id IS NOT NULL`). Lets
+        /// `inv-focus-roots` distinguish a genuine matview/IVM drift (base no
+        /// longer has the row, matview still does) from a holon close-path bug
+        /// (base still has the row open, so the matview is *correctly* showing it).
+        #[sut_only]
+        fn nav_history_open_rows(&self) -> Vec<(String, String)>;
+
+        /// Expected focus-root ids per region as `(region_string, [root_id])`, for
+        /// `inv-focus-roots`. Region strings match the `focus_roots` matview;
+        /// already resolved into SUT id space by `with_resolved_doc_uris` (the
+        /// `open_pins` block_ids it derives from are remapped there).
+        #[ref_only]
+        fn expected_focus_root_rows(&self) -> Vec<(String, Vec<String>)>;
+
+        /// Currently focused block in `region`. Wide PBT: per-region map;
+        /// pure slice: returns from a single field.
+        #[ref_only]
+        fn current_focus(&self, region: CapRegion) -> Option<EntityUri>;
+
+        /// Cursor position of the focused block's editor (if known).
+        #[ref_only]
+        fn focused_cursor(&self, region: CapRegion) -> Option<CapCursor>;
+    }
 }
 
 /// Focus mutations.
@@ -789,35 +893,15 @@ pub trait SutSqlProjection {
     async fn block_content(&self, id: &EntityUri) -> Option<String>;
 }
 
-/// SUT-side navigation-focus projection surface (C-5 split off
-/// [`SutSqlProjection`], 2026-07-02). Kept a SEPARATE cap so a storage-only slice
-/// (no navigation driven, e.g. `sql_slice`) does NOT register it and the
-/// focus/navigation invariants honestly DESELECT there — instead of selecting
-/// against an honest-empty `SutSqlProjection` focus family and passing vacuously
-/// (empty focus vs an unnavigated ref). Registered only where navigation is
-/// actually driven through a Turso `current_focus`/`focus_roots`/
-/// `navigation_history` projection (the frontend slice / `full_headless`).
-/// Methods reflect Turso state AFTER CDC quiescence — invariants `quiesce()` first.
-#[holon_macros::capmap_adapter]
-pub trait SutFocusProjection {
-    /// Rows of the `current_focus` matview as `(region, block_id)`. `block_id`
-    /// is `None` for a region navigated home (NULL in SQL). Used by
-    /// `inv-navigation-focus` to compare the SUT's per-region navigation focus
-    /// against the reference.
-    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)>;
-
-    /// Rows of the `focus_roots` matview as `(region, root_id)` — the
-    /// convergent truth-check for `inv-focus-roots`' CDC-lag downgrade.
-    async fn focus_roots_rows(&self) -> Vec<(String, String)>;
-
-    /// Open rows of the BASE `navigation_history` table as `(region, block_id)`
-    /// — exactly the set the `focus_roots` matview projects from
-    /// (`WHERE closed_at IS NULL AND block_id IS NOT NULL`). Lets
-    /// `inv-focus-roots` distinguish a genuine matview/IVM drift (base no longer
-    /// has the row, matview still does) from a holon close-path bug (base still
-    /// has the row open, so the matview is *correctly* showing it).
-    async fn nav_history_open_rows(&self) -> Vec<(String, String)>;
-}
+// `SutFocusProjection` (C-5 split off `SutSqlProjection`, 2026-07-02) is now
+// single-sourced with `RefFocus` by the `capability_pair! { pub trait Focus … }`
+// declaration above (the SUT side of the focus read duality); its methods are
+// unchanged. Kept a SEPARATE cap so a storage-only slice (no navigation driven,
+// e.g. `sql_slice`) does NOT register it and the focus/navigation invariants
+// honestly DESELECT there instead of passing vacuously against an unnavigated
+// ref. Registered only where navigation is actually driven through a Turso
+// `current_focus`/`focus_roots`/`navigation_history` projection (the frontend
+// slice / `full_headless`); methods reflect Turso state AFTER CDC quiescence.
 
 /// SUT-side typed block-snapshot surface for `inv-backend-blocks-match-ref`.
 ///

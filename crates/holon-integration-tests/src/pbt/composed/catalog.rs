@@ -62,7 +62,12 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // SutFocusWrite): needs `SutSqlProjection` (+`SutBackend` for focus_roots)
         // + `RefFocus`. Only the frontend `navigation_pbt` slice drives real focus
         // data; storage slices select but pass vacuously (unnavigated ref).
-        invariants::navigation_focus::wire(),
+        // Auto-derived by `capability_pair! { pub trait Focus … }` in
+        // holon-pbt-core (the `#[compare(with = compare_navigation_focus, …)]`
+        // method): replaces the hand-written `invariants::navigation_focus::wire()`
+        // + its two files. Id preserved (`inv-navigation-focus`) — it is a
+        // WIDE_REQUIRED invariant asserted by id in the slice teeth.
+        holon_pbt_core::capabilities::inv_pair_focus_current_focus_rows(),
         invariants::focus_roots::wire(),
         // ViewModel liveness/coherence invariants (Bundle C-remainder port,
         // 2026-06-23): need `SutViewModel` (`frontend_engine`/`frontend_root_not_error`/

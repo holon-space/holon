@@ -20,6 +20,20 @@
 //! }
 //! ```
 //!
+//! `#[compare]` accepts four optional keys:
+//!
+//! - `with = path` — a custom comparator instead of `==`. Contract:
+//!   `fn(&SutReturn, &RefReturn) -> Result<(), String>`, `Ok(())` = agree,
+//!   `Err(msg)` = fail-loud message used verbatim as the `Fail` payload. Keep
+//!   it a pure two-value function so it stays a faithful 1:1 extraction of a
+//!   transformed body's compare step (`&Vec<T>` deref-coerces to `&[T]`).
+//! - `sut = ident` / `ref = ident` — per-side method-name overrides, for a pair
+//!   whose two existing public methods are named differently (e.g. the SUT
+//!   `current_focus_rows` vs the reference `navigation_focus_rows`). The method
+//!   is written once under either name; the missing side is renamed on emit.
+//! - `id = "inv-…"` — an explicit invariant id, to preserve a pre-existing,
+//!   externally-referenced id instead of the derived `inv-pair-<stem>-<method>`.
+//!
 //! Effect convention (audited 46/56 SUT reads): the SUT trait's methods are
 //! `async fn … -> T` (SAME owned return type, NO `Result`); the reference
 //! trait's methods stay sync and verbatim. Methods are written ONCE, sync, in
@@ -31,12 +45,31 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
-use syn::{Attribute, Ident, ItemTrait, ReturnType, TraitItem, TraitItemFn, Type};
+use syn::{Attribute, Ident, ItemTrait, LitStr, ReturnType, TraitItem, TraitItemFn, Type};
 
 use crate::capmap::capmap_adapter_impl;
 
+/// Options parsed from a `#[compare(..)]` marker.
+///
+/// - `with`: an optional custom comparator path (see [`build_compare_invariant`]
+///   for its contract). Absent → plain `==` equality.
+/// - `sut` / `ref_`: optional per-side method-name overrides, for pairs whose
+///   two existing public methods are named differently (e.g. the SUT reads
+///   `current_focus_rows` while the reference exposes `navigation_focus_rows`).
+///   Absent → the method's written name is used on both sides.
+/// - `id`: an optional explicit invariant-id string, for preserving a
+///   pre-existing (externally-referenced) `inv-*` id instead of the derived
+///   `inv-pair-<stem>-<method>` one.
+#[derive(Default)]
+struct CompareOpts {
+    with: Option<syn::Path>,
+    sut: Option<Ident>,
+    ref_: Option<Ident>,
+    id: Option<LitStr>,
+}
+
 enum Role {
-    Compare { with: Option<syn::Path> },
+    Compare(CompareOpts),
     RefOnly,
     SutOnly,
 }
@@ -104,32 +137,24 @@ pub fn capability_pair_impl(mut decl: ItemTrait) -> TokenStream {
         }
 
         match role {
-            Role::Compare { with } => {
-                if let Some(with) = with {
-                    errors.push(
-                        syn::Error::new_spanned(
-                            with,
-                            "capability_pair: `#[compare(with = ...)]` custom comparators are not \
-                             yet supported (walking skeleton). Use plain `#[compare]` for equality.",
-                        )
-                        .to_compile_error(),
-                    );
-                    continue;
-                }
+            Role::Compare(opts) => {
+                let written = f.sig.ident.clone();
+                let sut_ident = opts.sut.clone().unwrap_or_else(|| written.clone());
+                let ref_ident = opts.ref_.clone().unwrap_or_else(|| written.clone());
+
                 let mut rf = f.clone();
                 rf.attrs = kept_attrs.clone();
+                rf.sig.ident = ref_ident.clone();
                 ref_methods.push(rf);
 
                 let mut sf = f.clone();
                 sf.attrs = kept_attrs;
+                sf.sig.ident = sut_ident.clone();
                 sf.sig.asyncness = Some(syn::token::Async(Span::call_site()));
                 sut_methods.push(sf);
 
                 compare_invariants.push(build_compare_invariant(
-                    &stem,
-                    &f.sig.ident,
-                    &sut_name,
-                    &ref_name,
+                    &stem, &sut_ident, &ref_ident, &sut_name, &ref_name, opts.with, opts.id,
                 ));
             }
             Role::RefOnly => {
@@ -171,20 +196,27 @@ fn extract_role(f: &TraitItemFn) -> syn::Result<(Role, Vec<Attribute>)> {
     for attr in &f.attrs {
         let path = attr.path();
         if path.is_ident("compare") {
-            let mut with = None;
+            let mut opts = CompareOpts::default();
             if !matches!(attr.meta, syn::Meta::Path(_)) {
                 attr.parse_nested_meta(|meta| {
                     if meta.path.is_ident("with") {
-                        with = Some(meta.value()?.parse()?);
-                        Ok(())
+                        opts.with = Some(meta.value()?.parse()?);
+                    } else if meta.path.is_ident("sut") {
+                        opts.sut = Some(meta.value()?.parse()?);
+                    } else if meta.path.is_ident("ref") {
+                        opts.ref_ = Some(meta.value()?.parse()?);
+                    } else if meta.path.is_ident("id") {
+                        opts.id = Some(meta.value()?.parse()?);
                     } else {
-                        Err(meta.error(
-                            "capability_pair: unknown `#[compare(..)]` key (expected `with`)",
-                        ))
+                        return Err(meta.error(
+                            "capability_pair: unknown `#[compare(..)]` key \
+                             (expected `with` / `sut` / `ref` / `id`)",
+                        ));
                     }
+                    Ok(())
                 })?;
             }
-            set_role(&mut role, Role::Compare { with }, attr)?;
+            set_role(&mut role, Role::Compare(opts), attr)?;
         } else if path.is_ident("ref_only") {
             set_role(&mut role, Role::RefOnly, attr)?;
         } else if path.is_ident("sut_only") {
@@ -259,30 +291,89 @@ fn make_trait(
     t
 }
 
-/// Emit the auto-derived equality invariant for one `#[compare]` method:
+/// Emit the auto-derived comparison invariant for one `#[compare]` method:
 /// a unit-struct `Invariant` body + a `BridgedInvariant` constructor whose
 /// `Needs` requires both the SUT and reference caps to be present.
+///
+/// `sut_method` / `ref_method` are the (possibly renamed, see `#[compare(sut
+/// = .., ref = ..)]`) method names invoked on each side; they are equal when
+/// the pair shares one name.
+///
+/// # Comparator contract (`#[compare(with = path)]`)
+///
+/// When `with` is `Some(path)`, the check calls `path(&sut_val, &ref_val)`
+/// where the comparator has the signature
+///
+/// ```ignore
+/// fn(&SutReturn, &RefReturn) -> Result<(), String>
+/// ```
+///
+/// i.e. it borrows both read values and returns `Ok(())` when they agree or
+/// `Err(message)` with a fail-loud, domain-specific divergence message. That
+/// message becomes the `InvariantResult::Fail` payload verbatim. This mirrors
+/// how the hand-written invariant bodies build rich `Fail` strings, and keeps
+/// the comparator a pure two-value function (no auxiliary cap reads) so it is
+/// a faithful 1:1 extraction of a transformed body's compare step — not a
+/// re-interpretation. `&SutReturn` / `&RefReturn` deref-coerce, so a comparator
+/// may take slices (`&[T]`) for `Vec<T>` returns.
+///
+/// When `with` is `None`, the two values are compared with plain `==` and the
+/// macro synthesizes the divergence message.
 fn build_compare_invariant(
     stem: &Ident,
-    method: &Ident,
+    sut_method: &Ident,
+    ref_method: &Ident,
     sut_name: &Ident,
     ref_name: &Ident,
+    with: Option<syn::Path>,
+    id_override: Option<LitStr>,
 ) -> TokenStream {
     let stem_snake = pascal_to_snake(&stem.to_string());
-    let method_snake = method.to_string();
-    let id_str = format!(
-        "inv-pair-{}-{}",
-        stem_snake.replace('_', "-"),
-        method_snake.replace('_', "-")
-    );
+    let method_snake = sut_method.to_string();
+    let id_str = match &id_override {
+        Some(lit) => lit.value(),
+        None => format!(
+            "inv-pair-{}-{}",
+            stem_snake.replace('_', "-"),
+            method_snake.replace('_', "-")
+        ),
+    };
 
     let struct_ident = format_ident!("InvPair{}{}", stem, snake_to_pascal(&method_snake),);
     let ctor_ident = format_ident!("inv_pair_{}_{}", stem_snake, method_snake);
+    let how = match &with {
+        Some(path) => format!("compared via `{}`", quote!(#path)),
+        None => "equal".to_string(),
+    };
     let ctor_doc = format!(
-        "Auto-derived `#[compare]` equality invariant `{id_str}`: asserts \
-         `{sut_name}::{method}` (SUT) equals `{ref_name}::{method}` (reference). \
+        "Auto-derived `#[compare]` invariant `{id_str}`: asserts \
+         `{sut_name}::{sut_method}` (SUT) is {how} `{ref_name}::{ref_method}` (reference). \
          Register with one line in `composed_invariant_catalog`."
     );
+
+    let compare_expr = match with {
+        Some(path) => quote! {
+            match #path(&sut_val, &ref_val) {
+                ::core::result::Result::Ok(()) => ::holon_pbt_core::invariant::InvariantResult::Ok,
+                ::core::result::Result::Err(msg) => {
+                    ::holon_pbt_core::invariant::InvariantResult::Fail(msg)
+                }
+            }
+        },
+        None => quote! {
+            if sut_val == ref_val {
+                ::holon_pbt_core::invariant::InvariantResult::Ok
+            } else {
+                ::holon_pbt_core::invariant::InvariantResult::Fail(format!(
+                    "[{}] {} diverged: SUT={:?} ref={:?}",
+                    #id_str,
+                    stringify!(#sut_method),
+                    sut_val,
+                    ref_val,
+                ))
+            }
+        },
+    };
 
     quote! {
         #[doc = #ctor_doc]
@@ -303,19 +394,9 @@ fn build_compare_invariant(
                 ref_: &R,
                 sut: &S,
             ) -> ::holon_pbt_core::invariant::InvariantResult {
-                let sut_val = sut.#method().await;
-                let ref_val = ref_.#method();
-                if sut_val == ref_val {
-                    ::holon_pbt_core::invariant::InvariantResult::Ok
-                } else {
-                    ::holon_pbt_core::invariant::InvariantResult::Fail(format!(
-                        "[{}] {} diverged: SUT={:?} ref={:?}",
-                        #id_str,
-                        stringify!(#method),
-                        sut_val,
-                        ref_val,
-                    ))
-                }
+                let sut_val = sut.#sut_method().await;
+                let ref_val = ref_.#ref_method();
+                #compare_expr
             }
         }
 
