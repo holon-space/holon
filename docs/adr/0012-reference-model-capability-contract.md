@@ -69,7 +69,7 @@ The reference side (capabilities.rs):
 | Focus | `RefFocus` (L230), `RefFocusMut` (L255), `RefFocusRoots` (L1219), `RefGlobalFocus` (L1389) | per-region nav focus, focus roots, engine-global focus |
 | Lifecycle | `RefLifecycle` (L285) | `app_started`, `enable_loro`, `renders_block_interactively`, Markov history |
 | Peers | `RefPeers` (L397), `RefPeersMut` (L411) | modeled peer-Loro replicas |
-| Layout/render | `RefLayout` (L1226), `RefRender` (L1271) | layout-block sets, render-expr metadata, visible columns |
+| Layout/render | `RefLayout` (L1226), `RefViewSelection` (L1271) | layout-block sets, render-expr metadata, visible columns |
 | Watches / tasks / backend | `RefWatches` (L1332), `RefTaskState` (L1397), `RefBackend` (L1412) | expected watch rows, task states, typed `Block` snapshots |
 
 The SUT side mirrors it per *observable component*, not per invariant
@@ -83,7 +83,7 @@ abstracted system COMPONENTS, never to individual invariants"):
 | Quiescence | `SutQuiesce` (L371) | CDC drain / reactive flush / Loro sync barrier |
 | Storage projections | `SutSqlProjection` (L584), `SutBackend` (L649), `SutLoroLog` (L559), `SutLoroTaskState` (L676), `SutOrgRender` (L1151), `SutOrgRead` (L1170) | Turso matview/base table, CDC `LiveData` mirrors, Loro tree, org files on disk |
 | Loro peers | `SutLoro` (L488) | real LoroDoc import/export peers |
-| ViewModel / renderer / geometry | `SutViewModel` (L765), `SutRenderer` (L909), `SutLayout` (L1028) | ReactiveEngine VM, widget tree (`WidgetSnapshot`), window geometry (`RenderedElement`) |
+| ViewModel / renderer / geometry | `SutViewSelection` (L765), `SutRenderer` (L909), `SutLayout` (L1028) | ReactiveEngine VM, widget tree (`WidgetSnapshot`), window geometry (`RenderedElement`) |
 | Driver / lifecycle / misc | `SutDriver` (L1113), `SutLifecycle` (L1204), `SutCdc` (L697), `SutErrorLog` (L546), `SutOrgFileWrite` (L689), `SutWatchRows` (L1362), `SutQueryCompile` (L1190) | input synthesis, app start/restart, CDC state, error logs, org-file writes, watch rows, query compilation |
 
 Two umbrella bounds keep dispatch ergonomic without re-monolithizing:

@@ -21,7 +21,7 @@ use std::sync::Arc;
 pub use holon_api::{Block, BlockContent, ContentType, EntityUri};
 use holon_pbt_core::capabilities::{
     SutBackend, SutEditorMirrorRead, SutErrorLog, SutLoroLog, SutLoroTaskState, SutSqlProjection,
-    SutViewModel,
+    SutViewSelection,
 };
 pub use holon_pbt_core::composition::{CapMap, run_selected};
 use holon_pbt_core::composition::{CapProvider, Config};
@@ -308,9 +308,9 @@ pub fn task_state_maps(sql: Vec<(EntityUri, &str)>, loro: Vec<(EntityUri, &str)>
 
 // ─── ViewModel SUT double ─────────────────────────────────────────────────
 
-/// A hand-crafted [`SutViewModel`] SUT — its `headless_error_node_count` can be
+/// A hand-crafted [`SutViewSelection`] SUT — its `headless_error_node_count` can be
 /// set to a non-zero count, which a real `HeadlessFrontendComponent` (rendering
-/// a valid tree) never produces. Same `SutViewModel` cap, identical selection
+/// a valid tree) never produces. Same `SutViewSelection` cap, identical selection
 /// path, so the frontend invariants' catch tests run with no real engine. Only
 /// `headless_error_node_count` carries data; the rest are honest defaults.
 pub struct FixtureViewModel {
@@ -320,7 +320,7 @@ pub struct FixtureViewModel {
 }
 
 #[async_trait::async_trait(?Send)]
-impl SutViewModel for FixtureViewModel {
+impl SutViewSelection for FixtureViewModel {
     async fn headless_error_node_count(&self) -> Option<usize> {
         self.error_count
     }
@@ -334,11 +334,11 @@ impl SutViewModel for FixtureViewModel {
 
 impl CapProvider for FixtureViewModel {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
-        caps.insert(self as Arc<dyn SutViewModel>);
+        caps.insert(self as Arc<dyn SutViewSelection>);
     }
 }
 
-/// Build a SUT `CapMap` exposing only `SutViewModel` with a fixed error count.
+/// Build a SUT `CapMap` exposing only `SutViewSelection` with a fixed error count.
 pub fn viewmodel_map(error_count: Option<usize>) -> CapMap {
     Config::new().with(FixtureViewModel { error_count }).build()
 }

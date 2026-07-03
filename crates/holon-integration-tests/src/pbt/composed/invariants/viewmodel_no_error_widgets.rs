@@ -1,11 +1,11 @@
 //! `inv-viewmodel-no-error-widgets` — the rendered ViewModel tree has no `Error`
-//! widget nodes. `Needs SutViewModel` only (no reference): a SUT-internal
+//! widget nodes. `Needs SutViewSelection` only (no reference): a SUT-internal
 //! liveness property of the render pipeline. Selected by any slice with a
 //! renderer/ViewModel — today the frontend slice's real headless `ReactiveEngine`
 //! (where it runs over the actual CDC→watch→interpret tree).
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutViewSelection;
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::viewmodel_no_error_widgets::InvViewmodelNoErrorWidgets;
@@ -15,7 +15,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvViewmodelNoErrorWidgets,
         RunMode::Strict,
         Needs {
-            sut_present: vec![CapId::of::<dyn SutViewModel>()],
+            sut_present: vec![CapId::of::<dyn SutViewSelection>()],
             sut_absent: Vec::new(),
             ref_present: Vec::new(),
         },
@@ -26,7 +26,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
 mod tests {
     use crate::pbt::composed::fixtures::*;
 
-    /// Positive: wiring `SutViewModel` with a clean tree selects the invariant
+    /// Positive: wiring `SutViewSelection` with a clean tree selects the invariant
     /// and passes.
     #[tokio::test]
     async fn frontend_no_error_widgets_passes_on_clean_tree() {
@@ -37,7 +37,7 @@ mod tests {
 
         assert!(
             report.ran_ids().contains(&"inv-viewmodel-no-error-widgets"),
-            "wiring SutViewModel must select the no-error-widgets invariant; ran={:?}",
+            "wiring SutViewSelection must select the no-error-widgets invariant; ran={:?}",
             report.ran_ids(),
         );
         assert!(
@@ -48,7 +48,7 @@ mod tests {
     }
 
     /// Negative containment (§2): deselected — disclosed, not faked — when no
-    /// `SutViewModel` is wired (a storage-only slice).
+    /// `SutViewSelection` is wired (a storage-only slice).
     #[tokio::test]
     async fn frontend_no_error_widgets_deselected_without_viewmodel() {
         let sut = fixture_slice(vec![Block::new_text(
@@ -65,7 +65,7 @@ mod tests {
                 .deselected
                 .iter()
                 .any(|d| d.0 == "inv-viewmodel-no-error-widgets"),
-            "without SutViewModel the invariant must be deselected; ran={:?} deselected={:?}",
+            "without SutViewSelection the invariant must be deselected; ran={:?} deselected={:?}",
             report.ran_ids(),
             report.deselected,
         );

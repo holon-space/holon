@@ -6,7 +6,7 @@
 //! path is the more authoritative check; `SutLayout::any_error_widget` falls
 //! back to the ViewModel tree when no geometry provider is installed.
 
-use holon_pbt_core::capabilities::{SutLayout, SutViewModel};
+use holon_pbt_core::capabilities::{SutLayout, SutViewSelection};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvFrontendNoErrorWidgets;
@@ -18,7 +18,7 @@ impl InvFrontendNoErrorWidgets {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvFrontendNoErrorWidgets
 where
-    S: SutViewModel + SutLayout,
+    S: SutViewSelection + SutLayout,
 {
     fn id(&self) -> InvariantId {
         Self::ID

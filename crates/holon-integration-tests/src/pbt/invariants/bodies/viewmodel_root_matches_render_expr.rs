@@ -12,9 +12,9 @@
 //! - **3-column layout mode** (once layout blocks arrive): the root widget is
 //!   the layout wrapper (e.g. `columns`); the content render expr lives INSIDE
 //!   the main panel subtree. We locate the main-panel node SEMANTICALLY by its
-//!   reference-model block id (`RefRender::main_panel_block_id`, never a string
+//!   reference-model block id (`RefViewSelection::main_panel_block_id`, never a string
 //!   literal here) and compare its content child's widget kind to the main
-//!   panel's expected render expr name (`RefRender::main_panel_render_expr_name`,
+//!   panel's expected render expr name (`RefViewSelection::main_panel_render_expr_name`,
 //!   which falls back to the root render expr).
 //!
 //! "Which mode" is derived from the snapshot, not hard-coded per layout: if the
@@ -38,7 +38,7 @@
 //!
 //! Status: functional.
 
-use holon_pbt_core::capabilities::{RefRender, SutRenderer, WidgetSnapshot};
+use holon_pbt_core::capabilities::{RefViewSelection, SutRenderer, WidgetSnapshot};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelRootMatchesRenderExpr;
@@ -75,7 +75,7 @@ fn is_not_ready_kind(kind: &str) -> bool {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvViewmodelRootMatchesRenderExpr
 where
-    R: RefRender,
+    R: RefViewSelection,
     S: SutRenderer,
 {
     fn id(&self) -> InvariantId {

@@ -62,7 +62,7 @@ pub async fn run_windowed_composed_check(
     let report = run_selected(&composed_invariant_catalog(), &sut_caps, &ref_caps).await;
 
     // Non-vacuity floor: the core windowed geometry invariant must SELECT + run
-    // (it binds `SutLayout + SutViewModel` on the SUT and `RefLayout` on the ref,
+    // (it binds `SutLayout + SutViewSelection` on the SUT and `RefLayout` on the ref,
     // all present here). A future regression that silently deselects the windowed
     // family — turning "green" into "ran nothing" — fails HERE rather than passing
     // vacuously.

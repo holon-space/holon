@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use holon_pbt_core::capabilities::{RefFocus, SutBackend, SutFocusProjection};
+use holon_pbt_core::capabilities::{RefFocus, SutBackend, SutFocus};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvFocusRoots;
@@ -32,7 +32,7 @@ impl InvFocusRoots {
 impl<R, S> Invariant<R, S> for InvFocusRoots
 where
     R: RefFocus,
-    S: SutBackend + SutFocusProjection,
+    S: SutBackend + SutFocus,
 {
     fn id(&self) -> InvariantId {
         Self::ID

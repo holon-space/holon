@@ -1,6 +1,6 @@
 //! `inv-frontend-root-not-error` — the rendered root ViewModel node is not an
-//! `Error` widget (reads [`SutViewModel::frontend_root_is_error`]). `Needs
-//! SutViewModel` only (no reference): a SUT-internal liveness property. Selected
+//! `Error` widget (reads [`SutViewSelection::frontend_root_is_error`]). `Needs
+//! SutViewSelection` only (no reference): a SUT-internal liveness property. Selected
 //! by any slice with a ViewModel — today the frontend slice's real headless
 //! `ReactiveEngine`, where it runs over the actual render pipeline.
 

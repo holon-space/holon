@@ -14,7 +14,7 @@
 //! lives behind `SutRenderer::root_content_comparison`, which returns the two
 //! `content` vectors already filtered. The body only owns the ordered-subset
 //! comparison (`is_ordered_subset`) and the failure diagnostic. The
-//! visible-column set is read ref-side via `RefRender::root_visible_columns()`.
+//! visible-column set is read ref-side via `RefViewSelection::root_visible_columns()`.
 //!
 //! The inline's diagnostic additionally printed `render_expr.to_rhai()` and
 //! `display_tree.pretty_print(0)` — both SUT-internal frontend artifacts not
@@ -24,7 +24,7 @@
 //!
 //! Status: functional.
 
-use holon_pbt_core::capabilities::{RefRender, SutRenderer};
+use holon_pbt_core::capabilities::{RefViewSelection, SutRenderer};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelDecompiledRowsMatchQuery;
@@ -36,7 +36,7 @@ impl InvViewmodelDecompiledRowsMatchQuery {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvViewmodelDecompiledRowsMatchQuery
 where
-    R: RefRender,
+    R: RefViewSelection,
     S: SutRenderer,
 {
     fn id(&self) -> InvariantId {

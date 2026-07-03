@@ -26,7 +26,7 @@ use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
     CapCursor, CapRegion, RefBackend, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
     RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
-    RefLifecycle, RefPeers, RefPeersMut, RefRender, RefTaskState, RefWatches, WatchRow,
+    RefLifecycle, RefPeers, RefPeersMut, RefViewSelection, RefTaskState, RefWatches, WatchRow,
 };
 
 use super::peer_ops::PeerBlock;
@@ -768,7 +768,7 @@ impl RefBackend for ReferenceState {
     }
 }
 
-impl RefRender for ReferenceState {
+impl RefViewSelection for ReferenceState {
     fn current_view(&self) -> String {
         ReferenceState::current_view(self)
     }
@@ -901,7 +901,7 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // `inv-frontend-bounds-rendered` reads (`has_user_documents`,
         // `region_entity_focused`). Registering it unconditionally is harmless to
         // existing slices: selection ANDs the SUT and ref cap sets, and only the
-        // windowed slice supplies the matching `SutLayout + SutViewModel`.
+        // windowed slice supplies the matching `SutLayout + SutViewSelection`.
         caps.insert(self.clone() as Arc<dyn RefLayout>);
         // `RefWatches` carries the active-watch query set + expected rows the B5
         // watch invariants read (E1 SutWatchRows relocation). Harmless to existing
@@ -914,16 +914,16 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // also supplies `SutSqlProjection` (+`SutBackend`) selects the focus
         // invariants — and only the navigation slice drives real focus data.
         caps.insert(self.clone() as Arc<dyn RefFocus>);
-        // `RefRender` carries the active-view / render-expr metadata the ViewModel
+        // `RefViewSelection` carries the active-view / render-expr metadata the ViewModel
         // invariants read (`inv-view-selection`, the C3 renderer cluster). The
         // logic already lives on `ReferenceState`; this just exposes it on the ref
         // `CapMap`. Harmless to existing slices: selection ANDs the SUT and ref cap
-        // sets, and only a slice supplying `SutViewModel`/`SutRenderer` selects it.
-        caps.insert(self.clone() as Arc<dyn RefRender>);
+        // sets, and only a slice supplying `SutViewSelection`/`SutRenderer` selects it.
+        caps.insert(self.clone() as Arc<dyn RefViewSelection>);
         // `RefTaskState` + `RefGlobalFocus` carry the task-state / global-focus
         // metadata the `value_fn_provider_*` ViewModel invariants read (C3 batch 2).
         // Logic already on `ReferenceState`; harmless to existing slices (selection
-        // ANDs SUT∧ref cap sets — only a `SutViewModel` slice selects them).
+        // ANDs SUT∧ref cap sets — only a `SutViewSelection` slice selects them).
         caps.insert(self.clone() as Arc<dyn RefTaskState>);
         caps.insert(self as Arc<dyn RefGlobalFocus>);
     }

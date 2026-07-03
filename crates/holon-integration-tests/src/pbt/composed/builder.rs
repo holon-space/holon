@@ -31,7 +31,7 @@ use holon_api::EntityUri;
 use holon_api::repository::{CoreOperations, NewBlock};
 use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead, SutFocusProjection,
+    SutBackend, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead, SutFocus,
     SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
@@ -299,13 +299,13 @@ async fn compose_sut_seeded_impl(
         // component's `register` (the nav slice adds it explicitly); add it here since
         // Turso storage is active and its invariants belong to this config.
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
-        // `SutFocusProjection` (C-5 split off `SutSqlProjection`, 2026-07-02): the
+        // `SutFocus` (C-5 split off `SutSqlProjection`, 2026-07-02): the
         // real navigation-focus matview surface. This frontend drives navigation
         // (Turso `current_focus`/`focus_roots`/`navigation_history`), so it hosts the
         // cap and `inv-navigation-focus`/`inv-focus-roots` keep their WIDE_REQUIRED
         // teeth in the keystone. Storage-only configs never reach this arm, so they
         // deselect those invariants honestly.
-        caps.insert(comp.clone() as Arc<dyn SutFocusProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
         // `SutQueryResults` (the full-mode query-engine row-count surface) — same
         // per-config rationale as `SutSqlProjection`: NOT in `register`, added here
         // because a real query engine (Turso `BackendEngine` + reactive watch) backs
@@ -791,14 +791,14 @@ mod tests {
     /// runtime + a settle window. This is the arm that folds C2.0's `boot_and_seed`.
     #[tokio::test(flavor = "multi_thread")]
     async fn compose_sut_frontend_arm_caps_and_aux() {
-        use holon_pbt_core::capabilities::{SutOrgRead, SutRenderer, SutViewModel, SutWatchRows};
+        use holon_pbt_core::capabilities::{SutOrgRead, SutRenderer, SutViewSelection, SutWatchRows};
         let sut = compose_sut(&turso_frontend(), &resolver()).await;
         // Backend + structural write + Turso projection.
         assert!(sut.caps.get::<dyn SutBackend>().is_some());
         assert!(sut.caps.get::<dyn SutBlockTreeWrite>().is_some());
         assert!(sut.caps.get::<dyn SutSqlProjection>().is_some());
         // The frontend projection caps.
-        assert!(sut.caps.get::<dyn SutViewModel>().is_some());
+        assert!(sut.caps.get::<dyn SutViewSelection>().is_some());
         assert!(sut.caps.get::<dyn SutRenderer>().is_some());
         assert!(sut.caps.get::<dyn SutOrgRead>().is_some());
         assert!(sut.caps.get::<dyn SutWatchRows>().is_some());

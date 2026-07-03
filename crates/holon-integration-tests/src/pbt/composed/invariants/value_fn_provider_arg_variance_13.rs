@@ -1,6 +1,6 @@
 //! `inv-value-fn-provider-arg-variance-13` — ViewModel value-fn provider arg
 //! variance agrees with the reference's layout / global-focus view. `Needs
-//! SutViewModel + RefLayout + RefGlobalFocus`. The ref side is the production
+//! SutViewSelection + RefLayout + RefGlobalFocus`. The ref side is the production
 //! `ReferenceState`; selection ANDs the SUT and ref cap sets, so it only fires
 //! where a real ViewModel slice is wired (the frontend slice). Teeth run there.
 

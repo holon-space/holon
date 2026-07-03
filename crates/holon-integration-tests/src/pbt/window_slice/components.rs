@@ -16,7 +16,7 @@ use holon_frontend::geometry::{GeometryProvider, ProviderEvalCtx};
 use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
 use holon_pbt_core::capabilities::{
     FrontendRootVm, ProviderStabilityReport, RenderedElement, SutFrontendEmissions,
-    SutFrontendEngine, SutLayout, SutQueryResults, SutRenderer, SutViewModel, ViewportHint,
+    SutFrontendEngine, SutLayout, SutQueryResults, SutRenderer, SutViewSelection, ViewportHint,
     WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
@@ -169,7 +169,7 @@ impl CapProvider for GpuiWindowComponent {
     }
 }
 
-/// The windowed slice's `SutViewModel` + `SutRenderer` provider over the **same**
+/// The windowed slice's `SutViewSelection` + `SutRenderer` provider over the **same**
 /// frontend [`ReactiveEngine`] the live window renders from (the engine passed to
 /// `launch_holon_window_rebindable`). This is the engine `E2ESut` reads as its
 /// `frontend_engine`, so the ViewModel the geometry invariants compare against and
@@ -253,7 +253,7 @@ impl GpuiFrontendEngineComponent {
 }
 
 #[async_trait::async_trait(?Send)]
-impl SutViewModel for GpuiFrontendEngineComponent {
+impl SutViewSelection for GpuiFrontendEngineComponent {
     /// Count `Error` widget nodes in the rendered ViewModel tree (the
     /// `inv-viewmodel-no-error-widgets` path). `None` while the root is loading /
     /// a placeholder / interpret panics. Reads the same engine the window paints.
@@ -792,9 +792,9 @@ impl SutQueryResults for GpuiFrontendEngineComponent {
 
 impl CapProvider for GpuiFrontendEngineComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
-        caps.insert(self.clone() as Arc<dyn SutViewModel>);
+        caps.insert(self.clone() as Arc<dyn SutViewSelection>);
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
-        // The windowed live-engine caps (C-5 split off SutViewModel): the root-VM
+        // The windowed live-engine caps (C-5 split off SutViewSelection): the root-VM
         // resolution surface (`SutFrontendEngine`) and the emission-observer surface
         // (`SutFrontendEmissions`). A live gpui `ReactiveEngine` is the only faithful
         // source, so only this windowed component registers them; the headless slice

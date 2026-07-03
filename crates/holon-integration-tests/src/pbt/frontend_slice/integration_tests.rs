@@ -1,5 +1,5 @@
 //! Cross-cutting tests of the frontend slice. The headline: the shared catalog's
-//! `SutViewModel`/`SutRenderer` invariants run over a **real** headless
+//! `SutViewSelection`/`SutRenderer` invariants run over a **real** headless
 //! `ReactiveEngine` (the production CDC→watch→interpret render path, windowless),
 //! and the `SutBackend` block-tree invariants run over the same engine's
 //! `block_raw` — a fourth realization backing the same catalog, zero duplication.

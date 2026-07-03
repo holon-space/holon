@@ -1,5 +1,5 @@
 //! `inv-frontend-engine` — the reactive engine produced a usable root ViewModel
-//! (reads [`SutViewModel::frontend_root_vm`]). `Needs SutViewModel` only (no
+//! (reads [`SutViewSelection::frontend_root_vm`]). `Needs SutViewSelection` only (no
 //! reference): a SUT-internal liveness property of the render pipeline. Selected
 //! by any slice with a ViewModel — today the frontend slice's real headless
 //! `ReactiveEngine`. Teeth run there (the fixture `FrontendRootVm` is `None`,

@@ -7,7 +7,7 @@
 //! glitches that a later structural re-render would mask (e.g.
 //! `flatten_properties` mishandling a `Value::String` from the CDC path).
 //!
-//! Reads [`SutViewModel::drain_vm_emission_toggles`] (drains the emission
+//! Reads [`SutViewSelection::drain_vm_emission_toggles`] (drains the emission
 //! buffer, returns `(block_id, current)` per toggle) and the reference's
 //! [`RefTaskState`] / [`RefBlockTree`]. Toggles for blocks the reference
 //! doesn't track are skipped.

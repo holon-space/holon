@@ -1,16 +1,16 @@
 //! `inv-focus-roots` wired into the composed catalog — the `focus_roots`
 //! matview's per-region root set matches the reference's expected focus roots,
 //! with the CDC-lag → `Skipped` downgrade the body implements
-//! (`SutBackend::live_focus_root_rows` mirror vs `SutFocusProjection::focus_roots_rows`
+//! (`SutBackend::live_focus_root_rows` mirror vs `SutFocus::focus_roots_rows`
 //! matview vs `nav_history_open_rows` base, against `RefFocus::expected_focus_root_rows`).
 //!
-//! `Needs SutBackend + SutFocusProjection` (SUT) + `RefFocus` (ref). Same selection
+//! `Needs SutBackend + SutFocus` (SUT) + `RefFocus` (ref). Same selection
 //! shape as `inv-navigation-focus`; only a navigation-driving slice supplies
-//! `SutFocusProjection` (C-5 split, 2026-07-02), so a storage-only slice deselects
+//! `SutFocus` (C-5 split, 2026-07-02), so a storage-only slice deselects
 //! honestly rather than running against an empty focus family.
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{RefFocus, SutBackend, SutFocusProjection};
+use holon_pbt_core::capabilities::{RefFocus, SutBackend, SutFocus};
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::focus_roots::InvFocusRoots;
@@ -22,7 +22,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         Needs {
             sut_present: vec![
                 CapId::of::<dyn SutBackend>(),
-                CapId::of::<dyn SutFocusProjection>(),
+                CapId::of::<dyn SutFocus>(),
             ],
             sut_absent: Vec::new(),
             ref_present: vec![CapId::of::<dyn RefFocus>()],

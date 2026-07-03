@@ -73,7 +73,7 @@ use crate::pbt::transitions::{
     SimulateRestart, SplitBlock, ToggleState, TypeChars,
 };
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutFocusProjection, SutQueryResults,
+    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutFocus, SutQueryResults,
     SutSqlProjection,
 };
 use holon_pbt_core::composition::CapProvider;
@@ -575,9 +575,9 @@ async fn boot_and_seed_editor(
     let mut caps = CapMap::new();
     comp.clone().register(&mut caps);
     caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
-    // `SutFocusProjection` (C-5 split, 2026-07-02) — preserves focus/nav invariant
+    // `SutFocus` (C-5 split, 2026-07-02) — preserves focus/nav invariant
     // selection over this real renderer (paired with a `RefFocus` ref).
-    caps.insert(comp.clone() as Arc<dyn SutFocusProjection>);
+    caps.insert(comp.clone() as Arc<dyn SutFocus>);
     // `SutQueryResults` (full-mode query engine) — mirrors `SutSqlProjection`: keeps
     // `inv-viewmodel-decompiled-rows-match-query` selected and the degraded
     // `inv-viewmodel-shows-source-when-no-query` twin deselected over this real renderer.
@@ -661,7 +661,7 @@ mod teeth {
     /// driven, the FULL catalog (incl. the org invariant) must go green.
     #[tokio::test(flavor = "multi_thread")]
     async fn frontend_fresh_drive_org_seed_full_catalog_green() {
-        use holon_pbt_core::capabilities::{SutFocusProjection, SutQueryResults, SutSqlProjection};
+        use holon_pbt_core::capabilities::{SutFocus, SutQueryResults, SutSqlProjection};
         use holon_pbt_core::composition::CapProvider;
 
         // The page-rooted working tree AS org: `structural-page` is the doc/page,
@@ -685,8 +685,8 @@ mod teeth {
         let mut caps = CapMap::new();
         comp.clone().register(&mut caps);
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
-        // `SutFocusProjection` (C-5 split, 2026-07-02) — preserves focus/nav selection.
-        caps.insert(comp.clone() as Arc<dyn SutFocusProjection>);
+        // `SutFocus` (C-5 split, 2026-07-02) — preserves focus/nav selection.
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
         // `SutQueryResults` (full-mode query engine) — same rationale as the combined
         // boot above: keeps the full decompiled twin selected and the degraded twin off.
         caps.insert(comp.clone() as Arc<dyn SutQueryResults>);

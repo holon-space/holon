@@ -10,6 +10,7 @@ use syn::{DeriveInput, FnArg, ItemFn, ItemTrait, Meta, Pat, Type, parse_macro_in
 
 pub(crate) mod attr_parser;
 mod builder_registry;
+mod capability_pair;
 mod capmap;
 mod entity;
 mod operations_trait;
@@ -67,6 +68,17 @@ pub fn operations_trait(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn capmap_adapter(_: TokenStream, item: TokenStream) -> TokenStream {
     let trait_def = parse_macro_input!(item as ItemTrait);
     TokenStream::from(capmap::capmap_adapter_impl(trait_def))
+}
+
+/// Single-source the Sut*/Ref* capability duality: one trait declaration emits
+/// BOTH a SUT read trait (async, owned returns) and a reference read trait
+/// (sync, verbatim), hosts each on `CapMap`, and auto-derives a
+/// `BridgedInvariant` equality constructor for every `#[compare]` method.
+/// See `capability_pair.rs`.
+#[proc_macro]
+pub fn capability_pair(item: TokenStream) -> TokenStream {
+    let decl = parse_macro_input!(item as ItemTrait);
+    TokenStream::from(capability_pair::capability_pair_impl(decl))
 }
 
 /// Extract doc comments from attributes

@@ -19,7 +19,7 @@
 //!
 //! Status: functional.
 
-use holon_pbt_core::capabilities::{RefLayout, RefRender, SutRenderer};
+use holon_pbt_core::capabilities::{RefLayout, RefViewSelection, SutRenderer};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelEntityIdsSubsetOfData;
@@ -31,7 +31,7 @@ impl InvViewmodelEntityIdsSubsetOfData {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvViewmodelEntityIdsSubsetOfData
 where
-    R: RefRender + RefLayout,
+    R: RefViewSelection + RefLayout,
     S: SutRenderer,
 {
     fn id(&self) -> InvariantId {

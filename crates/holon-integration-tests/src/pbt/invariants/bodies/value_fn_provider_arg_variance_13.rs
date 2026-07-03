@@ -1,7 +1,7 @@
 //! `inv-value-fn-provider-arg-variance-13`.
 //!
 //! The value-fn provider checks, asserting on the SUT-computed
-//! [`ProviderStabilityReport`] ([`SutViewModel::provider_stability_report`])
+//! [`ProviderStabilityReport`] ([`SutViewSelection::provider_stability_report`])
 //! so the `ReactiveEngine`/`interpret_pure`/`ProviderCache` coupling stays on
 //! the SUT side. Four sub-checks (inline `[inv_bar]`/`[vfn11/12/13]`):
 //! - **inv_bar** — a render_expr mentioning `bottom_dock` must interpret to

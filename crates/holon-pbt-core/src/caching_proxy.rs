@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use crate::capabilities::{
     EntityUri, FrontendRootVm, ProviderStabilityReport, RenderedElement, SutBackend, SutErrorLog,
-    SutFocusProjection, SutFrontendEmissions, SutFrontendEngine, SutLayout, SutLoroLog, SutOrgRead,
-    SutOrgRender, SutRenderer, SutSqlProjection, SutViewModel, SutWatchRows, ViewportHint,
+    SutFocus, SutFrontendEmissions, SutFrontendEngine, SutLayout, SutLoroLog, SutOrgRead,
+    SutOrgRender, SutRenderer, SutSqlProjection, SutViewSelection, SutWatchRows, ViewportHint,
     WatchRow, WidgetSnapshot,
 };
 
@@ -72,7 +72,7 @@ pub fn cached<S>(sut: &S) -> CachingProxy<'_, S> {
 
 /// Build a `CachingProxy` after eagerly draining VM emissions from `sut`.
 /// Subsequent `drain_vm_emissions` calls serve the cached Vec.
-pub async fn cached_with_drain<S: SutViewModel>(sut: &mut S) -> CachingProxy<'_, S> {
+pub async fn cached_with_drain<S: SutViewSelection>(sut: &mut S) -> CachingProxy<'_, S> {
     let emissions = sut.drain_vm_emissions().await;
     CachingProxy {
         inner: sut,
@@ -86,10 +86,10 @@ pub async fn cached_with_drain<S: SutViewModel>(sut: &mut S) -> CachingProxy<'_,
     }
 }
 
-// ─── SutViewModel ─────────────────────────────────────────────────────
+// ─── SutViewSelection ─────────────────────────────────────────────────────
 
 #[async_trait::async_trait(?Send)]
-impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
+impl<'a, S: SutViewSelection> SutViewSelection for CachingProxy<'a, S> {
     /// Returns the eagerly-drained snapshot if the proxy was built with
     /// [`cached_with_drain`], else an empty Vec.
     async fn drain_vm_emissions(&mut self) -> Vec<String> {
@@ -106,7 +106,7 @@ impl<'a, S: SutViewModel> SutViewModel for CachingProxy<'a, S> {
 }
 
 // ─── SutFrontendEngine ────────────────────────────────────────────────
-// The windowed root-VM resolution cap (C-5 Tier-2 split off SutViewModel).
+// The windowed root-VM resolution cap (C-5 Tier-2 split off SutViewSelection).
 
 #[async_trait::async_trait(?Send)]
 impl<'a, S: SutFrontendEngine> SutFrontendEngine for CachingProxy<'a, S> {
@@ -132,7 +132,7 @@ impl<'a, S: SutFrontendEngine> SutFrontendEngine for CachingProxy<'a, S> {
 
 // ─── SutFrontendEmissions ─────────────────────────────────────────────
 // The windowed ViewModel emission-observer cap (C-5 Tier-1 split off
-// SutViewModel). Uncached: each read at most once per tick, and
+// SutViewSelection). Uncached: each read at most once per tick, and
 // `drain_vm_emission_toggles` has drain-once semantics.
 
 #[async_trait::async_trait(?Send)]
@@ -200,11 +200,11 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
     }
 }
 
-// ─── SutFocusProjection ───────────────────────────────────────────────
+// ─── SutFocus ───────────────────────────────────────────────
 // Uncached: read at most once per tick by the focus/navigation invariants.
 
 #[async_trait::async_trait(?Send)]
-impl<'a, S: SutFocusProjection> SutFocusProjection for CachingProxy<'a, S> {
+impl<'a, S: SutFocus> SutFocus for CachingProxy<'a, S> {
     async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
         self.inner.current_focus_rows().await
     }

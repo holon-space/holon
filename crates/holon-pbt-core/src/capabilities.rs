@@ -1,17 +1,13 @@
-//! PBT capability traits — Stage A (Phase 1 draft).
+//! PBT capability traits — the reference-side (`Ref*`) and SUT-side (`Sut*`)
+//! read/write surfaces the composed PBT catalog and `wide_e2e` runner bind on.
 //!
-//! Defines the minimum reference-side and SUT-side capability traits the
-//! seven Phase 5 T0 transitions need (TypeChars, DeleteBackward,
-//! MoveCursor, MoveUp, MoveDown, SplitBlock, JoinBlock, Indent, Outdent).
+//! Each cap is a narrow trait hosted on `CapMap` (via `#[capmap_adapter]`, or
+//! emitted in pairs by `capability_pair!`). Reference impls live in
+//! `reference_capabilities.rs`; SUT impls in the composed components. Pure-slice
+//! impls return constants; the wide PBT delegates to `ReferenceState` / the real
+//! SUT.
 //!
-//! ## Status — DRAFT (Phase 1, hypothesis-verification stage)
-//!
-//! This module is currently *not wired into any consumer*. Phase 2 lands
-//! blanket impls on `ReferenceState`; Phase 3 migrates the seven
-//! transitions to bind on these traits; Phase 4 mirrors the same shape on
-//! the SUT side.
-//!
-//! ## Three axes × two access modes
+//! ## Three axes × two access modes (the editor/block/focus core)
 //!
 //! - **BlockTree**: in-memory block structure (parent/child, sort order,
 //!   content, tags). `RefBlockTree` (read) / `RefBlockTreeMut` (write).
@@ -20,17 +16,15 @@
 //! - **Focus**: per-region focused block id + cursor position.
 //!   `RefFocus` / `RefFocusMut`.
 //!
-//! Plus one administrative trait, [`RefLifecycle`], for gate predicates
-//! (`app_started`, `is_properly_setup`, `enable_loro`) that wide-PBT
-//! transitions check. Pure-slice impls return constants; wide-PBT impls
-//! delegate to `ReferenceState`.
+//! Plus [`RefLifecycle`] for gate predicates (`app_started`, `has_editor_buffer`,
+//! …) that transitions check, and the SUT write mirror ([`SutBlockTreeWrite`],
+//! [`SutEditorMirrorWrite`], [`SutFocusWrite`], [`SutQuiesce`]). SUT methods take
+//! only what they need — no `ref_state` leak (the SUT keeps its `doc_uri_map` and
+//! similar state via interior mutability).
 //!
-//! ## SUT side
-//!
-//! Symmetric mirror: [`SutBlockTreeWrite`], [`SutEditorMirrorWrite`],
-//! [`SutFocusWrite`], [`SutQuiesce`]. Methods take only what they need —
-//! no `ref_state` leak (wide PBT keeps its `doc_uri_map` and similar
-//! internal state via interior mutability on the SUT itself).
+//! Beyond that core, the file hosts the full projection/renderer/driver/Loro cap
+//! set the wide catalog needs; each trait's own doc explains what it observes and
+//! which invariants bind it.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -238,35 +232,137 @@ pub trait RefEditorMirrorMut: RefEditorMirror {
 
 // ─── Reference-side: Focus ───────────────────────────────────────────
 
-/// Read-side focus queries.
+/// `inv-navigation-focus`'s comparator, extracted verbatim from the former
+/// hand-written invariant body so `capability_pair!`'s `#[compare(with = ..)]`
+/// can auto-derive the wiring. The `current_focus` matview's per-region focus
+/// (SUT) must match the reference's navigation focus.
 ///
-/// `#[capmap_adapter]` hosts this on `CapMap` (fully sync, owned returns → no
-/// `#[async_trait]` wrapper; the existing `impl RefFocus for ReferenceState` is
-/// untouched). Needed so `inv-navigation-focus` / `inv-focus-roots` can select
-/// on `CapId::of::<dyn RefFocus>()` from a composed ref `CapMap`.
-#[holon_macros::capmap_adapter]
-pub trait RefFocus {
-    /// Expected focus-root ids per region as `(region_string, [root_id])`, for
-    /// `inv-focus-roots`. Region strings match the `focus_roots` matview;
-    /// already resolved into SUT id space by `with_resolved_doc_uris` (the
-    /// `open_pins` block_ids it derives from are remapped there).
-    fn expected_focus_root_rows(&self) -> Vec<(String, Vec<String>)>;
+/// A pure two-value function of the SUT rows and reference rows (no auxiliary
+/// cap reads) — a faithful 1:1 move of the old
+/// `bodies/navigation_focus::InvNavigationFocus::check` compare step. Both are
+/// `(region, block_id)` where `block_id` is `None` for a region navigated home;
+/// the ref rows are pre-resolved into SUT id space by `with_resolved_doc_uris`.
+pub fn compare_navigation_focus(
+    sut_rows: &[(String, Option<String>)],
+    ref_rows: &[(String, Option<String>)],
+) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet};
 
-    /// Per-region navigation focus as `(region_string, block_id_string)` for
-    /// the regions the reference has navigation history for, keyed by the SQL
-    /// region strings (matching the `current_focus` matview). `block_id` is
-    /// `None` for a region navigated home. Already resolved into SUT id space
-    /// by `with_resolved_doc_uris`. Used by `inv-navigation-focus`, which needs
-    /// LeftSidebar/RightSidebar granularity that [`CapRegion`] collapses, so it
-    /// keys by string rather than `CapRegion`.
-    fn navigation_focus_rows(&self) -> Vec<(String, Option<String>)>;
+    // region -> block_id (None = NULL/home). Presence of the key = the matview
+    // has a row for that region.
+    let sut_map: HashMap<String, Option<String>> = sut_rows.iter().cloned().collect();
 
-    /// Currently focused block in `region`. Wide PBT: per-region map;
-    /// pure slice: returns from a single field.
-    fn current_focus(&self, region: CapRegion) -> Option<EntityUri>;
+    for (region, expected) in ref_rows {
+        let has_row = sut_map.contains_key(region);
+        let row_block_id = sut_map.get(region).cloned().flatten();
+        match (has_row, expected) {
+            (true, Some(exp)) => {
+                if row_block_id.as_deref() != Some(exp.as_str()) {
+                    return Err(format!(
+                        "[inv-navigation-focus] region '{region}': expected focus {exp:?}, \
+                         matview has {row_block_id:?}"
+                    ));
+                }
+            }
+            (true, None) => {
+                if row_block_id.is_some() {
+                    return Err(format!(
+                        "[inv-navigation-focus] region '{region}': expected home (no focus), \
+                         matview has {row_block_id:?}"
+                    ));
+                }
+            }
+            (false, None) => {}
+            (false, Some(exp)) => {
+                return Err(format!(
+                    "[inv-navigation-focus] region '{region}' should have focus on {exp:?} \
+                     but has no row in the current_focus matview"
+                ));
+            }
+        }
+    }
 
-    /// Cursor position of the focused block's editor (if known).
-    fn focused_cursor(&self, region: CapRegion) -> Option<CapCursor>;
+    // Reverse direction: matview regions must be ⊆ ref regions — a focused row
+    // for a region the reference never navigated is a ghost. NULL rows (focus
+    // cleared / home) for an untracked region carry no focus and are tolerated.
+    let ref_regions: HashSet<&String> = ref_rows.iter().map(|(region, _)| region).collect();
+    for (region, block_id) in &sut_map {
+        if let Some(ghost) = block_id {
+            if !ref_regions.contains(region) {
+                return Err(format!(
+                    "[inv-navigation-focus] ghost row: current_focus matview has region \
+                     '{region}' focused on {ghost:?}, but the reference has no navigation \
+                     history for that region"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// `capability_pair!` single-sources the focus read duality: the SUT-side
+// `current_focus`/`focus_roots` matview projection ([`SutFocus`],
+// async, CDC-quiesced) and the reference navigation-focus model ([`RefFocus`],
+// sync, owned). The `#[compare]` method auto-derives `inv-navigation-focus`
+// (id preserved — it is a `WIDE_REQUIRED` invariant asserted by id in the
+// slice teeth) via [`compare_navigation_focus`]; `focus_roots` fan-out stays a
+// hand-written invariant (it reads three SUT sources + a ref source, so it is
+// not a two-value compare) but its cap methods live here as `#[sut_only]` /
+// `#[ref_only]`. The stem `Focus` yields the trait names `SutFocus` / `RefFocus`.
+holon_macros::capability_pair! {
+    /// Focus read surface: SUT `current_focus`/`focus_roots`/`navigation_history`
+    /// projection (Turso, post-CDC-quiescence) vs the reference navigation-focus
+    /// model. `#[capmap_adapter]`-equivalent glue hosts both on `CapMap` (the SUT
+    /// trait async → `#[async_trait(?Send)]`; the reference trait fully sync/owned
+    /// → plain trait). SUT registered only where navigation is actually driven
+    /// through a `current_focus`/`focus_roots` projection (the frontend slice /
+    /// `full_headless`); a storage-only slice does NOT register it, so the focus
+    /// invariants honestly DESELECT there instead of passing vacuously.
+    pub trait Focus {
+        /// Rows of the `current_focus` matview as `(region, block_id)` (SUT) /
+        /// per-region navigation focus (reference). `block_id` is `None` for a
+        /// region navigated home (NULL in SQL). The reference keys by the SQL
+        /// region strings — LeftSidebar/RightSidebar granularity that
+        /// [`CapRegion`] collapses. Auto-compared by `inv-navigation-focus` via
+        /// [`compare_navigation_focus`].
+        #[compare(
+            sut = current_focus_rows,
+            ref = navigation_focus_rows,
+            id = "inv-navigation-focus",
+            with = crate::capabilities::compare_navigation_focus
+        )]
+        fn current_focus_rows(&self) -> Vec<(String, Option<String>)>;
+
+        /// Rows of the `focus_roots` matview as `(region, root_id)` — the
+        /// convergent truth-check for `inv-focus-roots`' CDC-lag downgrade.
+        #[sut_only]
+        fn focus_roots_rows(&self) -> Vec<(String, String)>;
+
+        /// Open rows of the BASE `navigation_history` table as `(region, block_id)`
+        /// — exactly the set the `focus_roots` matview projects from
+        /// (`WHERE closed_at IS NULL AND block_id IS NOT NULL`). Lets
+        /// `inv-focus-roots` distinguish a genuine matview/IVM drift (base no
+        /// longer has the row, matview still does) from a holon close-path bug
+        /// (base still has the row open, so the matview is *correctly* showing it).
+        #[sut_only]
+        fn nav_history_open_rows(&self) -> Vec<(String, String)>;
+
+        /// Expected focus-root ids per region as `(region_string, [root_id])`, for
+        /// `inv-focus-roots`. Region strings match the `focus_roots` matview;
+        /// already resolved into SUT id space by `with_resolved_doc_uris` (the
+        /// `open_pins` block_ids it derives from are remapped there).
+        #[ref_only]
+        fn expected_focus_root_rows(&self) -> Vec<(String, Vec<String>)>;
+
+        /// Currently focused block in `region`. Wide PBT: per-region map;
+        /// pure slice: returns from a single field.
+        #[ref_only]
+        fn current_focus(&self, region: CapRegion) -> Option<EntityUri>;
+
+        /// Cursor position of the focused block's editor (if known).
+        #[ref_only]
+        fn focused_cursor(&self, region: CapRegion) -> Option<CapCursor>;
+    }
 }
 
 /// Focus mutations.
@@ -707,7 +803,7 @@ pub trait SutLoro {
 /// App-runtime error log — the SUT's general "did anything error during the
 /// run" surface, distinct from the component-specific error checks (the Loro
 /// log in [`SutLoroLog`], the ViewModel/frontend error widgets in
-/// [`SutViewModel`]/[`SutLayout`]). Today this is the Flutter/event publish
+/// [`SutViewSelection`]/[`SutLayout`]). Today this is the Flutter/event publish
 /// errors logged during the initial document sync; `inv-no-errors` asserts the
 /// count is zero. This is the home for any future non-component-specific error
 /// source.
@@ -789,35 +885,15 @@ pub trait SutSqlProjection {
     async fn block_content(&self, id: &EntityUri) -> Option<String>;
 }
 
-/// SUT-side navigation-focus projection surface (C-5 split off
-/// [`SutSqlProjection`], 2026-07-02). Kept a SEPARATE cap so a storage-only slice
-/// (no navigation driven, e.g. `sql_slice`) does NOT register it and the
-/// focus/navigation invariants honestly DESELECT there — instead of selecting
-/// against an honest-empty `SutSqlProjection` focus family and passing vacuously
-/// (empty focus vs an unnavigated ref). Registered only where navigation is
-/// actually driven through a Turso `current_focus`/`focus_roots`/
-/// `navigation_history` projection (the frontend slice / `full_headless`).
-/// Methods reflect Turso state AFTER CDC quiescence — invariants `quiesce()` first.
-#[holon_macros::capmap_adapter]
-pub trait SutFocusProjection {
-    /// Rows of the `current_focus` matview as `(region, block_id)`. `block_id`
-    /// is `None` for a region navigated home (NULL in SQL). Used by
-    /// `inv-navigation-focus` to compare the SUT's per-region navigation focus
-    /// against the reference.
-    async fn current_focus_rows(&self) -> Vec<(String, Option<String>)>;
-
-    /// Rows of the `focus_roots` matview as `(region, root_id)` — the
-    /// convergent truth-check for `inv-focus-roots`' CDC-lag downgrade.
-    async fn focus_roots_rows(&self) -> Vec<(String, String)>;
-
-    /// Open rows of the BASE `navigation_history` table as `(region, block_id)`
-    /// — exactly the set the `focus_roots` matview projects from
-    /// (`WHERE closed_at IS NULL AND block_id IS NOT NULL`). Lets
-    /// `inv-focus-roots` distinguish a genuine matview/IVM drift (base no longer
-    /// has the row, matview still does) from a holon close-path bug (base still
-    /// has the row open, so the matview is *correctly* showing it).
-    async fn nav_history_open_rows(&self) -> Vec<(String, String)>;
-}
+// `SutFocus` is the SUT side of the focus read duality, single-sourced
+// with `RefFocus` by the `capability_pair! { pub trait Focus … }` above. It is a
+// SEPARATE cap from `SutSqlProjection` so a storage-only slice (no navigation
+// driven, e.g. `sql_slice`) does NOT register it and the focus/navigation
+// invariants honestly DESELECT there instead of passing vacuously against an
+// unnavigated ref. Registered only where navigation is actually driven through a
+// Turso `current_focus`/`focus_roots`/`navigation_history` projection (the
+// frontend slice / `full_headless`); methods reflect Turso state AFTER CDC
+// quiescence.
 
 /// SUT-side typed block-snapshot surface for `inv-backend-blocks-match-ref`.
 ///
@@ -865,13 +941,7 @@ pub trait SutLoroTaskState {
     async fn loro_task_state_of(&self, block_id: &str) -> Option<String>;
 }
 
-// ─── SutOrgFileWrite ── DELETED (E3, 2026-06-24) ─────────────────────
-// Was a thin redundant wrapper that delegated straight to
-// `local_caps::SutFixtureFs::write_org_file`; the `WriteOrgFile` transition
-// binds `SutFixtureFs` directly, so this coarse trait had zero callers,
-// transitions, invariants, or composed hosts. Fully vestigial → removed.
-
-// ─── Phase 6c — ViewModel/Renderer cluster ───────────────────────────
+// ─── ViewModel/Renderer cluster ──────────────────────────────────────
 //
 // Binds: ViewModel-touching invariants (`inv-viewmodel-*`,
 // `inv-frontend-root-not-error`). Pure slice doesn't bind this.
@@ -929,30 +999,107 @@ pub struct FrontendRootVm {
     pub entity_ids: Vec<EntityUri>,
 }
 
-#[holon_macros::capmap_adapter]
-pub trait SutViewModel {
-    /// Drain pending ViewModel emissions. Drain-once semantics —
-    /// after drain, subsequent calls return `Vec::new` until next emit.
-    /// Phase 7 `CachingProxy` memoizes this per-tick.
-    async fn drain_vm_emissions(&mut self) -> Vec<String>;
-
-    /// Count Error widget nodes in the headless `ReactiveEngine`'s rendered
-    /// ViewModel tree. Returns `None` when the headless engine is not
-    /// installed or the tree isn't ready to inspect yet (loading / placeholder
-    /// / shadow-interpretation panicked). Returns `Some(n)` otherwise.
+// ─── ViewSelection: SUT ViewModel × reference render, single-sourced ──
+//
+// `capability_pair!` emits BOTH read traits from one declaration:
+//   - `SutViewSelection` (async, owned returns) — the SUT-side ViewModel surface
+//   - `RefViewSelection`    (sync, verbatim)       — the reference render-expr surface
+// plus the CapMap hosting glue for each, plus (for the `#[compare]` method)
+// the auto-derived `inv-pair-view-selection-current-view` equality invariant
+// (constructor `inv_pair_view_selection_current_view()`). The stem `ViewSelection`
+// yields the trait names `SutViewSelection` / `RefViewSelection`.
+//
+// Methods are written ONCE, sync; the macro adds `async` for the SUT side.
+// `drain_vm_emissions` keeps `&mut self` (a drain, not a snapshot): the CapMap
+// forwarder fail-louds on it — the concrete SUT provides it in the apply phase.
+holon_macros::capability_pair! {
+    /// Render-expression / view-selection metadata, SUT ViewModel vs reference.
     ///
-    /// `Some(0)` means "the rendered tree has no Error widgets"; the
-    /// `inv-viewmodel-no-error-widgets` body asserts on that.
-    async fn headless_error_node_count(&self) -> Option<usize>;
+    /// The SUT side (`SutViewSelection`) is the headless `ReactiveEngine`'s rendered
+    /// ViewModel surface; the reference side (`RefViewSelection`) is the production
+    /// `ReferenceState`. `#[capmap_adapter]`-equivalent glue hosts both on
+    /// `CapMap` (the SUT trait async → `#[async_trait(?Send)]`; the reference
+    /// trait fully sync/owned → plain trait, existing `impl … for ReferenceState`
+    /// untouched).
+    pub trait ViewSelection {
+        /// The currently selected view mode (e.g. `"all"`, `"today"`) — UI
+        /// view-selection state. Auto-compared SUT-vs-reference by
+        /// `inv-pair-view-selection-current-view`.
+        #[compare]
+        fn current_view(&self) -> String;
 
-    /// The currently selected view mode (e.g. `"all"`, `"today"`) — UI
-    /// view-selection state. `inv-view-selection` compares it to the
-    /// reference's [`RefRender::current_view`].
-    async fn current_view(&self) -> String;
+        /// Drain pending ViewModel emissions. Drain-once semantics —
+        /// after drain, subsequent calls return `Vec::new` until next emit.
+        /// Phase 7 `CachingProxy` memoizes this per-tick. `&mut self`, so the
+        /// CapMap forwarder fail-louds — use the concrete SUT in the apply phase.
+        #[sut_only]
+        fn drain_vm_emissions(&mut self) -> Vec<String>;
+
+        /// Count Error widget nodes in the headless `ReactiveEngine`'s rendered
+        /// ViewModel tree. Returns `None` when the headless engine is not
+        /// installed or the tree isn't ready to inspect yet (loading / placeholder
+        /// / shadow-interpretation panicked). Returns `Some(n)` otherwise.
+        ///
+        /// `Some(0)` means "the rendered tree has no Error widgets"; the
+        /// `inv-viewmodel-no-error-widgets` body asserts on that.
+        #[sut_only]
+        fn headless_error_node_count(&self) -> Option<usize>;
+
+        /// Name of the active render expression for `region` (e.g. "tree",
+        /// "list"). `None` when no render source block is set up yet.
+        /// Wide PBT: `ReferenceState::active_render_expr_name(region)`.
+        ///
+        /// NOTE: this is *main-panel-preferring* — wide PBT returns
+        /// `main_panel_render_expr().or(root_render_expr())`. For the
+        /// `inv-viewmodel-root-matches-render-expr` check, which compares the
+        /// SUT *root* widget, use `root_render_expr_name()` instead — the two
+        /// diverge when a distinct main-panel render expr is set.
+        #[ref_only]
+        fn active_render_expr_name(&self, region: CapRegion) -> Option<String>;
+
+        /// Function-call name of the ROOT layout's render expression
+        /// specifically (NOT main-panel-preferring). `None` when no root
+        /// render source block is set up, OR when the root render expr is not
+        /// a `FunctionCall`. Callers distinguish those two cases via
+        /// `has_root_render_expr()`. Wide PBT: the `FunctionCall { name, .. }`
+        /// of `ReferenceState::root_render_expr()`.
+        #[ref_only]
+        fn root_render_expr_name(&self) -> Option<String>;
+
+        /// True if the reference model has a root render expression at all.
+        /// Invariants gate on this before inspecting ViewModel structure.
+        #[ref_only]
+        fn has_root_render_expr(&self) -> bool;
+
+        /// Visible column names of the ROOT render expression — the column set
+        /// `inv-viewmodel-decompiled-rows-match-query` filters data rows to.
+        /// Wide PBT: `root_render_expr().map(|e| e.visible_columns()).unwrap_or_default()`.
+        /// Empty when there's no root render expr.
+        #[ref_only]
+        fn root_visible_columns(&self) -> Vec<String>;
+
+        /// Semantic id of the layout's main-panel container block, when the
+        /// active layout is a multi-region layout (e.g. the 3-column layout).
+        /// `None` in layout-less mode. Used by
+        /// `inv-viewmodel-root-matches-render-expr` to locate the main-panel
+        /// subtree in the SUT widget snapshot without hard-coding the layout's
+        /// container id. Wide PBT: `ReferenceState::main_panel_block_id()`.
+        #[ref_only]
+        fn main_panel_block_id(&self) -> Option<EntityUri>;
+
+        /// Function-call name of the MAIN PANEL's render expression — the content
+        /// the main panel should render in a multi-region layout. Falls back to
+        /// the root render expr when no distinct main-panel render expr is set.
+        /// `None` when neither resolves to a `FunctionCall`. Wide PBT:
+        /// `ReferenceState::main_panel_render_expr().or(root_render_expr())`'s
+        /// `FunctionCall { name, .. }`.
+        #[ref_only]
+        fn main_panel_render_expr_name(&self) -> Option<String>;
+    }
 }
 
-/// Windowed-only root-ViewModel resolution surface (C-5 Tier-2 split off
-/// [`SutViewModel`], 2026-07-02). Kept a SEPARATE cap because a live gpui
+/// Windowed-only root-ViewModel resolution surface. A SEPARATE cap from
+/// [`SutViewSelection`] because a live gpui
 /// `ReactiveEngine` is the only faithful source: the headless keystone has no
 /// window, so [`HeadlessFrontendComponent`] does NOT register this cap and
 /// `inv-frontend-engine` / `inv-frontend-root-not-error` honestly DESELECT
@@ -980,8 +1127,8 @@ pub trait SutFrontendEngine {
     async fn frontend_root_is_error(&self) -> bool;
 }
 
-/// Windowed-only ViewModel streaming-emission observer surface (C-5 Tier-1
-/// split off [`SutViewModel`], 2026-07-02). These three methods reconstruct the
+/// Windowed-only ViewModel streaming-emission observer surface, a SEPARATE cap
+/// from [`SutViewSelection`]. These three methods reconstruct the
 /// intermediate-emission / provider-cache / live-tree behaviour of the GPUI
 /// frontend directly from a live `ReactiveEngine`; a headless slice with no
 /// window genuinely has no such emission surface, so
@@ -1414,19 +1561,11 @@ pub trait SutOrgRead {
     async fn org_block_snapshot(&self) -> Vec<holon_api::Block>;
 }
 
-// ─── SutQueryCompile / SutLifecycle ── DELETED (E3, 2026-06-24) ──────
-// Both fully vestigial. `SutQueryCompile` was never wired (the E2ESut impl
-// was `unimplemented!()`); no transition/generator ever bound it. `SutLifecycle`
-// (coarse `&mut self` start/restart) was superseded by the finer
-// `local_caps::SutAppLifecycle`, which is what the `StartApp`/`SimulateRestart`
-// transitions actually bind — the coarse trait had zero method callers. Removed.
-
-// ─── Reference-side: extended caps added in Phase 7 (Stage B) ───────
+// ─── Reference-side: extended read-only projections ──────────────────
 //
-// These traits surface `ReferenceState` fields that are needed by the
-// deferred invariant bodies. Each is a thin read-only projection; the
-// blanket impl in `reference_capabilities.rs` delegates directly to the
-// corresponding field/method on `ReferenceState`.
+// Each surfaces `ReferenceState` fields that invariant bodies need. Thin
+// read-only projections; the blanket impl in `reference_capabilities.rs`
+// delegates directly to the corresponding field/method on `ReferenceState`.
 
 /// Focus-roots expected by the reference model — per-region set of
 /// block ids that the reactive engine should use as pin roots.
@@ -1480,64 +1619,6 @@ pub trait RefLayout {
     /// `ReferenceState::focused_entity_id.contains_key(region)`; pure slice:
     /// `false`.
     fn region_entity_focused(&self, region: CapRegion) -> bool;
-}
-
-/// Render-expression metadata exposed for ViewModel invariants.
-///
-/// `#[capmap_adapter]` hosts this on `CapMap` (fully sync, owned returns → no
-/// `#[async_trait]`, emits `CapName` + `impl RefRender for CapMap`). The
-/// production `ReferenceState` provides it; the composed ref `CapMap` forwards.
-#[holon_macros::capmap_adapter]
-pub trait RefRender {
-    /// Name of the active render expression for `region` (e.g. "tree",
-    /// "list"). `None` when no render source block is set up yet.
-    /// Wide PBT: `ReferenceState::active_render_expr_name(region)`.
-    ///
-    /// NOTE: this is *main-panel-preferring* — wide PBT returns
-    /// `main_panel_render_expr().or(root_render_expr())`. For the
-    /// `inv-viewmodel-root-matches-render-expr` check, which compares the
-    /// SUT *root* widget, use `root_render_expr_name()` instead — the two
-    /// diverge when a distinct main-panel render expr is set.
-    fn active_render_expr_name(&self, region: CapRegion) -> Option<String>;
-
-    /// Function-call name of the ROOT layout's render expression
-    /// specifically (NOT main-panel-preferring). `None` when no root
-    /// render source block is set up, OR when the root render expr is not
-    /// a `FunctionCall`. Callers distinguish those two cases via
-    /// `has_root_render_expr()`. Wide PBT: the `FunctionCall { name, .. }`
-    /// of `ReferenceState::root_render_expr()`.
-    fn root_render_expr_name(&self) -> Option<String>;
-
-    /// The currently selected view mode (e.g. `"all"`, `"today"`) — the
-    /// reference side of `inv-view-selection`. Wide PBT:
-    /// `ReferenceState::current_view()`.
-    fn current_view(&self) -> String;
-
-    /// True if the reference model has a root render expression at all.
-    /// Invariants gate on this before inspecting ViewModel structure.
-    fn has_root_render_expr(&self) -> bool;
-
-    /// Visible column names of the ROOT render expression — the column set
-    /// `inv-viewmodel-decompiled-rows-match-query` filters data rows to.
-    /// Wide PBT: `root_render_expr().map(|e| e.visible_columns()).unwrap_or_default()`.
-    /// Empty when there's no root render expr.
-    fn root_visible_columns(&self) -> Vec<String>;
-
-    /// Semantic id of the layout's main-panel container block, when the
-    /// active layout is a multi-region layout (e.g. the 3-column layout).
-    /// `None` in layout-less mode. Used by
-    /// `inv-viewmodel-root-matches-render-expr` to locate the main-panel
-    /// subtree in the SUT widget snapshot without hard-coding the layout's
-    /// container id. Wide PBT: `ReferenceState::main_panel_block_id()`.
-    fn main_panel_block_id(&self) -> Option<EntityUri>;
-
-    /// Function-call name of the MAIN PANEL's render expression — the content
-    /// the main panel should render in a multi-region layout. Falls back to
-    /// the root render expr when no distinct main-panel render expr is set.
-    /// `None` when neither resolves to a `FunctionCall`. Wide PBT:
-    /// `ReferenceState::main_panel_render_expr().or(root_render_expr())`'s
-    /// `FunctionCall { name, .. }`.
-    fn main_panel_render_expr_name(&self) -> Option<String>;
 }
 
 /// A single watch-result row, field name → stringified value. `None`
@@ -1708,20 +1789,3 @@ where
     }
     commit_active_editor_if_changed(state)
 }
-
-// ─── Additional cross-cuts discovered in Phase 1 (P1.3 spike) ────────
-//
-// Candidates known from code reading:
-// - focus-shift on tree mutation (Indent/Outdent/Split do
-//   `state.focused_block = Some(new_id)` after mutation — pattern
-//   already in `split_block.rs:123-129`). Currently inlined per
-//   transition; could become a free function
-//   `fn refocus_after_split<R: RefFocusMut>(state: &mut R, new_id: EntityUri, region: CapRegion)`.
-// - sibling re-key on join (join_block mutates parent's child order;
-//   pure-slice impl can keep a Vec and recompute, wide PBT uses
-//   gen_key_between).
-// - descendant invalidation on outdent (Outdent moves a block up a
-//   level; any cached descendant set goes stale).
-//
-// Final enumeration is a P1.3 deliverable. Trait surface above is a
-// minimum-viable set — additions widen it, not break it.

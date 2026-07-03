@@ -203,17 +203,17 @@ impl SutLoro for E2ESut {
 // which is what the `WriteOrgFile` transition binds directly; the coarse trait had
 // zero callers. Trait removed from pbt-core.
 
-// ─── SutViewModel: DELETED (E3, 2026-06-25) ───────────────────────────
+// ─── SutViewSelection: DELETED (E3, 2026-06-25) ───────────────────────────
 // The headless ViewModel read surface is relocated off `E2ESut` — it is no
 // longer in `WideProxyCaps`, the native proxy registry, or any native dispatch
 // path. Its invariant bodies (`inv-view-selection`, `inv-frontend-engine`,
 // `inv-frontend-root-not-error`, `inv-live-tree-matches-fresh`,
 // `inv-viewmodel-no-error-widgets`, `inv-value-fn-provider-{identity,arg-variance-13}`,
-// and the dual `SutViewModel + SutLayout` bodies `inv-frontend-no-error-widgets` /
+// and the dual `SutViewSelection + SutLayout` bodies `inv-frontend-no-error-widgets` /
 // `inv-frontend-bounds-rendered`) now run only via the composed catalog:
-// `full_headless` (HeadlessFrontendComponent) hosts `SutViewModel`, exercised every
+// `full_headless` (HeadlessFrontendComponent) hosts `SutViewSelection`, exercised every
 // tick by `general_e2e_composed_pbt`; the windowed dual bodies are also covered by
-// `run_windowed_composed_check`. See `NATIVE_ONLY_EXCLUDED` + the `SutViewModel` row
+// `run_windowed_composed_check`. See `NATIVE_ONLY_EXCLUDED` + the `SutViewSelection` row
 // in `E1_RELOCATED_CAP_COVERAGE`. (`SutLayout`/`SutDriver` are NOT deleted — they
 // remain load-bearing for E2ESut's windowed input/transition-apply shell until E5.)
 
@@ -221,11 +221,11 @@ impl SutLoro for E2ESut {
 
 impl E2ESut {
     /// Builder services for an *independent* (fresh) headless re-interpret in the
-    /// `SutViewModel` render invariants. The Turso wiring re-interprets through a
+    /// `SutViewSelection` render invariants. The Turso wiring re-interprets through a
     /// fresh `HeadlessBuilderServices` over its `BackendEngine` (preserving the
     /// established independence from the live reactive state); the no-Turso wiring
     /// has no engine, so it re-interprets through the reactive engine built over
-    /// `block_query` — the only builder-services it carries. The `SutViewModel`
+    /// `block_query` — the only builder-services it carries. The `SutViewSelection`
     /// callers (`headless_error_node_count` etc.) populate the reactive engine
     /// before calling here. `HeadlessBuilderServices` is Turso-only by
     /// construction, so the selection keys off the explicit storage backend, not
@@ -238,7 +238,7 @@ impl E2ESut {
             holon::di::StorageSelector::LoroMemory => {
                 self.render.reactive_engine.borrow().clone().expect(
                     "render_builder_services: no-Turso reactive engine must be set \
-                     (the SutViewModel caller watches the root first)",
+                     (the SutViewSelection caller watches the root first)",
                 ) as std::sync::Arc<dyn BuilderServices>
             }
         }

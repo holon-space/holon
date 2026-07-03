@@ -1,7 +1,7 @@
 //! `inv-live-tree-matches-fresh` — the live (incrementally-updated) ViewModel
-//! tree equals a fresh rebuild (reads [`SutViewModel::live_vs_fresh_tree_diff`]):
+//! tree equals a fresh rebuild (reads [`SutViewSelection::live_vs_fresh_tree_diff`]):
 //! catches `set_data` failing to propagate updated props to children. `Needs
-//! SutViewModel` only (no reference): a SUT-internal coherence property. Selected
+//! SutViewSelection` only (no reference): a SUT-internal coherence property. Selected
 //! by any slice with a ViewModel — today the frontend slice's real headless
 //! `ReactiveEngine`, where the live/fresh diff is meaningful.
 

@@ -30,9 +30,9 @@ use std::time::Duration;
 
 use holon_api::{EntityUri, Region};
 use holon_pbt_core::capabilities::{
-    RefFocus, SutBackend, SutFocusProjection, SutFocusWrite, SutHistoryWrite, SutMcpEmit,
+    RefFocus, SutBackend, SutFocus, SutFocusWrite, SutHistoryWrite, SutMcpEmit,
     SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutRenderer,
-    SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister, SutWatchRows,
+    SutSqlProjection, SutViewControl, SutViewSelection, SutWatchRegister, SutWatchRows,
 };
 use holon_pbt_core::composition::{CapInvariant, CapMap, RunReport, run_selected};
 use holon_pbt_core::{TransitionImpl, TransitionRef};
@@ -82,10 +82,10 @@ const _: fn() = || {
             + SutWatchRegister
             + SutWatchRows
             + SutSqlProjection
-            + SutFocusProjection
+            + SutFocus
             + SutBackend
             + SutRenderer
-            + SutViewModel
+            + SutViewSelection
             + SutOrgRead
             + SutOrgRender,
     >() {

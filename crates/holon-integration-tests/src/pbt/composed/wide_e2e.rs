@@ -155,8 +155,7 @@ pub fn wide_ref() -> ReferenceState {
 /// The caps the widest headless wiring (`full_headless`) legitimately does NOT provide,
 /// so the catalog invariants that `Needs` them deselect headless WITHOUT that being a
 /// silent-deselection bug. Each entry is `(cap-name, why)`. This is the ONLY hand-maintained
-/// list the `wide_cap_presence_guard` consults — the cap-level replacement for the old
-/// per-invariant-id `WIDE_REQUIRED_INVARIANTS` tripwire.
+/// list the `wide_cap_presence_guard` consults.
 ///
 /// All four are the windowed/GPUI rung: they need a live gpui window (thread affinity
 /// `compose_sut` cannot satisfy — it asserts `!Actor::UI` in `builder.rs`) and are supplied
@@ -164,11 +163,6 @@ pub fn wide_ref() -> ReferenceState {
 /// deselect headless AND run only in the windowed harness — NOT a silent-deselection bug. A cap
 /// that SHOULD be headless-present but isn't is NOT allowed here; it is a real finding the guard
 /// must surface (that is the whole point of listing each one explicitly, with a reason).
-///
-/// Note: `SutFrontendEngine` / `SutFrontendEmissions` were STALE entries in the deleted
-/// `WIDE_REQUIRED_INVARIANTS` — listed as "required every tick" yet silently filtered out
-/// headless (the headless full_headless map never provided them post C-5 split), the exact
-/// tripwire-smell this cap-level guard replaces.
 #[cfg(test)]
 const WIDE_HEADLESS_ABSENT_CAPS: &[(&str, &str)] = &[
     (
@@ -184,13 +178,13 @@ const WIDE_HEADLESS_ABSENT_CAPS: &[(&str, &str)] = &[
     ),
     (
         "SutFrontendEngine",
-        "windowed-only (C-5 split): root-VM liveness reads (frontend_root_vm / \
+        "windowed-only: root-VM liveness reads (frontend_root_vm / \
          frontend_root_is_error / live_vs_fresh_tree_diff); the headless frontend registers no \
          window engine, only GpuiFrontendEngineComponent does",
     ),
     (
         "SutFrontendEmissions",
-        "windowed-only (C-5 split): drain_vm_emissions / provider_stability_report need the \
+        "windowed-only: drain_vm_emissions / provider_stability_report need the \
          live windowed frontend engine; the headless ReactiveEngine returns honest-empty and \
          deselects rather than faking",
     ),
@@ -878,9 +872,8 @@ mod tests {
         }
     }
 
-    /// CAP-PRESENCE GUARD (replaces the hand-maintained `WIDE_REQUIRED_INVARIANTS` per-id
-    /// tripwire): the WIDEST wiring (`full_headless`) must PROVIDE every cap the shared
-    /// catalog's invariants declare in their `Needs` — so every catalog invariant is
+    /// CAP-PRESENCE GUARD: the WIDEST wiring (`full_headless`) must PROVIDE every cap the
+    /// shared catalog's invariants declare in their `Needs` — so every catalog invariant is
     /// guaranteed SELECTED (and thus run, via the per-draw `required_invariants` floor) in the
     /// wide config. Deselection has exactly one cause — a `Needs` cap absent from the CapMap —
     /// so this guard catches it at the cap level, with no per-invariant-id list to keep in sync.

@@ -5,12 +5,12 @@
 //! failures (matview fault, CDC delivery bug, shadow-interpretation
 //! panic) that leave Error widgets in the user-visible tree.
 //!
-//! Capability: `SutViewModel::headless_error_node_count` returns
+//! Capability: `SutViewSelection::headless_error_node_count` returns
 //! `Some(n)` with the count, or `None` when the headless engine
 //! isn't installed or its tree isn't yet ready (loading / placeholder
 //! / interpretation panicked). `None` → `Skipped`.
 
-use holon_pbt_core::capabilities::SutViewModel;
+use holon_pbt_core::capabilities::SutViewSelection;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvViewmodelNoErrorWidgets;
@@ -22,7 +22,7 @@ impl InvViewmodelNoErrorWidgets {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvViewmodelNoErrorWidgets
 where
-    S: SutViewModel,
+    S: SutViewSelection,
 {
     fn id(&self) -> InvariantId {
         Self::ID

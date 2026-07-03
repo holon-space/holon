@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use holon_pbt_core::capabilities::{SutFocusProjection, SutQueryResults, SutSqlProjection};
+use holon_pbt_core::capabilities::{SutFocus, SutQueryResults, SutSqlProjection};
 use holon_pbt_core::composition::{CapMap, Config};
 
 use super::block_query_component::BlockQueryFrontendComponent;
@@ -47,8 +47,8 @@ pub fn block_query_degraded(component: Arc<BlockQueryFrontendComponent>) -> CapM
 pub fn frontend_navigation_wide(component: Arc<HeadlessFrontendComponent>) -> CapMap {
     let mut caps = frontend_wide(component.clone());
     caps.insert(component.clone() as Arc<dyn SutSqlProjection>);
-    // `SutFocusProjection` (C-5 split, 2026-07-02): the focus/nav matview reads the
+    // `SutFocus` (C-5 split, 2026-07-02): the focus/nav matview reads the
     // focus invariants need. Registered only on this navigation-driving CapMap.
-    caps.insert(component as Arc<dyn SutFocusProjection>);
+    caps.insert(component as Arc<dyn SutFocus>);
     caps
 }

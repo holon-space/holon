@@ -14,7 +14,7 @@
 //!
 //! It also provides [`SutBackend`] over `block_raw` (so the block-tree catalog
 //! runs over this realization too, §6) and hosts the sync owned-return
-//! [`RefRender`] cap (folded in here so it is never dead code, §F4).
+//! [`RefViewSelection`] cap (folded in here so it is never dead code, §F4).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -28,9 +28,9 @@ use holon_frontend::reactive::{BuilderServices, ReactiveEngine, ReactiveRendered
 use holon_frontend::{FrontendSession, ReactiveEngineDriver, UserDriver};
 use holon_pbt_core::capabilities::{
     CapRegion, SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutEditorMirrorWrite,
-    SutErrorLog, SutFocusProjection, SutFocusWrite, SutHistoryWrite, SutMcpEmit,
+    SutErrorLog, SutFocus, SutFocusWrite, SutHistoryWrite, SutMcpEmit,
     SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults, SutRenderer,
-    SutSqlProjection, SutViewControl, SutViewModel, SutWatchRegister, SutWatchRows, WatchRow,
+    SutSqlProjection, SutViewControl, SutViewSelection, SutWatchRegister, SutWatchRows, WatchRow,
     WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
@@ -92,7 +92,7 @@ pub struct HeadlessFrontendComponent {
     /// render in the exact order the `FileSyncController` writes them).
     injector: fluxdi::Injector,
     /// The active view/mode name (`SutViewControl::switch_view` writes it,
-    /// `SutViewModel::current_view` reads it). Honest tracked state replacing the
+    /// `SutViewSelection::current_view` reads it). Honest tracked state replacing the
     /// former hardcoded `"all"` stub — a faithful port of `TestEnvironment`'s
     /// `current_view` (default `"all"`). Drives the `SwitchView` PBT transition's
     /// effect so the view-selection oracle observes it on the composed path.
@@ -874,7 +874,7 @@ impl SutBackend for HeadlessFrontendComponent {
 }
 
 #[async_trait::async_trait(?Send)]
-impl SutViewModel for HeadlessFrontendComponent {
+impl SutViewSelection for HeadlessFrontendComponent {
     /// Snapshot the headless engine's rendered ViewModel tree and count `Error`
     /// widgets — the **real** `inv-viewmodel-no-error-widgets` path (faithful
     /// port of `E2ESut::headless_error_node_count`). `None` when the root isn't
@@ -1395,12 +1395,12 @@ impl SutSqlProjection for HeadlessFrontendComponent {
     }
 }
 
-/// `SutFocusProjection` over the live Turso navigation projection — the real
+/// `SutFocus` over the live Turso navigation projection — the real
 /// teeth for `inv-navigation-focus` / `inv-focus-roots`. Split off
 /// `SutSqlProjection` (C-5, 2026-07-02) so a storage-only slice that drives no
 /// navigation does not register it and those invariants deselect honestly there.
 #[async_trait::async_trait(?Send)]
-impl SutFocusProjection for HeadlessFrontendComponent {
+impl SutFocus for HeadlessFrontendComponent {
     async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
         self.sql_query("SELECT region, block_id FROM current_focus")
             .await
@@ -1465,7 +1465,7 @@ impl SutWatchRegister for HeadlessFrontendComponent {
 
 /// `SutViewControl` (the `SwitchView` transition): set the active view name.
 /// Faithful port of `E2ESut`/`TestEnvironment::switch_view` — a pure interior-mut
-/// write the `SutViewModel::current_view` oracle reads back.
+/// write the `SutViewSelection::current_view` oracle reads back.
 #[async_trait::async_trait(?Send)]
 impl SutViewControl for HeadlessFrontendComponent {
     async fn switch_view(&self, view_name: &str) {
@@ -2003,7 +2003,7 @@ impl HeadlessFrontendComponent {
     pub(crate) fn register_non_gesture(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self.clone() as Arc<dyn SutErrorLog>);
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
-        caps.insert(self.clone() as Arc<dyn SutViewModel>);
+        caps.insert(self.clone() as Arc<dyn SutViewSelection>);
         caps.insert(self.clone() as Arc<dyn SutBackend>);
         caps.insert(self.clone() as Arc<dyn SutWatchRows>);
         caps.insert(self.clone() as Arc<dyn SutOrgRead>);

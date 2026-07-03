@@ -264,7 +264,7 @@ impl SutSqlProjection for SqlProjectionComponent {
             .and_then(|r| Self::cell(&r, "content"))
     }
 }
-// No `SutFocusProjection` impl: this slice drives no navigation, so the
+// No `SutFocus` impl: this slice drives no navigation, so the
 // focus/nav invariants (`inv-navigation-focus`/`inv-focus-roots`) DESELECT here
 // honestly (C-5, 2026-07-02) — no honest-empty focus family to pass vacuously.
 

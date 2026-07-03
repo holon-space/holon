@@ -38,7 +38,7 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         invariants::task_state_storage_coherence::wire(),
         // Windowed (E4): selected only by the windowed slice
         // (`window_slice::window_wide`), which supplies `SutLayout` +
-        // `SutViewModel` / `SutRenderer` over a live gpui `TestPlatform` window.
+        // `SutViewSelection` / `SutRenderer` over a live gpui `TestPlatform` window.
         invariants::frontend_bounds_rendered::wire(),
         invariants::displayed_text::wire_widget(),
         invariants::displayed_text::wire_viewmodel(),
@@ -46,7 +46,7 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // + `SutLayout`; no ref cap. Only the full windowed slice supplies both.
         invariants::window_focus::wire(),
         // Windowed no-error-widgets (laid-out tree + BoundsRegistry): needs
-        // `SutViewModel + SutLayout`, no ref. Windowed sibling of the headless
+        // `SutViewSelection + SutLayout`, no ref. Windowed sibling of the headless
         // `viewmodel_no_error_widgets`; only the windowed slice supplies `SutLayout`.
         invariants::frontend_no_error_widgets::wire(),
         // Windowed differential focus: engine global focus matches the ref model.
@@ -62,20 +62,26 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // SutFocusWrite): needs `SutSqlProjection` (+`SutBackend` for focus_roots)
         // + `RefFocus`. Only the frontend `navigation_pbt` slice drives real focus
         // data; storage slices select but pass vacuously (unnavigated ref).
-        invariants::navigation_focus::wire(),
+        // Auto-derived by `capability_pair! { pub trait Focus … }` in
+        // holon-pbt-core (the `#[compare(with = compare_navigation_focus, …)]`
+        // method). Id is pinned to `inv-navigation-focus` because the slice teeth
+        // assert it by id.
+        holon_pbt_core::capabilities::inv_pair_focus_current_focus_rows(),
         invariants::focus_roots::wire(),
         // ViewModel liveness/coherence invariants (Bundle C-remainder port,
-        // 2026-06-23): need `SutViewModel` (`frontend_engine`/`frontend_root_not_error`/
-        // `live_tree_matches_fresh`) or `SutViewModel + RefRender` (`view_selection`).
+        // 2026-06-23): need `SutViewSelection` (`frontend_engine`/`frontend_root_not_error`/
+        // `live_tree_matches_fresh`) or `SutViewSelection + RefViewSelection` (`view_selection`).
         // Only a slice with a real ViewModel (the frontend slice's headless
         // `ReactiveEngine`) supplies the SUT cap; storage slices deselect them.
         invariants::frontend_engine::wire(),
         invariants::frontend_root_not_error::wire(),
         invariants::live_tree_matches_fresh::wire(),
-        invariants::view_selection::wire(),
+        // Auto-derived by `capability_pair! { pub trait ViewSelection … }` in
+        // holon-pbt-core (the `#[compare] fn current_view` method).
+        holon_pbt_core::capabilities::inv_pair_view_selection_current_view(),
         // ViewModel value-fn provider invariants (Bundle C-remainder batch 2):
-        // `SutViewModel` + ref task-state/block-tree (`identity`) or layout/global-focus
-        // (`arg_variance_13`). Completes `SutViewModel`'s native-consumer coverage.
+        // `SutViewSelection` + ref task-state/block-tree (`identity`) or layout/global-focus
+        // (`arg_variance_13`). Completes `SutViewSelection`'s native-consumer coverage.
         invariants::value_fn_provider_identity::wire(),
         invariants::value_fn_provider_arg_variance_13::wire(),
         // Renderer cluster (Bundle C-remainder batch 2b): `SutRenderer` (+ ref

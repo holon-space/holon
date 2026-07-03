@@ -31,7 +31,7 @@ pub fn window_layout(geometry: Box<dyn GeometryProvider>) -> CapMap {
 }
 
 /// The full windowed slice: real geometry ([`SutLayout`]) **and** the ViewModel /
-/// renderer ([`SutViewModel`] + [`SutRenderer`]) of the **same** live window —
+/// renderer ([`SutViewSelection`] + [`SutRenderer`]) of the **same** live window —
 /// `geometry` is its `BoundsRegistry` clone, `engine` is the frontend
 /// [`ReactiveEngine`] it renders from. This is the composition that lets the
 /// windowed registry invariants (`inv-frontend-bounds-rendered`,
@@ -39,7 +39,7 @@ pub fn window_layout(geometry: Box<dyn GeometryProvider>) -> CapMap {
 /// geometry and the VM it is compared against come from one render pipeline.
 ///
 /// [`SutLayout`]: holon_pbt_core::capabilities::SutLayout
-/// [`SutViewModel`]: holon_pbt_core::capabilities::SutViewModel
+/// [`SutViewSelection`]: holon_pbt_core::capabilities::SutViewSelection
 /// [`SutRenderer`]: holon_pbt_core::capabilities::SutRenderer
 pub fn window_wide(geometry: Box<dyn GeometryProvider>, engine: Arc<ReactiveEngine>) -> CapMap {
     Config::new()
@@ -68,7 +68,7 @@ pub fn window_focus_wide(
 }
 
 /// E4 — the full windowed **input** SUT: [`window_focus_wide`]'s read caps
-/// (`SutLayout` + `SutViewModel` + `SutRenderer` + `SutDriver`) **plus** the
+/// (`SutLayout` + `SutViewSelection` + `SutRenderer` + `SutDriver`) **plus** the
 /// windowed input caps `SutBlockInteract` + `SutArrowNavigate`, driven through the
 /// live window's production `UserDriver` (`driver`). Because its `cap_set()` now
 /// carries the input caps, the value-level cap gate in
@@ -168,7 +168,7 @@ pub fn overlay_windowed_caps(
     Arc::new(GpuiWindowComponent::new(geometry)).register(&mut caps);
 
     // ★ C-5 windowed emission teeth (2026-07-02): the deferred base registered
-    // `SutViewModel` via the headless `HeadlessFrontendComponent`, which does NOT
+    // `SutViewSelection` via the headless `HeadlessFrontendComponent`, which does NOT
     // provide the live-engine root-VM / emission surfaces. Insert them here from a
     // `GpuiFrontendEngineComponent` over the SAME live window `engine` — the sole
     // providers of `SutFrontendEngine` / `SutFrontendEmissions` on this path, so the
