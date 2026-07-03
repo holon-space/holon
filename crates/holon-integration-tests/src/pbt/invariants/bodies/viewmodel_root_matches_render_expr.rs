@@ -65,11 +65,12 @@ fn panel_content_kind<'a>(panel: &'a WidgetSnapshot) -> Option<&'a str> {
 }
 
 /// A widget kind that does NOT represent a real, rendered content widget: the
-/// `widget_name().unwrap_or("unknown")` sentinel, an empty kind, or a known
-/// placeholder the frontend shows while a reactive watch hasn't delivered yet.
-/// Asserting against any of these is asserting against an unrendered node.
+/// `widget_name().unwrap_or("unknown")` sentinel, an empty kind (incl. the
+/// explicit `ViewKind::Empty` → `"empty"` mapping), or a known placeholder the
+/// frontend shows while a reactive watch hasn't delivered yet. Asserting
+/// against any of these is asserting against an unrendered node.
 fn is_not_ready_kind(kind: &str) -> bool {
-    matches!(kind, "unknown" | "" | "loading" | "spacer")
+    matches!(kind, "unknown" | "" | "empty" | "loading" | "spacer")
 }
 
 #[allow(async_fn_in_trait)]

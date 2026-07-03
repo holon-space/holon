@@ -830,15 +830,31 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
             params.insert(field.column().into(), field.param_value(new));
         }
     }
-    if old.source_language != new.source_language
-        && let Some(ref lang) = new.source_language
-    {
-        params.insert("source_language".into(), Value::String(lang.to_string()));
+    // Emit on ANY change, INCLUDING a clear (`Some → None`) — mirror `marks`
+    // below (`None → Value::Null`). The former `&& let Some(new) = …` guard
+    // could not represent clearing the field, so a Loro clear (e.g. a source
+    // block re-typed to text) neither propagated to SQL (the column stayed
+    // stale) NOR round-tripped through the intent vocabulary — `blocks_differ`
+    // saw the change but the update decoded to zero typed ops, tripping the
+    // `agrees_with_ops` divergence counter. Keeps this diff in lockstep with
+    // `blocks_differ`, which compares these fields with plain `!=`.
+    if old.source_language != new.source_language {
+        params.insert(
+            "source_language".into(),
+            match &new.source_language {
+                Some(lang) => Value::String(lang.to_string()),
+                None => Value::Null,
+            },
+        );
     }
-    if old.source_name != new.source_name
-        && let Some(ref name) = new.source_name
-    {
-        params.insert("source_name".into(), Value::String(name.clone()));
+    if old.source_name != new.source_name {
+        params.insert(
+            "source_name".into(),
+            match &new.source_name {
+                Some(name) => Value::String(name.clone()),
+                None => Value::Null,
+            },
+        );
     }
     if old_sort_key != new_sort_key {
         params.insert("sort_key".into(), Value::String(new_sort_key.clone()));
@@ -980,6 +996,51 @@ mod marks_outbound_tests {
         assert!(
             !params.contains_key("marks"),
             "no marks key when marks identical; got {params:?}"
+        );
+    }
+
+    fn block_with_source_lang(lang: Option<holon_api::SourceLanguage>) -> SnapshotBlock {
+        let mut b = Block::new_text(EntityUri::block("b1"), EntityUri::no_parent(), "q".to_string());
+        b.source_language = lang;
+        SnapshotBlock {
+            block: b,
+            sort_key: "A0".to_string(),
+        }
+    }
+
+    /// Regression for the `agrees_with_ops` divergence a parallel keystone soak
+    /// found ({create:8, update:2} → reencoded {create:8, update:1}): clearing
+    /// `source_language` (`Some → None`) was detected by `blocks_differ` but the
+    /// old `let Some(new) = …` guard emitted NO param, so the clear never
+    /// reached SQL and the update decoded to zero typed ops. Must now emit
+    /// `Null` (mirror `marks`), keeping the diff in lockstep with `blocks_differ`.
+    #[test]
+    fn block_diff_params_emits_null_when_source_language_cleared() {
+        let old = block_with_source_lang(Some(holon_api::SourceLanguage::Render));
+        let new = block_with_source_lang(None);
+        assert!(blocks_differ(&old, &new), "blocks_differ must see the clear");
+        let params = block_diff_params(&old, &new);
+        assert_eq!(
+            params.get("source_language"),
+            Some(&Value::Null),
+            "cleared source_language must emit a Null sentinel (else the clear is \
+             dropped from SQL and the update decodes to zero typed ops): {params:?}"
+        );
+    }
+
+    /// The end-to-end guard: a source_language-clear update must round-trip
+    /// through the typed intent vocabulary (no `agrees_with_ops` divergence).
+    #[test]
+    fn source_language_clear_update_agrees_with_ops() {
+        use holon_api::{agrees_with_ops, ChangeSet, Provenance};
+        let old = block_with_source_lang(Some(holon_api::SourceLanguage::Render));
+        let new = block_with_source_lang(None);
+        let ops = vec![("update".to_string(), block_diff_params(&old, &new))];
+        let cs = ChangeSet::from_ops(&ops, Provenance::default());
+        assert!(
+            agrees_with_ops(&cs, &ops).is_ok(),
+            "source_language clear must round-trip: {:?}",
+            agrees_with_ops(&cs, &ops)
         );
     }
 

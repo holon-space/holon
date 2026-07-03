@@ -40,7 +40,6 @@ use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::{E2ETransition, NavigateFocus};
-use crate::test_environment::pbt_quiet_floor;
 use holon::api::BackendEngine;
 
 /// The seed **page** the working blocks sit directly under. It is the focus root (so
@@ -98,62 +97,27 @@ impl WideHandle {
 ///    re-render `inv-blocks-match-ref/org` reads has drained).
 ///
 /// A CDC-only signal (the reverted lever 2) under-settled — Loro/org lagged and the
-/// block/org invariants diverged; this covers all three. Each stage is bounded by the
-/// shared `deadline`, so the whole thing never exceeds `budget`.
+/// block/org invariants diverged; this covers all three. Signal-level core shared with
+/// the `HeadlessFrontendComponent` boot settle: [`crate::pbt::convergence::converge_signals`].
 async fn converge_projections(handle: &WideHandle, budget: Duration) {
-    let deadline = tokio::time::Instant::now() + budget;
-    let quiet = pbt_quiet_floor();
-
-    // 1. Turso CDC drain: watermark stable for `quiet`, bounded by `deadline`.
-    if let Some(engine) = &handle.engine {
-        let db = engine.db_handle();
-        let mut last = db.cdc_emitted_watermark();
-        let mut stable_since = tokio::time::Instant::now();
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-            let now = db.cdc_emitted_watermark();
-            if now == last {
-                if stable_since.elapsed() >= quiet {
-                    break;
-                }
-            } else {
-                last = now;
-                stable_since = tokio::time::Instant::now();
-            }
-        }
-    }
-
-    // 2. Loro sync controller catches up to the authority doc's frontiers.
-    if let Some(comp) = &handle.frontend {
-        if let (Some(sync), Some(store)) = (comp.loro_sync_handle(), comp.loro_doc_store()) {
-            loop {
-                let current = store
-                    .get_global_doc()
-                    .await
-                    .expect("converge_projections: get_global_doc failed")
-                    .doc()
-                    .oplog_frontiers();
-                if sync.last_synced_frontiers() == current {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }
-    }
-
-    // 3. org re-render drain: the file-sync loop idle for `quiet`, bounded by remaining.
-    if let Some(comp) = &handle.frontend {
-        if let Some(idle) = comp.org_idle_signal() {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            idle.wait_quiescent(quiet, remaining).await;
-        }
-    }
+    // The frontend accessors are queried at settle time, not at boot: the sync
+    // controller / idle signal resolve on a spawned `post_ready_work` task.
+    let (sync, store, org_idle) = match &handle.frontend {
+        Some(comp) => (
+            comp.loro_sync_handle(),
+            comp.loro_doc_store(),
+            comp.org_idle_signal(),
+        ),
+        None => (None, None, None),
+    };
+    crate::pbt::convergence::converge_signals(
+        handle.engine.as_ref(),
+        sync,
+        store,
+        org_idle,
+        budget,
+    )
+    .await;
 }
 
 /// The working tree AS the boot org (page-rooted leaf siblings, pinned bare `:ID:`),

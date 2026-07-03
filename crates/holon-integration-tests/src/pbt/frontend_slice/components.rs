@@ -220,7 +220,45 @@ impl HeadlessFrontendComponent {
         }
 
         if settle > Duration::ZERO {
-            tokio::time::sleep(settle).await;
+            // Boot settle: CONVERGE instead of sleeping the full budget — the same
+            // three signals as the composed per-transition settle
+            // (`convergence::converge_signals`), with `settle` as the CAP (worst
+            // case = the former flat sleep; a quiescent boot returns in ms). The
+            // doc-id caching below reads the session-persisted `:ID:` drawers from
+            // disk, so the org drain must complete first. The org idle signal (and
+            // the Loro handles) resolve on a spawned `post_ready_work` task, so
+            // poll for the signal within the budget — a config with no org
+            // file-sync never resolves it and pays the full budget, exactly the
+            // old behavior.
+            let deadline = tokio::time::Instant::now() + settle;
+            let injector = injector_slot
+                .get()
+                .expect("DI injector captured during build");
+            let mut org_idle = injector
+                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .ok(); // ALLOW(ok): optional DI service — absent when org sync is off
+            while org_idle.is_none() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                org_idle = injector
+                    .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                    .ok(); // ALLOW(ok): optional DI service — absent when org sync is off
+            }
+            let sync = injector
+                .try_resolve::<holon::sync::LoroSyncControllerHandle>()
+                .ok(); // ALLOW(ok): optional DI service — absent when Loro/sync is off
+            let store = injector
+                .try_resolve::<holon::sync::LoroDocumentStore>()
+                .ok() // ALLOW(ok): optional DI service — absent when Loro is off
+                .map(|s| (*s).clone());
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            crate::pbt::convergence::converge_signals(
+                Some(&engine),
+                sync,
+                store,
+                org_idle,
+                remaining,
+            )
+            .await;
         }
 
         // Cache each tracked file's resolved doc-block id from a CLEAN parse at boot
@@ -733,7 +771,16 @@ impl SutRenderer for HeadlessFrontendComponent {
                 .count();
             if (total, pending) == last {
                 stable += 1;
-                if stable >= 4 {
+                // FULLY-RESOLVED fixed point (no loading/unknown placeholders):
+                // one confirming resample suffices — the composed harness has
+                // already converged CDC+Loro+org before any check
+                // (`settle_after_apply` → `converge_projections`), so nothing
+                // async is still due. The former unconditional 4×120 ms
+                // resample predates that settle and was measured at ~83% of
+                // keystone wall time. A tree still holding placeholders keeps
+                // the cautious exit (4 stable samples at 120 ms) so slow watch
+                // delivery isn't cut short.
+                if pending == 0 || stable >= 4 {
                     return snap;
                 }
             } else {
@@ -743,6 +790,11 @@ impl SutRenderer for HeadlessFrontendComponent {
             if tokio::time::Instant::now() >= deadline {
                 return snap;
             }
+            // Keep the proven 120 ms cadence: each resample drives
+            // `ensure_watching` (watch views + SQL), and sampling faster was
+            // measured to churn CDC enough to inflate the NEXT transition's
+            // quiet-floor settle (p50 5 ms → 70 ms) — the early exit above is
+            // the win, not a tighter poll.
             tokio::time::sleep(Duration::from_millis(120)).await;
             snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
         }
@@ -1799,9 +1851,10 @@ impl SutSeamMutate for HeadlessFrontendComponent {
 /// minted page is one new `block_raw` id paired 1:1 with the oracle's one new
 /// synthetic `block:ref-doc-N`). The action only WAITS until that page actually
 /// lands so the harness's post-apply id snapshot observes it (mirrors
-/// `TestContext`'s `resolve_page_uri_by_name` poll). `start_app`/`simulate_restart`/
-/// `concurrent_schema_init` are not part of any composed alphabet yet (lifecycle is
-/// the deferred-boot increment) — fail loud if ever dispatched.
+/// `TestContext`'s `resolve_page_uri_by_name` poll). `simulate_restart` and
+/// `concurrent_schema_init` ARE dispatched by the composed alphabet (both ported);
+/// `start_app` is not part of any composed alphabet yet (lifecycle/deferred-boot is a
+/// later increment) — it fails loud if ever dispatched.
 #[async_trait::async_trait(?Send)]
 impl SutAppLifecycle for HeadlessFrontendComponent {
     async fn start_app(&self, _: EntityUri, _: bool, _: bool, _: bool, _: bool) {
@@ -1914,10 +1967,52 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
     }
 
     async fn concurrent_schema_init(&self) {
-        unimplemented!(
-            "[SutAppLifecycle::concurrent_schema_init] not yet ported — not in any composed \
-             alphabet"
-        );
+        // Ported from the E2ESut/`SutHandle` impl: the regression this guards is the
+        // double-`ensure_navigation_schema` "database is locked" bug — sequential schema
+        // ops (each `query_and_watch` creates a matview) must NOT lock the DB. The test's
+        // only ASSERTION is the absence of a "database is locked" error; other errors
+        // (e.g. transient "Database schema changed" from concurrent IVM) are tolerated.
+        // `apply_to_ref` is a no-op, so this must not perturb the compared projections —
+        // the watches created here are anonymous (`None` query id), not the named watches
+        // `SutWatchRegister`/`inv-active-watches-match-ref` track.
+        let engine = self.engine();
+        for i in 0..3 {
+            let prql = format!(
+                "from block_raw | select {{id, content}} | filter id != \"dummy-{i}\" "
+            );
+            let sql = engine
+                .compile_to_sql(&prql, QueryLanguage::HolonPrql)
+                .expect("ConcurrentSchemaInit: PRQL compilation should succeed");
+            if let Err(e) = engine
+                .query_and_watch(sql, std::collections::HashMap::new(), None)
+                .await
+            {
+                let error_str = format!("{e:?}");
+                assert!(
+                    !error_str.contains("database is locked"),
+                    "DATABASE LOCK BUG: sequential query_and_watch {i} hit 'database is \
+                     locked' — ensure_navigation_schema is being called concurrently again: \
+                     {error_str}"
+                );
+            }
+        }
+        for _ in 0..2 {
+            if let Err(e) = engine
+                .execute_query(
+                    "SELECT id FROM block_raw LIMIT 1".to_string(),
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .await
+            {
+                let error_str = format!("{e:?}");
+                assert!(
+                    !error_str.contains("database is locked"),
+                    "DATABASE LOCK BUG: sequential simple query hit 'database is locked': \
+                     {error_str}"
+                );
+            }
+        }
     }
 
     async fn assert_epoch_flip_rejected(&self) {

@@ -193,10 +193,18 @@ fn strip_link(raw: &str) -> (String, InlineMark) {
         .strip_prefix("[[")
         .and_then(|s| s.strip_suffix("]]"))
         .unwrap_or(raw);
-    // Split on `][` to separate uri and label, if present.
+    // Split on `][` to separate uri and label, if present. Link labels must not
+    // carry leading/trailing whitespace (product rule): `[[a ]]` displays as `a`,
+    // not `a ` — so the extracted label (the content emitted for this link) is
+    // trimmed at the parse boundary, keeping every projection (Loro CONTENT_RAW /
+    // editor cell, SQL block_raw, org re-render) consistent. The no-explicit-label
+    // form `[[a ]]` uses the same trimmed string as both display and target.
     let (uri, label) = match inside.split_once("][") {
-        Some((u, l)) => (u.to_string(), l.to_string()),
-        None => (inside.to_string(), inside.to_string()),
+        Some((u, l)) => (u.to_string(), l.trim().to_string()),
+        None => {
+            let t = inside.trim().to_string();
+            (t.clone(), t)
+        }
     };
     let target = match classify_link(&uri) {
         LinkTarget::External(s) => EntityRef::External { url: s },

@@ -343,7 +343,19 @@ pub(crate) fn view_model_to_snapshot(
     use holon_frontend::view_model::ViewKind;
     use std::collections::BTreeMap;
 
-    let kind = vm.widget_name().unwrap_or("unknown").to_string();
+    // `widget_name()` returns `None` for BOTH `Empty` and `Loading`, but they
+    // mean opposite things to a snapshot consumer: `Loading` is a TRANSIENT
+    // placeholder (a reactive watch hasn't delivered yet — worth re-sampling),
+    // `Empty` is a PERMANENT structural slot (e.g. a tree item's vacant
+    // region). Conflating them as "unknown" made `widget_tree_snapshot`'s
+    // pending detector treat every tree as never-resolved, costing the full
+    // cautious resample window on every check (measured: the keystone's
+    // dominant wall-time cost). Name them explicitly.
+    let kind = match &vm.kind {
+        ViewKind::Loading => "loading".to_string(),
+        ViewKind::Empty => "empty".to_string(),
+        _ => vm.widget_name().unwrap_or("unknown").to_string(),
+    };
     // For LiveBlock, the referenced block id lives in `kind.block_id`;
     // `vm.row_id()` returns None. Mirror `ViewModel::collect_ids_recursive`
     // semantics by surfacing block_id as entity_id so cross-slice

@@ -1194,6 +1194,100 @@ mod teeth {
         }
     }
 
+    /// Perf-cliff guard: a booted, quiescent full_headless tree must contain NO
+    /// `loading`/`unknown` nodes. `widget_tree_snapshot` treats those as
+    /// still-resolving and pays its full cautious resample window (4×120 ms) on
+    /// EVERY check while any exist — a permanently-pending node (e.g. a
+    /// `ViewKind` whose `widget_name()` returns `None`, snapshot kind
+    /// "unknown") silently made that the keystone's dominant wall-time cost
+    /// (measured 2026-07-03: ~83% of the run). If this fails, name the kind in
+    /// `view_model_to_snapshot` (like `Empty`/`Loading`) instead of letting it
+    /// fall through to "unknown".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn booted_widget_tree_has_no_pending_placeholders() {
+        use holon_pbt_core::capabilities::SutRenderer;
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let bundle = compose_sut_seeded(
+            &ComponentSet::full_headless(),
+            &resolver,
+            &[("structural-page.org", WIDE_TREE_ORG)],
+            &[],
+        )
+        .await;
+        let snap = bundle
+            .caps
+            .expect::<dyn SutRenderer>()
+            .widget_tree_snapshot()
+            .await;
+        fn dump(
+            n: &holon_pbt_core::capabilities::WidgetSnapshot,
+            path: &str,
+            out: &mut Vec<String>,
+        ) {
+            let p = format!("{path}/{}", n.kind);
+            if n.kind == "loading" || n.kind == "unknown" {
+                out.push(format!("{p} entity={:?} props={:?}", n.entity_id, n.props));
+            }
+            for c in &n.children {
+                dump(c, &p, out);
+            }
+        }
+        let mut out = Vec::new();
+        dump(&snap, "", &mut out);
+        assert!(
+            out.is_empty(),
+            "booted widget tree holds permanent loading/unknown placeholders — every \
+             widget_tree_snapshot() will pay the full 4×120ms resample window: {out:?}"
+        );
+    }
+
+    /// Regression guard for the link-label whitespace fix (`strip_link` trims the
+    /// label at the parse boundary — product rule: link labels carry no leading/
+    /// trailing whitespace). Seeds `[[a ]]` (trailing inner space) and `[[ tl]]`
+    /// (leading) and asserts EVERY observable agrees on the trimmed label — the
+    /// live Loro editor cell (the content authority), the SQL `block_raw`
+    /// projection, and the org re-render. Before the fix the editor cell held the
+    /// untrimmed `"a "`/`" tl"` while block_raw/org trimmed to `"a"`/`"tl"`, which
+    /// diverged `inv-editor-text/mirror` (found by a CASES=256 soak).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_label_whitespace_consistent_across_observables() {
+        use holon_pbt_core::capabilities::{SutBackend, SutEditorMirrorRead, SutOrgRead};
+        const PROBE_ORG: &str = "#+ID: probe-page\n\
+            * [[a ]]\n:PROPERTIES:\n:ID: trail\n:END:\n\
+            * [[ tl]]\n:PROPERTIES:\n:ID: lead\n:END:\n";
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let bundle = compose_sut_seeded(
+            &ComponentSet::full_headless(),
+            &resolver,
+            &[("probe-page.org", PROBE_ORG)],
+            &[],
+        )
+        .await;
+        let raw = bundle.caps.expect::<dyn SutBackend>().block_raw_snapshot().await;
+        let org = bundle.caps.expect::<dyn SutOrgRead>().org_block_snapshot().await;
+        let editor = bundle.caps.expect::<dyn SutEditorMirrorRead>();
+        let content_of = |blocks: &[holon_api::Block], sid: &str| {
+            blocks
+                .iter()
+                .find(|b| b.id.as_str() == format!("block:{sid}"))
+                .map(|b| b.content_text().to_string())
+        };
+        for (sid, expected) in [("trail", "a"), ("lead", "tl")] {
+            let block_raw = content_of(&raw, sid);
+            let org_c = content_of(&org, sid);
+            let editor_c = editor
+                .editor_live_text(&holon_api::EntityUri::block(sid))
+                .ok();
+            assert_eq!(
+                (block_raw.as_deref(), org_c.as_deref(), editor_c.as_deref()),
+                (Some(expected), Some(expected), Some(expected)),
+                "link-label {sid}: every observable (block_raw, org, live editor cell) must \
+                 agree on the whitespace-trimmed label {expected:?} — a divergence means the \
+                 editor Loro authority kept whitespace the projections trimmed"
+            );
+        }
+    }
+
     /// PROBE (swap-config widening): does `compose_sut(full_headless())` — which adds the
     /// Loro PEER arm (`SutLoro` + the loro read caps, selecting the loro invariants) on top
     /// of the turso-frontend-editor cap set — run the FULL catalog GREEN on the static
