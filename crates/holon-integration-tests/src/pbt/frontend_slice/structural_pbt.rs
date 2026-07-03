@@ -128,7 +128,7 @@ const REQUIRED_INVARIANTS: &[&str] = &[
     "inv-no-orphan-blocks",
     "inv-no-parent-cycles",
     "inv-blocks-match-ref/block_raw",
-    "inv-block-parent-matches-ref/block_raw",
+    "inv-block-parent/block_raw",
 ];
 
 /// One arm per structural transition via the shared `weighted_arm` over the SAME
@@ -481,7 +481,7 @@ fn swap_design_probe_generated_alphabet() {
 // the block's `content_raw` `MutableText` resolves). Committed-content parity: the
 // reference commits typed text into block content on every `TypeChars`
 // (`commit_active_editor_if_changed`); the SUT's per-keystroke `MutableText` edit
-// syncs to `block_raw`, so `inv-block-content-matches-ref/block_raw` agrees. The
+// syncs to `block_raw`, so `inv-block-content/block_raw` agrees. The
 // editor is pre-opened on `c1` on both sides (the oracle via the UI-actor wiring in
 // `build_started_ref`, the SUT via `FocusEditableText`). Kept separate from
 // `frontend_wide_pbt` (Loro-off, structural) so the structural arm is unaffected by
@@ -1079,7 +1079,7 @@ mod teeth {
         // editor keystone's non-vacuity guard).
         for id in [
             "inv-blocks-match-ref/block_raw",
-            "inv-block-content-matches-ref/block_raw",
+            "inv-block-content/block_raw",
             "inv-editor-text-matches-ref",
             "inv-editor-caret-matches-ref",
         ] {
@@ -1115,8 +1115,7 @@ mod teeth {
         let report = run_with_seeded_ref(&composed_invariant_catalog(), &caps, resolved).await;
         assert!(
             report.failures().iter().any(|(id, _)| {
-                *id == "inv-block-content-matches-ref/block_raw"
-                    || *id == "inv-editor-text-matches-ref"
+                *id == "inv-block-content/block_raw" || *id == "inv-editor-text-matches-ref"
             }),
             "SUT-only TypeChars must be CAUGHT by the content/editor-text parity; \
              failures: {:?}, ran: {:?}",
@@ -1186,10 +1185,7 @@ mod teeth {
         );
         // The editor live-text + committed-content parity must RUN — proving the type
         // landed on the new block (active editor selected, not skipped).
-        for id in [
-            "inv-editor-text-matches-ref",
-            "inv-block-content-matches-ref/block_raw",
-        ] {
+        for id in ["inv-editor-text-matches-ref", "inv-block-content/block_raw"] {
             assert!(
                 report.ran_ids().contains(&id),
                 "non-vacuity: {id} must run over the split-then-typed block (ran: {:?})",
@@ -1452,7 +1448,7 @@ mod teeth {
     /// Turso smell #2 reproduce (split-of-block-with-children → child-vs-sibling): Indent
     /// `c2` under `c1` (so `c1` HAS a child), then Split `c1`. The oracle makes the new block
     /// a SIBLING of `c1` (parent = page); if the Loro positional-placement smell is live, the
-    /// SUT attaches it as a CHILD of `c1` → `inv-block-parent-matches-ref/block_raw` Fails.
+    /// SUT attaches it as a CHILD of `c1` → `inv-block-parent/block_raw` Fails.
     /// This is the decisive smell-#2 probe.
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_indent_then_split_parent_lockstep() {

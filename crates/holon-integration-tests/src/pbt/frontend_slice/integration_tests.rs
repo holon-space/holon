@@ -114,7 +114,7 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
     };
     // This test scopes to the `/viewmodel` content arm. The component also
     // provides `SutBackend`, so the block-tree-vs-ref invariants
-    // (`inv-blocks-match-ref`, `inv-block-parent-matches-ref`) also select against
+    // (`inv-blocks-match-ref`, `inv-block-parent/block_raw`) also select against
     // this *partial* ref (which knows only parent/c1/c2, not the whole booted
     // vault) and legitimately diverge — those need a full-vault oracle and are
     // covered elsewhere. So we assert the `/viewmodel` arm directly, not overall

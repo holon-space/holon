@@ -12,7 +12,7 @@
 //!
 //! Beyond the block-tree caps it shares with the other slices, the
 //! [`SqlProjectionComponent`] also provides [`SutSqlProjection`], unlocking the
-//! SQL-projection invariants (e.g. `inv-block-content-matches-ref`) that read the
+//! SQL-projection invariants (e.g. `inv-block-content/sql`) that read the
 //! `block_raw`/`block`/`block_tags` projections. The navigation/focus/watch
 //! members of that cap are honest-empty here (no reactive engine drives them).
 //!

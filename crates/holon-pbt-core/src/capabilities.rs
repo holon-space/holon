@@ -880,7 +880,7 @@ pub trait SutSqlProjection {
     async fn block_task_state(&self, id: &EntityUri) -> Option<String>;
 
     /// `content` column of `block_raw` for `id`. Returns `None` if the block
-    /// doesn't exist. Used by `inv-block-content-matches-ref` (split-block
+    /// doesn't exist. Used by `inv-block-content/sql` (split-block
     /// content-routing slice).
     async fn block_content(&self, id: &EntityUri) -> Option<String>;
 }

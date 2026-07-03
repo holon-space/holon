@@ -106,8 +106,8 @@ async fn loro_slice_runs_ref_comparison_over_loro() {
     for id in [
         "inv-blocks-match-ref/block_raw",
         "inv-no-orphan-blocks",
-        "inv-block-content-matches-ref/block_raw",
-        "inv-block-parent-matches-ref/block_raw",
+        "inv-block-content/block_raw",
+        "inv-block-parent/block_raw",
     ] {
         assert!(
             report.ran_ids().contains(&id),

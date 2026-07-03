@@ -3,7 +3,7 @@ Feature: SplitBlock routes prefix to original, suffix to new (composed full_head
   Born-booted from the wide seed (structural-page -> parent/c1/c2) over the composed
   `full_headless` CapMap (no `Given org file` / `app is started` ceremony — the doc is
   the boot org). Focus c1, split it at a byte offset; the per-tick
-  `inv-block-content-matches-ref` (the composed catalog runs it every step, and the
+  `inv-block-content/sql` (the composed catalog runs it every step, and the
   per-draw non-vacuity floor requires it in the wide config so it cannot pass vacuously)
   catches any prefix/suffix
   mis-routing — the same regression `split_routes_prefix_suffix.feature` guarded over

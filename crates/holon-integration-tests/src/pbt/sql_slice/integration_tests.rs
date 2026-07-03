@@ -3,7 +3,7 @@
 //! real Turso `BackendEngine` (the production storage + IVM matview layer) —
 //! every `SutBackend` block-tree invariant lights up over the SQL realization by
 //! capability presence, no catalog change, and the `SutSqlProjection`-bound
-//! invariants (e.g. `inv-block-content-matches-ref`) select on top. The
+//! invariants (e.g. `inv-block-content/sql`) select on top. The
 //! per-invariant catch triads live with their invariant in
 //! `super::super::composed::invariants`, fixture-driven.
 
@@ -56,7 +56,7 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
 }
 
 /// Wiring a reference selects the ref-comparing block-tree invariants **and**
-/// the `SutSqlProjection`-backed `inv-block-content-matches-ref` (the SQL
+/// the `SutSqlProjection`-backed `inv-block-content/sql` (the SQL
 /// variant), all of which pass when the Turso store agrees with the reference.
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_slice_runs_ref_comparison_over_turso() {
@@ -88,11 +88,11 @@ async fn sql_slice_runs_ref_comparison_over_turso() {
     for id in [
         "inv-blocks-match-ref/block_raw",
         "inv-no-orphan-blocks",
-        "inv-block-content-matches-ref/block_raw",
-        "inv-block-parent-matches-ref/block_raw",
+        "inv-block-content/block_raw",
+        "inv-block-parent/block_raw",
         // The SQL-projection variant — selected only because this slice
         // provides `SutSqlProjection`.
-        "inv-block-content-matches-ref",
+        "inv-block-content/sql",
     ] {
         assert!(
             report.ran_ids().contains(&id),

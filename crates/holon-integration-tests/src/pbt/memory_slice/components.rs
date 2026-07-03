@@ -421,7 +421,7 @@ impl InMemEditorComponent {
 
     /// Commit the editor's live text into the shared store, normalizing the SAME
     /// way the reference does (`commit_active_editor_if_changed`) so the RAW
-    /// content `inv-block-content-matches-ref/block_raw` compares matches
+    /// content `inv-block-content/block_raw` compares matches
     /// byte-for-byte.
     ///
     /// `take_commit` returns `Some` whenever a block is open — it does NOT gate on

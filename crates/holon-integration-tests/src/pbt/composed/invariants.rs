@@ -7,8 +7,8 @@
 //! ## Recipe — adding an invariant (the parallelizable unit)
 //! 1. Pick the registry body (`crate::pbt::invariants::bodies::*`) and the caps
 //!    its `where` bounds require.
-//! 2. Copy the nearest existing module here (e.g. `block_parent` for a
-//!    `SutBackend + RefBlockTree` body) and adjust the `wire()` `Needs`.
+//! 2. Copy the nearest existing module here (e.g. `no_orphan` for a
+//!    `SutBackend + RefBackend` body) and adjust the `wire()` `Needs`.
 //! 3. Write the test triad against `crate::pbt::composed::fixtures::*`:
 //!    a positive (cap wired ⇒ selected + passes), a negative-containment
 //!    (cap absent ⇒ in `report.deselected`, not faked), and a catch (inject a
@@ -21,9 +21,6 @@
 //! Full process (router, recipes, anti-patterns, the §8.10 convergence litmus):
 //! the `pbt-composition` skill (`.claude/skills/pbt-composition/`).
 
-pub mod block_content;
-pub mod block_content_sql;
-pub mod block_parent;
 pub mod blocks_match;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;

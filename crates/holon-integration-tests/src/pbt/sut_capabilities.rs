@@ -179,7 +179,7 @@ impl SutLoro for E2ESut {
 // is now hosted by the composed `full_headless` CapMap (`SqlProjectionComponent` /
 // `HeadlessFrontendComponent`). Its native consumers — `inv-navigation-focus` (now
 // selected by the wide config + run every tick by the per-draw floor) and
-// `inv-block-content-matches-ref` — run only via the
+// `inv-block-content/sql` — run only via the
 // composed catalog (`navigation_focus::wire` + `block_content_sql::wire`); the standalone
 // `split_block_content_pbt` / `peer_conflict_pbt` slices were deleted. See
 // `NATIVE_ONLY_EXCLUDED` + the `SutSqlProjection` row in `E1_RELOCATED_CAP_COVERAGE`.
