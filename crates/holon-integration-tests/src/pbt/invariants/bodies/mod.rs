@@ -5,7 +5,6 @@
 //! slice's `S` doesn't satisfy simply doesn't compile into that slice's
 //! invariant tuple.
 
-pub mod active_watches_match_ref;
 pub mod block_content_matches_ref;
 pub mod block_content_matches_ref_backend;
 pub mod block_ids_match_ref;

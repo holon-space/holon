@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::capabilities::{
     EntityUri, FrontendRootVm, ProviderStabilityReport, RenderedElement, SutBackend, SutErrorLog,
     SutFocus, SutFrontendEmissions, SutFrontendEngine, SutLayout, SutLoroLog, SutOrgRead,
-    SutOrgRender, SutRenderer, SutSqlProjection, SutViewSelection, SutWatchRows, ViewportHint,
+    SutOrgRender, SutRenderer, SutSqlProjection, SutViewSelection, SutWatch, ViewportHint,
     WatchRow, WidgetSnapshot,
 };
 
@@ -361,10 +361,10 @@ impl<'a, S: SutOrgRead> SutOrgRead for CachingProxy<'a, S> {
     }
 }
 
-// ─── SutWatchRows ─────────────────────────────────────────────────────
+// ─── SutWatch ─────────────────────────────────────────────────────
 
 #[async_trait::async_trait(?Send)]
-impl<'a, S: SutWatchRows> SutWatchRows for CachingProxy<'a, S> {
+impl<'a, S: SutWatch> SutWatch for CachingProxy<'a, S> {
     async fn watch_query_ids(&self) -> Vec<String> {
         self.inner.watch_query_ids().await
     }

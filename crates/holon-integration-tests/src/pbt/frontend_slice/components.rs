@@ -30,7 +30,7 @@ use holon_pbt_core::capabilities::{
     CapRegion, SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutEditorMirrorWrite,
     SutErrorLog, SutFocus, SutFocusWrite, SutHistoryWrite, SutMcpEmit, SutNavHistoryDrive,
     SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults, SutRenderer, SutSqlProjection,
-    SutViewControl, SutViewSelection, SutWatchRegister, SutWatchRows, WatchRow, WidgetSnapshot,
+    SutViewControl, SutViewSelection, SutWatch, SutWatchRegister, WatchRow, WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use tempfile::TempDir;
@@ -67,7 +67,7 @@ pub struct HeadlessFrontendComponent {
     session: Arc<FrontendSession>,
     _temp: TempDir,
     /// `query_id → query:<hash>` registry-key mapping for the watches this
-    /// component has registered (E1: `SutWatchRows` over the PRODUCTION reactive
+    /// component has registered (E1: `SutWatch` over the PRODUCTION reactive
     /// watch surface). Production keys query watches by content hash, so the
     /// component tracks the test's `query_id` against the engine key it got back
     /// from [`ReactiveEngine::watch_query_live`] — the only bookkeeping needed.
@@ -913,13 +913,13 @@ impl SutViewSelection for HeadlessFrontendComponent {
     }
 }
 
-/// `SutWatchRows` over the **production** reactive watch surface (E1 relocation;
+/// `SutWatch` over the **production** reactive watch surface (E1 relocation;
 /// the redesign away from E2ESut's bespoke `ui_model`). `watch_query_ids` /
 /// `watch_rows` read the live `ReactiveRenderedRows` the engine's CDC pump fills;
 /// the two `block_raw` truth reads (used by the invariant's CDC-lag classifier) go
 /// straight to the write-side base table via the `BackendEngine`.
 #[async_trait::async_trait(?Send)]
-impl SutWatchRows for HeadlessFrontendComponent {
+impl SutWatch for HeadlessFrontendComponent {
     async fn watch_query_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self
             .watches
@@ -1008,7 +1008,7 @@ impl SutWatchRows for HeadlessFrontendComponent {
             .db_handle()
             .query(&sql, std::collections::HashMap::new())
             .await
-            .expect("SutWatchRows::block_raw_field query failed");
+            .expect("SutWatch::block_raw_field query failed");
         rows.into_iter()
             .next()
             .and_then(|r| r.get(field).and_then(|v| v.as_string()).map(str::to_string))
@@ -1343,7 +1343,7 @@ impl SutSqlProjection for HeadlessFrontendComponent {
     }
 
     /// No `SutSqlProjection`-tracked CDC watch-count surface here (the watch set is
-    /// `SutWatchRows`' concern); honest `None`.
+    /// `SutWatch`' concern); honest `None`.
     async fn watch_row_count(&self, _: &str) -> Option<usize> {
         None
     }
@@ -2004,7 +2004,7 @@ impl HeadlessFrontendComponent {
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
         caps.insert(self.clone() as Arc<dyn SutViewSelection>);
         caps.insert(self.clone() as Arc<dyn SutBackend>);
-        caps.insert(self.clone() as Arc<dyn SutWatchRows>);
+        caps.insert(self.clone() as Arc<dyn SutWatch>);
         caps.insert(self.clone() as Arc<dyn SutOrgRead>);
         // `SutNavHistoryWrite` (go_home) — selection-neutral write cap (no invariant
         // `Needs` it), it just lets the `NavigateHome` transition drive this component
@@ -2016,8 +2016,8 @@ impl HeadlessFrontendComponent {
         // invariant `Needs` a write cap; it lets the `SetupWatch` transition drive
         // this component's production reactive watch surface through
         // `apply_to_sut(&mut CapMap)` (SutHandle decomposition INC 3). The watch
-        // *read* cap (`SutWatchRows`) is already registered above, so a slice that
-        // also supplies `RefWatches` makes the B5 watch invariants bite over a
+        // *read* cap (`SutWatch`) is already registered above, so a slice that
+        // also supplies `RefWatch` makes the B5 watch invariants bite over a
         // composed-driven watch.
         caps.insert(self.clone() as Arc<dyn SutWatchRegister>);
         // A1 drive caps (E3 provider-gap port): `SutViewControl` (SwitchView),

@@ -547,7 +547,7 @@ pub trait SutNavHistoryWrite {
 /// (`source` + `lang`) rather than the integration-test-local `TestQuery`, which
 /// pbt-core cannot name; the `SetupWatch` transition compiles `TestQuery` at the
 /// boundary (`compile_for`) and passes the result here. The read side
-/// (`SutWatchRows`) and the watch invariants already exist and bite headlessly
+/// (`SutWatch`) and the watch invariants already exist and bite headlessly
 /// (`frontend_slice` B5 teeth) — this is the missing **write** cap that lets a
 /// composed `CapMap` drive `SetupWatch`, so the watch invariants run over a
 /// composed-driven watch, not only an `E2ESut`-driven one. `&self` (like every
@@ -1629,60 +1629,94 @@ pub trait RefLayout {
 /// as the inline check did with `.and_then(|v| v.as_string())`.
 pub type WatchRow = std::collections::HashMap<String, Option<String>>;
 
-/// Active watched queries on the reference model.
-#[holon_macros::capmap_adapter] // sync owned-return → emits CapName + `impl … for CapMap`
-pub trait RefWatches {
-    /// Query ids of currently registered watches (stable, sorted).
-    /// Wide PBT: keys of `ReferenceState::active_watches`; pure slice: empty.
-    fn active_watch_ids(&self) -> Vec<String>;
+// `capability_pair!` single-sources the watch read duality: the SUT-side
+// CDC-driven `ui_model` surface ([`SutWatch`], async) and the reference
+// active-watches model ([`RefWatch`], sync, owned). The `#[compare]` method
+// auto-derives `inv-active-watches-match-ref` (id preserved — asserted by id
+// in slice teeth) via [`compare_watch_ids`]; the watch *rows* comparison
+// (`inv-watch-rows-match-ref`) stays a hand-written invariant (per-watch
+// loop + per-field CDC-lag classifier, not a two-value compare), but its cap
+// methods live here as `#[sut_only]` / `#[ref_only]`.
+holon_macros::capability_pair! {
+    /// Watch read surface: SUT CDC-delivered `ui_model` watch state (separate
+    /// from [`SutSqlProjection`] so the per-id String surface there stays
+    /// focused) vs the reference's registered active watches. Registered only
+    /// where watches are actually driven; a watch-less slice does NOT register
+    /// it, so the watch invariants honestly DESELECT there.
+    pub trait Watch {
+        /// Query ids of currently registered watches. SUT: keys of
+        /// `TestContext::ui_model`; reference: keys of
+        /// `ReferenceState::active_watches` (pure slice: empty). Auto-compared
+        /// (set semantics) by `inv-active-watches-match-ref` via
+        /// [`compare_watch_ids`].
+        #[compare(
+            ref = active_watch_ids,
+            id = "inv-active-watches-match-ref",
+            with = crate::capabilities::compare_watch_ids
+        )]
+        fn watch_query_ids(&self) -> Vec<String>;
 
-    /// Expected result rows for the watch `query_id`, stringified into the
-    /// [`WatchRow`] shape. Wide PBT: `query_results(active_watches[query_id])`
-    /// evaluated against the (already SUT-ID-space-resolved) block state;
-    /// pure slice: empty. Returns an empty Vec if `query_id` is not a
-    /// registered watch.
-    fn expected_watch_rows(&self, query_id: &str) -> Vec<WatchRow>;
+        /// CDC-delivered rows for the watch `query_id`, stringified into the
+        /// [`WatchRow`] shape. Wide PBT: `ui_model[query_id].to_vec()` with each
+        /// `Value` mapped through `as_string()`. Empty if `query_id` is not
+        /// registered.
+        #[sut_only]
+        fn watch_rows(&self, query_id: &str) -> Vec<WatchRow>;
 
-    /// The selected columns of the watch `query_id` — the field set the
-    /// per-row comparison checks. Wide PBT: `active_watches[query_id].query.columns`;
-    /// empty if `query_id` is unknown.
-    fn watch_query_columns(&self, query_id: &str) -> Vec<String>;
+        /// Run the given `block_raw` truth-check SQL and return the set of
+        /// `id` values it yields. Used by the CDC-lag classifier to decide
+        /// whether a matview/`ui_model` divergence is a pure CDC delivery race
+        /// (write-side already converged) or a real write-pipeline bug. Wide
+        /// PBT: `ctx.query_sql(sql)` projecting the `id` column.
+        #[sut_only]
+        fn block_raw_query_ids(&self, sql: &str) -> BTreeSet<EntityUri>;
 
-    /// The `block_raw` truth-check SQL for the watch `query_id` (reads the
-    /// write-side base table, bypassing the matview). Used by the CDC-lag
-    /// classifier. Wide PBT: `active_watches[query_id].query.to_block_raw_sql()`;
-    /// empty string if `query_id` is unknown.
-    fn watch_block_raw_sql(&self, query_id: &str) -> String;
+        /// Read a single `field` from `block_raw` for `id`. Used by the
+        /// per-field CDC-lag classifier. Wide PBT:
+        /// `SELECT {field} FROM block_raw WHERE id = ?`. `None` if absent/NULL.
+        #[sut_only]
+        fn block_raw_field(&self, id: &EntityUri, field: &str) -> Option<String>;
+
+        /// Expected result rows for the watch `query_id`, stringified into the
+        /// [`WatchRow`] shape. Wide PBT: `query_results(active_watches[query_id])`
+        /// evaluated against the (already SUT-ID-space-resolved) block state;
+        /// pure slice: empty. Returns an empty Vec if `query_id` is not a
+        /// registered watch.
+        #[ref_only]
+        fn expected_watch_rows(&self, query_id: &str) -> Vec<WatchRow>;
+
+        /// The selected columns of the watch `query_id` — the field set the
+        /// per-row comparison checks. Wide PBT: `active_watches[query_id].query.columns`;
+        /// empty if `query_id` is unknown.
+        #[ref_only]
+        fn watch_query_columns(&self, query_id: &str) -> Vec<String>;
+
+        /// The `block_raw` truth-check SQL for the watch `query_id` (reads the
+        /// write-side base table, bypassing the matview). Used by the CDC-lag
+        /// classifier. Wide PBT: `active_watches[query_id].query.to_block_raw_sql()`;
+        /// empty string if `query_id` is unknown.
+        #[ref_only]
+        fn watch_block_raw_sql(&self, query_id: &str) -> String;
+    }
 }
 
-/// SUT-side watch (CDC-driven `ui_model`) read surface for
-/// `inv-watch-rows-match-ref`. Separate from [`SutSqlProjection`] so the
-/// per-id String surface there stays focused; this trait carries the
-/// keyed [`WatchRow`] shape the watch comparison needs plus the two
-/// `block_raw` truth-check reads the CDC-lag classifier performs.
-#[holon_macros::capmap_adapter]
-pub trait SutWatchRows {
-    /// Query ids of the watches currently registered on the SUT
-    /// (`ui_model` keys). Wide PBT: keys of `TestContext::ui_model`.
-    async fn watch_query_ids(&self) -> Vec<String>;
-
-    /// CDC-delivered rows for the watch `query_id`, stringified into the
-    /// [`WatchRow`] shape. Wide PBT: `ui_model[query_id].to_vec()` with each
-    /// `Value` mapped through `as_string()`. Empty if `query_id` is not
-    /// registered.
-    async fn watch_rows(&self, query_id: &str) -> Vec<WatchRow>;
-
-    /// Run the given `block_raw` truth-check SQL and return the set of
-    /// `id` values it yields. Used by the CDC-lag classifier to decide
-    /// whether a matview/`ui_model` divergence is a pure CDC delivery race
-    /// (write-side already converged) or a real write-pipeline bug. Wide
-    /// PBT: `ctx.query_sql(sql)` projecting the `id` column.
-    async fn block_raw_query_ids(&self, sql: &str) -> BTreeSet<EntityUri>;
-
-    /// Read a single `field` from `block_raw` for `id`. Used by the
-    /// per-field CDC-lag classifier. Wide PBT:
-    /// `SELECT {field} FROM block_raw WHERE id = ?`. `None` if absent/NULL.
-    async fn block_raw_field(&self, id: &EntityUri, field: &str) -> Option<String>;
+/// Comparator for `inv-active-watches-match-ref` (the `Watch` pair's
+/// `#[compare]`): the registered watch id sets agree, order-insensitively.
+/// Lifted verbatim from the deleted hand-written body — the watch *rows* are
+/// checked separately by `inv-watch-rows-match-ref`; this is just the
+/// subscription-set agreement.
+pub fn compare_watch_ids(sut_ids: &[String], ref_ids: &[String]) -> Result<(), String> {
+    let sut: BTreeSet<&String> = sut_ids.iter().collect();
+    let ref_: BTreeSet<&String> = ref_ids.iter().collect();
+    if sut == ref_ {
+        return Ok(());
+    }
+    let missing: Vec<&&String> = ref_.difference(&sut).collect();
+    let spurious: Vec<&&String> = sut.difference(&ref_).collect();
+    Err(format!(
+        "[inv-active-watches-match-ref] watch sets diverged\n  missing on SUT: {missing:?}\n  \
+         spurious on SUT: {spurious:?}"
+    ))
 }
 
 /// Global engine-focused block (distinct from the per-region navigation

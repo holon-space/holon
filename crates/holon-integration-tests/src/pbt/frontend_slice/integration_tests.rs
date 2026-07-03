@@ -23,17 +23,17 @@ async fn new_component() -> Arc<HeadlessFrontendComponent> {
     )
 }
 
-/// E1 make-or-break PROBE (Step-A): does `SutWatchRows` over the PRODUCTION reactive
+/// E1 make-or-break PROBE (Step-A): does `SutWatch` over the PRODUCTION reactive
 /// watch surface actually deliver rows in the windowless session? Register an
 /// `AllBlocks` query watch through `register_query_watch` (→
 /// `ReactiveEngine::watch_query_live`, the real CDC pump), settle, and read it back
-/// through the `SutWatchRows` cap. If this returns the seeded blocks, the redesign
+/// through the `SutWatch` cap. If this returns the seeded blocks, the redesign
 /// (read the real `ReactiveRenderedRows`, not E2ESut's bespoke `ui_model`) is viable.
 #[tokio::test]
 async fn frontend_slice_watch_rows_deliver_over_production_reactive_surface() {
     use crate::pbt::query::{QuerySource, QueryTable, TestQuery};
     use holon_api::QueryLanguage;
-    use holon_pbt_core::capabilities::SutWatchRows;
+    use holon_pbt_core::capabilities::SutWatch;
 
     let comp = new_component().await;
     let query = TestQuery {
@@ -71,7 +71,7 @@ async fn frontend_slice_watch_rows_deliver_over_production_reactive_surface() {
     assert!(
         !rows.is_empty(),
         "the production reactive watch must deliver the seeded blocks' rows headlessly \
-         (else SutWatchRows can't read the real ReactiveRenderedRows); got 0 rows"
+         (else SutWatch can't read the real ReactiveRenderedRows); got 0 rows"
     );
     // Every row must carry an `id` column (the AllBlocks projection).
     assert!(
@@ -164,7 +164,7 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
     );
 }
 
-/// E1 teeth: the relocated `SutWatchRows` (production reactive watch surface) makes
+/// E1 teeth: the relocated `SutWatch` (production reactive watch surface) makes
 /// the B5 watch invariants **bite** on the composition path. Graft fixed
 /// `parent`/`c1`/`c2` (c1,c2 are direct children of `parent`), register a
 /// `DirectChildren(parent)` watch projecting only `id`, and seed the ref with a

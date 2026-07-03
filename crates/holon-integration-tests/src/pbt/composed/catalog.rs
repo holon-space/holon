@@ -53,10 +53,12 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // Needs `SutDriver` + `RefGlobalFocus + RefEditorMirror`. Only the windowed
         // slice supplies `SutDriver`; body self-skips with no focus / open editor.
         invariants::focus_matches_ref::wire(),
-        // Watch invariants (E1 — SutWatchRows over the production reactive surface):
-        // needs `SutWatchRows` + `RefWatches`. Only the frontend slice supplies the
+        // Watch invariants (E1 — SutWatch over the production reactive surface):
+        // needs `SutWatch` + `RefWatch`. Only the frontend slice supplies the
         // SUT cap; trivially Ok until a slice registers watches + seeds the ref.
-        invariants::watch_rows::wire_active_watches(),
+        // The id-set half is auto-derived by `capability_pair! { pub trait Watch … }`
+        // (id pinned to `inv-active-watches-match-ref` — slice teeth assert it by id).
+        holon_pbt_core::capabilities::inv_pair_watch_watch_query_ids(),
         invariants::watch_rows::wire_watch_rows(),
         // Focus invariants (SutHandle decomposition — NavigateFocus onto
         // SutFocusWrite): needs `SutSqlProjection` (+`SutBackend` for focus_roots)

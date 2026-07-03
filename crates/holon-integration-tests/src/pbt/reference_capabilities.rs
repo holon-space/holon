@@ -26,7 +26,7 @@ use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
     CapCursor, CapRegion, RefBackend, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
     RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
-    RefLifecycle, RefPeers, RefPeersMut, RefTaskState, RefViewSelection, RefWatches, WatchRow,
+    RefLifecycle, RefPeers, RefPeersMut, RefTaskState, RefViewSelection, RefWatch, WatchRow,
 };
 
 use super::peer_ops::PeerBlock;
@@ -816,7 +816,7 @@ impl RefViewSelection for ReferenceState {
     }
 }
 
-impl RefWatches for ReferenceState {
+impl RefWatch for ReferenceState {
     fn active_watch_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.mcp.active_watches.keys().cloned().collect();
         ids.sort();
@@ -903,10 +903,10 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // existing slices: selection ANDs the SUT and ref cap sets, and only the
         // windowed slice supplies the matching `SutLayout + SutViewSelection`.
         caps.insert(self.clone() as Arc<dyn RefLayout>);
-        // `RefWatches` carries the active-watch query set + expected rows the B5
-        // watch invariants read (E1 SutWatchRows relocation). Harmless to existing
-        // slices: only the frontend slice supplies the matching `SutWatchRows`.
-        caps.insert(self.clone() as Arc<dyn RefWatches>);
+        // `RefWatch` carries the active-watch query set + expected rows the B5
+        // watch invariants read (E1 SutWatch relocation). Harmless to existing
+        // slices: only the frontend slice supplies the matching `SutWatch`.
+        caps.insert(self.clone() as Arc<dyn RefWatch>);
         // `RefFocus` carries the per-region navigation focus + expected focus roots
         // the `inv-navigation-focus` / `inv-focus-roots` invariants read (SutHandle
         // decomposition: NavigateFocus onto SutFocusWrite). Harmless to existing

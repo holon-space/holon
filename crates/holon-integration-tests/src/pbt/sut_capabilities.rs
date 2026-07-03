@@ -192,8 +192,8 @@ impl SutLoro for E2ESut {
 // focus-roots) run only via the composed catalog — see `NATIVE_ONLY_EXCLUDED`
 // + the `SutBackend` row in `E1_RELOCATED_CAP_COVERAGE`.
 
-// ─── SutWatchRows: DELETED (E3) ───────────────────────────────────────
-// E2ESut's `SutWatchRows` impl was removed once the cap was relocated onto
+// ─── SutWatch: DELETED (E3) ───────────────────────────────────────
+// E2ESut's `SutWatch` impl was removed once the cap was relocated onto
 // `HeadlessFrontendComponent`'s production reactive watch surface (E1/B5). The
 // watch invariants now run only via the composed `frontend_slice`; the native
 // runner no longer dispatches them (see `NATIVE_ONLY_EXCLUDED`).

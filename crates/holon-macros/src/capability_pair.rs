@@ -51,6 +51,29 @@
 //! Owned returns only: a borrow-returning signature (`&str`, `Option<&str>`)
 //! is a compile error — an `async` SUT method can't borrow `&self` across the
 //! `.await`.
+//!
+//! # Scope — the convertible set is EXHAUSTED (audit 2026-07-03)
+//!
+//! Do not hunt for more pairs to convert; a body-level inventory found the
+//! macro's reach is capped by two structural facts:
+//!
+//! 1. **The SUT↔Ref comparison graph is many-to-many, not 1:1.** Hub reference
+//!    caps (`RefBlockTree` ×3, `RefBackend` ×3, `RefLayout` ×2) answer several
+//!    different questions for several SUT caps; a trait can live in at most one
+//!    pair, so pairing a hub would misrepresent the relationship and orphan the
+//!    other edges.
+//! 2. **`#[compare]` is strictly two-value** — one arg-less method per side
+//!    returning the whole comparable value. Most invariant bodies read 2+
+//!    methods per side, loop over per-id parameterized reads, or need 3-valued
+//!    `Result`-Skip / borrow returns (editor caret/text).
+//!
+//! The convertible set was exactly four invariants — `inv-view-selection`
+//! (ViewSelection), `inv-navigation-focus` (Focus),
+//! `inv-active-watches-match-ref` (Watch), all converted, plus
+//! `inv-blocks-match-ref/org`, deliberately NOT converted (its ref side is the
+//! `RefBackend` hub). Everything beyond a clean 1:1 two-value edge belongs to
+//! the Correspondence registry (`holon-pbt-core/src/correspondence.rs`), not
+//! this macro.
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};

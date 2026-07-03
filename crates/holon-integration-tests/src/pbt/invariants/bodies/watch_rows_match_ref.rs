@@ -40,7 +40,7 @@
 
 use std::collections::HashSet;
 
-use holon_pbt_core::capabilities::{EntityUri, RefWatches, SutWatchRows, WatchRow};
+use holon_pbt_core::capabilities::{EntityUri, RefWatch, SutWatch, WatchRow};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 use crate::pbt::staleness::{Staleness, classify_staleness};
@@ -89,8 +89,8 @@ fn id_of(row: &WatchRow) -> Option<EntityUri> {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvWatchRowsMatchRef
 where
-    R: RefWatches,
-    S: SutWatchRows,
+    R: RefWatch,
+    S: SutWatch,
 {
     fn id(&self) -> InvariantId {
         Self::ID
