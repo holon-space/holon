@@ -20,10 +20,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvFocusRoots,
         RunMode::Strict,
         Needs {
-            sut_present: vec![
-                CapId::of::<dyn SutBackend>(),
-                CapId::of::<dyn SutFocus>(),
-            ],
+            sut_present: vec![CapId::of::<dyn SutBackend>(), CapId::of::<dyn SutFocus>()],
             sut_absent: Vec::new(),
             ref_present: vec![CapId::of::<dyn RefFocus>()],
         },

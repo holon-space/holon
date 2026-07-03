@@ -31,6 +31,7 @@ pub mod retry;
 pub mod slice;
 pub mod sql_loro_slice;
 pub mod sql_slice;
+pub mod staleness;
 pub mod state_machine;
 pub mod stepper;
 pub mod sut;

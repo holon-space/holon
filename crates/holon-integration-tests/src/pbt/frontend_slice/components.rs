@@ -28,10 +28,9 @@ use holon_frontend::reactive::{BuilderServices, ReactiveEngine, ReactiveRendered
 use holon_frontend::{FrontendSession, ReactiveEngineDriver, UserDriver};
 use holon_pbt_core::capabilities::{
     CapRegion, SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutEditorMirrorWrite,
-    SutErrorLog, SutFocus, SutFocusWrite, SutHistoryWrite, SutMcpEmit,
-    SutNavHistoryDrive, SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults, SutRenderer,
-    SutSqlProjection, SutViewControl, SutViewSelection, SutWatchRegister, SutWatchRows, WatchRow,
-    WidgetSnapshot,
+    SutErrorLog, SutFocus, SutFocusWrite, SutHistoryWrite, SutMcpEmit, SutNavHistoryDrive,
+    SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults, SutRenderer, SutSqlProjection,
+    SutViewControl, SutViewSelection, SutWatchRegister, SutWatchRows, WatchRow, WidgetSnapshot,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use tempfile::TempDir;

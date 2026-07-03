@@ -791,7 +791,9 @@ mod tests {
     /// runtime + a settle window. This is the arm that folds C2.0's `boot_and_seed`.
     #[tokio::test(flavor = "multi_thread")]
     async fn compose_sut_frontend_arm_caps_and_aux() {
-        use holon_pbt_core::capabilities::{SutOrgRead, SutRenderer, SutViewSelection, SutWatchRows};
+        use holon_pbt_core::capabilities::{
+            SutOrgRead, SutRenderer, SutViewSelection, SutWatchRows,
+        };
         let sut = compose_sut(&turso_frontend(), &resolver()).await;
         // Backend + structural write + Turso projection.
         assert!(sut.caps.get::<dyn SutBackend>().is_some());

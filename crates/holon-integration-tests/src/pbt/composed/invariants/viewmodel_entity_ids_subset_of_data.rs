@@ -17,7 +17,10 @@ pub fn wire() -> Box<dyn CapInvariant> {
         Needs {
             sut_present: vec![CapId::of::<dyn SutRenderer>()],
             sut_absent: Vec::new(),
-            ref_present: vec![CapId::of::<dyn RefViewSelection>(), CapId::of::<dyn RefLayout>()],
+            ref_present: vec![
+                CapId::of::<dyn RefViewSelection>(),
+                CapId::of::<dyn RefLayout>(),
+            ],
         },
     ))
 }

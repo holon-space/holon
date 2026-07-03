@@ -26,7 +26,7 @@ use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
     CapCursor, CapRegion, RefBackend, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
     RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
-    RefLifecycle, RefPeers, RefPeersMut, RefViewSelection, RefTaskState, RefWatches, WatchRow,
+    RefLifecycle, RefPeers, RefPeersMut, RefTaskState, RefViewSelection, RefWatches, WatchRow,
 };
 
 use super::peer_ops::PeerBlock;

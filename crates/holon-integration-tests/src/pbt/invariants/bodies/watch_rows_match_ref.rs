@@ -38,10 +38,12 @@
 //! `RunMode`). So the faithful run mode is `Strict` — the CDC-lag downgrade is
 //! orthogonal to the run mode, not a reason to weaken it to `Warn`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use holon_pbt_core::capabilities::{EntityUri, RefWatches, SutWatchRows, WatchRow};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
+
+use crate::pbt::staleness::{Staleness, classify_staleness};
 
 pub struct InvWatchRowsMatchRef;
 
@@ -112,34 +114,43 @@ where
             let expected_ids: HashSet<EntityUri> = expected_rows.iter().filter_map(id_of).collect();
 
             // ── id-set CDC-lag classifier ──────────────────────────────
-            if ui_ids != expected_ids {
+            // ui_model is the downstream projection; `block_raw` (via the watch's
+            // `to_block_raw_sql()` truth query) the authoritative upstream.
+            match classify_staleness(&ui_ids, &expected_ids, || async {
                 let truth_sql = ref_.watch_block_raw_sql(&query_id);
-                let truth_ids: BTreeSet<EntityUri> = sut.block_raw_query_ids(&truth_sql).await;
-                let truth_ids: HashSet<EntityUri> = truth_ids.into_iter().collect();
-
-                if truth_ids == expected_ids {
-                    // ui_model lagged for this watch — skip its per-row
-                    // checks. Re-checking against stale rows would just
-                    // mask the next signal.
+                sut.block_raw_query_ids(&truth_sql)
+                    .await
+                    .into_iter()
+                    .collect::<HashSet<EntityUri>>()
+            })
+            .await
+            {
+                Staleness::Converged => {}
+                Staleness::Lag => {
+                    // ui_model lagged for this watch — skip its per-row checks.
+                    // Re-checking against stale rows would just mask the next signal.
                     any_lag_skipped = true;
                     continue;
                 }
-
                 // block_raw ALSO disagrees → real write/parse pipeline bug.
-                let missing: Vec<&EntityUri> = expected_ids.difference(&ui_ids).collect();
-                let spurious: Vec<&EntityUri> = ui_ids.difference(&expected_ids).collect();
-                return InvariantResult::Fail(format!(
-                    "CDC UI model for watch '{query_id}' has wrong block IDs (block_raw also \
-                     disagrees — real bug, not a CDC delivery race).\n\
-                     Expected {} blocks: {expected_ids:?}\n\
-                     Got {} blocks (ui_model): {ui_ids:?}\n\
-                     Got {} blocks (block_raw truth): {truth_ids:?}\n\
-                     Missing in ui_model: {missing:?}\n\
-                     Spurious in ui_model: {spurious:?}",
-                    expected_ids.len(),
-                    ui_ids.len(),
-                    truth_ids.len(),
-                ));
+                Staleness::Divergent {
+                    upstream: truth_ids,
+                } => {
+                    let missing: Vec<&EntityUri> = expected_ids.difference(&ui_ids).collect();
+                    let spurious: Vec<&EntityUri> = ui_ids.difference(&expected_ids).collect();
+                    return InvariantResult::Fail(format!(
+                        "CDC UI model for watch '{query_id}' has wrong block IDs (block_raw also \
+                         disagrees — real bug, not a CDC delivery race).\n\
+                         Expected {} blocks: {expected_ids:?}\n\
+                         Got {} blocks (ui_model): {ui_ids:?}\n\
+                         Got {} blocks (block_raw truth): {truth_ids:?}\n\
+                         Missing in ui_model: {missing:?}\n\
+                         Spurious in ui_model: {spurious:?}",
+                        expected_ids.len(),
+                        ui_ids.len(),
+                        truth_ids.len(),
+                    ));
+                }
             }
 
             // ── per-row field + parent_id checks ───────────────────────
@@ -172,15 +183,18 @@ where
                         .and_then(|v| v.as_ref())
                         .map(|s| normalize_content(s));
 
-                    if actual_val != expected_val {
-                        // field-level CDC-lag classifier: consult block_raw.
-                        let sql_val = sut
-                            .block_raw_field(&expected_id, field)
+                    // field-level CDC-lag classifier: ui_model field is downstream,
+                    // the same field read straight from `block_raw` is upstream.
+                    match classify_staleness(&actual_val, &expected_val, || async {
+                        sut.block_raw_field(&expected_id, field)
                             .await
-                            .map(|s| normalize_content(&s));
-                        if sql_val == expected_val {
-                            any_lag_skipped = true;
-                        } else {
+                            .map(|s| normalize_content(&s))
+                    })
+                    .await
+                    {
+                        Staleness::Converged => {}
+                        Staleness::Lag => any_lag_skipped = true,
+                        Staleness::Divergent { upstream: sql_val } => {
                             return InvariantResult::Fail(format!(
                                 "CDC field '{field}' mismatch for block '{expected_id}' in watch \
                                  '{query_id}'\n\

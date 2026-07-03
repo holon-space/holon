@@ -73,8 +73,7 @@ use crate::pbt::transitions::{
     SimulateRestart, SplitBlock, ToggleState, TypeChars,
 };
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutFocus, SutQueryResults,
-    SutSqlProjection,
+    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutFocus, SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::CapProvider;
 
