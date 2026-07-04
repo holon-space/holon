@@ -10,13 +10,17 @@ use std::collections::HashMap;
 // Import Block for use in extension traits (not re-exported to avoid FRB issues)
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::types::{ContentType, Priority, Tags, TaskState, Timestamp};
+use holon_api::types::{ContentType, Priority, StateCategory, Tags, TaskState, Timestamp};
 
 /// Property keys for org-specific fields stored in properties JSON.
 pub mod org_props {
     pub const TITLE: &str = "title";
     pub const TODO_KEYWORDS: &str = "todo_keywords";
     pub const TASK_STATE: &str = "task_state";
+    /// Sidecar for TASK_STATE: "active" | "done". TASK_STATE stays a bare
+    /// keyword (many consumers read it as such); the category — derived at
+    /// the parse boundary from `#+TODO:` config — would otherwise be lost.
+    pub const TASK_STATE_CATEGORY: &str = "task_state_category";
     pub const PRIORITY: &str = "priority";
     pub const TAGS: &str = "tags";
     pub const LEVEL: &str = "level";
@@ -543,19 +547,44 @@ impl OrgBlockExt for Block {
     }
 
     fn task_state(&self) -> Option<TaskState> {
-        self.get_property(org_props::TASK_STATE)
-            .and_then(|v| v.as_string().map(TaskState::from_keyword))
+        let keyword = self
+            .get_property(org_props::TASK_STATE)
+            .and_then(|v| v.as_string().map(str::to_string))?;
+        match self.get_property(org_props::TASK_STATE_CATEGORY) {
+            Some(v) => {
+                let category = match v.as_string() {
+                    Some("active") => StateCategory::Active,
+                    Some("done") => StateCategory::Done,
+                    other => panic!(
+                        "corrupt task_state_category {:?} on block {} (expected \"active\" or \"done\")",
+                        other, self.id
+                    ),
+                };
+                Some(TaskState::new(keyword, category))
+            }
+            // Legacy data / writers that only set the keyword.
+            None => Some(TaskState::from_keyword(&keyword)),
+        }
     }
 
     fn set_task_state(&mut self, state: Option<TaskState>) {
         if let Some(s) = state {
+            let category = match s.category {
+                StateCategory::Active => "active",
+                StateCategory::Done => "done",
+            };
             self.set_property(
                 org_props::TASK_STATE,
-                holon_api::Value::String(s.to_string()),
+                holon_api::Value::String(s.keyword.clone()),
+            );
+            self.set_property(
+                org_props::TASK_STATE_CATEGORY,
+                holon_api::Value::String(category.to_string()),
             );
         } else {
             let mut props = self.properties_map();
             props.remove(org_props::TASK_STATE);
+            props.remove(org_props::TASK_STATE_CATEGORY);
             self.set_properties_map(props);
         }
     }
@@ -651,6 +680,7 @@ impl OrgBlockExt for Block {
             "level",
             "sequence",
             "task_state",
+            "task_state_category",
             "priority",
             "tags",
             "requires",
