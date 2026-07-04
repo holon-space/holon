@@ -1058,7 +1058,10 @@ fn build_task_transitions(
     for (i, dep_id) in task.depends_on.iter().enumerate() {
         let bind_name = format!("dep_{i}");
         let mut precond = BTreeMap::new();
-        precond.insert("source_task".to_string(), PrecondSpec::Exact(dep_id.clone()));
+        precond.insert(
+            "source_task".to_string(),
+            PrecondSpec::Exact(dep_id.clone()),
+        );
         inputs.push(InputArc {
             bind: bind_name.clone(),
             token_type: "completion".to_string(),
