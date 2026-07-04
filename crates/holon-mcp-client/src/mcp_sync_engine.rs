@@ -444,6 +444,22 @@ impl McpSyncEngine {
         Ok(false)
     }
 
+    /// Sync one entity by name — the poll-tick path. Fails loudly if the
+    /// entity has no sync strategy or cache (a poll tick for such an entity
+    /// is a wiring bug, not a condition to paper over).
+    pub async fn sync_entity_by_name(&self, entity_name: &str) -> anyhow::Result<()> {
+        let strategy = self.strategies.get(entity_name).ok_or_else(|| {
+            anyhow::anyhow!("poll tick for '{entity_name}': no sync strategy configured")
+        })?;
+        let cache = self
+            .caches
+            .get(entity_name)
+            .ok_or_else(|| anyhow::anyhow!("poll tick for '{entity_name}': no cache configured"))?;
+        self.sync_entity(entity_name, strategy.as_ref(), cache.as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// Sync all entities. Convenience wrapper around the SyncableProvider trait.
     pub async fn sync_all(&self) -> anyhow::Result<()> {
         self.sync(StreamPosition::Beginning)
@@ -463,7 +479,7 @@ impl McpSyncEngine {
     }
 
     /// Access the underlying MCP peer (e.g. to build additional typed
-    /// sources over the same connection).
+    /// sources like `McpClaudeSessionSource` over the same connection).
     pub fn peer(&self) -> &Peer<RoleClient> {
         &self.peer
     }

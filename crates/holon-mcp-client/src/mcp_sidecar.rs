@@ -16,6 +16,28 @@ pub struct McpSidecar {
     pub entities: HashMap<String, EntityConfig>,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
+    /// Sidecar-declared derived views, created as Turso materialized views at
+    /// integration startup (after the cache tables exist). Names get
+    /// `entity_prefix` applied like entities do.
+    ///
+    /// The SQL must stay within the Turso-IVM-supported dialect:
+    /// - single-level `GROUP BY` aggregates, including the arg-max concat
+    ///   idiom `substr(MAX(ts || '|' || col), N)`
+    /// - NO correlated subqueries, NO self-joins back to the aggregated
+    ///   table, NO non-equijoin LEFT JOINs — these fail at CREATE.
+    ///
+    /// A view that fails to create is a hard, loud config error at connect.
+    #[serde(default)]
+    pub views: Vec<ViewConfig>,
+}
+
+/// A sidecar-declared derived view: `CREATE MATERIALIZED VIEW {prefix}{name} AS {sql}`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ViewConfig {
+    /// View name; `entity_prefix` is applied (e.g. `session_status` -> `cc_session_status`).
+    pub name: String,
+    /// The SELECT statement (IVM-supported dialect, see [`McpSidecar::views`]).
+    pub sql: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,6 +108,87 @@ pub struct SyncConfig {
     /// Parameters to expand in the resource URI template (e.g. `{project_id}`).
     #[serde(default)]
     pub uri_params: HashMap<String, String>,
+    /// Optional polling interval. When set, the integration emits a poll tick
+    /// for this entity on this cadence (serialized with notification resyncs).
+    /// This is the freshness mechanism for servers without
+    /// `resources.subscribe`, and an explicit belt-and-braces cadence for
+    /// servers that have it. Accepts an integer (seconds) or a humantime-style
+    /// string (`"30s"`, `"5m"`, `"1h"`).
+    #[serde(default)]
+    pub interval: Option<SyncInterval>,
+}
+
+/// A polling interval parsed from YAML: integer seconds or `"30s"`/`"5m"`/`"1h"`.
+///
+/// Parse-don't-validate: an unparseable interval fails YAML deserialization
+/// loudly instead of becoming a silently-ignored setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncInterval(std::time::Duration);
+
+impl SyncInterval {
+    pub fn duration(&self) -> std::time::Duration {
+        self.0
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        let (digits, unit) = match s.find(|c: char| !c.is_ascii_digit()) {
+            Some(idx) => s.split_at(idx),
+            None => (s, ""),
+        };
+        if digits.is_empty() {
+            return Err(format!(
+                "invalid sync interval '{s}': expected <number>[s|m|h] or plain seconds"
+            ));
+        }
+        let n: u64 = digits
+            .parse()
+            .map_err(|e| format!("invalid sync interval '{s}': {e}"))?;
+        let secs = match unit.trim() {
+            "" | "s" | "sec" | "secs" | "second" | "seconds" => n,
+            "m" | "min" | "mins" | "minute" | "minutes" => n * 60,
+            "h" | "hr" | "hour" | "hours" => n * 3600,
+            other => {
+                return Err(format!(
+                    "invalid sync interval '{s}': unknown unit '{other}' (use s, m, or h)"
+                ));
+            }
+        };
+        if secs == 0 {
+            return Err(format!("invalid sync interval '{s}': must be > 0"));
+        }
+        Ok(Self(std::time::Duration::from_secs(secs)))
+    }
+}
+
+impl std::fmt::Display for SyncInterval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}s", self.0.as_secs())
+    }
+}
+
+impl Serialize for SyncInterval {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0.as_secs())
+    }
+}
+
+impl<'de> Deserialize<'de> for SyncInterval {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Secs(u64),
+            Text(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Secs(0) => Err(serde::de::Error::custom(
+                "invalid sync interval: must be > 0 seconds",
+            )),
+            Raw::Secs(n) => Ok(Self(std::time::Duration::from_secs(n))),
+            Raw::Text(s) => Self::parse(&s).map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 impl SyncConfig {
@@ -487,6 +590,103 @@ entities:
         assert_eq!(entity.id_column_or_default(), "id");
         assert!(entity.schema.is_empty());
         assert!(entity.sync.is_some());
+    }
+
+    #[test]
+    fn parse_sync_interval_forms() {
+        let yaml = r#"
+entities:
+  session:
+    sync:
+      list_resource: "history://sessions"
+      interval: 60
+  message:
+    sync:
+      list_resource: "history://messages"
+      interval: "5m"
+"#;
+        let sidecar: McpSidecar = serde_yaml::from_str(yaml).unwrap();
+        let session = sidecar.entities["session"].sync.as_ref().unwrap();
+        assert_eq!(
+            session.interval.unwrap().duration(),
+            std::time::Duration::from_secs(60)
+        );
+        let message = sidecar.entities["message"].sync.as_ref().unwrap();
+        assert_eq!(
+            message.interval.unwrap().duration(),
+            std::time::Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn parse_sync_interval_absent_is_none() {
+        let yaml = r#"
+entities:
+  session:
+    sync:
+      list_resource: "history://sessions"
+"#;
+        let sidecar: McpSidecar = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            sidecar.entities["session"]
+                .sync
+                .as_ref()
+                .unwrap()
+                .interval
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_sync_interval_fails_deserialization() {
+        for bad in ["\"5 fortnights\"", "\"abc\"", "0", "\"0s\""] {
+            let yaml = format!(
+                r#"
+entities:
+  session:
+    sync:
+      list_resource: "history://sessions"
+      interval: {bad}
+"#
+            );
+            let result: Result<McpSidecar, _> = serde_yaml::from_str(&yaml);
+            assert!(result.is_err(), "interval {bad} should fail to parse");
+        }
+    }
+
+    #[test]
+    fn parse_views_section() {
+        let yaml = r#"
+entity_prefix: "cc_"
+entities:
+  session:
+    sync:
+      list_resource: "history://sessions"
+views:
+  - name: session_status
+    sql: "SELECT session_id, MAX(ts) AS last_ts FROM cc_message GROUP BY session_id"
+"#;
+        let sidecar: McpSidecar = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(sidecar.views.len(), 1);
+        assert_eq!(sidecar.views[0].name, "session_status");
+        assert!(sidecar.views[0].sql.starts_with("SELECT session_id"));
+        // entity_prefix applies to view names the same way it does to tables
+        assert_eq!(
+            sidecar.prefixed_name(&sidecar.views[0].name).table_name(),
+            "cc_session_status"
+        );
+    }
+
+    #[test]
+    fn views_absent_is_empty() {
+        let yaml = r#"
+entities:
+  session:
+    sync:
+      list_resource: "history://sessions"
+"#;
+        let sidecar: McpSidecar = serde_yaml::from_str(yaml).unwrap();
+        assert!(sidecar.views.is_empty());
     }
 
     #[test]

@@ -20,11 +20,12 @@ pub mod mcp_sidecar;
 pub mod mcp_sync_engine;
 pub mod mcp_sync_strategy;
 pub mod mcp_vtable;
+pub mod sync_freshness;
 
 pub use integration_config::{IntegrationFileConfig, load_integration_configs};
 pub use mcp_integration::{
     AuthMode, McpConnectionResult, McpIntegration, McpIntegrationConfig, McpTransport,
-    PendingOAuthFlows, build_mcp_integration, spawn_subscription_listener,
+    PendingOAuthFlows, SyncEvent, build_mcp_integration, spawn_sync_event_loop,
 };
 pub use mcp_notification_handler::{NotifyingClientHandler, ResourceUpdateReceiver};
 pub use mcp_provider::{
@@ -33,7 +34,8 @@ pub use mcp_provider::{
     connect_mcp_with_handler,
 };
 pub use mcp_resource_discovery::{ResourceEntityMeta, parse_resource_template_meta};
-pub use mcp_sidecar::McpSidecar;
+pub use mcp_sidecar::{McpSidecar, SyncInterval, ViewConfig};
 pub use mcp_sync_engine::{McpSyncEngine, VtableSubscription};
 pub use mcp_sync_strategy::{FetchResult, ResourceSync, SyncStrategy, ToolSync};
 pub use mcp_vtable::{McpForeignDataWrapper, VtableConfig};
+pub use sync_freshness::{FreshnessPlan, ProbedResourceCapabilities, freshness_plan};

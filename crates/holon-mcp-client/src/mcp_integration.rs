@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, info, warn};
 
@@ -21,6 +21,7 @@ use crate::mcp_resource_discovery::parse_resource_template_meta;
 use crate::mcp_sidecar::{EntityConfig, McpSidecar, SyncConfig};
 use crate::mcp_sync_engine::McpSyncEngine;
 use crate::mcp_sync_strategy::SyncStrategy;
+use crate::sync_freshness::ProbedResourceCapabilities;
 
 /// Transport configuration for connecting to an MCP server.
 #[derive(Debug)]
@@ -89,14 +90,42 @@ pub struct McpIntegration {
     pub sync_engine: Arc<McpSyncEngine>,
     /// Must be kept alive for the MCP connection to stay open.
     pub service: McpRunningService,
-    /// Background task processing resource update notifications.
-    /// `None` if no entities use resource-based sync.
-    pub subscription_task: Option<JoinHandle<()>>,
+    /// The single consumer serializing all sync work for this integration:
+    /// initial sync, notification resyncs, and poll ticks.
+    pub sync_event_task: JoinHandle<()>,
+    /// Producers feeding `sync_event_task`: the notification forwarder and
+    /// one poll ticker per entity with a configured `sync.interval`.
+    /// Held so their lifetime is owned by the integration.
+    pub background_tasks: Vec<JoinHandle<()>>,
+    /// Server resource capabilities probed from `peer_info()` at connect.
+    pub resource_capabilities: ProbedResourceCapabilities,
     /// Cache table names that have an associated FDW table.
     pub fdw_backed_tables: Vec<String>,
+    /// Producer handle into the sync event loop.
+    sync_event_tx: mpsc::UnboundedSender<SyncEvent>,
+}
+
+/// A unit of sync work, serialized through one consumer per integration so
+/// notification resyncs, poll ticks, and the initial sync never overlap.
+#[derive(Debug)]
+pub enum SyncEvent {
+    /// Full sync of every sync-configured entity (the initial sync).
+    SyncAll,
+    /// A `notifications/resources/updated` arrived for this URI.
+    NotificationUri(String),
+    /// Poll cadence fired for this entity (sidecar `sync.interval`).
+    PollTick(String),
 }
 
 impl McpIntegration {
+    /// Enqueue the initial full sync through the serialized sync event loop.
+    /// Returns an error if the loop has already stopped (channel closed).
+    pub fn request_initial_sync(&self) -> anyhow::Result<()> {
+        self.sync_event_tx.send(SyncEvent::SyncAll).map_err(|_| {
+            anyhow::anyhow!("sync event loop is not running — cannot enqueue initial sync")
+        })
+    }
+
     /// Register all entity types from the sidecar config into the TypeRegistry.
     /// Called by frontends after building the integration so GQL graph includes MCP entities.
     pub fn register_entity_types(&self, type_registry: &holon_profiles::TypeRegistry) {
@@ -430,6 +459,7 @@ async fn finish_integration(
                         cursor: None,
                         list_resource: Some(meta.uri_template),
                         uri_params: HashMap::new(),
+                        interval: None,
                     }),
                     vtable: None,
                     profile_variants: Vec::new(),
@@ -533,6 +563,30 @@ async fn finish_integration(
         }
     }
 
+    // Sidecar-declared derived views (generic): the cache tables they select
+    // from were just created by the CacheFactory above. A view that fails DDL
+    // is a hard, loud config error naming the view and the provider — never
+    // skip-and-continue (parse, don't validate, at connect).
+    for view in &sidecar.views {
+        let view_name = sidecar.prefixed_name(&view.name).table_name();
+        holon_turso::matview_manager::reconcile_named_view(&db_handle, &view_name, &view.sql)
+            .await
+            .with_context(|| {
+                format!(
+                    "sidecar view '{}' of provider '{provider_name}': \
+                     CREATE MATERIALIZED VIEW '{view_name}' failed — fix the `views:` \
+                     SQL in the provider's sidecar YAML (IVM dialect: single-level \
+                     GROUP BY aggregates incl. substr(MAX(ts || '|' || col), N); no \
+                     correlated subqueries, self-joins, or non-equijoin LEFT JOINs)",
+                    view.name
+                )
+            })?;
+        info!(
+            "[finish_integration] Sidecar view '{}' ready as matview '{}'",
+            view.name, view_name
+        );
+    }
+
     let operation_provider =
         McpOperationProvider::from_peer_shared(peer.clone(), sidecar.clone(), entity_readers)
             .await?;
@@ -559,54 +613,156 @@ async fn finish_integration(
         })
         .collect();
 
+    // Capability probe: what freshness mechanisms does this server support?
+    let resource_capabilities = ProbedResourceCapabilities::from_server(
+        peer.peer_info()
+            .and_then(|i| i.capabilities.resources.as_ref()),
+    );
+
+    // Entities that explicitly opted into polling via `sync.interval`.
+    let poll_entities: Vec<(String, std::time::Duration)> = sidecar
+        .entities
+        .iter()
+        .filter_map(|(name, config)| {
+            let interval = config.sync.as_ref()?.interval?;
+            Some((name.clone(), interval.duration()))
+        })
+        .collect();
+
     let sync_engine = Arc::new(McpSyncEngine::new(
         peer,
         strategies,
         caches,
         token_store,
-        provider_name,
+        provider_name.clone(),
         sidecar.clone(),
         vtable_subs,
         Some(db_handle),
     ));
 
-    // Subscribe to resource updates and spawn background listener
-    let subscription_task = if sync_engine.has_subscriptions() {
-        if let Err(e) = sync_engine.subscribe_all().await {
-            warn!("[finish_integration] Failed to subscribe to resources: {e}");
+    // Probe-gated subscribe: only attempt `resources/subscribe` against
+    // servers that advertise the capability. Against a capable server, an
+    // individual subscribe failure is a real error — fail loud.
+    if sync_engine.has_subscriptions() {
+        if resource_capabilities.subscribe {
+            sync_engine.subscribe_all().await.with_context(|| {
+                format!(
+                    "provider '{provider_name}': server advertises resources.subscribe \
+                     but subscribing failed"
+                )
+            })?;
+        } else if poll_entities.is_empty() {
+            warn!(
+                "provider {provider_name}: no resources.subscribe capability and no \
+                 sync.interval configured — caches will be STALE after the initial sync \
+                 (add `sync: {{ interval: 60s }}` to entities in the sidecar YAML to poll)"
+            );
+        } else {
+            let cadences: Vec<String> = poll_entities
+                .iter()
+                .map(|(name, d)| format!("{name}@{}s", d.as_secs()))
+                .collect();
+            warn!(
+                "provider {provider_name}: no resources.subscribe — falling back to \
+                 polling at {}",
+                cadences.join(", ")
+            );
         }
-        Some(spawn_subscription_listener(receiver, sync_engine.clone()))
-    } else {
-        None
-    };
+    }
+
+    // One serialized consumer per integration: initial sync, notification
+    // resyncs, and poll ticks all flow through the same channel, so per-entity
+    // sync work never overlaps.
+    let (sync_event_tx, sync_event_rx) = mpsc::unbounded_channel::<SyncEvent>();
+    let sync_event_task = spawn_sync_event_loop(sync_event_rx, sync_engine.clone());
+
+    let mut background_tasks = Vec::new();
+
+    // Notification forwarder: resource-updated URIs -> serialized consumer.
+    {
+        let tx = sync_event_tx.clone();
+        let mut receiver = receiver;
+        background_tasks.push(tokio::spawn(async move {
+            while let Some(uri) = receiver.0.recv().await {
+                if tx.send(SyncEvent::NotificationUri(uri)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    // Poll tickers: one per entity with a configured interval.
+    for (entity_name, every) in poll_entities {
+        let tx = sync_event_tx.clone();
+        background_tasks.push(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // The first tick fires immediately; the initial SyncAll covers it.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if tx.send(SyncEvent::PollTick(entity_name.clone())).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
 
     Ok(McpIntegration {
         operation_provider,
         sync_engine,
         service,
-        subscription_task,
+        sync_event_task,
+        background_tasks,
+        resource_capabilities,
         fdw_backed_tables,
+        sync_event_tx,
     })
 }
 
-/// Spawn a background task that re-syncs entities when resource update notifications arrive.
-pub fn spawn_subscription_listener(
-    mut receiver: ResourceUpdateReceiver,
+/// Spawn the single consumer that serializes all sync work for an integration:
+/// the initial full sync, notification-driven resyncs, and poll ticks.
+pub fn spawn_sync_event_loop(
+    mut receiver: mpsc::UnboundedReceiver<SyncEvent>,
     sync_engine: Arc<McpSyncEngine>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(uri) = receiver.0.recv().await {
-            let span = tracing::info_span!("subscription_resync", %uri);
-            async {
-                info!("resource updated, re-syncing...");
-                if let Err(e) = sync_engine.resync_by_uri(&uri).await {
-                    warn!(error = %e, "failed to resync");
+        while let Some(event) = receiver.recv().await {
+            match event {
+                SyncEvent::SyncAll => {
+                    let span = tracing::info_span!("initial_sync");
+                    async {
+                        if let Err(e) = sync_engine.sync_all().await {
+                            warn!(error = %e, "initial sync failed");
+                        }
+                    }
+                    .instrument(span)
+                    .await;
+                }
+                SyncEvent::NotificationUri(uri) => {
+                    let span = tracing::info_span!("subscription_resync", %uri);
+                    async {
+                        info!("resource updated, re-syncing...");
+                        if let Err(e) = sync_engine.resync_by_uri(&uri).await {
+                            warn!(error = %e, "failed to resync");
+                        }
+                    }
+                    .instrument(span)
+                    .await;
+                }
+                SyncEvent::PollTick(entity) => {
+                    let span = tracing::info_span!("poll_resync", %entity);
+                    async {
+                        if let Err(e) = sync_engine.sync_entity_by_name(&entity).await {
+                            warn!(error = %e, "poll resync failed");
+                        }
+                    }
+                    .instrument(span)
+                    .await;
                 }
             }
-            .instrument(span)
-            .await;
         }
-        info!("[subscription_listener] Channel closed, stopping");
+        info!("[sync_event_loop] Channel closed, stopping");
     })
 }
 

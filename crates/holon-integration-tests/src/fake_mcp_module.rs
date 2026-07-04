@@ -228,6 +228,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
                 cursor: None,
                 list_resource: Some(RESOURCE_URI.to_string()),
                 uri_params: HashMap::new(),
+                interval: None,
             }),
             vtable: None,
             profile_variants: vec![],
@@ -238,6 +239,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
         entity_prefix: Some("fake_".to_string()),
         entities,
         tools: HashMap::new(),
+        views: vec![],
     };
 
     let entity_config = &sidecar.entities[ENTITY_NAME];
@@ -275,7 +277,19 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
 
     sync_engine.sync_all().await?;
     sync_engine.subscribe_all().await?;
-    holon_mcp_client::spawn_subscription_listener(update_rx, sync_engine.clone());
+    let (sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
+    holon_mcp_client::spawn_sync_event_loop(sync_event_rx, sync_engine.clone());
+    tokio::spawn(async move {
+        let mut update_rx = update_rx;
+        while let Some(uri) = update_rx.0.recv().await {
+            if sync_event_tx
+                .send(holon_mcp_client::SyncEvent::NotificationUri(uri))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     Ok(FakeMcpHandle {
         sync_engine,

@@ -140,3 +140,48 @@ entities:
       write_through: true
 
 tools: {}
+
+# Sidecar-declared derived views (generic `views:` mechanism, Phase 2).
+# Each entry becomes `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}`
+# at integration startup, after the cache tables exist. DDL failure is a hard,
+# loud config error at connect.
+#
+# SQL must stay inside the Turso-IVM-supported dialect:
+#   - single-level GROUP BY aggregates, incl. the arg-max concat idiom
+#     substr(MAX(ts || '|' || col), N)
+#   - iif(cond, a, b) for conditionals (CASE ... END fails at CREATE)
+#   - NO correlated subqueries, NO self-joins back to the aggregated table,
+#     NO non-equijoin LEFT JOINs — these fail at CREATE.
+#
+# Both views below are verified by
+# crates/holon-turso/tests/sidecar_views.rs — keep the SQL in sync.
+views:
+  # Arg-max rollup: last message per session, read from the cc_message CACHE
+  # table (fed by vtable write-through; cc_message requires a pinned
+  # session_id today, so rows exist for sessions whose messages were viewed).
+  # substr(..., 26): message timestamps are 24-char ISO-8601
+  # ("2026-07-04T10:00:00.000Z") + 1 for the '|' separator.
+  # session_id is emitted pre-prefixed ("cc-session:<id>") so it equijoins
+  # directly against cc_session.id.
+  - name: session_last_message
+    sql: >-
+      SELECT 'cc-session:' || session_id AS session_id,
+             MAX(timestamp) AS last_ts,
+             substr(MAX(timestamp || '|' || role), 26) AS last_role
+      FROM cc_message GROUP BY session_id
+  # Status classification, chained on the rollup (IVM rejects conditionals
+  # over aggregate expressions in one view; matview-on-matview is supported).
+  #   user spoke last                       -> working (agent is chewing)
+  #   assistant spoke last, recent activity -> waiting-on-user
+  #   otherwise                             -> idle
+  # CAVEAT: strftime('now') is evaluated when IVM recomputes a row (i.e. when
+  # that session's data changes), not continuously — a session that stops
+  # changing keeps its last classification until its next write.
+  - name: session_status
+    sql: >-
+      SELECT session_id, last_ts, last_role,
+             iif(last_role = 'user', 'working',
+                 iif(last_role = 'assistant'
+                     AND last_ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-10 minutes'),
+                     'waiting-on-user', 'idle')) AS status
+      FROM cc_session_last_message

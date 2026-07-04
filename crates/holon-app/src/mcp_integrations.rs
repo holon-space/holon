@@ -189,17 +189,17 @@ impl Module for McpIntegrationsModule {
                             // Register MCP entity types in TypeRegistry for GQL graph
                             integration.register_entity_types(&type_registry);
 
-                            // Spawn initial sync in background — don't block startup
-                            let sync_engine = integration.sync_engine.clone();
-                            let sync_name = name.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = sync_engine.sync_all().await {
-                                    warn!(
-                                        "[McpIntegrationsModule] Initial sync for '{}' failed: {e}",
-                                        sync_name
-                                    );
-                                }
-                            });
+                            // Enqueue the initial sync through the integration's
+                            // serialized sync event loop (same consumer as
+                            // notification resyncs and poll ticks) — doesn't block
+                            // startup and can't overlap a concurrent resync.
+                            if let Err(e) = integration.request_initial_sync() {
+                                warn!(
+                                    "[McpIntegrationsModule] Initial sync for '{}' could not \
+                                     be enqueued: {e}",
+                                    name
+                                );
+                            }
 
                             names.push(name.clone());
                             integrations.push(integration);

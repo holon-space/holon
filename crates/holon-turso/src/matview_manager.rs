@@ -22,14 +22,17 @@ use holon_api::{BatchWithMetadata, Value};
 use holon_core::storage::{Resource, StorageEntity};
 
 /// Normalize a SQL statement for comparison: collapse whitespace, strip trailing
-/// semicolons, lowercase keywords. This lets us compare `sqlite_master.sql` against
-/// the desired CREATE statement without false positives from formatting differences.
+/// semicolons, lowercase keywords, and drop spaces before `(` (Turso's view
+/// pretty-printer emits `iif (` / `strftime (`). This lets us compare
+/// `sqlite_master.sql` against the desired CREATE statement without false
+/// positives from formatting differences.
 fn normalize_view_sql(sql: &str) -> String {
     sql.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .trim_end_matches(';')
         .to_lowercase()
+        .replace(" (", "(")
 }
 
 /// Reconcile a named materialized view: only DROP+CREATE if the SELECT changed.

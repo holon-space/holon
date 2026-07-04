@@ -56,8 +56,8 @@ impl ServerHandler for TestMcpServer {
 
     fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParam>,
-        _context: RequestContext<RoleServer>,
+        _: Option<PaginatedRequestParam>,
+        _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
         async {
             Ok(ListResourcesResult {
@@ -83,7 +83,7 @@ impl ServerHandler for TestMcpServer {
     fn read_resource(
         &self,
         request: ReadResourceRequestParam,
-        _context: RequestContext<RoleServer>,
+        _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, ErrorData>> + Send + '_ {
         async move {
             if request.uri != RESOURCE_URI {
@@ -99,8 +99,8 @@ impl ServerHandler for TestMcpServer {
 
     fn subscribe(
         &self,
-        _request: SubscribeRequestParam,
-        _context: RequestContext<RoleServer>,
+        _: SubscribeRequestParam,
+        _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<(), ErrorData>> + Send + '_ {
         std::future::ready(Ok(()))
     }
@@ -229,6 +229,7 @@ impl PbtMcpIntegration {
                     cursor: None,
                     list_resource: Some(RESOURCE_URI.to_string()),
                     uri_params: HashMap::new(),
+                    interval: None,
                 }),
                 vtable: None,
                 profile_variants: vec![],
@@ -239,6 +240,7 @@ impl PbtMcpIntegration {
             entity_prefix: Some("pbt_".to_string()),
             entities,
             tools: HashMap::new(),
+            views: vec![],
         };
 
         // Create cache table in Turso (same pattern as finish_integration)
@@ -281,9 +283,21 @@ impl PbtMcpIntegration {
         // Subscribe to resource notifications
         sync_engine.subscribe_all().await?;
 
-        // Spawn notification listener
+        // Spawn serialized sync-event consumer + notification forwarder
         let engine_for_listener = sync_engine.clone();
-        holon_mcp_client::spawn_subscription_listener(update_rx, engine_for_listener);
+        let (sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        holon_mcp_client::spawn_sync_event_loop(sync_event_rx, engine_for_listener);
+        tokio::spawn(async move {
+            let mut update_rx = update_rx;
+            while let Some(uri) = update_rx.0.recv().await {
+                if sync_event_tx
+                    .send(holon_mcp_client::SyncEvent::NotificationUri(uri))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         Ok(Self {
             counter: AtomicU64::new(0),

@@ -56,6 +56,9 @@ pub struct IntegrationFileConfig {
     pub entities: HashMap<String, EntityConfig>,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
+    /// Sidecar-declared derived views (see [`crate::mcp_sidecar::McpSidecar::views`]).
+    #[serde(default)]
+    pub views: Vec<crate::mcp_sidecar::ViewConfig>,
 }
 
 /// Resolves `${VAR}` references in integration config strings.
@@ -153,6 +156,7 @@ impl IntegrationFileConfig {
             entity_prefix: self.entity_prefix,
             entities: self.entities,
             tools: self.tools,
+            views: self.views,
         };
         let sidecar_yaml =
             serde_yaml::to_string(&sidecar).expect("McpSidecar must be serializable");
