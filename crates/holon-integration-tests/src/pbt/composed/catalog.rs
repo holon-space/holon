@@ -20,7 +20,6 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
     let mut catalog: Vec<Box<dyn CapInvariant>> = vec![
         invariants::no_parent_cycles::wire(),
         invariants::source_language::wire(),
-        invariants::blocks_match::wire_org(),
         // Org render fixed point (E1): needs `SutOrgRender`, no ref. Only the
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),
@@ -86,7 +85,6 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // `ReactiveEngine` `widget_tree_snapshot`) supplies the SUT cap.
         invariants::viewmodel_snapshot::wire(),
         invariants::viewmodel_tree_virtual_slots::wire(),
-        invariants::matview_consistent_with_ref::wire(),
         invariants::editable_text_has_draggable::wire(),
         invariants::viewmodel_root_matches_render_expr::wire(),
         invariants::viewmodel_decompiled_rows_match_query::wire(),
@@ -116,11 +114,15 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
     // `inv-block-content/{block_raw,sql}` and `inv-block-parent/block_raw`
     // families in `correspondences::block_{content,parent}`; the editor-mirror
     // `inv-editor-{text,caret}/mirror` families in
-    // `correspondences::active_editor_{text,caret}`.
+    // `correspondences::active_editor_{text,caret}`; the org store
+    // `inv-blocks-match-ref/org` and the root-layout ghost-row check
+    // `inv-matview-consistent-with-ref/root_layout`.
     catalog.extend(correspondences::non_seed_blocks().wire());
     catalog.extend(correspondences::block_content().wire());
     catalog.extend(correspondences::block_parent().wire());
     catalog.extend(correspondences::active_editor_text().wire());
     catalog.extend(correspondences::active_editor_caret().wire());
+    catalog.extend(correspondences::org_blocks().wire());
+    catalog.extend(correspondences::matview_ghost_rows().wire());
     catalog
 }

@@ -6,14 +6,14 @@
 //! nothing else. Extraction/comparison strategies are named `fn`s in this
 //! module (greppable wiring; see the registry module doc's integrity rule).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 
 use holon_api::Block;
 use holon_pbt_core::capabilities::{
-    EntityUri, RefBackend, RefBlockTree, RefEditorMirror, SutBackend, SutEditorMirrorRead,
-    SutLoroLog, SutSqlProjection,
+    EntityUri, RefBackend, RefBlockTree, RefEditorMirror, RefLayout, SutBackend,
+    SutEditorMirrorRead, SutLoroLog, SutOrgRead, SutRenderer, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapId, CapMap, Needs};
 use holon_pbt_core::invariant::InvariantResult;
@@ -22,7 +22,7 @@ use crate::pbt::correspondence::{
     Converge, Correspondence, Extraction, NamedCompare, Observable, StoreProjection,
 };
 use crate::pbt::invariants::block_compare::{
-    BlockFacet, compare_block_fields, compare_block_subset,
+    BlockFacet, compare_block_fields, compare_block_subset, compare_blocks,
 };
 
 // ─── Observable: non-seed blocks (the `inv-blocks-match-ref/*` family) ──────
@@ -603,10 +603,190 @@ fn compare_editor_caret(sut: &(EntityUri, usize), ref_: &(EntityUri, usize)) -> 
     ))
 }
 
+// ─── Observable: org store of block-equivalence (`inv-blocks-match-ref/org`) ──
+
+/// The blocks parsed back off the on-disk org files vs the reference's org
+/// view. Shares the `blocks-match-ref` family stem with [`NonSeedBlocks`] but is
+/// a SEPARATE correspondence: its reference value comes from a DIFFERENT
+/// projection (`RefBackend::org_blocks` — non-seed, non-page, with the org
+/// parser's `file:<filename>` parent for unresolved docs), so it cannot share
+/// `NonSeedBlocks`' single `ref_project`. It is also the only block store whose
+/// per-parent sibling ORDER is checked (disk order = the renderer's canonical
+/// order; `compare_blocks(check_order = true)`) — `inv-live-children-match-ref`
+/// checks SQL `sort_key` order separately. Consolidates the last hand-written
+/// `blocks_match` body.
+pub struct OrgBlocks;
+
+impl Observable for OrgBlocks {
+    type Value = Vec<Block>;
+    const NAME: &'static str = "blocks-match-ref";
+}
+
+pub fn org_blocks() -> Correspondence<OrgBlocks> {
+    Correspondence {
+        ref_project: ref_org_blocks,
+        stores: vec![StoreProjection {
+            id: "inv-blocks-match-ref/org",
+            store: "org",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutOrgRead>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefBackend>()],
+            },
+            extract: extract_org_snapshot,
+            compare: NamedCompare {
+                name: "compare_blocks{fields+order}",
+                f: compare_org_blocks,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_org_blocks(refs: &CapMap) -> Extraction<Vec<Block>> {
+    Extraction::Value(RefBackend::org_blocks(refs))
+}
+
+fn extract_org_snapshot<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
+    Box::pin(async move { Extraction::Value(sut.org_block_snapshot().await) })
+}
+
+fn compare_org_blocks(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
+    match compare_blocks("inv-blocks-match-ref/org", sut, ref_, true) {
+        InvariantResult::Ok => Ok(()),
+        InvariantResult::Fail(msg) => Err(msg),
+        InvariantResult::Skipped(reason) => Err(format!(
+            "[inv-blocks-match-ref/org] unexpected Skip from compare_blocks: {reason}"
+        )),
+    }
+}
+
+// ─── Observable: root-layout ghost rows (`inv-matview-consistent-with-ref/*`) ─
+
+/// The id set the root-layout matview surfaces as `data_rows`, guarded against
+/// GHOST ROWS: ids present in the matview but outside the reference universe
+/// (every ref block incl. seed + source, plus layout scaffolding, plus profile
+/// blocks) — stale rows left by an IVM inconsistency. Asymmetric: this is a
+/// SUBSET check (`data ⊆ ref universe`), not equality — under-projection of
+/// content is `inv-block-ids-match-ref` / `inv-live-children-match-ref`'s job.
+/// Disclosed Skip when the matview snapshot is empty (engine not warmed up).
+/// Consolidates the hand-written `inv-matview-consistent-with-ref` body.
+pub struct MatviewGhostRows;
+
+impl Observable for MatviewGhostRows {
+    type Value = BTreeSet<EntityUri>;
+    const NAME: &'static str = "matview-consistent-with-ref";
+}
+
+pub fn matview_ghost_rows() -> Correspondence<MatviewGhostRows> {
+    Correspondence {
+        ref_project: ref_block_universe,
+        stores: vec![StoreProjection {
+            id: "inv-matview-consistent-with-ref/root_layout",
+            store: "root_layout",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutRenderer>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefLayout>()],
+            },
+            extract: extract_root_data_rows,
+            compare: NamedCompare {
+                name: "compare_no_ghost_rows{subset}",
+                f: compare_no_ghost_rows,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_block_universe(refs: &CapMap) -> Extraction<BTreeSet<EntityUri>> {
+    // Every id the ref model knows: all blocks (incl. seed + source) ∪ layout
+    // scaffolding ∪ profile blocks. Any matview id outside this is a ghost.
+    Extraction::Value(
+        RefLayout::all_block_ids(refs)
+            .into_iter()
+            .chain(RefLayout::layout_block_ids(refs))
+            .chain(RefLayout::profile_block_ids(refs))
+            .collect(),
+    )
+}
+
+fn extract_root_data_rows<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<BTreeSet<EntityUri>>> + 'a>> {
+    Box::pin(async move {
+        let data_block_ids = SutRenderer::root_data_row_ids(sut).await;
+        if data_block_ids.is_empty() {
+            return Extraction::Unobservable(
+                "matview snapshot empty (engine not warmed up / still loading)".to_string(),
+            );
+        }
+        Extraction::Value(data_block_ids)
+    })
+}
+
+fn compare_no_ghost_rows(
+    data_block_ids: &BTreeSet<EntityUri>,
+    ref_universe: &BTreeSet<EntityUri>,
+) -> Result<(), String> {
+    let extra: Vec<&EntityUri> = data_block_ids
+        .iter()
+        .filter(|id| !ref_universe.contains(*id))
+        .collect();
+    if extra.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[inv-matview-consistent-with-ref/root_layout] IVM MATVIEW GHOST ROW DETECTED!\n  \
+         data rows (from root-layout matview): {} ids\n  \
+         reference model: {} known ids\n  \
+         extra in matview (stale/ghost, not in ref universe): {extra:?}",
+        data_block_ids.len(),
+        ref_universe.len(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::pbt::composed::fixtures::*;
     use crate::pbt::composed::subsystem_seed::{run_with_seeded_ref, seed_ref, seed_ref_with_editor};
+
+    /// Catch (doc §6 gate): with the ref wired, a SUT `block_raw` whose content
+    /// diverged from the reference is caught by the registry-emitted
+    /// `inv-blocks-match-ref/block_raw` (`NonSeedBlocks`' block_raw store).
+    #[tokio::test]
+    async fn blocks_match_block_raw_catches_divergence_from_ref() {
+        let id = uri("local://d");
+        let sut = fixture_slice(vec![Block::new_text(
+            id.clone(),
+            EntityUri::no_parent(),
+            "sut-content",
+        )]);
+        let ref_state = seed_ref(vec![Block::new_text(
+            id,
+            EntityUri::no_parent(),
+            "ref-content",
+        )]);
+
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+
+        let failures = report.failures();
+        assert!(
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-blocks-match-ref/block_raw"),
+            "the content divergence must be caught; failures={failures:?}",
+        );
+    }
 
     /// Catch (doc §6 gate): a `block_raw` content that diverged from the
     /// reference's `RefBlockTree` view — the borrow-returning read driving a

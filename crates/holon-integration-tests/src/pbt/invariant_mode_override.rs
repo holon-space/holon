@@ -7,7 +7,7 @@
 //! committed test is never weakened, only the environment is. Use it to get a
 //! **disclosed, temporary green run** while a real fix is built for an
 //! unfixable-locally red (e.g. an upstream Turso-IVM matview-drift invariant
-//! like `inv-focus-roots` / `inv-matview-consistent-with-ref`).
+//! like `inv-focus-roots` / `inv-matview-consistent-with-ref/root_layout`).
 //!
 //! Relocated out of the native `invariants/registry.rs` (which is being deleted
 //! with the native runner core) so the composed check

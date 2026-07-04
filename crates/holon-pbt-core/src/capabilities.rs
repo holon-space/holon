@@ -839,7 +839,7 @@ pub trait SutLoroLog {
 // ─── Phase 6b — Turso/CDC cluster (Stage B) ──────────────────────────
 //
 // Binds: WriteOrgFile, BulkExternalAdd, all matview-touching invariants
-// (`inv-matview-consistent-with-ref`, `inv-watch-rows-match-ref`,
+// (`inv-matview-consistent-with-ref/root_layout`, `inv-watch-rows-match-ref`,
 // `inv-focus-roots`, `inv-backend-blocks-match-ref` Turso side,
 // `inv-sql-budget`). Required by Phase 8 storage-consistency slice.
 
@@ -1599,7 +1599,7 @@ pub trait RefLayout {
 
     /// The blocks the reactive root layout is *expected* to surface for
     /// `region`: non-source blocks that are descendants of the region's
-    /// expected focus roots. Used by `inv-matview-consistent-with-ref` to
+    /// expected focus roots. Used by `inv-matview-consistent-with-ref/root_layout` to
     /// detect rows the matview is missing. Wide PBT filters
     /// `block_state.blocks` by `content_type != Source` and
     /// `is_descendant_of_any(expected_focus_root_ids(region))`; pure

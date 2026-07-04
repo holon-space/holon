@@ -21,7 +21,6 @@
 //! Full process (router, recipes, anti-patterns, the §8.10 convergence litmus):
 //! the `pbt-composition` skill (`.claude/skills/pbt-composition/`).
 
-pub mod blocks_match;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
 pub mod focus_matches_ref;
@@ -34,7 +33,6 @@ pub mod live_children_match_ref;
 pub mod live_tree_matches_fresh;
 pub mod loro_children_match_ref;
 pub mod loro_no_errors;
-pub mod matview_consistent_with_ref;
 // `navigation_focus` is now auto-derived by `capability_pair! { pub trait Focus }`
 // in holon-pbt-core (`inv_pair_focus_current_focus_rows`); its hand-written
 // wiring + body files were deleted.
