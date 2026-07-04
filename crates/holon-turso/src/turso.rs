@@ -697,34 +697,27 @@ fn bind_parameters(
     Ok((result_sql, param_values))
 }
 
-/// Convert turso_core::Value to holon_api::Value
+/// Convert turso_core::Value to holon_api::Value.
+///
+/// TEXT comes back verbatim as `Value::String` — JSON parsing is driven by
+/// KNOWN JSON columns (see [`normalize_known_json_columns`]), never by
+/// content sniffing. Sniffing reshaped user text like `"[1, 2, 3]"` into
+/// `Value::Array` on the query path while the CDC path kept it a String,
+/// so consumers diffing initial rows against CDC updates saw a spurious
+/// type change.
 fn turso_value_to_value(value: turso_core::Value) -> Value {
     match value {
         turso_core::Value::Null => Value::Null,
         turso_core::Value::Numeric(turso_core::Numeric::Integer(i)) => Value::Integer(i),
         turso_core::Value::Numeric(turso_core::Numeric::Float(f)) => Value::Float(f.into()),
-        turso_core::Value::Text(s) => {
-            let s_str = s.to_string();
-            let trimmed = s_str.trim();
-            if (trimmed.starts_with('[') && trimmed.ends_with(']'))
-                || (trimmed.starts_with('{') && trimmed.ends_with('}'))
-            {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&s_str) {
-                    Value::from(json_val)
-                } else {
-                    Value::String(s_str)
-                }
-            } else {
-                Value::String(s_str)
-            }
-        }
+        turso_core::Value::Text(s) => Value::String(s.to_string()),
         turso_core::Value::Blob(_) => Value::Null,
     }
 }
 
-/// Flatten a 'data' column value into key-value pairs
-fn flatten_data_column(data_value: Value) -> Option<HashMap<String, Value>> {
-    match data_value {
+/// Parse a Value that may be JSON object text or already an Object into a HashMap.
+fn parse_json_object(value: Value) -> Option<HashMap<String, Value>> {
+    match value {
         Value::Object(obj) => Some(obj),
         Value::String(s) => serde_json::from_str::<serde_json::Value>(&s)
             .ok() // ALLOW(ok): non-JSON values become Null
@@ -736,6 +729,43 @@ fn flatten_data_column(data_value: Value) -> Option<HashMap<String, Value>> {
                 }
             }),
         _ => None,
+    }
+}
+
+/// Normalize the KNOWN JSON columns of a row, applied identically on the
+/// query path (`handle_query`/`handle_query_positional`) and the CDC path
+/// (`parse_row_values_with_schema`) so both paths produce the same
+/// representation for the same row:
+///
+/// - `data`: synthesized by the UNION-query rewriter (`json_object(*) AS
+///   data`, see sql_parser.rs) — parsed and flattened into top-level fields.
+/// - `properties`: the JSON object column on `block_raw` — parsed into
+///   `Value::Object` (Null / non-object becomes an empty Object).
+///
+/// Everything else stays exactly as stored (parse-don't-validate: the JSON
+/// column set comes from what our schema/rewriter declare, not from content
+/// shape). In particular the `json_group_array` projection columns
+/// (`tags`/`requires`) remain JSON TEXT; their consumers (`Block::try_from`
+/// via `require_string_array`, the PBT row parsers) strictly parse that JSON
+/// at their own boundary and already accepted TEXT because the CDC path
+/// never sniffed.
+fn normalize_known_json_columns(entity: &mut StorageEntity) {
+    if let Some(data_value) = entity.remove("data")
+        && let Some(obj) = parse_json_object(data_value)
+    {
+        for (key, value) in obj {
+            entity.entry(key.into()).or_insert(value);
+        }
+    }
+
+    if let Some(props) = entity.remove("properties") {
+        entity.insert(
+            "properties".into(),
+            match parse_json_object(props) {
+                Some(obj) => Value::Object(obj),
+                None => Value::Object(HashMap::new()),
+            },
+        );
     }
 }
 
@@ -776,8 +806,8 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
 ///
 /// **UI MUST KEY BY ENTITY ID from `data.get("id")`, NOT BY ROWID**
 ///
-/// Example:
-/// ```rust
+/// Example (illustrative — `change` is a `RowChange` you received):
+/// ```rust,ignore
 /// match change.change {
 ///     ChangeData::Created { data, .. } => {
 ///         let entity_id = data.get("id").unwrap(); // Use this for widget key
@@ -1294,46 +1324,9 @@ impl TursoBackend {
             entity.insert(column_name, our_value);
         }
 
-        // Flatten 'data' JSON column: remove it and promote its fields to top-level
-        // (used for heterogeneous UNION queries).
-        if let Some(data_value) = entity.remove("data")
-            && let Some(obj) = Self::parse_json_object(data_value)
-        {
-            for (key, value) in obj {
-                entity.entry(key.into()).or_insert(value);
-            }
-        }
-
-        // Parse 'properties' JSON text into Value::Object in-place so downstream
-        // code sees a uniform representation in both query and CDC paths.
-        if let Some(props) = entity.remove("properties") {
-            entity.insert(
-                "properties".into(),
-                match Self::parse_json_object(props) {
-                    Some(obj) => Value::Object(obj),
-                    None => Value::Object(HashMap::new()),
-                },
-            );
-        }
+        normalize_known_json_columns(&mut entity);
 
         entity
-    }
-
-    /// Parse a Value that may be JSON text or already an Object into a HashMap.
-    fn parse_json_object(value: Value) -> Option<HashMap<String, Value>> {
-        match value {
-            Value::Object(obj) => Some(obj),
-            Value::String(s) => serde_json::from_str::<serde_json::Value>(&s)
-                .ok() // ALLOW(ok): non-JSON values become Null
-                .and_then(|v| {
-                    if let serde_json::Value::Object(map) = v {
-                        Some(map.into_iter().map(|(k, v)| (k, Value::from(v))).collect())
-                    } else {
-                        None
-                    }
-                }),
-            _ => None,
-        }
     }
 
     pub fn value_to_sql_param(&self, value: &Value) -> String {
@@ -1773,14 +1766,7 @@ impl TursoBackend {
                 entity.insert(Arc::clone(col_name), turso_value_to_value(value.into()));
             }
 
-            // Flatten 'data' JSON column if present
-            if let Some(data_value) = entity.remove("data")
-                && let Some(obj) = flatten_data_column(data_value)
-            {
-                for (key, value) in obj {
-                    entity.entry(key.into()).or_insert(value);
-                }
-            }
+            normalize_known_json_columns(&mut entity);
 
             results.push(entity);
         }
@@ -1823,14 +1809,7 @@ impl TursoBackend {
                 entity.insert(Arc::clone(col_name), turso_value_to_value(value.into()));
             }
 
-            // Flatten 'data' JSON column if present
-            if let Some(data_value) = entity.remove("data")
-                && let Some(obj) = flatten_data_column(data_value)
-            {
-                for (key, value) in obj {
-                    entity.entry(key.into()).or_insert(value);
-                }
-            }
+            normalize_known_json_columns(&mut entity);
 
             results.push(entity);
         }
@@ -2265,42 +2244,42 @@ mod tests {
     }
 
     #[test]
-    fn test_flatten_data_column_object() {
+    fn test_parse_json_object_object() {
         let mut obj = HashMap::new();
         obj.insert("key1".to_string(), Value::String("value1".to_string()));
         obj.insert("key2".to_string(), Value::Integer(42));
 
-        let result = flatten_data_column(Value::Object(obj.clone()));
+        let result = parse_json_object(Value::Object(obj.clone()));
         assert!(result.is_some());
-        let flattened = result.unwrap();
+        let parsed = result.unwrap();
         assert_eq!(
-            flattened.get("key1"),
+            parsed.get("key1"),
             Some(&Value::String("value1".to_string()))
         );
-        assert_eq!(flattened.get("key2"), Some(&Value::Integer(42)));
+        assert_eq!(parsed.get("key2"), Some(&Value::Integer(42)));
     }
 
     #[test]
-    fn test_flatten_data_column_json_string() {
+    fn test_parse_json_object_json_string() {
         let json_str = r#"{"key1": "value1", "key2": 42}"#;
-        let result = flatten_data_column(Value::String(json_str.to_string()));
+        let result = parse_json_object(Value::String(json_str.to_string()));
         assert!(result.is_some());
-        let flattened = result.unwrap();
+        let parsed = result.unwrap();
         assert_eq!(
-            flattened.get("key1"),
+            parsed.get("key1"),
             Some(&Value::String("value1".to_string()))
         );
     }
 
     #[test]
-    fn test_flatten_data_column_non_json() {
-        let result = flatten_data_column(Value::String("not json".to_string()));
+    fn test_parse_json_object_non_json() {
+        let result = parse_json_object(Value::String("not json".to_string()));
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_flatten_data_column_null() {
-        let result = flatten_data_column(Value::Null);
+    fn test_parse_json_object_null() {
+        let result = parse_json_object(Value::Null);
         assert!(result.is_none());
     }
 
@@ -2320,9 +2299,45 @@ mod tests {
         let text_val = turso_value_to_value(turso_core::Value::Text("hello".into()));
         assert_eq!(text_val, Value::String("hello".to_string()));
 
-        // JSON array string gets parsed
+        // User text that merely LOOKS like JSON stays a String — no content
+        // sniffing (the CDC path never parsed it, so parsing here made the
+        // two paths disagree about the same row).
         let arr_val = turso_value_to_value(turso_core::Value::Text("[1, 2, 3]".into()));
-        assert!(matches!(arr_val, Value::Array(_)));
+        assert_eq!(arr_val, Value::String("[1, 2, 3]".to_string()));
+        let obj_val = turso_value_to_value(turso_core::Value::Text("{\"a\": 1}".into()));
+        assert_eq!(obj_val, Value::String("{\"a\": 1}".to_string()));
+    }
+
+    /// Both row-parsing paths must agree: JSON-shaped user TEXT stays a
+    /// String, while the known JSON columns (`data`, `properties`) come back
+    /// structured. The query-path half of this lives in
+    /// `integration_tests::test_json_shaped_text_round_trips_as_string`.
+    #[test]
+    fn test_cdc_path_keeps_json_shaped_text_as_string() {
+        let values = vec![
+            turso_core::Value::Text("b1".into()),
+            turso_core::Value::Text("[1, 2, 3]".into()),
+            turso_core::Value::Text(r#"{"k": "v"}"#.into()),
+        ];
+        let columns: Vec<Arc<str>> = vec![
+            Arc::from("id"),
+            Arc::from("content"),
+            Arc::from("properties"),
+        ];
+
+        let entity = TursoBackend::parse_row_values_with_schema(&values, &columns);
+
+        assert_eq!(
+            entity.get("content"),
+            Some(&Value::String("[1, 2, 3]".to_string()))
+        );
+        let Some(Value::Object(props)) = entity.get("properties") else {
+            panic!(
+                "properties must be parsed to an Object, got {:?}",
+                entity.get("properties")
+            );
+        };
+        assert_eq!(props.get("k"), Some(&Value::String("v".to_string())));
     }
 }
 
@@ -2660,6 +2675,97 @@ mod integration_tests {
             success_count, 100,
             "All 100 concurrent queries should succeed"
         );
+
+        handle.shutdown().await.unwrap();
+    }
+
+    /// Query path: user TEXT that merely looks like JSON must round-trip as
+    /// a String (matching the CDC path), while the known JSON columns
+    /// (`properties`; `data` via the UNION rewriter) come back structured.
+    #[tokio::test]
+    async fn test_json_shaped_text_round_trips_as_string() {
+        let (_backend, handle) = create_test_backend().await.unwrap();
+
+        handle
+            .execute_ddl(
+                "CREATE TABLE sniff_test (id TEXT PRIMARY KEY, content TEXT, properties TEXT)",
+            )
+            .await
+            .unwrap();
+        handle
+            .execute(
+                "INSERT INTO sniff_test (id, content, properties) VALUES (?, ?, ?)",
+                vec![
+                    turso::Value::Text("b1".into()),
+                    turso::Value::Text("[1, 2, 3]".into()),
+                    turso::Value::Text(r#"{"k": "v"}"#.into()),
+                ],
+            )
+            .await
+            .unwrap();
+        handle.transition_to_ready().await.unwrap();
+
+        // Named-params path (handle_query)
+        let rows = handle
+            .query("SELECT * FROM sniff_test", HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("content"),
+            Some(&Value::String("[1, 2, 3]".to_string())),
+            "JSON-shaped user text must stay a String on the query path"
+        );
+        let Some(Value::Object(props)) = rows[0].get("properties") else {
+            panic!(
+                "properties must be parsed to an Object on the query path, got {:?}",
+                rows[0].get("properties")
+            );
+        };
+        assert_eq!(props.get("k"), Some(&Value::String("v".to_string())));
+
+        // Positional-params path (handle_query_positional)
+        let rows = handle
+            .query_positional(
+                "SELECT * FROM sniff_test WHERE id = ?",
+                vec![turso::Value::Text("b1".into())],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("content"),
+            Some(&Value::String("[1, 2, 3]".to_string()))
+        );
+        assert!(matches!(rows[0].get("properties"), Some(Value::Object(_))));
+
+        // json_group_array projection columns stay JSON TEXT (their consumers
+        // parse strictly at their own boundary) — same as the CDC path.
+        let rows = handle
+            .query(
+                "SELECT id, COALESCE(json_group_array(content) FILTER (WHERE content IS NOT NULL), '[]') AS tags FROM sniff_test GROUP BY id",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("tags"),
+            Some(&Value::String(r#"["[1, 2, 3]"]"#.to_string())),
+            "aggregate JSON columns come back as JSON TEXT, not sniffed into Arrays"
+        );
+
+        // The UNION rewriter's synthesized `data` column still flattens.
+        let rows = handle
+            .query(
+                r#"SELECT json_object('id', id, 'flat', 7) AS data FROM sniff_test"#,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("flat"), Some(&Value::Integer(7)));
+        assert_eq!(rows[0].get("id"), Some(&Value::String("b1".to_string())));
 
         handle.shutdown().await.unwrap();
     }
