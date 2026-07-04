@@ -1,0 +1,3 @@
+{
+  "exclude_dirs": ["experiments", ".ast-outline", "research", "vendor"]
+}
