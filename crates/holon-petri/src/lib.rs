@@ -33,6 +33,7 @@ use holon_api::types::TaskState;
 use holon_api::types::Timestamp;
 use holon_engine::Marking;
 use holon_engine::NetDef;
+use holon_engine::PrecondSpec;
 use holon_engine::TokenState;
 use holon_engine::TransitionDef;
 use holon_engine::arc::CreateArc;
